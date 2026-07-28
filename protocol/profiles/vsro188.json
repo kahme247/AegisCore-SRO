@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "profile": "vsro188",
+  "status": "evidence-pending",
+  "client": {
+    "executable": null,
+    "sha256": null,
+    "file_version": null
+  },
+  "data_pk2": {
+    "path": "Data/Data.pk2",
+    "size_bytes": 2136580096,
+    "sha256": "0F6191BA393DF32B2258DEE38CC5AB100DC91210D1FA121C1D3845FDC74D8C3B",
+    "archive_format": "0x01000002",
+    "encrypted": true
+  },
+  "locale": null,
+  "content_id": null,
+  "unvalidated_content_id_values": [
+    22,
+    122
+  ],
+  "captures": [],
+  "promotion_requirements": [
+    "Record the canonical stock-client executable SHA-256 and file version.",
+    "Record the locale and captured Content ID for that client.",
+    "Add sanitized capture fixtures with provenance and wire-byte hashes.",
+    "Resolve all captured values against this exact Data.pk2 hash."
+  ]
+}

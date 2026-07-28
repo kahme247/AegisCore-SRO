@@ -1,0 +1,13 @@
+# Go formatting is byte-stable only when every checkout uses LF line endings.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# Keep cross-platform project metadata and automation files deterministic too.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ps1 text eol=lf
+*.sql text eol=lf
+Dockerfile text eol=lf

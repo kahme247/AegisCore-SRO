@@ -1,0 +1,33 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Silkroad client assets are supplied locally and are not part of the source tree
+/Data/
+/.tools/
+/.local/
+/Media/
+/VSRO_OLDDB/
+/VSRO_TestIn(EPVP)/
+/Script/
+/.gocache/
+/.cache/
+/.env
+/VSRO_Client/
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+../.idea
+.idea
+*.iml
+*.mwb.bak
+logs.txt
+
+config.json
