@@ -1,0 +1,6 @@
+DELETE FROM `CHAR_MASTERY`
+WHERE `LEVEL` = 0;
+
+ALTER TABLE `CHAR_MASTERY`
+    ADD CONSTRAINT `chk_char_mastery_level`
+    CHECK (`LEVEL` > 0);

@@ -1,0 +1,1 @@
+ALTER TABLE `REF_SKILL_BY_ITEM_OPT_LEVEL` DROP KEY `idx_ref_skill_opt_level_link`, ADD PRIMARY KEY (`LINK`);

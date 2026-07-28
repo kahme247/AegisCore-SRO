@@ -1,0 +1,13 @@
+CREATE TABLE `CHAR_QUICK_SLOT` (
+    `CHAR_ID` INT NOT NULL,
+    `SLOT_SEQ` TINYINT UNSIGNED NOT NULL,
+    `CONTENT_TYPE` TINYINT UNSIGNED NOT NULL,
+    `CONTENT_ID` INT UNSIGNED NOT NULL,
+    PRIMARY KEY (`CHAR_ID`, `SLOT_SEQ`),
+    CONSTRAINT `fk_char_quick_slot_character`
+        FOREIGN KEY (`CHAR_ID`) REFERENCES `CHAR` (`ID`) ON DELETE CASCADE,
+    CONSTRAINT `chk_char_quick_slot_sequence`
+        CHECK (`SLOT_SEQ` < 51),
+    CONSTRAINT `chk_char_quick_slot_content_type`
+        CHECK (`CONTENT_TYPE` > 0)
+) ENGINE=InnoDB;
