@@ -55,6 +55,25 @@ func TestWorldVisibilityActivationQueuesExistingNPC(t *testing.T) {
 	}
 }
 
+func TestWorldNPCsKnownToPlayersOnlyIncludesVisibleNPCsAfterActivation(t *testing.T) {
+	regionID := int16(25000)
+	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	world := newVisibilityTestWorld(t, player)
+	nearby := newVisibilityTestNPC(visibilityTestPosition(regionID, 140, 100))
+	remote := newVisibilityTestNPC(visibilityTestPosition(regionID, 1_400, 100))
+	world.AddVisibleObject(nearby)
+	world.AddVisibleObject(remote)
+
+	if got := world.GetNPCsKnownToPlayers(); len(got) != 0 {
+		t.Fatalf("NPCs before player activation = %d, want 0", len(got))
+	}
+	world.ActivatePlayer(player)
+	got := world.GetNPCsKnownToPlayers()
+	if len(got) != 1 || got[0] != nearby {
+		t.Fatalf("active NPCs = %#v, want only nearby NPC %d", got, nearby.GetUniqueID())
+	}
+}
+
 func TestWorldVisibilityIgnoresClientVerticalCoordinateForNPCs(t *testing.T) {
 	regionID := int16(25000)
 	playerPosition := visibilityTestPosition(regionID, 100, 100)

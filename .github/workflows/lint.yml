@@ -1,0 +1,59 @@
+name: Verify Go
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "**/Dockerfile"
+  push:
+    branches:
+      - main
+      - master
+      - "feature/**"
+    paths:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "**/Dockerfile"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l $(find . -name '*.go' -not -path './.tools/*'))"
+          if [ -n "$unformatted" ]; then
+            printf 'The following files need gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Vet and static analysis
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Core race tests
+        run: >-
+          go test -race
+          ./framework/network
+          ./framework/server
+          ./framework/client
+          ./agent-server/engine/geo
+          ./agent-server/handler/character
+          ./agent-server/model
+          ./agent-server/service

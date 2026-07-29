@@ -1,0 +1,163 @@
+services:
+  db:
+    image: ferdoran/go-sro-db:latest
+    restart: always
+    container_name: gosro-db
+    networks:
+      - gosro
+    ports:
+      - "3306:3306"
+      - "33060:33060"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_USER: sro
+      MYSQL_PASSWORD: 1234
+    volumes:
+      # Use a stable Compose volume rather than the image's anonymous
+      # /var/lib/mysql volume, which is detached whenever the container is
+      # recreated and makes a normal clean restart appear to lose all data.
+      - mysql-data:/var/lib/mysql
+    # A TCP query against both schemas waits for the image's initialization
+    # scripts, not merely for mysqld to have opened its port.
+    healthcheck:
+      test:
+        ["CMD-SHELL", 'mysql --protocol=TCP --connect-timeout=2 -h 127.0.0.1 -u"$${MYSQL_USER}" -p"$${MYSQL_PASSWORD}" -e "USE SRO_ACCOUNT; USE SRO_SHARD;"']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+  # These one-shot jobs are deliberately profile-gated. They must be invoked
+  # by an operator in a maintenance window; live servers do not depend on
+  # their completion during normal startup.
+  migrate-account:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: cmd/migrate/Dockerfile
+    image: gosro-migrations:local
+    restart: "no"
+    networks:
+      - gosro
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_ACCOUNT_HOST: db
+      DB_ACCOUNT_DATABASE: SRO_ACCOUNT
+    command: ["--target=account"]
+
+  migrate-shard:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: cmd/migrate/Dockerfile
+    image: gosro-migrations:local
+    restart: "no"
+    networks:
+      - gosro
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_SHARD_HOST: db
+      DB_SHARD_DATABASE: SRO_SHARD
+    command: ["--target=shard"]
+
+  agent-server:
+    build:
+      context: .
+      dockerfile: agent-server/Dockerfile
+    image: gosro-agent-server:local
+    restart: always
+    container_name: gosro-agent-server
+    networks:
+      - gosro
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "15882:15882"
+    # This is reachable only by services on the gosro network; do not publish
+    # the Gateway-to-Agent ticket installation port to the host.
+    expose:
+      - "15883"
+    deploy:
+      resources:
+        limits:
+          # Data.pk2 world loading settles above 5 GiB before any players join.
+          memory: 8G
+    environment:
+      DB_ACCOUNT_HOST: db
+      DB_SHARD_HOST: db
+      AGENT_HOST: agent-server
+      AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/go-sro/Data/Data.pk2}
+      AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/go-sro/Data/prelinked_navdata.gob}
+      AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/go-sro/Media/server_dep/silkroad/textdata/leveldata.txt}
+      AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
+      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
+      # Modes: 0/off, players/characters, mobs, or all/everything/1.
+      # Prefer players for client-crash diagnostics; all can emit substantial
+      # output in a populated world.
+      SRO_MOVEMENT_TRACE: ${SRO_MOVEMENT_TRACE:-off}
+      MOB_AI_TRACE: ${MOB_AI_TRACE:-0}
+      AGENT_ADMISSION_HOST: "0.0.0.0"
+      AGENT_ADMISSION_PORT: "15883"
+      AGENT_ADMISSION_TLS_CERT_FILE: /run/secrets/go-sro/agent-cert.pem
+      AGENT_ADMISSION_TLS_KEY_FILE: /run/secrets/go-sro/agent-key.pem
+      AGENT_ADMISSION_TLS_CLIENT_CA_FILE: /run/secrets/go-sro/gateway-ca.pem
+    volumes:
+    - ./Data:/etc/go-sro/Data:ro
+    - ./Media/Media:/etc/go-sro/Media:ro
+    - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/go-sro:ro"
+
+  gateway-server:
+    build:
+      context: .
+      dockerfile: gateway-server/Dockerfile
+    image: gosro-gateway-server:local
+    restart: always
+    container_name: gosro-gateway-server
+    depends_on:
+      db:
+        condition: service_healthy
+      agent-server:
+        condition: service_started
+    ports:
+      - "15779:15779"
+    networks:
+      - gosro
+    environment:
+      DB_ACCOUNT_HOST: db
+      DB_SHARD_HOST: db
+      AGENT_HOST: agent-server
+      SRO_SESSION_TRACE: ${GATEWAY_SESSION_TRACE:-0}
+      # Gateway will not invent stock-client identifiers or advertise a
+      # loopback/private Agent endpoint in production. Supply the values from
+      # an approved capture and the externally reachable Agent address.
+      AGENT_PUBLIC_IP: "${AGENT_PUBLIC_IP:?Set AGENT_PUBLIC_IP to the externally reachable Agent IPv4 address}"
+      GATEWAY_HOST: gateway-server
+      GATEWAY_ENVIRONMENT: "${GATEWAY_ENVIRONMENT:-production}"
+      GATEWAY_PROTOCOL_PROFILE: "${GATEWAY_PROTOCOL_PROFILE:-vsro188}"
+      GATEWAY_PROTOCOL_CONTENT_ID: "${GATEWAY_PROTOCOL_CONTENT_ID:?Set GATEWAY_PROTOCOL_CONTENT_ID from an approved client capture}"
+      GATEWAY_PROTOCOL_MODULE_NAME: "${GATEWAY_PROTOCOL_MODULE_NAME:?Set GATEWAY_PROTOCOL_MODULE_NAME from an approved client capture}"
+      GATEWAY_PROTOCOL_VERSION: "${GATEWAY_PROTOCOL_VERSION:?Set GATEWAY_PROTOCOL_VERSION from an approved client capture}"
+      AGENT_ADMISSION_PORT: "15883"
+      AGENT_ADMISSION_TIMEOUT_SECONDS: ${AGENT_ADMISSION_TIMEOUT_SECONDS:-5}
+      AGENT_ADMISSION_TLS_CA_FILE: /run/secrets/go-sro/agent-ca.pem
+      AGENT_ADMISSION_TLS_SERVER_NAME: "${AGENT_ADMISSION_TLS_SERVER_NAME:?Set AGENT_ADMISSION_TLS_SERVER_NAME to the Agent certificate DNS SAN}"
+      GATEWAY_ADMISSION_TLS_CERT_FILE: /run/secrets/go-sro/gateway-cert.pem
+      GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/go-sro/gateway-key.pem
+    volumes:
+    - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/go-sro:ro"
+
+networks:
+  gosro:
+
+volumes:
+  mysql-data:
+    name: gosro-mysql-data

@@ -1,0 +1,44 @@
+name: Build Migration Job Image
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cmd/migrate/**'
+      - 'db/migrations/**'
+      - 'framework/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - 'cmd/migrate/Dockerfile'
+      - '.github/workflows/docker-build-migrations.yml'
+  push:
+    branches:
+      - 'main'
+      - 'master'
+    paths:
+      - 'cmd/migrate/**'
+      - 'db/migrations/**'
+      - 'framework/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - 'cmd/migrate/Dockerfile'
+      - '.github/workflows/docker-build-migrations.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build migration job
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./cmd/migrate/Dockerfile
+          platforms: linux/amd64
+          push: false
