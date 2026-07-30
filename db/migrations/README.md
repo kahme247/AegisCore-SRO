@@ -1,64 +1,75 @@
 # Database migrations
 
-`framework/db` owns a target-bound migration catalog and runner. Migrations are
-an explicit maintenance operation: Agent and Gateway neither import nor start
-the runner.
+`framework/db` owns embedded, target-bound migration catalogs. Migration is an
+explicit maintenance operation; Agent and Gateway never start the runner.
 
-## Targets and current catalog
+## Current catalog
 
-| Target | Required database | Versions in this tree |
+| Target | Required database | Versions |
 | --- | --- | --- |
 | `account` | exactly `SRO_ACCOUNT` | `000001` normalized username |
-| `shard` | exactly `SRO_SHARD` | `000001` normalized character name, `000002` unique inventory link, `000003` quests, `000004` economy/storage, `000005` shop catalog, `000006` teleports, `000008` masteries, `000009` guild storage, `000010` character skills, `000011` default mastery rows, `000012` reference default masteries, `000013` reference default skills, `000014` reference default quests, `000015` reference level and skill data, `000016` native vSRO skill catalog, `000017` vSRO unsigned tinyint compatibility, `000018` vSRO group-reference compatibility, `000019` vSRO item-opt-level link compatibility, `000020` vSRO item reference catalog, `000021` gameplay movement settings |
+| `shard` | exactly `SRO_SHARD` | `000001` normalized character name; `000002` unique inventory link; `000003` quests; `000004` economy/storage; `000005` shop catalog; `000006` teleports; `000008` masteries; `000009` guild storage; `000010` character skills; `000011`-`000014` default mastery/skill/quest data; `000015` Media level/skill data; `000016`-`000019` native vSRO skill catalog and compatibility; `000020` native item catalog; `000021` movement settings; `000022` rental metadata; `000023` return city; `000024` progression rates; `000025` mob rates; `000026` quick slots |
 
-Shard version `000007` is intentionally documented as unresolved. Do not
-renumber later files: deployed ledgers may already identify those versions.
+The catalog may be non-contiguous, so a clean ledger proceeds from `000006` to
+`000008`. A ledger row for missing version `000007` is rejected as unknown
+history. Do not add or renumber that version without reconciling every deployed
+ledger.
 
-## File layout
+## Files and immutability
 
 ```text
-000001_description.preflight.sql  # optional SELECT-only checks
-000001_description.up.sql
-000001_description.down.sql
+000001_description.preflight.sql  # optional SELECT-only check
+000001_description.up.sql         # required
+000001_description.down.sql       # required
 ```
 
-Applied migration content is immutable. The ledger checksum covers preflight,
-up and down SQL. A preflight query fails when it returns any row; only `SELECT`
-preflight statements are accepted so a mistaken DML statement cannot mutate
-data through the preflight path.
+The SHA-256 ledger checksum covers version, name, preflight SQL, up SQL and down
+SQL exactly, including line endings. Applied content is immutable.
 
-## Concurrency and dirty states
+Preflights must begin with `SELECT`; `WITH` and mutation statements are
+rejected. Any returned row fails the migration. Current preflights guard account
+username normalization, shard character-name normalization and duplicate
+inventory item links.
+
+## Runner guarantees
 
 The runner:
 
-1. binds a catalog to one target;
-2. pins one MySQL connection;
-3. verifies `SELECT DATABASE()` with case-sensitive target matching;
-4. holds a target-specific `GET_LOCK` advisory lock;
-5. records short ledger transitions around DDL.
+1. Binds one catalog to one target and pins one MySQL connection.
+2. Verifies case-sensitive `SELECT DATABASE()` before creating the ledger or
+   executing migration DDL.
+3. Acquires target lock `go-sro:migrations:account` or
+   `go-sro:migrations:shard`, with a default 30-second wait.
+4. Rejects dirty state, unknown versions, changed names/checksums and
+   out-of-order history.
+5. Records `applying`/`rolling_back` around DDL and discards the physical
+   connection when lock release is uncertain.
 
-MySQL DDL may commit implicitly. If DDL or a ledger transition becomes
-uncertain, the row remains `applying` or `rolling_back` and automatic retries
-stop. Reconcile the real schema and ledger with an operator; never delete the
-dirty row merely to make the command run again.
+MySQL DDL can commit implicitly, so schema and ledger changes are not one atomic
+transaction. A dirty state deliberately blocks automatic continuation. Inspect
+the real schema and ledger; never delete a dirty row only to unblock the tool.
 
-Identity migrations add stored generated columns and may rebuild tables. Stop
-account creation, character creation, rename and deletion writes during the
-maintenance window. The duplicate preflight is not a live-write reservation.
+Legacy ledgers without `state` are upgraded in place and existing rows become
+`applied`. This does not verify the resulting schema beyond ledger history.
 
-## Running migrations
+## CLI scope
 
 ```powershell
 go run ./cmd/migrate --target=account
 go run ./cmd/migrate --target=shard
 ```
 
-Or use the profile-gated Compose jobs one at a time:
+Or run one profile-gated Compose job:
 
 ```powershell
 docker compose --profile maintenance up --build migrate-account
 docker compose --profile maintenance up --build migrate-shard
 ```
 
-Back up first, review every new SQL file, and verify the resulting schema and
-ledger before restoring application writes.
+The CLI applies every pending migration in ascending order. It has no status,
+dry-run, target-version, step, preflight-only or rollback command. Framework
+rollback exists for programmatic callers, but down SQL can destroy newly stored
+data and is not necessarily lossless.
+
+Back up first, stop affected writes, review both directions, inspect the ledger,
+and perform migration-specific schema/data checks before restoring traffic.

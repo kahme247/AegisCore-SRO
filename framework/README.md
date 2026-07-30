@@ -1,58 +1,98 @@
-# GO-SRO framework
+# SRO Nexus framework
 
-`framework` contains the shared runtime used by Gateway, Agent and maintenance
-commands. It is part of this monorepo rather than an external dependency.
+`framework` is the shared runtime used by Gateway, Agent and maintenance tools.
+It remains part of this monorepo rather than a separately versioned dependency.
 
 ## Packages
 
-| Package | Responsibility |
+| Package | Current responsibility |
 | --- | --- |
-| `boot` | ordered component startup and shutdown |
-| `config` | Viper defaults, environment binding and MySQL pools |
-| `db` | target-bound migrations, advisory locking and migration ledger |
-| `network` | packet buffers, framing, opcodes, CRC/sequence and security messages |
-| `security` | Blowfish/security primitives and admission-ticket mTLS support |
-| `server` | TCP listener, sessions, handler dispatch and lifecycle hooks |
-| `pk2` | fail-closed bounded reads and archive helpers |
-| `reference` | shared reference-data models |
-| `logging`, `math`, `utils` | common support code |
+| `boot` | Legacy process-global phased startup registry; no rollback or shutdown orchestration |
+| `client` | Reconnecting vSRO TCP client, handshake/module identification, encryption/EDC, massive reassembly and ordered writes |
+| `config` | Viper defaults, environment aliases and account/shard DSN construction |
+| `db` | Long-lived SQL pools plus target-bound migration catalogs, locks, checksums, dirty ledger and apply/rollback APIs |
+| `network` | Packet readers/writers, incremental stream framing, Blowfish wire frames, sequence/CRC, bounded massive codec and opcode constants |
+| `security` | Legacy vSRO key/challenge helpers and Blowfish implementation |
+| `security/auth` | Bounded one-time admission tickets and private Gateway-to-Agent HTTPS/mTLS transport |
+| `security/hashing` | bcrypt password verification and cost-12 hash generation |
+| `server` | TCP listener, session registry, handshake/application admission, lifecycle gates, traffic limits, ordered sender and draining |
+| `pk2` | Bounded fail-closed PK2 indexing/reads plus retained compatibility paths |
+| `reference` | Offline profile/archive provenance and source-manifest/decoder contracts; not a PK2 importer |
+| `logging`, `math`, `utils` | Common logging, geometry, region, time, transform, item and formula helpers |
 
-Viewer-only code is guarded by `raylib && cgo` build tags so normal Agent,
-Gateway and test builds remain headless.
+Protocol ownership is still transitional: opcode constants live under
+`framework/network/opcode`, while `protocol/vsro188` contains wire-neutral typed
+IDs, states, text validation and safe client-request translations.
+
+Optional frontends use separate build tags: `raylib && cgo`, `gtk && cgo`, or
+`rendering`. Ordinary Gateway, Agent and test builds remain headless.
+
+## Transport and session behavior
+
+- TCP is decoded as a stream; fragmented headers/payloads and coalesced frames
+  have synthetic tests.
+- Normal frame payloads are limited to 32,767 bytes.
+- Massive `0x600D` logical messages default to a 4 MiB aggregate limit, have a
+  16 MiB hard ceiling and expire after 30 seconds.
+- `Session.SendMassive` sends a non-interleaving wrapper batch. Ordinary
+  `Session.Send` does not automatically fragment oversized logical messages.
+- Sessions default to a 30-second idle timeout, five-second write timeout and
+  200 validated physical frames per one-second traffic-filter window.
+- Handshake, module identification and application opcodes are admitted in
+  ordered phases; Agent adds lobby/loading/world lifecycle gates.
+- `Session.Close` is idempotent. Registry removal occurs immediately; the
+  configured terminal domain hook runs once after inbound work and sender drain.
+  The legacy `ConnectionClosed` channel is best-effort only.
+
+These limits are defensive implementation defaults, not capture-proven protocol
+constants. Server outbound EDC fields are currently zero and automatic
+post-handshake encryption excludes `0x600D` wrappers; both assumptions need
+stock-client fixtures.
+
+The public vSRO handshake uses legacy Blowfish plus unauthenticated modular key
+exchange. It uses OS randomness and rejects trivial public values, but it is not
+modern authenticated encryption and does not perform capture-unsupported
+primality/subgroup checks. Gateway-to-Agent ticket installation is a separate
+verified mTLS channel.
 
 ## Safety invariants
 
-- Treat TCP as a stream: packets may be fragmented or coalesced.
-- Reject malformed lengths and out-of-bounds PK2 reads instead of recovering
-  partial data.
-- Keep protocol-specific layouts in `protocol/vsro188` or typed model helpers;
-  do not spread unexplained offsets through handlers.
-- Keep account and shard migrations bound to their exact database targets.
-- Close sessions and run registered cleanup hooks exactly once.
-- Treat captured bytes as final wire authority and label inferred constants.
+- Reject malformed lengths, unknown state transitions and out-of-bounds PK2
+  reads instead of accepting partial data.
+- Keep account and shard migrations bound to exact database targets.
+- Keep session cleanup idempotent and domain cleanup drain-aware.
+- Label inferred wire constants and prefer versioned, sanitized capture evidence.
+- Treat admission tickets as single-use, source-bound and process-local; they
+  are not durable session storage.
 
-## Known gaps
+## Known limitations
 
-- the stock-client capture corpus is empty;
-- massive `0x600D` and handshake stream behavior need golden end-to-end fixtures;
-- older dependencies should be modernized only after protocol baselines are
-  stable;
-- some legacy `engine` and viewer code remains alongside the active `navmeshv2`
-  and service paths and needs consolidation.
+- Stream framing, massive assembly, handshake and encryption helpers have
+  synthetic coverage but no sanitized stock-client golden corpus.
+- Actual opcodes and packet layouts are not yet consolidated under
+  `protocol/vsro188`.
+- The legacy `boot`, DB and PK2 compatibility APIs remain alongside safer paths.
+- Admission tickets and active-account reservations are lost on process restart.
+- Several older dependencies should be modernized only after protocol baselines
+  are stable.
 
 ## Verification
 
-Run the repository gate from the root:
+Run from the repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
-go test ./framework/...
+go test ./framework/... ./protocol/...
+go test ./framework/network ./framework/server ./framework/client `
+  ./framework/security/...
 ```
 
-Protocol notes under `docs/` are research material, not stronger authority than
-the pinned capture/profile rules in the root README.
+The optional Docker-backed race gate covers selected packages, not the entire
+repository:
 
-## License
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Race
+```
 
-See the repository [LICENSE](../LICENSE). The original acknowledgement to
-DaxterSoul for packet and file-structure knowledge is retained.
+See the [capture policy](../protocol/captures/README.md) and repository
+[LICENSE](../LICENSE).

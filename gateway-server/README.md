@@ -1,68 +1,155 @@
-# GO-SRO Gateway server
+# SRO Nexus Gateway server
 
-The Gateway server is the vSRO 1.88 entry point. It serves the configured client
-profile, notices and shard list, validates credentials and admission policy,
-then installs a one-time ticket on Agent before returning a successful handoff.
+Gateway is the public vSRO 1.188 entry point. It handles patch negotiation,
+notices, shard listing, login policy and one-time handoff to Agent. Runtime
+compatibility values come from explicit configuration; Gateway does not load or
+transmit `protocol/profiles/vsro188.json`.
 
-## Implemented behavior
+## Protocol surface
 
-- patch/profile response from one explicit `vsro188` profile;
-- DB-backed notices and shard list plus shard ping;
-- normalized credential lookup;
-- admission checks against account state, shard state and capacity;
-- bounded login-attempt tracking;
-- one-time Agent tickets installed over mutual TLS;
-- success response only after Agent acknowledges the ticket.
+After the Silkroad core handshake and module identification, Gateway admits:
 
-The Gateway intentionally does not guess Content ID, module name or version.
-`protocol/profiles/vsro188.json` remains `evidence-pending`, so provide values
-from the exact client build being tested:
+| Opcode | Request |
+| --- | --- |
+| `0x6100` | Patch/version negotiation |
+| `0x6101` | Shard list |
+| `0x6102` | Login |
+| `0x6104` | Notices |
+| `0x6106` | Shard ping |
 
-```text
-GATEWAY_PROTOCOL_PROFILE=vsro188
-GATEWAY_PROTOCOL_CONTENT_ID=<captured value>
-GATEWAY_PROTOCOL_MODULE_NAME=<captured value>
-GATEWAY_PROTOCOL_VERSION=<captured value>
-AGENT_PUBLIC_IP=<externally reachable IPv4>
-```
+Patch negotiation compares one configured Content ID/module/version tuple.
+Exact clients receive massive `0xA100 [1]`; unknown or newer clients receive
+`[2,1]`; older clients receive `[2,3]`. No patch manifest or patch service is
+implemented.
 
-Loopback Agent addresses are accepted only with the explicit local override
-`GATEWAY_ENVIRONMENT=development`.
+Notices and shards are read from `SRO_ACCOUNT` for each request. Notices are
+capped at 255. Shards are filtered by the configured Content ID, validated and
+sorted by ID. A one-second cached mTLS readiness probe projects listed shards as
+offline while Agent is unavailable. Shard ping is configuration-backed, does
+not perform readiness, and returns farm ID plus Agent IPv4 bytes without a port.
 
-## Gateway-to-Agent mTLS
+## Login and admission
 
-The private endpoint defaults to Agent port `15883` and is not published by
-Compose. Gateway needs a client certificate/key and the Agent CA. Agent needs a
-server certificate/key and the Gateway client CA. The Agent certificate DNS SAN
-must match `AGENT_ADMISSION_TLS_SERVER_NAME`.
+Login performs these steps:
 
-The repository's Compose file mounts separate read-only TLS directories through
-`SRO_GATEWAY_TLS_DIR` and `SRO_AGENT_TLS_DIR`. Missing files, an invalid chain,
-a wrong server name or an unavailable Agent listener causes startup/admission to
-fail closed; there is no shared-secret fallback.
+1. Parse Content ID, username, password and shard ID without trailing bytes.
+2. Apply account/IP failed-attempt preflight using the direct TCP source IP.
+3. Query the exact supplied username and verify its stored password hash.
+4. Require `USER.STATUS=1` and a matching online shard with positive free
+   capacity and the requested Content ID.
+5. Issue a random nonzero Queue ID and bind a 45-second ticket to account,
+   normalized username, shard, Content ID and source IP.
+6. Install the ticket on Agent over mTLS and wait for acknowledgement.
+7. Return Agent address, port and Queue ID only after successful installation.
 
-## Known gaps
+Agent atomically rejects duplicate pending or active accounts. Tickets are
+single-use, process-local and bounded to 8,192 entries; Agent restart discards
+pending tickets. There is no separate ban, punishment, maintenance, activation,
+email-verification or trusted-proxy policy.
 
-- canonical client executable hash, file version, locale and Content ID are not
-  recorded;
-- patch and login massive-message behavior needs sanitized `0x600D` fixtures;
-- live capacity, maintenance and ban-policy operations need broader smoke tests;
-- account activation/email verification is not implemented;
-- public deployment still needs an operator-owned patch service and TLS/network
-  perimeter.
+Credential SQL uses the username exactly as received. Normalization applies to
+rate-limit and ticket identity keys only. Patch/notice and shard-list paths
+enforce the configured profile; login currently checks Content ID against the
+selected DB shard rather than directly against `GATEWAY_PROTOCOL_CONTENT_ID`.
+
+## Limits
+
+- The traffic filter defaults to 200 validated physical frames per connection
+  per one-second window, including handshake and `0x600D` wrapper frames.
+- Failed-credential tracking defaults to four attempts per normalized account
+  and 20 per source IP over 15 minutes, with 4,096 shared records.
+- Only credential failures increment counters. Successful login clears the
+  account counter but retains source-IP history.
+
+The public `15779` listener uses legacy Silkroad encrypted framing, key exchange
+and EDC; it is not TLS. TLS 1.2 or newer is used only for the private
+Gateway-to-Agent admission API.
+
+## Configuration
+
+Compose requires these operator-supplied values:
+
+| Variable | Purpose |
+| --- | --- |
+| `GATEWAY_PROTOCOL_CONTENT_ID` | Accepted runtime Content ID |
+| `GATEWAY_PROTOCOL_MODULE_NAME` | Accepted patch module |
+| `GATEWAY_PROTOCOL_VERSION` | Accepted patch version |
+| `AGENT_PUBLIC_IP` | IPv4 advertised to clients |
+| `AGENT_ADMISSION_TLS_SERVER_NAME` | Agent certificate DNS name |
+| `SRO_GATEWAY_TLS_DIR` | Gateway certificate/key/CA host directory |
+| `SRO_AGENT_TLS_DIR` | Agent certificate/key/CA host directory |
+
+The Gateway TLS directory must contain `agent-ca.pem`, `gateway-cert.pem`, and
+`gateway-key.pem`. The Agent directory must contain `agent-cert.pem`,
+`agent-key.pem`, and `gateway-ca.pem`.
+
+Important defaults:
+
+| Variable | Default |
+| --- | --- |
+| `GATEWAY_HOST` / `GATEWAY_PORT` | `127.0.0.1` / `15779` |
+| `GATEWAY_PROTOCOL_PROFILE` | `vsro188` |
+| `GATEWAY_ENVIRONMENT` | `production` |
+| `GATEWAY_FARM_ID` / `GATEWAY_FARM_NAME` | `1` / `SRO_DEUTSCHLAND` |
+| `AGENT_HOST` / `AGENT_PORT` | `127.0.0.1` / `15882` |
+| `AGENT_ADMISSION_PORT` | `15883` |
+| `AGENT_ADMISSION_TIMEOUT_SECONDS` | `5` |
+| `GATEWAY_LOGIN_ATTEMPT_WINDOW_SECONDS` | `900` |
+| `GATEWAY_LOGIN_ACCOUNT_ATTEMPT_LIMIT` | `4` |
+| `GATEWAY_LOGIN_IP_ATTEMPT_LIMIT` | `20` |
+| `GATEWAY_LOGIN_ATTEMPT_TRACKER_CAPACITY` | `4096` |
+
+Loopback advertised Agent addresses require
+`GATEWAY_ENVIRONMENT=development`. Gateway opens and pings both configured MySQL
+pools at startup. Normal startup does not apply migrations.
+
+## mTLS and deployment
+
+Admission port `15883` exposes `GET /v1/readiness` and
+`POST /v1/admission-tickets` on the private Compose network. Agent requires a
+Gateway client certificate chaining to its configured CA; Gateway verifies the
+Agent chain and `AGENT_ADMISSION_TLS_SERVER_NAME`.
+
+Missing or malformed local TLS material fails construction. Gateway does not
+contact Agent during construction: reachability, live certificate and readiness
+errors are discovered on readiness or ticket requests, then shards are projected
+offline and login fails closed. There is no shared-secret fallback.
+
+Compose publishes Gateway `15779`, Agent `15882`, MySQL `3306`, and MySQL X
+`33060`; only admission `15883` stays private. The supplied topology has no
+Gateway/Agent health checks and is not a complete public network perimeter.
+
+## Known limitations
+
+- Canonical client executable identity, locale, Content ID and sanitized wire
+  corpus are not checked in.
+- `vsro188.json` is evidence metadata, not Gateway runtime configuration.
+- Shard discovery is a DB catalog read for one Agent endpoint, not service
+  registration or multi-Agent discovery.
+- Shard ping does not check readiness or serialize Agent port.
+- Source-IP ticket binding uses the direct peer and has no proxy-header support.
+- Login does not directly enforce the configured protocol Content ID.
+- Pending tickets and duplicate-account reservations are non-durable.
 
 ## Verification
 
+Run from the repository root:
+
 ```powershell
-go test ./gateway-server/...
-docker compose up -d --build --force-recreate gateway-server
-docker compose logs --tail=200 gateway-server
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
+go test ./gateway-server/... ./framework/security/auth ./framework/server `
+  ./protocol/profiles ./agent-server/handler/lobby ./deployment
+docker compose config --quiet
 ```
 
-See the root [data/evidence rules](../README.md#evidence-and-references) and
-[capture policy](../protocol/captures/README.md).
+For a live rebuild:
 
-## License
+```powershell
+docker compose up -d --build --force-recreate agent-server gateway-server
+docker compose logs --tail=200 agent-server gateway-server
+Test-NetConnection 127.0.0.1 -Port 15779
+Test-NetConnection 127.0.0.1 -Port 15882
+```
 
-The original project acknowledgement to DaxterSoul and the repository
-[LICENSE](../LICENSE) are retained.
+Open ports prove listener state, not stock-client compatibility. See the
+[capture policy](../protocol/captures/README.md) and [LICENSE](../LICENSE).

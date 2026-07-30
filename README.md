@@ -1,15 +1,20 @@
-# GO-SRO
+# SRO Nexus
 
-GO-SRO is a Go implementation of a Silkroad Online server stack. This branch
-targets one compatibility boundary: **vSRO 1.88**. The current deployable
+SRO Nexus is a Go implementation of a Silkroad Online server stack focused on
+one compatibility boundary: **vSRO 1.188** (Gateway version `188`, profile
+`vsro188`). The current deployable
 topology is MySQL + Gateway + Agent; game, world, chat, and shard behavior still
 lives inside those processes until the protocol and ownership boundaries are
 stable enough to justify extracting more services.
 
-This is an active recovery and expansion branch, not a production-complete
-emulator. Code paths described as implemented have automated coverage, but wire
-formats remain provisional until they are backed by sanitized stock-client
-captures.
+This repository is an active recovery and expansion effort, not a
+production-complete emulator. Code paths described as implemented have
+automated coverage, but wire formats remain provisional until they are backed
+by sanitized stock-client captures.
+
+The public project name is SRO Nexus. The Go module path and several Compose
+resource names still use the legacy `github.com/ferdoran/go-sro`/`gosro` names;
+changing those identifiers is a separate compatibility migration.
 
 ## Current architecture
 
@@ -33,23 +38,26 @@ change the Gateway/Agent wire contract.
 | Build and safety | Go 1.26.5 pin, headless builds, verification script, safe PK2 reader, cache manifest checks | CI/runtime soak and dependency modernization |
 | Transport and sessions | framed packet handling, encrypted-session support, session lifecycle, handler dispatch | sanitized fragmentation/coalescing and `0x600D` fixtures |
 | Gateway | patch/profile, notices, shard list/ping, credential checks, login rate tracking, admission policy, mTLS ticket install | canonical client hash, locale, Content ID, module/version captures |
-| Character lifecycle | list/create/delete/rename/join, inventory serialization, position persistence | guild/academy fields and broader stock-client fixtures |
+| Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position and quick-slot persistence | rename persistence, guild/academy fields and broader stock-client fixtures |
 | World and movement | region/spawn repositories, Data.pk2 navmesh, visibility, authoritative movement, wall/object collision, position checkpoints, teleport | dungeon/neighbour-plane support, memory reduction, broader collision corpus |
-| Entities and spawning | players, NPCs and mobs, group spawn/despawn, headings, respawn, basic mob AI | COS/structure group-spawn encoders and collision-safe random spawn sampling |
-| Character systems | basic combat/XP/level progression, mastery upgrade/persistence, quest abandon, NPC interaction/talk | skill learning/casting breadth, quest lifecycle, exact talk/action masks |
+| Entities and spawning | staged-to-active player admission, reciprocal visibility bookkeeping, NPC/mob group spawn/despawn, headings, bounded collision-aware respawn, basic mob AI | capture-backed player spawn delivery, COS/pet/item/structure serializers and broader collision fixtures |
+| Character systems | stat allocation, combat/XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | skill casting breadth, quest lifecycle and capture-backed talk/action masks |
 | Economy and inventory | move/equip, storage, guild storage, repair, item use, elixir alchemy, exchange, stall | complete item option/rent/bind formats and transactional live testing |
 | Social | local/global/party/stall/whisper chat, party core and matching | guild, academy, jobs, stealth/invisibility rules |
-| Data and migrations | explicit target-bound migration runner, identity/inventory/quest/economy/shop/teleport/mastery/guild-storage schemas | reconcile version gap `000007`, production backup/restore runbook |
+| Data and migrations | target-bound runner through shard `000026`; identity, gameplay, reference catalog, movement, rental, return-city, rate and quick-slot schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
 
-Recent crash/collision work corrected three important vSRO 1.88 details:
+Current crash/collision safeguards include:
 
-- world/navmesh coordinates remain `X,Y,Z`, while the spawn wire layout is
-  `X,Z,Y`; swapping the model axes puts entities inside walls;
-- neutral NPC spawn talk flags serialize as zero until a verified interaction
-  mask is known;
+- current position serialization writes model coordinates in `X,Y,Z` order;
+  any alternative wire ordering remains capture evidence to prove rather than
+  a reason to swap model axes implicitly;
+- normal service NPC spawns advertise talkability with flag `2`; selected-NPC
+  responses supply family-specific actions that remain capture-provisional;
 - outbound group spawn currently admits normal NPCs and mobs only. COS and
   specialized structures are deferred instead of emitting malformed `0x3019`
-  data that can crash the client.
+  data that can crash the client;
+- random respawn placement uses at most 32 same-region, collision-checked
+  candidates before falling back to the authored point.
 
 Mastery upgrades are stored in `CHAR_MASTERY` and included in character join
 serialization. A valid mastery row is not itself a world-entry crash cause;
@@ -63,10 +71,10 @@ checkouts are intentionally ignored by Git.
 | Local input | Expected location | Use |
 | --- | --- | --- |
 | Canonical archive | `Data/Data.pk2` | navmesh and world files |
-| Level table | `Media/server_dep/silkroad/textdata/leveldata.txt` | XP, level and mastery limits |
-| Environment | `.env` | local ports, protocol profile and TLS paths; never commit secrets |
+| Level/skill Media | `Media/Media/server_dep/silkroad/textdata/` | XP, level, mastery and skill reference input |
+| Environment | `.env` | protocol identity, advertised Agent address and TLS mount paths; never commit secrets |
 | TLS material | `.local/admission-tls/` or external directories | Gateway/Agent mutual TLS |
-| Reference DBs | `VSRO_OLDDB/`, `VSRO_TestIn(EPVP)/` | offline comparison only; live GO-SRO uses MySQL |
+| Reference DBs | `VSRO_OLDDB/`, `VSRO_TestIn(EPVP)/` | offline comparison only; live SRO Nexus uses MySQL |
 | Research sources | `.local/rsbot/`, `.local/SilkroadLauncher-source/` | packet-reader and launcher cross-checks |
 | Prepared cache | configured cache prefix | manifest-bound navmesh acceleration |
 
@@ -90,6 +98,14 @@ go run ./cmd/sro-data verify --profile protocol/profiles/vsro188.json --archive 
 Prerequisites are Docker Desktop and the local data/TLS inputs above. Copy the
 required environment names into a private `.env`; do not commit that file.
 
+Compose requires `SRO_AGENT_TLS_DIR`, `SRO_GATEWAY_TLS_DIR`,
+`AGENT_ADMISSION_TLS_SERVER_NAME`, `AGENT_PUBLIC_IP`,
+`GATEWAY_PROTOCOL_CONTENT_ID`, `GATEWAY_PROTOCOL_MODULE_NAME`, and
+`GATEWAY_PROTOCOL_VERSION`. Use `GATEWAY_ENVIRONMENT=development` only when the
+advertised Agent address is loopback. The development topology publishes MySQL
+`3306`/`33060`, Gateway `15779`, and Agent `15882`; admission `15883` remains on
+the Compose network.
+
 ```powershell
 docker compose up --build -d
 docker compose ps
@@ -106,7 +122,23 @@ docker compose --profile maintenance up --build migrate-shard
 
 See [database operations](db/README.md), [migration safety](db/migrations/README.md),
 [Gateway configuration](gateway-server/README.md), and
-[Agent behavior](agent-server/README.md).
+[Agent behavior](agent-server/README.md). Shared runtime details are in the
+[framework guide](framework/README.md), while the maintenance CLIs are covered
+by [migrate](cmd/migrate/README.md) and [sro-data](cmd/sro-data/README.md).
+
+Reference-data imports are separate maintenance operations and require the
+current shard schema first:
+
+```powershell
+go run ./cmd/sro-data import-reference --media Media/Media
+go run ./cmd/sro-data import-vsro-skills --export-dir <export-directory>
+go run ./cmd/sro-data import-vsro-items --export-dir <export-directory>
+```
+
+`GAMEPLAY_PROGRESSION_RATES` and `GAMEPLAY_MOB_RATES` refresh every five
+seconds. Migration defaults are 1000% EXP/skill EXP and 100% mob count/respawn;
+review them before opening a server. Initial read failure falls back to 100%,
+and later refresh failures retain the last valid values.
 
 ## Verification
 
@@ -152,14 +184,15 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
   messages, character data and entity actions.
 - Implement explicit COS, pet, dropped-item and structure spawn serializers;
   keep unsupported types fail-closed until then.
-- Validate random spawn candidates against a loaded, walkable navmesh region
-  instead of retrying an unbounded radius sample.
+- Expand randomized-spawn and collision fixtures across authored regions,
+  object meshes and boundary conditions.
 - Finish NPC talk/action masks and remove placeholder fields from entity/item
   serializers.
 
 ### P1 - complete the playable core
 
-- Expand mastery into skill learn/upgrade/cast flows and validate SP rules.
+- Capture-validate mastery and skill-learning responses, add skill upgrade and
+  broader casting flows, and expand effect/SP-rule coverage.
 - Complete damage formulas, skills, buffs, death/respawn and mob tactics.
 - Implement full quest accept/progress/complete/reward persistence.
 - Finish item magic options, sockets, advanced elixirs, durability, rental and
@@ -171,7 +204,7 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
 
 - Replace eager whole-world navmesh retention with region-scoped loading or a
   compact prepared representation; current Compose sizing expects more than
-  5 GiB after Data.pk2 world load and reserves 7 GiB for Agent.
+  5 GiB after Data.pk2 world load and limits Agent to 8 GiB.
 - Add dungeons, neighbour planes, robust cross-region pathing and spawn audits.
 - Add guild/academy/jobs, events, market and administrative observability.
 - Resolve migration numbering, document backup/restore drills, pin container
@@ -181,7 +214,8 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
 
 ## License and acknowledgement
 
-GO-SRO retains the repository's original license; see [LICENSE](LICENSE).
-The original project credits DaxterSoul for packet/file-structure knowledge and
-the related Ferdoran projects. Current recovery work also cross-checks the open
-SilkroadDoc, RSBot and SilkroadLauncher sources listed above.
+SRO Nexus retains the original GO-SRO license; see [LICENSE](LICENSE). The
+project builds on [ferdoran/go-sro](https://github.com/ferdoran/go-sro), which
+credits DaxterSoul for packet and file-structure knowledge and the related
+Ferdoran projects. Current recovery work also cross-checks the open SilkroadDoc,
+RSBot and SilkroadLauncher sources listed above.

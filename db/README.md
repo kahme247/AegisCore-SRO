@@ -1,45 +1,69 @@
-# GO-SRO database
+# SRO Nexus database
 
-GO-SRO uses MySQL with two logical schemas:
+SRO Nexus uses MySQL with two logical schemas:
 
-- `SRO_ACCOUNT` for accounts, credentials and shard admission state;
-- `SRO_SHARD` for characters, inventory, world/reference data and gameplay
-  persistence.
+- `SRO_ACCOUNT` stores accounts, credentials, notices and shard admission data.
+- `SRO_SHARD` stores characters, inventory, world/reference data and gameplay
+  persistence. Some shard tables reference `SRO_ACCOUNT`, so the schemas are
+  logically separate but not fully independent.
 
-Compose starts the existing `ferdoran/go-sro-db:latest` image and publishes
-`3306`/`33060` for local development. Production deployments should pin an
-immutable image and keep database ports private.
+Compose currently uses the external `ferdoran/go-sro-db:latest` image and
+publishes `3306`/`33060` for development. The repository cannot prove that this
+mutable image exactly matches the checked-in SQL. Production deployments should
+pin an immutable image, verify its bootstrap contents and keep DB ports private.
 
 ## Schema sources
 
-- `create_sro_account.sql` and `create_sro_shard.sql` are the baseline schema;
-- `grant_user_permissions.sql` grants the application account access;
-- `migrations/account` and `migrations/shard` contain forward evolution;
-- `cmd/migrate` is the only supported checked-in migration entry point.
+- `create_sro_account.sql` and `create_sro_shard.sql` are destructive historical
+  bootstrap dumps. They drop/recreate tables, include sample data, and do not
+  represent the fully migrated schema.
+- The baseline dumps are not consumed by `cmd/migrate`; the shard dump also
+  contains `DELIMITER` syntax that the migration parser intentionally rejects.
+- `grant_user_permissions.sql` grants the application user access to both
+  schemas.
+- `migrations/account` and `migrations/shard` are the embedded forward catalog.
+- `cmd/migrate` is the checked-in migration entry point.
 
-Current migrations cover normalized account/character identity, unique
-inventory item links, character quests, economy/storage, shop reference data,
-teleports, character masteries and guild storage. Shard version `000007` is not
-present in the current tree; preserve the gap until its historical intent is
-resolved rather than silently renumbering applied files.
+The account catalog currently ends at `000001`. The shard catalog reaches
+`000026` and covers normalized identity, inventory constraints, quests,
+economy/storage, shops, teleports, mastery/skills, guild storage, reference
+catalogs, movement settings, rental metadata, return-city recovery, progression
+and mob rates, and character quick slots. Version `000007` is absent; preserve
+that gap until deployed ledgers and historical intent are reconciled.
 
 ## Operations
 
-Normal Agent/Gateway startup never applies migrations. Stop writes, back up the
-target schema, review preflight SQL and run exactly one maintenance target:
+Agent and Gateway never apply migrations. Stop dependent writes, back up the
+target, review SQL, and run one target at a time:
+
+```powershell
+go run ./cmd/migrate --target=account
+go run ./cmd/migrate --target=shard
+```
+
+Or use the profile-gated Compose jobs:
 
 ```powershell
 docker compose --profile maintenance up --build migrate-account
 docker compose --profile maintenance up --build migrate-shard
 ```
 
-Each target maintains its own `go_sro_schema_migrations` ledger and verifies
-`SELECT DATABASE()` before DDL. Dirty `applying` or `rolling_back` states require
-manual reconciliation; do not delete ledger rows or auto-retry uncertain DDL.
+Each target owns a `go_sro_schema_migrations` ledger and requires
+`SELECT DATABASE()` to match exactly. Dirty `applying` or `rolling_back` states
+require manual schema/ledger reconciliation; do not delete rows or blindly
+retry uncertain MySQL DDL.
 
-Local MSSQL vSRO reference backups under `VSRO_OLDDB/` and
-`VSRO_TestIn(EPVP)/` are comparison inputs only. They are ignored by Git and are
-not the live GO-SRO database.
+Reference-data importers are separate maintenance tools, not migrations:
 
-See [migration safety](migrations/README.md) and the
-[maintenance command](../cmd/migrate/README.md).
+```powershell
+go run ./cmd/sro-data import-reference --media Media/Media
+go run ./cmd/sro-data import-vsro-skills --export-dir <export-directory>
+go run ./cmd/sro-data import-vsro-items --export-dir <export-directory>
+```
+
+Local MSSQL backups under `VSRO_OLDDB/` and `VSRO_TestIn(EPVP)/` are ignored
+comparison inputs, not the live SRO Nexus database.
+
+See [migration safety](migrations/README.md), the
+[migration command](../cmd/migrate/README.md), and the
+[data tool](../cmd/sro-data/README.md).
