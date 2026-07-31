@@ -133,6 +133,9 @@ type Player struct {
 	Masteries                    map[uint32]byte
 	Skills                       map[uint32]byte
 	ActiveBuffs                  map[uint32]ActiveBuff
+	pendingReturnDamage          []PendingReturnDamage
+	returnDamageScheduled        bool
+	returnDamageChanceState      map[uint32]int
 	activeRecovery               map[uint32]RecoveryStatusDescriptor
 	combatStatuses               map[CombatStatusKind]CombatStatus
 	characterMask                CharacterMask
@@ -152,6 +155,7 @@ type Player struct {
 	CTFTeam                      CTFTeam
 	PVPCape                      PVPCape
 	IsGm                         bool
+	gmMuted                      bool
 	Party                        *Party
 	WalkSpeed                    float32
 	RunSpeed                     float32
@@ -180,6 +184,27 @@ type Player struct {
 	- TeleportLocation
 	- Active Buffs / Effects
 	*/
+}
+
+func (p *Player) ToggleGMMute() bool {
+	if p == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	p.gmMuted = !p.gmMuted
+	muted := p.gmMuted
+	p.Mutex.Unlock()
+	return muted
+}
+
+func (p *Player) IsGMMuted() bool {
+	if p == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	muted := p.gmMuted
+	p.Mutex.Unlock()
+	return muted
 }
 
 func (p *Player) BeginTimedAction(token uint32) bool {

@@ -1217,9 +1217,9 @@ func lockEconomyCharacter(ctx context.Context, tx *sql.Tx, characterID int64) (u
 	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT `FK_USER`,`GOLD` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&owner, &gold)
 	return owner, gold, err
 }
-// NPC buy packets and SHOP_GOODS both use the zero-based Media tab index.
-// Keep this boundary explicit: shifting nonzero tabs redirects consumables to
-// the preceding equipment tab.
+// NPC-buy packets and SHOP_GOODS use the same zero-based Media tab index.
+// Live requests for NPC_WC_ACCESSORY and NPC_WC_HORSE match their persisted
+// tab/slot rows directly; shifting them makes visible shop goods unavailable.
 func shopGoodCatalogTab(packetTab byte) byte {
 	return packetTab
 }

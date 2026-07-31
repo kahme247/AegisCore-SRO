@@ -15,7 +15,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func sendCharacterBootstrapBody(session *server.Session, player *model.Player) error {
+func sendCharacterBootstrapBody(session *server.Session, player *model.Player, itemCooldowns []model.CharacterCooldownState) error {
 	traceBootstrap := os.Getenv("SRO_SESSION_TRACE") == "1"
 	if traceBootstrap {
 		log.Infof("CHAR_BOOTSTRAP_TRACE start character=%s id=%d", player.CharName, player.ID)
@@ -154,11 +154,30 @@ func sendCharacterBootstrapBody(session *server.Session, player *model.Player) e
 	player.SendStatsUpdate()
 	player.SendMovementStateUpdate()
 
-	pReady := network.EmptyPacket()
-	pReady.MessageID = 0x3077
-	pReady.WriteByte(0)
-	pReady.WriteByte(0)
+	pReady, err := buildCooldownBootstrap(itemCooldowns)
+	if err != nil {
+		return err
+	}
 	return session.Send(pReady)
+}
+
+func buildCooldownBootstrap(itemCooldowns []model.CharacterCooldownState) (network.Packet, error) {
+	if len(itemCooldowns) > 255 {
+		return network.Packet{}, fmt.Errorf("item cooldown bootstrap count %d exceeds wire limit", len(itemCooldowns))
+	}
+	packet := network.EmptyPacket()
+	packet.MessageID = 0x3077
+	packet.WriteByte(byte(len(itemCooldowns)))
+	for _, cooldown := range itemCooldowns {
+		remainingMilliseconds := (cooldown.Remaining + time.Millisecond - 1) / time.Millisecond
+		if cooldown.SourceID == 0 || remainingMilliseconds <= 0 || remainingMilliseconds > time.Duration(^uint32(0)) {
+			return network.Packet{}, fmt.Errorf("invalid item cooldown bootstrap source=%d remaining=%s", cooldown.SourceID, cooldown.Remaining)
+		}
+		packet.WriteUInt32(cooldown.SourceID)
+		packet.WriteUInt32(uint32(remainingMilliseconds))
+	}
+	packet.WriteByte(0)
+	return packet, nil
 }
 
 func buildPlayerBadEffectBootstrap() network.Packet {

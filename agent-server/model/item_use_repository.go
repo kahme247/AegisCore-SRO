@@ -16,6 +16,7 @@ var (
 	ErrItemUseUnsupported           = errors.New("item use is not supported")
 	ErrItemUseNoEffect              = errors.New("item use would have no effect")
 	ErrItemUseExpired               = errors.New("item use has expired")
+	ErrItemUseCooldown              = errors.New("item use is on cooldown")
 	ErrItemUseOutcomeUnknown        = errors.New("item-use transaction outcome is unknown")
 	ErrItemServiceDailyUnavailable  = errors.New("item-service daily activation is unavailable")
 )
@@ -210,6 +211,12 @@ func NewItemUseRepository(shard *sql.DB) (*SQLItemUseRepository, error) {
 	return &SQLItemUseRepository{shard: shard}, nil
 }
 
+// CheckCooldowns exposes the preflight used by runtime publishers. Item
+// consumption still claims the cooldown inside its own transaction.
+func (r *SQLItemUseRepository) CheckCooldowns(ctx context.Context, characterID int, claims []CharacterCooldownClaim) error {
+	return (&SQLCharacterCooldownRepository{shard: r.shard}).CheckCooldowns(ctx, characterID, claims)
+}
+
 func InventoryItemType(ref RefItem) uint16 {
 	cash := 0
 	if ref.IsCashItem {
@@ -380,6 +387,16 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	case isDimensionHole:
 		if target != nil || vitals.DimensionHolePreparedItemRefID != ref.ID {
 			return result, ErrItemUseUnsupported
+		}
+		if err = claimCharacterCooldowns(ctx, tx, int(characterID), []CharacterCooldownClaim{{
+			Kind:     CharacterCooldownItem,
+			SourceID: ref.ID,
+			Duration: dimensionHole.Cooldown,
+		}}); err != nil {
+			if errors.Is(err, ErrCharacterCooldownActive) {
+				return result, ErrItemUseCooldown
+			}
+			return result, err
 		}
 		result.DimensionHolePortal = &dimensionHole
 	case isCOSScroll:

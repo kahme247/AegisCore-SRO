@@ -424,6 +424,35 @@ func TestNPCTalkAdmitsKnownNearbyNormalNPC(t *testing.T) {
 	}
 }
 
+func TestNPCTalkConversationEntersDimensionHolePortal(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	portal := selectEntityDimensionHolePortal(t, player, 0x12345678, selectEntityPosition(30000, 20, 0, 20))
+	if !player.GetKnownObjectList().AddObject(portal) {
+		t.Fatal("could not add Dimension Hole portal")
+	}
+	world := &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{portal.GetUniqueID(): portal}, distance: selectionKnownRange,
+	}
+	entry := &dimensionHoleCombatEntryFake{}
+	var sent []network.Packet
+	handler := NewNPCTalkHandler(world)
+	handler.ConfigureDimensionHoleEntry(entry)
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+
+	if err := handler.handlePacket(context.Background(), session, npcTalkPacket(t, portal.GetUniqueID())); err != nil {
+		t.Fatalf("enter Dimension Hole through conversation: %v", err)
+	}
+	if entry.calls != 1 || entry.portalUID != portal.GetUniqueID() || entry.player != player {
+		t.Fatalf("entry calls=%d portal=%d player=%p, want 1/%d/%p", entry.calls, entry.portalUID, entry.player, portal.GetUniqueID(), player)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.EntityTalkResponse || !reflect.DeepEqual(sent[0].Payload(), []byte{1, npcTalkActionConversation}) {
+		t.Fatalf("conversation acknowledgement = %#v, want 0xB046 success", sent)
+	}
+}
+
 func TestNPCTalkOpensChulsanQuestList(t *testing.T) {
 	session, player, npc := selectEntityFixture(t)
 	npc.Name = "NPC_CH_SMITH"

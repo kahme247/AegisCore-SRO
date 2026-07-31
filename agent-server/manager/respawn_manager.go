@@ -335,6 +335,9 @@ func (s *RespawnManager) newNPCForSpawnWithRarity(spawnArea *model.SpawnArea, fo
 	npc.Name = spawnArea.NpcCodeName
 	npc.RefObjectID = refObjectID
 	npc.TypeInfo = refChar.TypeInfo
+	if spawnArea.GameWorldID != 0 {
+		npc.SetGameWorldID(spawnArea.GameWorldID)
+	}
 	npc.ConfigureMovementSpeeds(float32(refChar.Speed1), float32(refChar.Speed2))
 	if refChar.TypeInfo.IsNPCMob() {
 		rarity := s.selectRuntimeRarity(refChar.Rarity, spawnArea.ChampionGenPercentage)

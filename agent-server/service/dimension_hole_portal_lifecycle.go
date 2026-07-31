@@ -33,16 +33,19 @@ type DimensionHolePortalInstance struct {
 // player transfer remain separate authorities, so expiry never mutates a
 // player's inventory or position.
 type DimensionHolePortalLifecycle struct {
-	mu       sync.RWMutex
-	portals  *DimensionHolePortalService
-	scopes   model.DimensionHoleScopeAllocator
-	nextKey  func() uint32
-	byUID    map[uint32]DimensionHolePortalInstance
-	prepared map[uint32]*PreparedDimensionHolePortal
-	now      func() time.Time
-	lifetime time.Duration
-	schedule func(time.Duration, func()) func() bool
-	timers   map[uint32]func() bool
+	mu         sync.RWMutex
+	portals    *DimensionHolePortalService
+	scopes     model.DimensionHoleScopeAllocator
+	nextKey    func() uint32
+	byUID      map[uint32]DimensionHolePortalInstance
+	prepared   map[uint32]*PreparedDimensionHolePortal
+	now        func() time.Time
+	lifetime   time.Duration
+	schedule   func(time.Duration, func()) func() bool
+	timers     map[uint32]func() bool
+	onDestroy  func(uint32)
+	onPopulate func(DimensionHolePortalInstance) error
+	onRelease  func(DimensionHolePortalInstance)
 }
 
 func NewDimensionHolePortalLifecycle(portals *DimensionHolePortalService, scopes model.DimensionHoleScopeAllocator, nextKey func() uint32) (*DimensionHolePortalLifecycle, error) {
@@ -63,6 +66,25 @@ func NewDimensionHolePortalLifecycle(portals *DimensionHolePortalService, scopes
 		},
 		timers: make(map[uint32]func() bool),
 	}, nil
+}
+
+func (l *DimensionHolePortalLifecycle) ConfigureAdmissionCleanup(cleanup func(uint32)) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.onDestroy = cleanup
+	l.mu.Unlock()
+}
+
+func (l *DimensionHolePortalLifecycle) ConfigurePopulation(populate func(DimensionHolePortalInstance) error, release func(DimensionHolePortalInstance)) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.onPopulate = populate
+	l.onRelease = release
+	l.mu.Unlock()
 }
 
 func (l *DimensionHolePortalLifecycle) Prepare(ctx context.Context, definition model.DimensionHoleDefinition, owner *model.Player, position navmeshv2.RtNavmeshPosition) (*PreparedDimensionHolePortal, error) {
@@ -119,6 +141,14 @@ func (l *DimensionHolePortalLifecycle) Publish(ctx context.Context, prepared *Pr
 	now := l.now()
 	instance := DimensionHolePortalInstance{Portal: portal, Lease: prepared.lease, ExpiresAt: now.Add(l.lifetime)}
 	uid := portal.GetUniqueID()
+	l.mu.RLock()
+	populate := l.onPopulate
+	l.mu.RUnlock()
+	if populate != nil {
+		if err = populate(instance); err != nil {
+			return DimensionHolePortalInstance{}, errors.Join(err, l.portals.Destroy(uid), l.scopes.ReleaseDimensionHoleScope(context.WithoutCancel(ctx), prepared.lease))
+		}
+	}
 	l.mu.Lock()
 	if _, exists := l.byUID[uid]; exists {
 		l.mu.Unlock()
@@ -210,6 +240,8 @@ func (l *DimensionHolePortalLifecycle) Destroy(ctx context.Context, uid uint32) 
 	}
 	l.mu.Lock()
 	instance, ok := l.byUID[uid]
+	cleanup := l.onDestroy
+	releasePopulation := l.onRelease
 	if ok {
 		delete(l.byUID, uid)
 		if cancel := l.timers[uid]; cancel != nil {
@@ -239,6 +271,14 @@ func (l *DimensionHolePortalLifecycle) Destroy(ctx context.Context, uid uint32) 
 		l.mu.Unlock()
 		if reschedule {
 			l.scheduleExpiration(uid, delay)
+		}
+	}
+	if destroyErr == nil && releaseErr == nil {
+		if cleanup != nil {
+			cleanup(uid)
+		}
+		if releasePopulation != nil {
+			releasePopulation(instance)
 		}
 	}
 	return errors.Join(destroyErr, releaseErr)

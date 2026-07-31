@@ -48,14 +48,23 @@ func TestExchangeControlPacketsMatchProtocol(t *testing.T) {
 			p := exchangeFailure(opcode.ExchangeApproveResponse)
 			return p.MessageID, p.Payload()
 		}, wantID: opcode.ExchangeApproveResponse, payload: []byte{2, 0, 0}},
-		{name: "inventory operation success", packet: func() (uint16, []byte) {
-			p := inventoryOperationSuccess(4)
+		{name: "inventory add-item success", packet: func() (uint16, []byte) {
+			p := inventoryOperationAddSuccess(30, 2)
 			return p.MessageID, p.Payload()
-		}, wantID: opcode.ItemOperationResponse, payload: []byte{1, 4}},
+		}, wantID: opcode.ItemOperationResponse, payload: []byte{1, exchangeAddItem, 30, 2}},
+		{name: "inventory remove-item success", packet: func() (uint16, []byte) {
+			p := inventoryOperationRemoveSuccess(2)
+			return p.MessageID, p.Payload()
+		}, wantID: opcode.ItemOperationResponse, payload: []byte{1, exchangeRemoveItem, 2}},
+		{name: "inventory set-gold success", packet: func() (uint16, []byte) {
+			p := inventoryOperationGoldSuccess(0x1122334455667788)
+			return p.MessageID, p.Payload()
+		}, wantID: opcode.ItemOperationResponse, payload: []byte{1, exchangeSetGold, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}},
 		{name: "inventory operation failure", packet: func() (uint16, []byte) {
 			p := inventoryOperationFailure()
 			return p.MessageID, p.Payload()
 		}, wantID: opcode.ItemOperationResponse, payload: []byte{2, 0}},
+		{name: "invitation", packet: func() (uint16, []byte) { p := exchangeInvitation(0x12345678); return p.MessageID, p.Payload() }, wantID: opcode.ExchangeInvitationResponse, payload: []byte{1, 0x78, 0x56, 0x34, 0x12}},
 		{name: "cancelled", packet: func() (uint16, []byte) { p := exchangeCancelled(); return p.MessageID, p.Payload() }, wantID: opcode.ExchangeCancelledResponse, payload: []byte{0, 0}},
 	}
 	for _, test := range tests {
@@ -146,7 +155,7 @@ func TestPeerSnapshotProjectsTemporaryEnhancementAndExpiration(t *testing.T) {
 	}
 }
 
-func TestStartCreatesExchangeForBothPlayers(t *testing.T) {
+func TestStartWaitsForTargetAcceptanceBeforeOpeningExchange(t *testing.T) {
 	requesterSession := &server.Session{UserContext: server.UserContext{UserID: 10, CharacterID: 1, UniqueID: 101}}
 	responderSession := &server.Session{UserContext: server.UserContext{UserID: 20, CharacterID: 2, UniqueID: 202}}
 	requester := &model.Player{ID: 1, Session: requesterSession, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 101}}
@@ -169,16 +178,45 @@ func TestStartCreatesExchangeForBothPlayers(t *testing.T) {
 	request := network.EmptyPacket()
 	request.WriteUInt32(responder.GetUniqueID())
 	if err := manager.handleStart(context.Background(), requesterSession, request); err != nil {
-		t.Fatalf("handleStart() error = %v", err)
+		t.Fatalf("request exchange: %v", err)
 	}
-	if manager.Busy(requester.ID) == false || manager.Busy(responder.ID) == false || len(sent) != 2 {
-		t.Fatalf("exchange active = (%v, %v), packets = %d; want true, true, 2", manager.Busy(requester.ID), manager.Busy(responder.ID), len(sent))
+	if !manager.Busy(requester.ID) || !manager.Busy(responder.ID) || len(sent) != 1 {
+		t.Fatalf("pending exchange = (%v, %v), packets = %d; want true, true, 1", manager.Busy(requester.ID), manager.Busy(responder.ID), len(sent))
 	}
-	if sent[0].session != requesterSession || sent[0].packet.MessageID != opcode.ExchangeStartResponse || !bytes.Equal(sent[0].packet.Payload(), []byte{1, 202, 0, 0, 0}) {
-		t.Fatalf("requester packet = (0x%04X, % X)", sent[0].packet.MessageID, sent[0].packet.Payload())
+	if sent[0].session != responderSession || sent[0].packet.MessageID != opcode.ExchangeInvitationResponse || !bytes.Equal(sent[0].packet.Payload(), []byte{1, 101, 0, 0, 0}) {
+		t.Fatalf("invitation packet = recipient %p (0x%04X, % X)", sent[0].session, sent[0].packet.MessageID, sent[0].packet.Payload())
 	}
-	if sent[1].session != responderSession || sent[1].packet.MessageID != opcode.ExchangeStartedResponse || !bytes.Equal(sent[1].packet.Payload(), []byte{101, 0, 0, 0}) {
-		t.Fatalf("responder packet = (0x%04X, % X)", sent[1].packet.MessageID, sent[1].packet.Payload())
+
+	handled, err := manager.AnswerInvitation(context.Background(), responderSession, true)
+	if err != nil || !handled {
+		t.Fatalf("accept exchange: handled=%v error=%v", handled, err)
+	}
+	if len(sent) != 3 {
+		t.Fatalf("packets after acceptance = %d, want 3", len(sent))
+	}
+	if sent[1].session != responderSession || sent[1].packet.MessageID != opcode.ExchangeStartResponse || !bytes.Equal(sent[1].packet.Payload(), []byte{1, 101, 0, 0, 0}) {
+		t.Fatalf("accept response = recipient %p (0x%04X, % X)", sent[1].session, sent[1].packet.MessageID, sent[1].packet.Payload())
+	}
+	if sent[2].session != requesterSession || sent[2].packet.MessageID != opcode.ExchangeStartedResponse || !bytes.Equal(sent[2].packet.Payload(), []byte{202, 0, 0, 0}) {
+		t.Fatalf("requester start = recipient %p (0x%04X, % X)", sent[2].session, sent[2].packet.MessageID, sent[2].packet.Payload())
+	}
+}
+
+func TestActiveItemServicePreventsExchangeOffer(t *testing.T) {
+	now := time.Now().UTC()
+	player := &model.Player{}
+	player.ApplyItemService(model.ItemServiceEffect{
+		Kind:          model.ItemServiceReinforceWeapon,
+		TargetSlot:    13,
+		TargetSlotSet: true,
+		ActivatedAt:   now.Add(-time.Minute),
+		ExpiresAt:     now.Add(time.Minute),
+	})
+	if !hasActiveItemService(player, 13, now) {
+		t.Fatal("active item service was not detected")
+	}
+	if hasActiveItemService(player, 14, now) {
+		t.Fatal("active item service matched the wrong slot")
 	}
 }
 

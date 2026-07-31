@@ -340,6 +340,22 @@ func TestPlayerPhysicalCriticalDoublesDamageAndMonsterBlockPreventsIt(t *testing
 	}
 }
 
+func TestPlayerMagicalDamageDoesNotBecomeCritical(t *testing.T) {
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}}
+	target := combatEffectNPC(210, 9000, 1000)
+	handler := &CombatHandler{referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+		9000: {RefObject: model.RefObject{ID: 9000}},
+	}})}
+
+	result := handler.applyPlayerDamageResult(player, target, 500, true, false, true)
+	if result.wireDamage != 500 || result.appliedDamage != 500 || result.damageState != model.DamageStateNormal || result.killed {
+		t.Fatalf("magical critical-flag result = %+v, want normal 500 damage", result)
+	}
+	if hp := target.CurrentHitPoints(); hp != 500 {
+		t.Fatalf("target HP = %d, want 500", hp)
+	}
+}
+
 func TestMSCHModeOneProducesStateOnlySourceResult(t *testing.T) {
 	now := time.Now()
 	const skillID = uint32(7127)
@@ -451,6 +467,39 @@ func TestPlayerTargetSkillAppliesMitigatedDamage(t *testing.T) {
 	}
 	if packets < 2 {
 		t.Fatalf("sent packets = %d, want action-state and attack packets", packets)
+	}
+}
+
+func TestPlayerTargetMagicalSkillDoesNotRollCritical(t *testing.T) {
+	attacker := &model.Player{
+		SRObject:        model.SRObject{UniqueID: 100},
+		BaseStats:       model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20},
+		Level:           10,
+		LifeState:       model.Alive,
+		BaseAttackStats: model.AttackStats{MagAttackMin: 100, MagAttackMax: 100, HitRate: 100, CriticalRate: 100},
+	}
+	target := &model.Player{
+		SRObject:  model.SRObject{UniqueID: 200},
+		BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20},
+		Level:     10,
+		LifeState: model.Alive,
+	}
+	criticalRolls := 0
+	handler := &CombatHandler{
+		send:         func(*server.Session, network.Packet) error { return nil },
+		blockRoll:    func(int) bool { return false },
+		damageRoll:   func() int { return 0 },
+		criticalRoll: func(int) bool { criticalRolls++; return true },
+	}
+	skill := model.RefSkill{ID: 9002, TargetEnemyPVP: true, AttackType: 8, AttackMin: 100, AttackMax: 100}
+	if err := handler.executePlayerSkillAttack(context.Background(), &server.Session{}, attacker, target, skill); err != nil {
+		t.Fatalf("player-target magical skill failed: %v", err)
+	}
+	if hp := target.CurrentHP(); hp != 796 {
+		t.Fatalf("target HP = %d, want 796 from non-critical magical damage", hp)
+	}
+	if criticalRolls != 0 {
+		t.Fatalf("magical critical rolls = %d, want 0", criticalRolls)
 	}
 }
 
@@ -708,15 +757,16 @@ func TestHealingSkillAppliesOnlyAtAuthoredImpact(t *testing.T) {
 	}
 	caster.SetLifeState(model.Alive)
 	vitals := &combatVitalsFake{spent: true}
+	cooldowns := &combatCooldownFake{}
 	var scheduled func()
 	handler := &CombatHandler{
-		vitals:   vitals,
+		vitals: vitals, cooldowns: cooldowns,
 		schedule: func(_ time.Duration, fn func()) { scheduled = fn },
 		send:     func(*server.Session, network.Packet) error { return nil },
 	}
 	skill := model.RefSkill{
 		ID: 9017, BasicActivity: 2, TargetSelf: true,
-		HealHP: 50, ActionCastingTime: 25, ConsumeMP: 10,
+		HealHP: 50, ActionCastingTime: 25, ConsumeMP: 10, ReuseDelay: 1000,
 	}
 	if err := handler.executeHealing(context.Background(), &server.Session{}, caster, caster, skill); err != nil {
 		t.Fatalf("delayed healing failed: %v", err)
@@ -724,12 +774,39 @@ func TestHealingSkillAppliesOnlyAtAuthoredImpact(t *testing.T) {
 	if scheduled == nil {
 		t.Fatal("healing did not schedule impact")
 	}
+	if cooldowns.checkCalls != 1 || cooldowns.claimCalls != 1 {
+		t.Fatalf("cooldown calls = check:%d claim:%d, want check:1 claim:1", cooldowns.checkCalls, cooldowns.claimCalls)
+	}
 	if got := caster.CurrentHP(); got != 100 {
 		t.Fatalf("healing applied before impact: hp=%d", got)
 	}
 	scheduled()
 	if got := caster.CurrentHP(); got != 150 {
 		t.Fatalf("healing at impact = %d, want 150", got)
+	}
+}
+
+func TestHealingSkillDurableCooldownRejectsBeforeResourceSpend(t *testing.T) {
+	caster := &model.Player{
+		ID: 303, SRObject: model.SRObject{UniqueID: 107},
+		BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20},
+	}
+	caster.SetLifeState(model.Alive)
+	vitals := &combatVitalsFake{spent: true}
+	cooldowns := &combatCooldownFake{checkErr: model.ErrCharacterCooldownActive}
+	handler := &CombatHandler{
+		vitals: vitals, cooldowns: cooldowns,
+		send: func(*server.Session, network.Packet) error { return nil },
+	}
+	skill := model.RefSkill{ID: 9018, BasicActivity: 2, TargetSelf: true, HealHP: 50, ConsumeMP: 10, ReuseDelay: 1000}
+	if err := handler.executeHealing(context.Background(), &server.Session{}, caster, caster, skill); err != nil {
+		t.Fatalf("active durable cooldown returned error: %v", err)
+	}
+	if cooldowns.checkCalls != 1 || cooldowns.claimCalls != 0 {
+		t.Fatalf("cooldown calls = check:%d claim:%d, want check:1 claim:0", cooldowns.checkCalls, cooldowns.claimCalls)
+	}
+	if vitals.spendCalls != 0 {
+		t.Fatalf("active durable cooldown spent resources: calls=%d", vitals.spendCalls)
 	}
 }
 
@@ -1219,6 +1296,30 @@ func TestPlayerTargetStatusSkillPublishesAndAppliesEffect(t *testing.T) {
 		t.Fatalf("status application stops = %d, want 1", world.stops)
 	}
 }
+func TestPlayerBadEffectPacketsIncludeLocalStatusSnapshot(t *testing.T) {
+	now := time.Unix(100, 0)
+	target := &model.Player{SRObject: model.SRObject{UniqueID: 202}}
+	target.SetLifeState(model.Alive)
+	if !target.ApplyCombatStatusAt(model.CombatStatus{
+		Kind:      model.CombatStatusStun,
+		Level:     7,
+		AppliedAt: now,
+		ExpiresAt: now.Add(10 * time.Second),
+	}, now) {
+		t.Fatal("could not install stun status")
+	}
+
+	update, snapshot := buildPlayerBadEffectPackets(target, now)
+	if update.MessageID != opcode.EntityUpdateStatus {
+		t.Fatalf("visible status opcode = %04X, want %04X", update.MessageID, opcode.EntityUpdateStatus)
+	}
+	if snapshot.MessageID != opcode.ActionUnknownUpdate2 {
+		t.Fatalf("local status opcode = %04X, want %04X", snapshot.MessageID, opcode.ActionUnknownUpdate2)
+	}
+	if got, want := snapshot.Payload(), []byte{0, 0x40, 0, 0, 100, 0, 0, 0, 0, 0, 7, 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("local status snapshot = % X, want % X", got, want)
+	}
+}
 
 func TestFearImmediatelyInterruptsCommittedPlayerAction(t *testing.T) {
 	now := time.Unix(100, 0)
@@ -1298,6 +1399,52 @@ func TestPlayerAbnormalDamageTicksAfterPvPStatus(t *testing.T) {
 	tick()
 	if target.CurrentHP() != 1000 || linked.CurrentHP() != 880 {
 		t.Fatalf("abnormal tick HP = target:%d linked:%d, want target:1000 linked:880", target.CurrentHP(), linked.CurrentHP())
+	}
+}
+
+func TestBloodTrapNaturalExpiryAppliesSubtype4WithSourceAndTokenGuard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	source := &model.Player{SRObject: model.SRObject{UniqueID: 320}}
+	target := &model.Player{SRObject: model.SRObject{UniqueID: 321}, BaseStats: model.BaseStats{HP: 1000, MP: 100}}
+	source.SetLifeState(model.Alive)
+	target.SetLifeState(model.Alive)
+	status := model.CombatStatus{Kind: model.CombatStatusBloodTrap, Token: 77, SkillID: 9101, SourceUID: source.GetUniqueID(), Payload: 120, ExpiresAt: now.Add(time.Second)}
+	if !target.ApplyCombatStatusAt(status, now) {
+		t.Fatal("failed to install blood-trap status")
+	}
+	var expiry func()
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:     &combatWorldFake{player: source},
+		now:       func() time.Time { return now },
+		schedule:  func(_ time.Duration, fn func()) { expiry = fn },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	handler.schedulePlayerStatusExpiration(target, status, false)
+	if expiry == nil {
+		t.Fatal("blood-trap expiry was not scheduled")
+	}
+	now = status.ExpiresAt
+	expiry()
+	if got := target.CurrentHP(); got != 880 {
+		t.Fatalf("blood-trap HP = %d, want 880", got)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.EntitySkillApplicationResponse {
+		t.Fatalf("subtype-4 packets = %+v", sent)
+	}
+	if got, want := sent[0].Payload(), []byte{4, 0, 0x41, 0x01, 0, 0, 120, 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("subtype-4 payload = % X, want % X", got, want)
+	}
+
+	replacement := model.CombatStatus{Kind: model.CombatStatusBloodTrap, Token: 78, SkillID: 9101, SourceUID: source.GetUniqueID(), Payload: 300, ExpiresAt: now.Add(time.Second)}
+	if !target.ApplyCombatStatusAt(replacement, now) {
+		t.Fatal("failed to install blood-trap replacement")
+	}
+	sent = nil
+	handler.schedulePlayerStatusExpiration(target, status, false)
+	expiry()
+	if got := target.CurrentHP(); got != 880 || len(sent) != 0 {
+		t.Fatalf("old token detonated replacement: HP=%d packets=%d", got, len(sent))
 	}
 }
 

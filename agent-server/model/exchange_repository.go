@@ -135,8 +135,8 @@ func (r *SQLExchangeRepository) CommitExchange(ctx context.Context, first, secon
 		} else {
 			owner = second.CharacterID
 		}
-		if _, deleteErr := tx.ExecContext(ctx, "DELETE FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `TARGET_SLOT`=? AND `SERVICE_KIND` IN (?,?,?)", owner, transfer.SourceSlot, ItemServiceReinforceWeapon, ItemServiceReinforceArmor, ItemServiceReinforceAccessory); deleteErr != nil {
-			return ExchangeCommitResult{}, deleteErr
+		if err = validateExchangeItemService(ctx, tx, owner, transfer.SourceSlot); err != nil {
+			return ExchangeCommitResult{}, err
 		}
 		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", owner, transfer.SourceSlot, transfer.ItemID)
 		if deleteErr != nil {
@@ -224,6 +224,18 @@ func validateExchangeOffer(offer ExchangeOffer, state *lockedExchangeCharacter) 
 		seenExchangeSlots[offered.ExchangeSlot] = struct{}{}
 	}
 	return nil
+}
+
+func validateExchangeItemService(ctx context.Context, tx *sql.Tx, characterID int64, slot byte) error {
+	var active int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `TARGET_SLOT`=? AND `EXPIRES_AT`>UTC_TIMESTAMP(6) LIMIT 1 FOR UPDATE", characterID, slot).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return ErrExchangeConflict
 }
 
 func exchangeDestinationSlots(inventory map[byte]lockedExchangeItem, outgoing []ExchangeOfferedItem, incoming int) ([]byte, error) {

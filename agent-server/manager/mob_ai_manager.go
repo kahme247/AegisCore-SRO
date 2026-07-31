@@ -60,6 +60,7 @@ type MobAIManager struct {
 	schedule        func(time.Duration, func())
 	ownerTargets    func(*model.NPC, *model.Player, model.RefSkill, int) []*model.Player
 	interruptPlayer func(*model.Player)
+	returnDamage    func(*model.Player, *model.NPC, model.PendingReturnDamage)
 	gameplayRates   interface{ Current() model.GameplayRates }
 }
 
@@ -188,6 +189,17 @@ func (m *MobAIManager) ConfigurePlayerAttackInterrupter(interrupt func(*model.Pl
 	}
 	m.stateMu.Lock()
 	m.interruptPlayer = interrupt
+	m.stateMu.Unlock()
+}
+
+// ConfigureReturnDamageExecutor connects deferred NPC RGMD records to the
+// combat handler, which owns NPC kill credit, decay, and packet lifecycle.
+func (m *MobAIManager) ConfigureReturnDamageExecutor(executor func(*model.Player, *model.NPC, model.PendingReturnDamage)) {
+	if m == nil {
+		return
+	}
+	m.stateMu.Lock()
+	m.returnDamage = executor
 	m.stateMu.Unlock()
 }
 
@@ -1017,6 +1029,12 @@ func (m *MobAIManager) applyAttackDamageWithSkillResult(world mobAIWorld, npc *m
 			// to physical 0xB4 and magical 0xB5 after critical processing.
 			damage = model.CombatFinalDamageFactor(damage, status.Power)
 		}
+		physicalHit, magicalHit := damage, 0
+		if isMagical {
+			physicalHit, magicalHit = 0, damage
+		}
+		// 0x005A0B80 admits rgmd before the later linked-damage branch.
+		m.admitNPCToPlayerReturnDamage(npc, target, physicalHit, magicalHit, m.combatNow())
 		damage, linked = m.interceptLinkedDamage(npc, target, damage, isMagical)
 		application := target.ApplyCombatDamage(damage, isMagical)
 		record.Damage = uint32(min(application.WireDamage, maximumMobWireDamage))

@@ -126,13 +126,18 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 	session.UserContext.CharName = player.CharName
 	session.UserContext.RefObjId = player.GetRefObjectID()
 
+	itemCooldowns, err := h.activeItemCooldowns(ctx, player)
+	if err != nil {
+		return err
+	}
+
 	joinResult := buildJoinResult(ResultTrue, 0)
 	dataBegin := network.EmptyPacket()
 	dataBegin.MessageID = opcode.CharacterDataBegin
 	if err := session.SendBatch([]network.Packet{joinResult, dataBegin}); err != nil {
 		return err
 	}
-	if err := sendCharacterBootstrapBody(session, player); err != nil {
+	if err := sendCharacterBootstrapBody(session, player, itemCooldowns); err != nil {
 		return err
 	}
 	h.publishRestoredSpeedEffect(player)
@@ -543,20 +548,30 @@ func buildJoinResult(result byte, errorCode uint16) network.Packet {
 	return packet
 }
 
-func sendCharacterBootstrap(session *server.Session, player *model.Player) error {
+func sendCharacterBootstrap(session *server.Session, player *model.Player, itemCooldowns []model.CharacterCooldownState) error {
 	pDataBegin := network.EmptyPacket()
 	pDataBegin.MessageID = opcode.CharacterDataBegin
 	if err := session.Send(pDataBegin); err != nil {
 		return err
 	}
-	return sendCharacterBootstrapBody(session, player)
+	return sendCharacterBootstrapBody(session, player, itemCooldowns)
 }
 
 // SendCharacterBootstrap resends the stock character loading stream after an
 // in-server teleport. Character selection and teleport use the same vSRO 1.88
 // bootstrap body; only their preceding handshake differs.
-func SendCharacterBootstrap(session *server.Session, player *model.Player) error {
-	return sendCharacterBootstrap(session, player)
+func SendCharacterBootstrap(session *server.Session, player *model.Player, itemCooldowns []model.CharacterCooldownState) error {
+	return sendCharacterBootstrap(session, player, itemCooldowns)
+}
+
+func (h *CharacterSelectionHandler) activeItemCooldowns(ctx context.Context, player *model.Player) ([]model.CharacterCooldownState, error) {
+	if h == nil || player == nil || player.ID <= 0 {
+		return nil, model.ErrCharacterCooldownInvalidClaim
+	}
+	if h.cooldowns == nil {
+		return nil, nil
+	}
+	return h.cooldowns.ActiveCooldowns(ctx, player.ID, model.CharacterCooldownItem)
 }
 
 func WriteCharDataToPacket(p *network.Packet, data *model.Player) {

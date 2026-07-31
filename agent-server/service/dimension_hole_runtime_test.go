@@ -75,6 +75,19 @@ func TestNewDimensionHoleRuntimeComposesLeasePortalAndAdmissionAuthorities(t *te
 	if admission.Scope != instance.Lease.Scope || admission.PortalUID != instance.Portal.GetUniqueID() {
 		t.Fatalf("admission = %#v; instance = %#v", admission, instance)
 	}
+	if err = runtime.Lifecycle.Destroy(context.Background(), instance.Portal.GetUniqueID()); err != nil {
+		t.Fatalf("Destroy() error = %v", err)
+	}
+	if _, admitted := runtime.Admissions.AdmissionForPlayer(owner.GetUniqueID()); admitted {
+		t.Fatal("destroyed portal retained owner admission")
+	}
+	replacement, err := runtime.Lifecycle.Open(context.Background(), definition, owner, dimensionHolePortalTestPosition())
+	if err != nil {
+		t.Fatalf("Open(replacement) error = %v", err)
+	}
+	if _, err = runtime.Admissions.Admit(replacement.Portal.GetUniqueID(), owner); err != nil {
+		t.Fatalf("Admit(replacement) error = %v", err)
+	}
 }
 
 func TestDimensionHoleRuntimeConfiguresEntryOnlyWithCompleteDestinationsAndCoordinator(t *testing.T) {

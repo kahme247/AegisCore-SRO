@@ -273,6 +273,22 @@ func TestRefSkillParsesFireAndColdImbueStatuses(t *testing.T) {
 	}
 }
 
+func TestRefSkillParsesBloodTrapDescriptor(t *testing.T) {
+	var skill RefSkill
+	copy(skill.Params[:], []int{skillParameterBloodTrap, 0x050A0F00, 80, 5, 2091})
+	skill.parseParameters()
+	want := BloodTrapDescriptor{DurationChoiceMask: 0x050A0F00, ChancePercent: 80, Level: 5, EffectValue: 2091}
+	if skill.BloodTrap != want {
+		t.Fatalf("bt descriptor = %+v, want %+v", skill.BloodTrap, want)
+	}
+	if len(skill.StatusEffects) != 1 || skill.StatusEffects[0] != (SkillStatusEffect{
+		Kind: CombatStatusBloodTrap, Chance: 80, Level: 5, Payload: 2091,
+		DurationChoiceMask: 0x050A0F00, NativeSubtype4: true,
+	}) {
+		t.Fatalf("bt effects = %+v", skill.StatusEffects)
+	}
+}
+
 func TestRefSkillParsesVerifiedBuffModifiers(t *testing.T) {
 	var skill RefSkill
 	copy(skill.Params[:], []int{
@@ -615,11 +631,33 @@ func TestRefSkillParsesAbnormalDurationResistance(t *testing.T) {
 	}
 }
 
-func TestRefSkillLeavesUnmappedDefenseSacrificeUnsupported(t *testing.T) {
+func TestRefSkillLeavesUnmappedDescriptorsUnsupported(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []int
+	}{
+		{"pdmp", []int{1886217328, 900000, 75, 75, 2}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			skill := RefSkill{BasicActivity: 2}
+			copy(skill.Params[:], test.params)
+			skill.parseParameters()
+			if skill.BuffModifiers != (BuffModifiers{}) || skill.ExecutionKind() != SkillExecutionUnsupported {
+				t.Fatalf("unmapped %s skill = %+v, want unsupported", test.name, skill)
+			}
+		})
+	}
+}
+
+func TestRefSkillParsesRGMDReturnDamageDescriptor(t *testing.T) {
 	skill := RefSkill{BasicActivity: 2}
-	copy(skill.Params[:], []int{1886217328, 900000, 75, 75, 2})
+	copy(skill.Params[:], []int{skillParameterReturnDamage, 50, 25, 75, 100})
 	skill.parseParameters()
-	if skill.BuffModifiers != (BuffModifiers{}) {
-		t.Fatalf("unmapped pdmp modifiers = %+v, want none", skill.BuffModifiers)
+	if got, want := skill.ReturnDamage, (ReturnDamageDescriptor{ChancePercent: 50, PhysicalPercent: 25, MagicalPercent: 75, MaximumRange: 100}); got != want {
+		t.Fatalf("rgmd = %+v, want %+v", got, want)
+	}
+	if kind := skill.ExecutionKind(); kind != SkillExecutionBuff {
+		t.Fatalf("rgmd execution kind = %v, want buff", kind)
 	}
 }

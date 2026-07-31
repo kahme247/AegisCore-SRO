@@ -59,6 +59,32 @@ func TestDimensionHoleEntryServiceSubmitsAdmittedPlayer(t *testing.T) {
 	}
 }
 
+func TestDimensionHoleEntryServiceTransfersOwnerPartyTogether(t *testing.T) {
+	admissions, member, instance := dimensionHoleEntryTestFixture(t)
+	players := admissions.players.(*dimensionHoleAdmissionPlayersFake)
+	owner := players.byUID[instance.Portal.OwnerUniqueID]
+	destination := DimensionHoleEntryDestination{WorldID: instance.Portal.Definition.WorldID, Region: 31201}
+	destinations := &dimensionHoleEntryDestinationFake{destination: destination}
+	coordinator := &dimensionHoleEntryCoordinatorFake{}
+	entries, err := NewDimensionHoleEntryService(admissions, destinations, coordinator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := entries.Enter(context.Background(), instance.Portal.GetUniqueID(), owner)
+	if err != nil {
+		t.Fatalf("Enter(owner) error = %v", err)
+	}
+	if admission.PlayerUID != owner.GetUniqueID() || destinations.calls != 2 || coordinator.calls != 2 {
+		t.Fatalf("party transfer admission=%#v destinationCalls=%d transferCalls=%d", admission, destinations.calls, coordinator.calls)
+	}
+	if _, ok := admissions.AdmissionForPlayer(owner.GetUniqueID()); !ok {
+		t.Fatal("owner admission was not retained")
+	}
+	if _, ok := admissions.AdmissionForPlayer(member.GetUniqueID()); !ok {
+		t.Fatal("party member admission was not retained")
+	}
+}
+
 func TestDimensionHoleEntryServiceRollsBackOnlyNewAdmissionOnTransferFailure(t *testing.T) {
 	admissions, player, instance := dimensionHoleEntryTestFixture(t)
 	transferErr := errors.New("loading rejected")

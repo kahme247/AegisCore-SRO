@@ -84,12 +84,15 @@ func TestDirectiveMappingsCoverExactRecoveredInventory(t *testing.T) {
 	}
 }
 
-func TestResolveRejectsAttemptToEnableUnavailableFeature(t *testing.T) {
-	provider := boolMap{"agent.features.open_market.enabled": true}
-	if _, err := Resolve(provider); err == nil {
-		t.Fatal("Resolve accepted unavailable open market feature")
+func TestResolveAcceptsCertifiedOpenMarketFeature(t *testing.T) {
+	set, err := Resolve(boolMap{"agent.features.open_market.enabled": true})
+	if err != nil {
+		t.Fatalf("Resolve Open Market feature: %v", err)
 	}
-	set, err := Resolve(boolMap{})
+	if !set.Enabled(OpenMarket) {
+		t.Fatal("Resolve did not enable Open Market")
+	}
+	set, err = Resolve(boolMap{})
 	if err != nil {
 		t.Fatalf("Resolve disabled defaults: %v", err)
 	}

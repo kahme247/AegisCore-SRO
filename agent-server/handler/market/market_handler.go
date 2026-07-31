@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"time"
-
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
+	"math"
+	"sync"
+	"time"
 )
 
 const (
@@ -23,18 +24,20 @@ type worldLookup interface {
 }
 
 type Handler struct {
-	repo      model.OpenMarketRepository
-	inventory model.InventoryRepository
-	world     worldLookup
-	now       func() time.Time
-	send      func(*server.Session, network.Packet) error
+	repo       model.OpenMarketRepository
+	inventory  model.InventoryRepository
+	world      worldLookup
+	now        func() time.Time
+	send       func(*server.Session, network.Packet) error
+	searchMu   sync.Mutex
+	lastSearch map[string]model.MarketSearch
 }
 
 func RegisterHandlers(target *server.Server, repo model.OpenMarketRepository, inventory model.InventoryRepository, world worldLookup) (*Handler, error) {
 	if target == nil || repo == nil || inventory == nil || world == nil {
 		return nil, model.ErrMarketUnavailable
 	}
-	h := &Handler{repo: repo, inventory: inventory, world: world, now: time.Now}
+	h := &Handler{repo: repo, inventory: inventory, world: world, now: time.Now, lastSearch: make(map[string]model.MarketSearch)}
 	target.RegisterHandler(opcode.OpenMarketDetailRequest, h.detail)
 	target.RegisterHandler(opcode.OpenMarketCloseRequest, h.close)
 	target.RegisterHandler(opcode.OpenMarketRegisterRequest, h.register)
@@ -149,7 +152,6 @@ func (h *Handler) detail(ctx context.Context, session *server.Session, packet ne
 	response := marketResponse(opcode.OpenMarketDetailResponse, err)
 	if err == nil {
 		response.WriteByte(detailType)
-		response.WriteString(view.Seller)
 		response.WriteUInt32(uint32(view.Listing.ID))
 		writeGenericItem(&response, view.Item)
 	}
@@ -163,6 +165,9 @@ func (h *Handler) close(_ context.Context, session *server.Session, packet netwo
 	if packet.Remaining() != 0 {
 		return model.ErrMarketInvalidCommand
 	}
+	h.searchMu.Lock()
+	delete(h.lastSearch, session.ID)
+	h.searchMu.Unlock()
 	return h.sendPacket(session, marketResponse(opcode.OpenMarketCloseResponse, nil))
 }
 
@@ -260,26 +265,55 @@ func readListingIDs(packet *network.Packet) ([]uint32, error) {
 	return ids, nil
 }
 
+func readUnregisterRequest(packet *network.Packet) (bool, uint32, error) {
+	mode, err := packet.ReadByte()
+	if err != nil {
+		return false, 0, model.ErrMarketInvalidCommand
+	}
+	switch mode {
+	case 0:
+		if packet.Remaining() != 0 {
+			return false, 0, model.ErrMarketInvalidCommand
+		}
+		return true, 0, nil
+	case 1:
+		id, readErr := packet.ReadUInt32()
+		if readErr != nil || id == 0 || packet.Remaining() != 0 {
+			return false, 0, model.ErrMarketInvalidCommand
+		}
+		return false, id, nil
+	default:
+		return false, 0, model.ErrMarketInvalidCommand
+	}
+}
+
 func (h *Handler) unregister(ctx context.Context, session *server.Session, packet network.Packet) error {
 	seller, err := characterID(session)
 	if err != nil {
 		return err
 	}
-	ids, err := readListingIDs(&packet)
+	all, requestedID, err := readUnregisterRequest(&packet)
 	if err != nil {
 		return h.sendPacket(session, marketResponse(opcode.OpenMarketUnregisterResponse, err))
 	}
 	views, err := h.repo.SellerListings(ctx, seller)
+	if err != nil {
+		return h.sendPacket(session, marketResponse(opcode.OpenMarketUnregisterResponse, err))
+	}
 	byID := make(map[uint64]model.MarketListing, len(views))
+	ids := make([]uint32, 0, len(views))
 	for _, view := range views {
 		byID[view.Listing.ID] = view.Listing
+		if all && view.Listing.Status == model.MarketListingActive {
+			ids = append(ids, uint32(view.Listing.ID))
+		}
 	}
-	type returned struct {
-		id   uint32
-		slot byte
-		item model.Item
+	if !all {
+		ids = append(ids, requestedID)
 	}
-	results := make([]returned, 0, len(ids))
+	if len(ids) == 0 {
+		return h.sendPacket(session, marketResponse(opcode.OpenMarketUnregisterResponse, model.ErrMarketListingUnavailable))
+	}
 	commands := make([]model.MarketReturnCommand, 0, len(ids))
 	for i, id := range ids {
 		listing, found := byID[uint64(id)]
@@ -293,27 +327,12 @@ func (h *Handler) unregister(ctx context.Context, session *server.Session, packe
 	if err == nil {
 		returnedListings, err = h.repo.CancelBatch(ctx, commands)
 	}
-	if err == nil {
-		inventory, loadErr := h.inventory.GetCharacterInventory(ctx, int64(seller))
-		if loadErr != nil {
-			err = loadErr
-		}
-		for i, returnedListing := range returnedListings {
-			item, found := inventory.Items[returnedListing.Slot]
-			if !found {
-				err = model.ErrMarketListingUnavailable
-				break
-			}
-			results = append(results, returned{id: ids[i], slot: returnedListing.Slot, item: item})
-		}
-	}
 	response := marketResponse(opcode.OpenMarketUnregisterResponse, err)
 	if err == nil {
-		response.WriteByte(byte(len(results)))
-		for _, result := range results {
-			response.WriteUInt32(result.id)
-			response.WriteByte(result.slot)
-			writeGenericItem(&response, result.item)
+		response.WriteByte(byte(len(returnedListings)))
+		for i, returnedListing := range returnedListings {
+			response.WriteUInt32(ids[i])
+			response.WriteByte(returnedListing.Slot)
 		}
 		h.refreshPlayer(ctx, seller)
 	}
@@ -342,19 +361,23 @@ func (h *Handler) buy(ctx context.Context, session *server.Session, packet netwo
 	if err == nil {
 		_, slot, err = h.repo.Purchase(ctx, model.MarketPurchaseCommand{BuyerCharacterID: buyer, ListingID: uint64(listingID), ExpectedVersion: view.Listing.Version, ExpectedReferenceItemID: int(refID), CommandKey: commandKey(session, packet, "buy", 0)})
 	}
-	response := marketResponse(opcode.OpenMarketBuyResponse, err)
 	if err == nil {
 		inventory, loadErr := h.inventory.GetCharacterInventory(ctx, int64(buyer))
-		item, found := inventory.Items[slot]
-		if loadErr != nil || !found {
-			return model.ErrMarketListingUnavailable
+		if loadErr != nil {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketBuyResponse, loadErr))
 		}
+		item, found := inventory.Items[slot]
+		if !found {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketBuyResponse, model.ErrMarketListingUnavailable))
+		}
+		response := marketResponse(opcode.OpenMarketBuyResponse, nil)
 		response.WriteUInt32(listingID)
 		response.WriteByte(slot)
 		writeGenericItem(&response, item)
 		h.refreshPlayer(ctx, buyer)
+		return h.sendPacket(session, response)
 	}
-	return h.sendPacket(session, response)
+	return h.sendPacket(session, marketResponse(opcode.OpenMarketBuyResponse, err))
 }
 
 func (h *Handler) settle(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -389,23 +412,49 @@ func (h *Handler) search(ctx context.Context, session *server.Session, packet ne
 	if err != nil || searchType < 1 || searchType > 3 {
 		return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
 	}
-	page, err := packet.ReadByte()
+	cursor, err := packet.ReadByte()
 	if err != nil {
-		return err
-	}
-	tid, err := packet.ReadUInt32()
-	if err != nil {
-		return err
-	}
-	degree, err := packet.ReadByte()
-	if err != nil {
-		return err
-	}
-	filter, err := packet.ReadString()
-	if err != nil || packet.Remaining() != 0 {
 		return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
 	}
-	views, pages, err := h.repo.Search(ctx, model.MarketSearch{TIDGroupID: tid, Degree: degree, Filter: filter, Page: page, PageSize: marketPageSize})
+	var search model.MarketSearch
+	switch searchType {
+	case 1, 2:
+		if cursor != 0 {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		tid, readErr := packet.ReadUInt32()
+		if readErr != nil {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		degree, readErr := packet.ReadByte()
+		if readErr != nil {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		filter, readErr := packet.ReadString()
+		if readErr != nil || packet.Remaining() != 0 {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		search = model.MarketSearch{TIDGroupID: tid, Degree: degree, Filter: filter, PageSize: marketPageSize}
+		h.searchMu.Lock()
+		if h.lastSearch == nil {
+			h.lastSearch = make(map[string]model.MarketSearch)
+		}
+		h.lastSearch[session.ID] = search
+		h.searchMu.Unlock()
+	case 3:
+		if packet.Remaining() != 0 {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		h.searchMu.Lock()
+		cachedSearch, ok := h.lastSearch[session.ID]
+		h.searchMu.Unlock()
+		search = cachedSearch
+		if !ok {
+			return h.sendPacket(session, marketResponse(opcode.OpenMarketSearchResponse, model.ErrMarketInvalidCommand))
+		}
+		search.Page = cursor
+	}
+	views, pages, err := h.repo.Search(ctx, search)
 	response := marketResponse(opcode.OpenMarketSearchResponse, err)
 	if err == nil {
 		response.WriteByte(byte(len(views)))
@@ -459,5 +508,8 @@ func (h *Handler) refreshPlayer(ctx context.Context, characterID int) {
 	}
 	if gold, loadErr := h.repo.Balance(ctx, characterID); loadErr == nil {
 		player.SetGold(gold)
+		if player.Session != nil {
+			_ = h.sendPacket(player.Session, vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold}))
+		}
 	}
 }

@@ -429,8 +429,8 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 144 {
-		t.Fatalf("shard migration count = %d, want 144", len(shardMigrations))
+	if len(shardMigrations) != 149 {
+		t.Fatalf("shard migration count = %d, want 149", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {

@@ -103,6 +103,7 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 		clearSelectedNPC(session)
 		return h.sendPacket(session, buildEntitySelectionFailure())
 	}
+	session.UserContext.SelectedEntityUniqueID = object.GetUniqueID()
 	if targetPlayer, ok := object.(*model.Player); ok && targetPlayer != nil && targetPlayer.GetTypeInfo().IsPlayerCharacter() {
 		job := targetPlayer.GetJob()
 		response, err := (vsro188.EntityPlayerSelectResponseCodec{}).Encode(vsro188.EntityPlayerSelectResponse{
@@ -120,9 +121,7 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 		return h.sendPacket(session, buildMobSelectionResponse(uniqueID, mob.CurrentHitPoints()))
 	}
 	if portal, ok := object.(*model.DimensionHolePortal); ok && model.IsDimensionHolePortalObject(portal) {
-		// INS_QUEST_TELEPORT uses the structure/NPC selection branch and therefore
-		// requires its counted action-list byte after the common prefix.
-		return h.sendPacket(session, buildDimensionHolePortalSelectionResponse(portal.GetUniqueID()))
+		return h.sendPacket(session, buildDimensionHolePortalSelectionResponse(uniqueID))
 	}
 	if object.GetTypeInfo().IsNPCNpc() || model.IsTeleportGateObject(object) {
 		session.UserContext.SelectedNPCUniqueID = object.GetUniqueID()
@@ -151,6 +150,7 @@ func clearSelectedNPC(session *server.Session) {
 	if session == nil {
 		return
 	}
+	session.UserContext.SelectedEntityUniqueID = 0
 	session.UserContext.SelectedNPCUniqueID = 0
 	session.UserContext.SelectedNPCRefObjID = 0
 }
@@ -167,12 +167,7 @@ func buildDimensionHolePortalSelectionResponse(uniqueID uint32) network.Packet {
 	p.MessageID = opcode.EntitySelectResponse
 	p.WriteByte(1)
 	p.WriteUInt32(uniqueID)
-	// INS_QUEST_TELEPORT resolves through the client's structure/NPC branch in
-	// CNetProcessIn::OnB045. That branch always consumes a counted action-list
-	// byte after the accepted-selection prefix, even when the structure exposes
-	// no NPC talk actions. Omitting the zero count makes the stock client assert
-	// in CMsgStreamBuffer when it reads past the five-byte packet.
-	p.WriteByte(0)
+	p.WriteBytes([]byte{1, npcTalkActionConversation})
 	return p
 }
 

@@ -80,6 +80,12 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 				return fallbackErr
 			}
 		}
+		if errors.Is(err, service.ErrPartyInvitationMissing) && h.exchangeInvitationFallback != nil {
+			handled, fallbackErr := h.exchangeInvitationFallback.AnswerInvitation(ctx, session, accept)
+			if handled || fallbackErr != nil {
+				return fallbackErr
+			}
+		}
 		return err
 	}
 	responseOpcode := opcode.PartyCreateResponse
@@ -94,6 +100,9 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 		response = buildPartyCreateSuccess(transition.Inviter.GetUniqueID())
 	}
 	if err = h.sendPacket(transition.Inviter.GetSession(), response); err != nil {
+		return err
+	}
+	if err = h.sendPacket(transition.Inviter.GetSession(), buildPartyJoinAcknowledgement(transition.Inviter.GetUniqueID())); err != nil {
 		return err
 	}
 	if err = h.sendPacket(transition.Target.GetSession(), buildPartyJoinAcknowledgement(transition.Target.GetUniqueID())); err != nil {
@@ -135,16 +144,17 @@ func publishRemoval(ctx context.Context, h *PartyHandler, transition service.Par
 			}
 		}
 	}
-	if err := sendPartyPacket(h, transition.AllBefore, buildPartyLeave(transition.RemovedUID, transition.RemovalReason)); err != nil {
-		return err
-	}
+	// The departing player's transport is commonly already closed. Do not let
+	// that expected send failure prevent connected members from receiving the
+	// required dismissal or leadership update.
+	result := sendPartyPacket(h, transition.AllBefore, buildPartyLeave(transition.RemovedUID, transition.RemovalReason))
 	if transition.Dismissed {
-		return sendPartyPacket(h, transition.AllBefore, buildPartyDismiss())
+		return errors.Join(result, sendPartyPacket(h, transition.AllBefore, buildPartyDismiss()))
 	}
 	if transition.LeaderChanged {
-		return sendPartyPacket(h, transition.Party.Members, buildPartyLeader(transition.Party.MasterUniqueID))
+		return errors.Join(result, sendPartyPacket(h, transition.Party.Members, buildPartyLeader(transition.Party.MasterUniqueID)))
 	}
-	return nil
+	return result
 }
 
 func sendPartyPacket(h *PartyHandler, players []*model.Player, packet network.Packet) error {

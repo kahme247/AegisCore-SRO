@@ -4062,3 +4062,53 @@ UPDATE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` SET `REQUIRES_TARGET_SLOT`=1 WHERE
 UPDATE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` SET `COOLDOWN_SECONDS`=1200 WHERE `EFFECT_KIND`='hwan_duration';
 UPDATE `SRO_SHARD`.`ITEMDATA` SET `TypeID_3`=13,`TypeID_4`=11 WHERE `ItemID` IN (39364,39365,39366);
 INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (142,'expendable_target_and_cooldown','53829d45e69c03686ac979f00350d46ebd717126ce886b3ec2df0e8118a9706f','applied','2026-07-28 00:00:00.000000'),(143,'item_service_target_projection','c5d8565bd6c86bbc6b9a13bfddeb75a05b6dc425e5220320a88536e010a545b2','applied','2026-07-28 00:00:00.000000');
+
+-- Shard migrations 146-148 leave durable cooldown and stable-shop tab state.
+CREATE TABLE `SRO_SHARD`.`CHAR_COOLDOWN` (
+    `CHAR_ID` INT NOT NULL,
+    `COOLDOWN_KIND` TINYINT UNSIGNED NOT NULL,
+    `SOURCE_ID` INT UNSIGNED NOT NULL,
+    `EXPIRES_AT` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`CHAR_ID`, `COOLDOWN_KIND`, `SOURCE_ID`),
+    CONSTRAINT `FK_CHAR_COOLDOWN_CHARACTER`
+        FOREIGN KEY (`CHAR_ID`) REFERENCES `SRO_SHARD`.`CHAR` (`ID`) ON DELETE CASCADE
+);
+
+-- Shard migration 148 restores the intentionally empty stable pet tab.
+UPDATE `SRO_SHARD`.`SHOP_GOODS`
+SET `TAB_INDEX` = 3
+WHERE `NPC_CODE_NAME` IN (
+    'NPC_CA_HORSE',
+    'NPC_CH_HORSE',
+    'NPC_EU_HORSE',
+    'NPC_KT_HORSE',
+    'NPC_SD_M_AREA_HORSE',
+    'NPC_WC_HORSE'
+)
+  AND `TAB_INDEX` = 2
+  AND `FK_REF_ITEM` IN (2143, 2144, 7552, 7553, 9226, 9227, 9237);
+
+-- Shard migration 149 permits historical Open Market listings to outlive
+-- their runtime item after buyback rollover.
+ALTER TABLE `SRO_SHARD`.`OPEN_MARKET_LISTING`
+    DROP FOREIGN KEY `fk_open_market_item`;
+
+-- Shard migration 150 preserves the active-listing escrow invariant after
+-- migration 149 decoupled terminal history from runtime item deletion.
+CREATE TABLE `SRO_SHARD`.`OPEN_MARKET_ACTIVE_ITEM_GUARD` (
+    `LISTING_ID` BIGINT UNSIGNED NOT NULL,
+    `ITEM_ID` INT NOT NULL,
+    PRIMARY KEY (`LISTING_ID`),
+    UNIQUE KEY `UX_OPEN_MARKET_ACTIVE_ITEM_GUARD_ITEM` (`ITEM_ID`),
+    CONSTRAINT `FK_OPEN_MARKET_ACTIVE_GUARD_LISTING` FOREIGN KEY (`LISTING_ID`) REFERENCES `SRO_SHARD`.`OPEN_MARKET_LISTING` (`ID`) ON DELETE CASCADE,
+    CONSTRAINT `FK_OPEN_MARKET_ACTIVE_GUARD_ITEM` FOREIGN KEY (`ITEM_ID`) REFERENCES `SRO_SHARD`.`ITEM` (`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB;
+
+INSERT INTO `SRO_SHARD`.`OPEN_MARKET_ACTIVE_ITEM_GUARD` (`LISTING_ID`,`ITEM_ID`)
+SELECT `ID`,`ITEM_ID` FROM `SRO_SHARD`.`OPEN_MARKET_LISTING` WHERE `STATUS`=1;
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES
+    (146,'character_dimension_hole_cooldowns','03e776e0524d21345e20455b6f17c55fbf789e6cc762cad3208885eb53c01238','applied','2026-07-29 00:00:00.000000'),
+    (147,'character_cooldowns','76f173429aba8ca148974e44e5d83d9951051bbf67a135ab6657c5f169e638bc','applied','2026-07-29 00:00:00.000000'),
+    (148,'stable_cure_tab_alignment','da0d1d7be015b9a4c806149fb1fbdd0fb856c1f4bd6acd805c85b258501d2dab','applied','2026-07-30 00:00:00.000000'),
+    (149,'open_market_history_item_reference','390e78b9464af1d7adb619321866a1cdacabbb10875289de35b1acdd847a28a8','applied','2026-07-30 00:00:00.000000'),
+    (150,'open_market_active_item_delete_guard','0521285aecc5b471df00110e6fdc9e325dd201d256c7ce0fb8a3e9030f6527ca','applied','2026-07-30 00:00:00.000000');

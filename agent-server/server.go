@@ -396,6 +396,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureItemBuffRepository(repositories.ItemBuffs); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character item-buff bootstrap: %w", err)
 	}
+	if err := characterSelection.ConfigureCooldownRepository(repositories.Cooldowns); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character cooldown bootstrap: %w", err)
+	}
 	if err := characterSelection.ConfigureHwanRepository(repositories.Hwan); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character HWAN bootstrap: %w", err)
 	}
@@ -438,7 +441,8 @@ func NewAgentServer() (AgentServer, error) {
 	if _, err = character.RegisterSeasonalEventHandler(&serv, repositories.SeasonalEvents, service.GetWorldServiceInstance(), features.Enabled(feature.ChristmasEvent2007)); err != nil {
 		return AgentServer{}, err
 	}
-	if _, err = character.RegisterOperatorHandler(&serv, service.GetWorldServiceInstance(), repositories.OperatorPunishments); err != nil {
+	operatorHandler, err := character.RegisterOperatorHandler(&serv, service.GetWorldServiceInstance(), repositories.OperatorPunishments)
+	if err != nil {
 		return AgentServer{}, err
 	}
 	ping.RegisterHandler(&serv)
@@ -488,6 +492,12 @@ func NewAgentServer() (AgentServer, error) {
 	}
 	log.WithField("definitions", len(dimensionHoleDefinitions)).Info("loaded database-backed Dimension Hole catalog")
 	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
+	teleportHandler.ConfigureCooldownRepository(repositories.Cooldowns)
+	operatorHandler.ConfigureRecall(teleportHandler)
+	chat.ConfigureGMRecall(teleportHandler)
+	if returnTown, ok := repositories.Teleport.(model.ReturnTeleportDestinationRepository); ok {
+		operatorHandler.ConfigureToTown(returnTown, teleportHandler)
+	}
 	agentServer.DimensionHoles, err = service.LoadDimensionHoleRuntime(
 		context.Background(), repositories.DimensionHoleWorlds, repositories.DimensionHoleRegions, repositories.DimensionHoleStarts,
 		service.GetWorldServiceInstance(), service.GetWorldServiceInstance(), model.NextActionUID,
@@ -495,9 +505,19 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Dimension Hole runtime: %w", err)
 	}
+	dimensionWorld := service.GetWorldServiceInstance()
+	agentServer.DimensionHoles.Lifecycle.ConfigurePopulation(
+		func(instance service.DimensionHolePortalInstance) error {
+			return dimensionWorld.InstantiateDimensionHoleSpawns(instance.Lease.Scope, agentServer.DimensionHoles.Regions.Regions(instance.Portal.Definition.WorldID))
+		},
+		func(instance service.DimensionHolePortalInstance) {
+			dimensionWorld.ReleaseDimensionHoleSpawns(instance.Lease.Scope)
+		},
+	)
 	if err = agentServer.DimensionHoles.ConfigureEntry(agentServer.DimensionHoles.Destinations, teleportHandler); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Dimension Hole entry: %w", err)
 	}
+	npcTalkHandler.ConfigureDimensionHoleEntry(agentServer.DimensionHoles.Entries)
 	dungeonLinks, dungeonLinkErr := repositories.DungeonTeleportLinks.DungeonLinks(context.Background())
 	if dungeonLinkErr != nil {
 		return AgentServer{}, fmt.Errorf("load dungeon teleport links: %w", dungeonLinkErr)
@@ -547,6 +567,7 @@ func NewAgentServer() (AgentServer, error) {
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
 	manager.GetRespawnManagerInstance().ConfigureGiantSpawnRatio(viper.GetInt(config.AgentGiantMonsterSpawnRatio))
 	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
+	agentServer.Combat.ConfigureCharacterCooldowns(repositories.Cooldowns)
 	agentServer.Combat.ConfigureDimensionHoleEntry(agentServer.DimensionHoles.Entries)
 	agentServer.Combat.ConfigurePKPenalties(repositories.CharacterPK)
 	agentServer.Combat.ConfigureNativeQuestInstanceDeaths(agentServer.QuestInstances, teleportHandler)
@@ -554,6 +575,7 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Combat.ConfigureMobAttackInterrupter(manager.GetMobAIManagerInstance().InterruptAttack)
 	agentServer.Combat.ConfigureMobActionTiming(manager.GetMobAIManagerInstance().ReconcileAttackTiming)
 	manager.GetMobAIManagerInstance().ConfigurePlayerAttackInterrupter(agentServer.Combat.InterruptPlayerAction)
+	manager.GetMobAIManagerInstance().ConfigureReturnDamageExecutor(agentServer.Combat.ExecuteNPCReturnDamage)
 	if agentServer.MonsterDrops != nil {
 		agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
 	}
@@ -613,6 +635,9 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent safe-trade bootstrap: %w", err)
 	}
 	gameReadyHandler.ConfigureSocial(socialHandler)
+	chat.ConfigureGMGroundItems(agentServer.GroundItems, repositories.GroundItemMaterializer)
+	chat.ConfigureGMCombat(agentServer.Combat)
+	chat.ConfigureGMAccountModeration(repositories.AccountModeration)
 	chat.RegisterChatHandler(&serv, repositories.Social, repositories.ChatFilter)
 	logoutHandler := logout.RegisterLogoutHandler(&serv)
 	logoutHandler.ConfigureCommunity(socialHandler)
@@ -697,7 +722,7 @@ func NewAgentServer() (AgentServer, error) {
 	manager.GetGameTimeManagerInstance().ConfigureNativeQuests(
 		manager.NewNativeQuestManager(questRuntime, manager.GetRespawnManagerInstance()),
 	)
-	party.RegisterPartyHandlers(&serv, socialHandler, teleportHandler)
+	party.RegisterPartyHandlers(&serv, socialHandler, teleportHandler, exchangeManager)
 
 	if err := world.ConfigureRepositories(service.WorldRepositories{
 		RegionCatalog: repositories.Regions,

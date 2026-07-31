@@ -16,6 +16,17 @@ import (
 
 type matchingHandlerPlayers struct{ players map[uint32]*model.Player }
 
+type exchangeInvitationFallbackFake struct {
+	handled  bool
+	accepted bool
+	session  *server.Session
+}
+
+func (f *exchangeInvitationFallbackFake) AnswerInvitation(_ context.Context, session *server.Session, accepted bool) (bool, error) {
+	f.session, f.accepted = session, accepted
+	return f.handled, nil
+}
+
 func (p matchingHandlerPlayers) GetPlayerByUniqueId(uid uint32) (*model.Player, error) {
 	player := p.players[uid]
 	if player == nil {
@@ -45,10 +56,14 @@ func TestMatchingFormInitializesMasterPartyModeBeforeJoinUpdates(t *testing.T) {
 	if err := handler.handleMatchingForm(context.Background(), session, request); err != nil {
 		t.Fatalf("matching form: %v", err)
 	}
-	if len(sent) != 2 || sent[0].MessageID != opcode.PartyMatchingFormResponse || sent[1].MessageID != opcode.PartyCreatedFromMatchingResponse {
-		t.Fatalf("form packets = %#v, want B069 then 3065", sent)
+	if len(sent) != 3 || sent[0].MessageID != opcode.PartyMatchingFormResponse ||
+		sent[1].MessageID != opcode.PartyMemberCountResponse || sent[2].MessageID != opcode.PartyCreatedFromMatchingResponse {
+		t.Fatalf("form packets = %#v, want B069, B067, then 3065", sent)
 	}
-	r := newPartyPacketReader(t, sent[1].Payload())
+	if !bytes.Equal(sent[1].Payload(), []byte{1, 10, 0, 0, 0}) {
+		t.Fatalf("master join acknowledgement payload = % X", sent[1].Payload())
+	}
+	r := newPartyPacketReader(t, sent[2].Payload())
 	flags, number, masterUID, settings, count := r.byte(), r.uint32(), r.uint32(), r.byte(), r.byte()
 	if flags != 0xFF || number == 0 || masterUID != master.GetUniqueID() || settings != byte(model.ExpShareItemShare) || count != 1 {
 		t.Fatalf("master snapshot = flags %02X number %d master %d settings %d count %d", flags, number, masterUID, settings, count)
@@ -151,21 +166,86 @@ func TestInvitationAcceptanceAcknowledgesJoinBeforePartySnapshot(t *testing.T) {
 	if err := handler.handleInvitationAnswer(context.Background(), targetSession, answer); err != nil {
 		t.Fatalf("answer invitation: %v", err)
 	}
-	if len(sent) != 4 {
-		t.Fatalf("sent %d packets, want inviter acknowledgement, target join acknowledgement, and two snapshots", len(sent))
+	if len(sent) != 5 {
+		t.Fatalf("sent %d packets, want inviter response, two join acknowledgements, and two snapshots", len(sent))
 	}
 	if recipients[0] != inviterSession || sent[0].MessageID != opcode.PartyCreateResponse {
 		t.Fatalf("first response = recipient %p/opcode 0x%04X, want inviter/0x%04X", recipients[0], sent[0].MessageID, opcode.PartyCreateResponse)
 	}
-	if recipients[1] != targetSession || sent[1].MessageID != opcode.PartyMemberCountResponse ||
-		!bytes.Equal(sent[1].Payload(), []byte{1, 20, 0, 0, 0}) {
-		t.Fatalf("join acknowledgement = recipient %p/opcode 0x%04X/payload % X", recipients[1], sent[1].MessageID, sent[1].Payload())
+	for _, index := range []int{1, 2} {
+		if sent[index].MessageID != opcode.PartyMemberCountResponse {
+			t.Fatalf("join acknowledgement %d opcode = 0x%04X, want 0x%04X", index, sent[index].MessageID, opcode.PartyMemberCountResponse)
+		}
 	}
-	for _, index := range []int{2, 3} {
+	if recipients[1] != inviterSession || !bytes.Equal(sent[1].Payload(), []byte{1, 10, 0, 0, 0}) {
+		t.Fatalf("inviter acknowledgement = recipient %p/payload % X", recipients[1], sent[1].Payload())
+	}
+	if recipients[2] != targetSession || !bytes.Equal(sent[2].Payload(), []byte{1, 20, 0, 0, 0}) {
+		t.Fatalf("target acknowledgement = recipient %p/payload % X", recipients[2], sent[2].Payload())
+	}
+	for _, index := range []int{3, 4} {
 		if sent[index].MessageID != opcode.PartyCreate {
 			t.Fatalf("snapshot %d opcode = 0x%04X, want 0x%04X", index, sent[index].MessageID, opcode.PartyCreate)
 		}
 	}
+}
+
+func TestExchangeInvitationAnswerFallsBackFromPartyHandler(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 20}}
+	fallback := &exchangeInvitationFallbackFake{handled: true}
+	handler := &PartyHandler{service: service.NewPartyService(nil), exchangeInvitationFallback: fallback}
+	answer := network.EmptyClientPacket()
+	answer.WriteByte(1)
+	answer.WriteByte(1)
+	if err := handler.handleInvitationAnswer(context.Background(), session, answer); err != nil {
+		t.Fatalf("exchange invitation answer: %v", err)
+	}
+	if fallback.session != session || !fallback.accepted {
+		t.Fatalf("exchange fallback = session %p accepted %v", fallback.session, fallback.accepted)
+	}
+}
+
+func TestMatchingListSendsRecoveredV188PageLayout(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharName: "master"}}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}}
+	master := &model.Player{ID: 100, CharName: "master", Session: session, SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: position}}
+	core := service.NewPartyService(matchingHandlerPlayers{players: map[uint32]*model.Player{10: master}})
+	partyNumber := core.FormParty(model.PartyFormRequest{
+		MasterUniqueID: 10, MasterJID: 100, MasterName: "master", CountryType: 2,
+		PartySettingsFlag: model.ExpShareItemShare, PurposeType: model.QuestingParty,
+		LevelMin: 10, LevelMax: 30, Title: "open party",
+	})
+	if partyNumber == 0 {
+		t.Fatal("FormParty returned zero")
+	}
+	handler := &PartyHandler{service: core}
+	var sent network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = packet
+		return nil
+	}
+	request := network.EmptyClientPacket()
+	request.WriteByte(0)
+	if err := handler.handleMatchingList(context.Background(), session, request); err != nil {
+		t.Fatalf("matching list: %v", err)
+	}
+	if sent.MessageID != opcode.PartyMatchingListResponse {
+		t.Fatalf("response opcode = 0x%04X, want 0x%04X", sent.MessageID, opcode.PartyMatchingListResponse)
+	}
+	r := newPartyPacketReader(t, sent.Payload())
+	if success, page, pages, count := r.byte(), r.byte(), r.byte(), r.byte(); success != 1 || page != 0 || pages != 1 || count != 1 {
+		t.Fatalf("page header = success=%d page=%d pages=%d count=%d", success, page, pages, count)
+	}
+	if number, masterJID, masterName := r.uint32(), r.uint32(), r.string(); number != partyNumber || masterJID != 100 || masterName != "master" {
+		t.Fatalf("listing identity = number=%d masterJID=%d name=%q", number, masterJID, masterName)
+	}
+	if country, members, settings, purpose, minLevel, maxLevel := r.byte(), r.byte(), r.byte(), r.byte(), r.byte(), r.byte(); country != 2 || members != 1 || settings != byte(model.ExpShareItemShare) || purpose != byte(model.QuestingParty) || minLevel != 10 || maxLevel != 30 {
+		t.Fatalf("listing fields = country=%d members=%d settings=%d purpose=%d levels=%d-%d", country, members, settings, purpose, minLevel, maxLevel)
+	}
+	if title := r.string(); title != "open party" {
+		t.Fatalf("listing title = %q", title)
+	}
+	r.done()
 }
 
 func TestMatchingFailureUsesTheTwoBytePartyNotFoundCode(t *testing.T) {

@@ -288,8 +288,28 @@ func publishAvailableQuestIndicators(ctx context.Context, repository model.Quest
 		slices.Sort(targets)
 	}
 	publisher := questMarkPublisher{send: send}
+	slices.SortFunc(indicators, func(left, right model.QuestNPCIndicator) int {
+		if left.NPCRefObjectID != right.NPCRefObjectID {
+			if left.NPCRefObjectID < right.NPCRefObjectID {
+				return -1
+			}
+			return 1
+		}
+		if left.QuestID < right.QuestID {
+			return -1
+		}
+		if left.QuestID > right.QuestID {
+			return 1
+		}
+		return 0
+	})
+	published := make(map[uint32]struct{})
 	for _, indicator := range indicators {
 		for _, targetUID := range targetsByRefObjectID[indicator.NPCRefObjectID] {
+			if _, exists := published[targetUID]; exists {
+				continue
+			}
+			published[targetUID] = struct{}{}
 			if _, err = publisher.add(player, model.QuestMark{
 				QuestID:  indicator.QuestID,
 				Flags:    0x02,

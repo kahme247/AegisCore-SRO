@@ -39,6 +39,23 @@ func TestBuildServerInventoryItemAddedMatchesStockB034Layout(t *testing.T) {
 	}
 }
 
+type combatCooldownFake struct {
+	checkCalls int
+	claimCalls int
+	checkErr   error
+	claimErr   error
+}
+
+func (f *combatCooldownFake) CheckCooldowns(context.Context, int, []model.CharacterCooldownClaim) error {
+	f.checkCalls++
+	return f.checkErr
+}
+
+func (f *combatCooldownFake) ClaimCooldowns(context.Context, int, []model.CharacterCooldownClaim) error {
+	f.claimCalls++
+	return f.claimErr
+}
+
 type combatVitalsFake struct {
 	spendCalls        int
 	expectedMP        int
@@ -2027,8 +2044,7 @@ func TestBowBaseAttackWithoutArrowsReturnsStockAmmunitionError(t *testing.T) {
 	}
 }
 
-func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T) {
-	session := &server.Session{UserContext: server.UserContext{CharacterID: 42}}
+func TestCombatKeepsEquippedBowArrowsWithInfiniteAmmo(t *testing.T) {
 	player := &model.Player{ID: 42, Inventory: model.NewInventory(map[byte]model.Item{
 		model.SlotPrimaryWeapon: {
 			SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6}},
@@ -2039,7 +2055,7 @@ func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T)
 			SRObject:  model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 4, TypeID4: 1}},
 		},
 	})}
-	ammo := &rangedAmmoCombatFake{remaining: []uint16{1, 0}}
+	ammo := &rangedAmmoCombatFake{remaining: []uint16{1}}
 	var sent []network.Packet
 	handler := &CombatHandler{
 		rangedAmmo: ammo,
@@ -2049,27 +2065,17 @@ func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T)
 		},
 	}
 
-	if err := handler.consumeRangedAmmo(context.Background(), session, player); err != nil {
+	if err := handler.consumeRangedAmmo(context.Background(), &server.Session{}, player); err != nil {
 		t.Fatal(err)
 	}
-	if got := player.GetInventory().Items[model.SlotSecondaryWeapon].StackSize; got != 1 {
-		t.Fatalf("arrow stack after first shot = %d, want 1", got)
+	if got := player.GetInventory().Items[model.SlotSecondaryWeapon].StackSize; got != 2 {
+		t.Fatalf("arrow stack = %d, want 2", got)
 	}
-	if len(ammo.calls) != 1 || ammo.calls[0] != [2]int64{42, 77} {
-		t.Fatalf("ammunition persistence calls = %#v, want character 42 item 77", ammo.calls)
+	if len(ammo.calls) != 0 {
+		t.Fatalf("ammunition persistence calls = %#v, want none", ammo.calls)
 	}
-	if len(sent) != 2 || sent[0].MessageID != opcode.InventoryItemUpdate || !bytes.Equal(sent[0].Payload(), []byte{model.SlotSecondaryWeapon, 0x08, 0x01, 0x00}) || sent[1].MessageID != opcode.InventoryUpdateAmmo || !bytes.Equal(sent[1].Payload(), []byte{1, 0}) {
-		t.Fatalf("first arrow update = %#v, want 3040 quantity slot 7 count 1", sent)
-	}
-
-	if err := handler.consumeRangedAmmo(context.Background(), session, player); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists := player.GetInventory().Items[model.SlotSecondaryWeapon]; exists {
-		t.Fatal("exhausted arrow stack remained equipped")
-	}
-	if len(sent) != 4 || sent[2].MessageID != opcode.ItemOperationResponse || !bytes.Equal(sent[2].Payload(), []byte{1, 0x0F, model.SlotSecondaryWeapon, 0}) || sent[3].MessageID != opcode.InventoryUpdateAmmo || !bytes.Equal(sent[3].Payload(), []byte{0, 0}) {
-		t.Fatalf("last arrow update = %#v, want B034 server delete slot 7", sent)
+	if len(sent) != 0 {
+		t.Fatalf("ammunition updates = %#v, want none", sent)
 	}
 }
 

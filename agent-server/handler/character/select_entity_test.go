@@ -258,7 +258,7 @@ func TestTeleportGateUsesExtendedSelectionRange(t *testing.T) {
 	}
 }
 
-func TestSelectEntityAdmitsDimensionHolePortalWithEmptyActionList(t *testing.T) {
+func TestSelectEntityAdvertisesDimensionHoleTravelAction(t *testing.T) {
 	session, player, _ := selectEntityFixture(t)
 	portal := selectEntityDimensionHolePortal(t, player, 0x12345678, selectEntityPosition(30000, 20, 0, 20))
 	if !player.GetKnownObjectList().AddObject(portal) {
@@ -279,8 +279,8 @@ func TestSelectEntityAdmitsDimensionHolePortalWithEmptyActionList(t *testing.T) 
 	if sent.MessageID != opcode.EntitySelectResponse {
 		t.Fatalf("message id = 0x%04X, want 0x%04X", sent.MessageID, opcode.EntitySelectResponse)
 	}
-	if got, want := sent.Payload(), []byte{1, 0x78, 0x56, 0x34, 0x12, 0}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("payload = %x, want portal selection with empty action list %x", got, want)
+	if got, want := sent.Payload(), []byte{1, 0x78, 0x56, 0x34, 0x12, 1, npcTalkActionConversation}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want portal travel selection %x", got, want)
 	}
 	if interaction, ok := npcInteractions.Get(player.GetUniqueID()); ok {
 		t.Fatalf("portal selection entered normal teleport interaction path: %+v", interaction)

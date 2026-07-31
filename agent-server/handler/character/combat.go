@@ -140,6 +140,13 @@ type CombatHandler struct {
 	traceTargets     map[uint32]uint32
 	now              func() time.Time
 	rollPercent      func(int) bool
+	// returnDamageRoll owns native `rgmd` actor chance state. It receives the
+	// defender actor and descriptor chance percentage; its internal category is
+	// not a wire field.
+	returnDamageRoll func(*model.Player, int) bool
+	// bloodTrapRoll owns native `bt` type-0x18 chance state (category
+	// 0x19000000) on the afflicted actor.
+	bloodTrapRoll    func(*model.Player, int) bool
 	hitRollPercent   func(int) bool
 	criticalRoll     func(int) bool
 	blockRoll        func(int) bool
@@ -149,6 +156,7 @@ type CombatHandler struct {
 	actionTime       func(*model.Player, model.RefSkill) float64
 	pvpAdmission     func(*model.Player, *model.Player, model.RefSkill) bool
 	longCooldown     func(*model.Player, model.RefSkill, time.Time)
+	cooldowns        model.CharacterCooldownRepository
 	interruptMob     func(*model.NPC)
 	retimeMob        func(*model.NPC, time.Time)
 	questInstances   *model.QuestInstanceRegistry
@@ -268,6 +276,19 @@ func (h *CombatHandler) ConfigureSkillOwnerTargetProvider(provider func(*model.N
 // percentage recovered by a runtime status/equipment system. The native
 // arithmetic is already represented by RefSkill; absent a provider, the
 // catalog's authored timing remains at 100 percent.
+// ConfigureReturnDamageAdmissionProvider overrides native `rgmd` actor
+// chance admission for an explicit runtime implementation or deterministic
+// test. Its second argument is descriptor word 0, ChancePercent; the provider
+// must not be called for out-of-range hits.
+func (h *CombatHandler) ConfigureReturnDamageAdmissionProvider(provider func(*model.Player, int) bool) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.returnDamageRoll = provider
+	h.mu.Unlock()
+}
+
 func (h *CombatHandler) ConfigureActionTimeProvider(provider func(*model.Player, model.RefSkill) float64) {
 	if h == nil {
 		return
@@ -331,6 +352,18 @@ func (h *CombatHandler) ConfigureLongCooldownSink(sink func(*model.Player, model
 	h.mu.Unlock()
 }
 
+// ConfigureCharacterCooldowns installs the durable cooldown authority. It is
+// wired by Agent startup; an unset repository is retained only for isolated
+// combat tests that do not construct SQL dependencies.
+func (h *CombatHandler) ConfigureCharacterCooldowns(repository model.CharacterCooldownRepository) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.cooldowns = repository
+	h.mu.Unlock()
+}
+
 func RegisterCombatHandler(target *server.Server, progress model.CharacterProgressRepository, levels *model.LevelTable, rates combatRateProvider, quests ...model.QuestRuntimeRepository) *CombatHandler {
 	if target == nil {
 		return nil
@@ -364,6 +397,12 @@ func RegisterCombatHandler(target *server.Server, progress model.CharacterProgre
 		now:           time.Now,
 		rollPercent: func(chance int) bool {
 			return chance >= 100 || chance > 0 && rand.Intn(100) < chance
+		},
+		returnDamageRoll: func(owner *model.Player, chancePercent int) bool {
+			return owner.AdmitReturnDamage(chancePercent, rand.Intn(101))
+		},
+		bloodTrapRoll: func(owner *model.Player, chancePercent int) bool {
+			return owner.AdmitKeyedChance(model.BloodTrapChanceCategory, chancePercent, rand.Intn(101))
 		},
 		hitRollPercent: func(chance int) bool {
 			return chance >= 100 || chance > 0 && rand.Intn(100) < chance
@@ -1031,15 +1070,21 @@ func (h *CombatHandler) executeTargetedPlayerStatusSkill(ctx context.Context, se
 		return err
 	}
 	h.facePlayerTowardTarget(player, target)
+	applied := false
 	return h.beginStatusCast(session, player, target.GetUniqueID(), skill, func(impactTime time.Time) []model.SkillEffectTarget {
 		if target.GetLifeState() != model.Alive {
 			return nil
 		}
-		mask := h.applyPlayerSkillStatuses(target, player, skill, impactTime)
+		mask := h.applyPlayerSkillStatusesWithPublication(target, player, skill, impactTime, false)
 		if mask == 0 {
 			return nil
 		}
+		applied = true
 		return []model.SkillEffectTarget{{TargetUID: target.GetUniqueID(), EffectMask: mask}}
+	}, func(impactTime time.Time) {
+		if applied {
+			h.publishPlayerBadEffectState(target, impactTime)
+		}
 	})
 }
 
@@ -1112,8 +1157,20 @@ func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Sess
 		logrus.Infof("COMBAT_REJECT_TRACE gate=cooldown skill=%d target=%d", skill.ID, target.GetUniqueID())
 		return h.sendActionState(session, false)
 	}
+	if err := h.checkSkillCooldowns(ctx, caster, skill); err != nil {
+		if errors.Is(err, model.ErrCharacterCooldownActive) {
+			logrus.Infof("COMBAT_REJECT_TRACE gate=durable_cooldown skill=%d target=%d", skill.ID, target.GetUniqueID())
+		}
+		return h.sendActionState(session, false)
+	}
 	if err := h.spendSkillResources(ctx, session, caster, skill); err != nil {
 		return err
+	}
+	if err := h.claimSkillCooldowns(ctx, caster, skill); err != nil {
+		if errors.Is(err, model.ErrCharacterCooldownActive) {
+			logrus.Infof("COMBAT_REJECT_TRACE gate=durable_cooldown skill=%d target=%d", skill.ID, target.GetUniqueID())
+		}
+		return h.sendActionState(session, false)
 	}
 	h.registerSkillCooldownForPlayer(caster, key, skill, now)
 	// Resource consumption and cooldown registration are pre-engage state. The
@@ -1322,6 +1379,9 @@ func (h *CombatHandler) executeResurrection(ctx context.Context, session *server
 	if skill.ConsumeMP < 0 || casterMP < skill.ConsumeMP {
 		return h.sendActionState(session, false)
 	}
+	if err := h.claimSkillCooldowns(ctx, caster, skill); err != nil {
+		return h.sendActionState(session, false)
+	}
 	h.registerSkillCooldownForPlayer(caster, key, skill, now)
 	h.facePlayerTowardTarget(caster, target)
 	if err := h.sendActionState(session, true); err != nil {
@@ -1403,9 +1463,7 @@ func (h *CombatHandler) executeCureSkill(ctx context.Context, session *server.Se
 	}
 	return h.beginUtilityCast(session, caster, target.GetUniqueID(), skill, func(now time.Time) {
 		h.curePlayer(target, skill, now)
-		remaining, levels := target.CombatBadEffectState(now)
-		packet := model.BuildBadEffectUpdate(target.GetUniqueID(), remaining, levels)
-		h.publishCombatPacket(caster, &packet)
+		h.publishPlayerBadEffectState(target, now)
 	})
 }
 
@@ -1436,9 +1494,7 @@ func (h *CombatHandler) executeAreaCureSkill(ctx context.Context, session *serve
 		}
 		for _, target := range targets {
 			h.curePlayer(target, skill, now)
-			remaining, levels := target.CombatBadEffectState(now)
-			packet := model.BuildBadEffectUpdate(target.GetUniqueID(), remaining, levels)
-			h.publishCombatPacket(caster, &packet)
+			h.publishPlayerBadEffectState(target, now)
 		}
 	})
 }
@@ -1869,8 +1925,14 @@ func (h *CombatHandler) executeBuff(ctx context.Context, session *server.Session
 	if !h.skillAvailable(key, now) {
 		return h.sendActionState(session, false)
 	}
+	if err := h.checkSkillCooldowns(ctx, caster, skill); err != nil {
+		return h.sendActionState(session, false)
+	}
 	if err := h.spendSkillResources(ctx, session, caster, skill); err != nil {
 		return err
+	}
+	if err := h.claimSkillCooldowns(ctx, caster, skill); err != nil {
+		return h.sendActionState(session, false)
 	}
 	h.registerSkillCooldownForPlayer(caster, key, skill, now)
 	resourceCost := playerHasSkillResourceCost(caster, skill)
@@ -2555,11 +2617,17 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 	if !h.skillAvailable(key, now) {
 		return h.sendActionState(session, false)
 	}
+	if err := h.checkSkillCooldowns(ctx, player, skill); err != nil {
+		return h.sendActionState(session, false)
+	}
 	if err := h.consumeRangedAmmo(ctx, session, player); err != nil {
 		return err
 	}
 	if err := h.spendSkillResources(ctx, session, player, skill); err != nil {
 		return err
+	}
+	if err := h.claimSkillCooldowns(ctx, player, skill); err != nil {
+		return h.sendActionState(session, false)
 	}
 	if playerHasSkillResourceCost(player, skill) {
 		defer func() {
@@ -2685,11 +2753,17 @@ func (h *CombatHandler) executePlayerSkillAttack(ctx context.Context, session *s
 			return h.sendActionState(session, false)
 		}
 	}
+	if err := h.checkSkillCooldowns(ctx, player, skill); err != nil {
+		return h.sendActionState(session, false)
+	}
 	if err := h.consumeRangedAmmo(ctx, session, player); err != nil {
 		return err
 	}
 	if err := h.spendSkillResources(ctx, session, player, skill); err != nil {
 		return err
+	}
+	if err := h.claimSkillCooldowns(ctx, player, skill); err != nil {
+		return h.sendActionState(session, false)
 	}
 	if playerHasSkillResourceCost(player, skill) {
 		defer func() {
@@ -2742,22 +2816,28 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 	attackState := model.DamageAttackStateNormal
 	damageState := model.DamageStateNormal
 	damage := 0
+	physicalHit, magicalHit := 0, 0
 	if skill.AbsoluteDamage <= 0 && h.playerAttackBlockedAgainstPlayer(target) {
 		attackState = model.DamageAttackStateBlock
 	} else {
 		for _, strike := range h.skillStrikes(skill) {
 			hit := h.playerSkillDamageAgainstPlayerAt(player, target, strike, now)
-			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(player, target) {
+			if !strike.IsMagicalAttack() && strike.AbsoluteDamage <= 0 && h.playerAttackCritical(player, target) {
 				hit *= 2
 				damageState = model.DamageStateCritical
 			}
 			hit = h.mitigatePlayerSkillDamage(target, hit, strike.IsMagicalAttack(), strike.AbsoluteDamage > 0, now, strike.AttackPercent)
 			hit += hit * player.ActiveCombatDamagePercent() / 100
+			if strike.IsMagicalAttack() {
+				magicalHit += hit
+			} else {
+				physicalHit += hit
+			}
 			damage += hit
 		}
 	}
 	damage, linkedTarget, linkedApplication, linkedBuff := h.interceptPlayerLinkedDamage(player, target, damage, skill.IsMagicalAttack())
-	application := target.ApplyCombatDamage(damage, skill.IsMagicalAttack())
+	application := h.applyPlayerDamageWithReturn(player, target, damage, skill.IsMagicalAttack(), physicalHit, magicalHit, now)
 	if application.AppliedDamage > 0 && h.vitals != nil && target.ID > 0 {
 		hp, mp := target.CurrentVitals()
 		if err := h.vitals.SaveVitals(ctx, target.ID, hp, mp); err != nil {
@@ -2897,7 +2977,11 @@ func (h *CombatHandler) interceptPlayerLinkedDamage(source, target *model.Player
 		if amount <= 0 || linked == nil || linked == source || linked.GetLifeState() != model.Alive {
 			continue
 		}
-		application := linked.ApplyCombatDamage(amount, magical)
+		physicalHit, magicalHit := amount, 0
+		if magical {
+			physicalHit, magicalHit = 0, amount
+		}
+		application := h.applyPlayerDamageWithReturn(source, linked, amount, magical, physicalHit, magicalHit, now)
 		if application.WireDamage == 0 && application.BarrierDamage == 0 {
 			continue
 		}
@@ -2918,23 +3002,29 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 		return nil
 	}
 	damage := 0
+	physicalHit, magicalHit := 0, 0
 	blocked := skill.AbsoluteDamage <= 0 && h.playerAttackBlockedAgainstPlayer(target)
 	critical := false
 	if !blocked {
 		for _, strike := range h.skillStrikes(skill) {
 			hit := h.playerSkillDamageAgainstPlayerAt(source, target, strike, now)
 			hit = scaleTransferAmount(hit, factor)
-			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(source, target) {
+			if !strike.IsMagicalAttack() && strike.AbsoluteDamage <= 0 && h.playerAttackCritical(source, target) {
 				hit *= 2
 				critical = true
 			}
 			hit = h.mitigatePlayerSkillDamage(target, hit, strike.IsMagicalAttack(), strike.AbsoluteDamage > 0, now, strike.AttackPercent)
 			hit += hit * source.ActiveCombatDamagePercent() / 100
+			if strike.IsMagicalAttack() {
+				magicalHit += hit
+			} else {
+				physicalHit += hit
+			}
 			damage += hit
 		}
 	}
 	damage, linkedTarget, linkedApplication, linkedBuff := h.interceptPlayerLinkedDamage(source, target, damage, skill.IsMagicalAttack())
-	application := target.ApplyCombatDamage(damage, skill.IsMagicalAttack())
+	application := h.applyPlayerDamageWithReturn(source, target, damage, skill.IsMagicalAttack(), physicalHit, magicalHit, now)
 	if application.AppliedDamage > 0 && h.vitals != nil && target.ID > 0 {
 		hp, mp := target.CurrentVitals()
 		if err := h.vitals.SaveVitals(ctx, target.ID, hp, mp); err != nil {
@@ -3067,6 +3157,10 @@ func (h *CombatHandler) playerAttackBlockedAgainstPlayer(target *model.Player) b
 }
 
 func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, skill model.RefSkill, now time.Time) uint32 {
+	return h.applyPlayerSkillStatusesWithPublication(target, source, skill, now, true)
+}
+
+func (h *CombatHandler) applyPlayerSkillStatusesWithPublication(target, source *model.Player, skill model.RefSkill, now time.Time, publish bool) uint32 {
 	if target == nil || source == nil || len(skill.StatusEffects) == 0 {
 		return 0
 	}
@@ -3077,8 +3171,26 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 	var badMask uint32
 	for _, effect := range skill.StatusEffects {
 		durationMS := target.CombatStatusDurationMS(effect.Kind, effect.DurationMS)
+		if effect.NativeSubtype4 {
+			durationMS = bloodTrapDurationMS(effect.DurationChoiceMask)
+		}
 		chance := target.CombatStatusChance(effect.Chance, now)
-		if effect.Kind == 0 || chance <= 0 || durationMS <= 0 || !roll(chance) {
+		if effect.Kind == 0 || chance <= 0 || durationMS <= 0 {
+			continue
+		}
+		admitted := false
+		if effect.NativeSubtype4 {
+			trapRoll := h.bloodTrapRoll
+			if trapRoll == nil {
+				trapRoll = func(owner *model.Player, chancePercent int) bool {
+					return owner.AdmitKeyedChance(model.BloodTrapChanceCategory, chancePercent, rand.Intn(101))
+				}
+			}
+			admitted = trapRoll(target, chance)
+		} else {
+			admitted = roll(chance)
+		}
+		if !admitted {
 			continue
 		}
 		status := model.CombatStatus{Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: source.GetUniqueID(), SkillID: skill.ID, Power: effect.Power, Level: effect.Level, Payload: effect.Payload, ExpiresAt: now.Add(time.Duration(durationMS) * time.Millisecond), Stackable: skill.LinkedSameGroup}
@@ -3095,7 +3207,7 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 		badEffect := model.CombatStatusBadEffectBit(effect.Kind)
 		if badEffect != 0 {
 			badMask |= badEffect
-		} else {
+		} else if !effect.NativeSubtype4 {
 			packet := model.BuildTimedBuffAdd(target.GetUniqueID(), skill.ID, status.Token, uint32(durationMS))
 			target.SendToSelfAndKnown(&packet)
 		}
@@ -3110,10 +3222,8 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 			h.schedulePlayerStatusDamageTick(source, target, status, now.Add(2*time.Second))
 		}
 	}
-	if badMask != 0 {
-		mask, levels := target.CombatBadEffectState(now)
-		packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
-		target.SendToSelfAndKnown(&packet)
+	if badMask != 0 && publish {
+		h.publishPlayerBadEffectState(target, now)
 	}
 	return badMask
 }
@@ -3152,7 +3262,7 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 			}
 		}
 		amount, linkedTarget, linkedApplication, linkedBuff := h.interceptPlayerLinkedDamage(source, target, max(1, amount), false)
-		application := target.ApplyCombatDamage(amount, false)
+		application := h.applyPlayerDamageWithReturn(source, target, amount, false, amount, 0, now)
 		if application.WireDamage == 0 && application.BarrierDamage == 0 {
 			return
 		}
@@ -3295,6 +3405,32 @@ func (h *CombatHandler) recordPlayerKill(ctx context.Context, killer, target *mo
 	return nil
 }
 
+// bloodTrapDurationMS reproduces 0x005933E0's choice from the nonzero bytes
+// in native `bt` word 0. Each byte is an equiprobable duration in seconds.
+func bloodTrapDurationMS(mask uint32) int {
+	choices := [4]byte{byte(mask), byte(mask >> 8), byte(mask >> 16), byte(mask >> 24)}
+	count := 0
+	for _, choice := range choices {
+		if choice != 0 {
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	selected := rand.Intn(count)
+	for _, choice := range choices {
+		if choice == 0 {
+			continue
+		}
+		if selected == 0 {
+			return int(choice) * 1000
+		}
+		selected--
+	}
+	return 0
+}
+
 func (h *CombatHandler) schedulePlayerStatusExpiration(target *model.Player, expected model.CombatStatus, badEffect bool) {
 	if h == nil || h.schedule == nil || target == nil {
 		return
@@ -3305,14 +3441,20 @@ func (h *CombatHandler) schedulePlayerStatusExpiration(target *model.Player, exp
 	}
 	h.schedule(delay, func() {
 		now := h.combatNow()
+		if expected.Kind == model.CombatStatusBloodTrap {
+			expired, ok := target.ExpireCombatStatus(expected.Kind, expected.Token, now)
+			if !ok {
+				return
+			}
+			h.executeBloodTrapExpiry(target, expired)
+			return
+		}
 		current, active := target.CombatStatus(expected.Kind, now)
 		if active && current.Token == expected.Token {
 			return
 		}
 		if badEffect {
-			mask, levels := target.CombatBadEffectState(now)
-			packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
-			target.SendToSelfAndKnown(&packet)
+			h.publishPlayerBadEffectState(target, now)
 		} else {
 			packet := model.BuildBuffRemove(expected.Token)
 			target.SendToSelfAndKnown(&packet)
@@ -3324,6 +3466,57 @@ func (h *CombatHandler) schedulePlayerStatusExpiration(target *model.Player, exp
 			target.SendStatsUpdate()
 		}
 	})
+}
+
+func (h *CombatHandler) publishPlayerBadEffectState(target *model.Player, now time.Time) {
+	if target == nil {
+		return
+	}
+	update, snapshot := buildPlayerBadEffectPackets(target, now)
+	target.SendToSelfAndKnown(&update)
+	target.SendToSelf(&snapshot)
+}
+
+func buildPlayerBadEffectPackets(target *model.Player, now time.Time) (network.Packet, network.Packet) {
+	mask, levels, details := target.CombatBadEffectSnapshot(now)
+	return model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels), model.BuildPlayerBadEffectSnapshot(mask, details)
+}
+
+// executeBloodTrapExpiry reproduces the type-0x18 normal-removal handler:
+// the record's +0x1C value is applied with its original source and serialized
+// as subtype 4. Forced removals never reach this scheduled natural-expiry path.
+func (h *CombatHandler) executeBloodTrapExpiry(target *model.Player, status model.CombatStatus) {
+	if h == nil || target == nil || target.GetLifeState() != model.Alive || status.Payload <= 0 || h.world == nil {
+		return
+	}
+	source, err := h.world.GetPlayerByUniqueId(status.SourceUID)
+	if err != nil || source == nil {
+		return
+	}
+	application := target.ApplyCombatDamage(status.Payload, false)
+	if application.AppliedDamage == 0 && application.BarrierDamage == 0 {
+		return
+	}
+	if application.AppliedDamage > 0 && h.vitals != nil && target.ID > 0 {
+		hp, mp := target.CurrentVitals()
+		if err := h.vitals.SaveVitals(context.Background(), target.ID, hp, mp); err != nil {
+			return
+		}
+	}
+	flags := byte(0)
+	if application.Killed {
+		flags = 0x80
+	}
+	packet := model.BuildSkillApplicationDepletion(flags, target.GetUniqueID(), uint16(status.Payload))
+	h.publishCombatPacket(source, &packet)
+	target.SendVitalsUpdate()
+	h.publishPartyStatus(target)
+	if !application.Killed {
+		return
+	}
+	life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
+	h.publishCombatPacket(source, &life)
+	_ = h.recordPlayerKill(context.Background(), source, target)
 }
 
 func (h *CombatHandler) executeBarrierSkill(ctx context.Context, session *server.Session, player *model.Player, skill model.RefSkill) error {
@@ -3599,7 +3792,7 @@ func (h *CombatHandler) executeTargetedStatusSkill(ctx context.Context, session 
 			return nil
 		}
 		return []model.SkillEffectTarget{{TargetUID: target.GetUniqueID(), EffectMask: mask}}
-	})
+	}, nil)
 }
 
 func (h *CombatHandler) executeAreaStatusSkill(ctx context.Context, session *server.Session, player *model.Player, skill model.RefSkill) error {
@@ -3610,6 +3803,7 @@ func (h *CombatHandler) executeAreaStatusSkill(ctx context.Context, session *ser
 	if err != nil || !ready {
 		return err
 	}
+	var affected []*model.Player
 	return h.beginStatusCast(session, player, player.GetUniqueID(), skill, func(impactTime time.Time) []model.SkillEffectTarget {
 		type candidate struct {
 			npc      *model.NPC
@@ -3673,13 +3867,18 @@ func (h *CombatHandler) executeAreaStatusSkill(ctx context.Context, session *ser
 				remaining = min(remaining, max(0, skill.TransferCount-len(targets)))
 			}
 			for _, candidate := range playerCandidates[:remaining] {
-				mask := h.applyPlayerSkillStatuses(candidate, player, skill, impactTime)
+				mask := h.applyPlayerSkillStatusesWithPublication(candidate, player, skill, impactTime, false)
 				if mask != 0 {
+					affected = append(affected, candidate)
 					targets = append(targets, model.SkillEffectTarget{TargetUID: candidate.GetUniqueID(), EffectMask: mask})
 				}
 			}
 		}
 		return targets
+	}, func(impactTime time.Time) {
+		for _, target := range affected {
+			h.publishPlayerBadEffectState(target, impactTime)
+		}
 	})
 }
 
@@ -3709,11 +3908,17 @@ func (h *CombatHandler) prepareStatusSkill(ctx context.Context, session *server.
 	if !h.skillAvailable(key, now) {
 		return time.Time{}, false, h.sendActionState(session, false)
 	}
+	if err := h.checkSkillCooldowns(ctx, player, skill); err != nil {
+		return time.Time{}, false, h.sendActionState(session, false)
+	}
 	if err := h.consumeRangedAmmo(ctx, session, player); err != nil {
 		return time.Time{}, false, err
 	}
 	if err := h.spendSkillResources(ctx, session, player, skill); err != nil {
 		return time.Time{}, false, err
+	}
+	if err := h.claimSkillCooldowns(ctx, player, skill); err != nil {
+		return time.Time{}, false, h.sendActionState(session, false)
 	}
 	if playerHasSkillResourceCost(player, skill) {
 		hp, mp := player.CurrentVitals()
@@ -3725,7 +3930,7 @@ func (h *CombatHandler) prepareStatusSkill(ctx context.Context, session *server.
 	return now, true, nil
 }
 
-func (h *CombatHandler) beginStatusCast(session *server.Session, player *model.Player, animationTarget uint32, skill model.RefSkill, apply func(time.Time) []model.SkillEffectTarget) error {
+func (h *CombatHandler) beginStatusCast(session *server.Session, player *model.Player, animationTarget uint32, skill model.RefSkill, apply func(time.Time) []model.SkillEffectTarget, after func(time.Time)) error {
 	if err := h.sendActionState(session, true); err != nil {
 		return err
 	}
@@ -3742,6 +3947,9 @@ func (h *CombatHandler) beginStatusCast(session *server.Session, player *model.P
 		targets := apply(impactTime)
 		end := model.BuildStatusAttackEnd(animationTarget, castUID, targets)
 		_ = h.emitAttack(player, &end)
+		if after != nil {
+			after(impactTime)
+		}
 		_ = h.sendActionState(session, false)
 	}
 	delay := skill.RuntimeCastingDurationAt(h.skillActionTimePercent(player, skill))
@@ -3947,6 +4155,39 @@ func (h *CombatHandler) skillAvailable(key skillCooldownKey, now time.Time) bool
 
 // registerSkillCooldown preserves the fixed 100% timing helper used by
 // package-level combat tests and non-player callers.
+func (h *CombatHandler) checkSkillCooldowns(ctx context.Context, player *model.Player, skill model.RefSkill) error {
+	if h == nil || h.cooldowns == nil || player == nil {
+		return nil
+	}
+	claims := h.skillCooldownClaims(player, skill)
+	if len(claims) == 0 {
+		return nil
+	}
+	return h.cooldowns.CheckCooldowns(ctx, player.ID, claims)
+}
+
+func (h *CombatHandler) claimSkillCooldowns(ctx context.Context, player *model.Player, skill model.RefSkill) error {
+	if h == nil || h.cooldowns == nil || player == nil {
+		return nil
+	}
+	claims := h.skillCooldownClaims(player, skill)
+	if len(claims) == 0 {
+		return nil
+	}
+	return h.cooldowns.ClaimCooldowns(ctx, player.ID, claims)
+}
+
+func (h *CombatHandler) skillCooldownClaims(player *model.Player, skill model.RefSkill) []model.CharacterCooldownClaim {
+	claims := make([]model.CharacterCooldownClaim, 0, 2)
+	if reuse := skill.ReuseDuration(h.skillActionTimePercent(player, skill)); reuse > 0 {
+		claims = append(claims, model.CharacterCooldownClaim{Kind: model.CharacterCooldownSkill, SourceID: skill.ID, Duration: reuse})
+	}
+	if coolTime := skill.CoolTimeDuration(); coolTime > 0 {
+		claims = append(claims, model.CharacterCooldownClaim{Kind: model.CharacterCooldownSkillGlobal, Duration: coolTime})
+	}
+	return claims
+}
+
 func (h *CombatHandler) registerSkillCooldown(key skillCooldownKey, skill model.RefSkill, now time.Time) {
 	h.registerSkillCooldownForPlayer(nil, key, skill, now)
 }
@@ -4128,7 +4369,7 @@ func (h *CombatHandler) applyPlayerDamageResultWithAggroPercent(player *model.Pl
 		// key 5, to physical slot 0xB4 and magical slot 0xB5.
 		damage = model.CombatFinalDamageFactor(damage, status.Power)
 	}
-	if isCritical {
+	if isCritical && !isMagical {
 		damage *= 2
 	}
 	applied, killed := target.ApplyDamage(damage)
@@ -4159,7 +4400,7 @@ func (h *CombatHandler) applyPlayerDamageResultWithAggroPercent(player *model.Pl
 		schedule(target.DecayDuration(), func() { h.world.RemoveVisibleObject(target) })
 	}
 	damageState := model.DamageStateNormal
-	if isCritical {
+	if isCritical && !isMagical {
 		damageState = model.DamageStateCritical
 	}
 	return playerDamageResult{

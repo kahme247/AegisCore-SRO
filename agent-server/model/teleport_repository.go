@@ -67,6 +67,12 @@ type TeleportDesignationRepository interface {
 	Designate(context.Context, int64, uint32, uint32) (uint32, error)
 }
 
+// ReturnTeleportDestinationRepository resolves the target character's
+// designated return town without changing its persisted bind point.
+type ReturnTeleportDestinationRepository interface {
+	ReturnTeleportDestination(context.Context, int) (TeleportDestination, error)
+}
+
 type SQLTeleportRepository struct{ shard *sql.DB }
 
 func NewTeleportRepository(shard *sql.DB) (*SQLTeleportRepository, error) {
@@ -92,11 +98,26 @@ FROM DUNGEON_TELEPORT_POINT
 WHERE SERVICE=1
 ORDER BY ID`
 
+const selectReturnTeleportDestination = "SELECT t.ID,t.REGION_ID,t.POS_X,t.POS_Y,t.POS_Z,t.WORLD_ID,0,0\n" +
+	"FROM `SRO_SHARD`.`CHAR` c\n" +
+	"JOIN `SRO_SHARD`.`TELEPORT_POINT` t ON t.ID=c.RETURN_TELEPORT_ID AND t.SERVICE=1\n" +
+	"WHERE c.ID=?"
+
 func (r *SQLTeleportRepository) Quote(ctx context.Context, sourceNPCRefID, targetTeleportID uint32) (TeleportDestination, error) {
 	if r == nil || r.shard == nil {
 		return TeleportDestination{}, ErrTeleportRepositoryUnavailable
 	}
 	return scanTeleportDestination(r.shard.QueryRowContext(normalizeTeleportContext(ctx), selectTeleportLink, sourceNPCRefID, targetTeleportID))
+}
+
+func (r *SQLTeleportRepository) ReturnTeleportDestination(ctx context.Context, characterID int) (TeleportDestination, error) {
+	if r == nil || r.shard == nil {
+		return TeleportDestination{}, ErrTeleportRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return TeleportDestination{}, ErrTeleportCharacterNotFound
+	}
+	return scanReturnTeleportDestination(r.shard.QueryRowContext(normalizeTeleportContext(ctx), selectReturnTeleportDestination, characterID))
 }
 
 func (r *SQLTeleportRepository) DungeonLinks(ctx context.Context) (map[uint32]uint32, error) {
@@ -268,6 +289,15 @@ func scanTeleportDestination(row teleportRow) (TeleportDestination, error) {
 	err := row.Scan(&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TeleportDestination{}, ErrTeleportLinkNotFound
+	}
+	return destination, err
+}
+
+func scanReturnTeleportDestination(row teleportRow) (TeleportDestination, error) {
+	var destination TeleportDestination
+	err := row.Scan(&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TeleportDestination{}, ErrTeleportPointNotFound
 	}
 	return destination, err
 }

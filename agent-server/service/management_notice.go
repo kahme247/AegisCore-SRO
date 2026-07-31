@@ -14,17 +14,9 @@ const managementNoticeChatType byte = 7
 // player snapshot. The returned count is the number of sessions that accepted
 // the packet for delivery, not a client acknowledgement count.
 func (w *WorldService) BroadcastNotice(message string) (int, error) {
-	if err := vsro188.ValidateText(message, vsro188.TextRules{
-		Field: "management notice", MaxRunes: 200, RequireTrimmed: true,
-	}); err != nil {
+	packet, err := buildServerNoticePacket(message)
+	if err != nil {
 		return 0, err
-	}
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ChatUpdate
-	packet.WriteByte(managementNoticeChatType)
-	packet.WriteString(message)
-	if err := packet.WriteError(); err != nil {
-		return 0, fmt.Errorf("build management notice packet: %w", err)
 	}
 	recipientCount := 0
 	for _, player := range w.GetActivePlayers() {
@@ -33,4 +25,23 @@ func (w *WorldService) BroadcastNotice(message string) (int, error) {
 		}
 	}
 	return recipientCount, nil
+}
+
+// buildServerNoticePacket uses the type-7 ChatUpdate variant consumed by the
+// stock GM debug console's "~ <text>" command. Unlike ordinary player chat,
+// this variant contains no sender UID or name.
+func buildServerNoticePacket(message string) (network.Packet, error) {
+	if err := vsro188.ValidateText(message, vsro188.TextRules{
+		Field: "management notice", MaxRunes: 200, RequireTrimmed: true,
+	}); err != nil {
+		return network.Packet{}, err
+	}
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ChatUpdate
+	packet.WriteByte(managementNoticeChatType)
+	packet.WriteString(message)
+	if err := packet.WriteError(); err != nil {
+		return network.Packet{}, fmt.Errorf("build management notice packet: %w", err)
+	}
+	return packet, nil
 }

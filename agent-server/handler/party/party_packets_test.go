@@ -12,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/g3n/engine/math32"
 )
 
@@ -39,6 +40,46 @@ func TestPartyRemovalPublishesNativeInstanceExitScope(t *testing.T) {
 	}
 	if len(recorder.ids) != 2 || recorder.ids[0] != 10 || recorder.ids[1] != 20 {
 		t.Fatalf("dismiss exits=%v", recorder.ids)
+	}
+}
+
+func TestPartyRemovalPublishesLeaderTransferAfterDepartingSendFailure(t *testing.T) {
+	departingSession := &server.Session{}
+	survivingSession := &server.Session{}
+	departing := &model.Player{Session: departingSession, SRObject: model.SRObject{UniqueID: 10}}
+	survivor := &model.Player{Session: survivingSession, SRObject: model.SRObject{UniqueID: 20}}
+	var survivorPackets []network.Packet
+	handler := &PartyHandler{send: func(session *server.Session, packet network.Packet) error {
+		if session == departingSession {
+			return fmt.Errorf("departing session is closed")
+		}
+		if session == survivingSession {
+			survivorPackets = append(survivorPackets, packet)
+		}
+		return nil
+	}}
+
+	err := publishRemoval(context.Background(), handler, service.PartyTransition{
+		AllBefore:     []*model.Player{departing, survivor},
+		RemovedUID:    departing.GetUniqueID(),
+		RemovalReason: 1,
+		LeaderChanged: true,
+		Party: service.PartySnapshot{
+			MasterUniqueID: survivor.GetUniqueID(),
+			Members:        []*model.Player{survivor},
+		},
+	})
+	if err == nil {
+		t.Fatal("publishRemoval error = nil, want departing-session send failure")
+	}
+	if len(survivorPackets) != 2 {
+		t.Fatalf("surviving member packets = %d, want leave then leader update", len(survivorPackets))
+	}
+	if got := survivorPackets[0].Payload(); !bytes.Equal(got, []byte{3, 10, 0, 0, 0, 1}) {
+		t.Fatalf("leave payload = % X", got)
+	}
+	if got := survivorPackets[1].Payload(); !bytes.Equal(got, []byte{9, 20, 0, 0, 0}) {
+		t.Fatalf("leader payload = % X", got)
 	}
 }
 

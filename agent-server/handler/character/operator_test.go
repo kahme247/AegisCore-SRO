@@ -40,6 +40,39 @@ func (world operatorWorldFake) GetPlayerByCharName(name string) (*model.Player, 
 }
 func (operatorWorldFake) OperatorStatistics() (uint32, uint32, uint32) { return 2, 3, 4 }
 
+type operatorRecallFake struct {
+	actor  *model.Player
+	target *model.Player
+	err    error
+}
+
+func (f *operatorRecallFake) RecallPlayer(actor, target *model.Player) error {
+	f.actor, f.target = actor, target
+	return f.err
+}
+
+type operatorReturnTownFake struct {
+	characterID int
+	destination model.TeleportDestination
+	err         error
+}
+
+func (f *operatorReturnTownFake) ReturnTeleportDestination(_ context.Context, characterID int) (model.TeleportDestination, error) {
+	f.characterID = characterID
+	return f.destination, f.err
+}
+
+type operatorTownTeleportFake struct {
+	target      *model.Player
+	destination model.TeleportDestination
+	err         error
+}
+
+func (f *operatorTownTeleportFake) TeleportPlayerTo(target *model.Player, destination model.TeleportDestination) error {
+	f.target, f.destination = target, destination
+	return f.err
+}
+
 func TestOperatorHandlerRequiresLiveGMIdentity(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharacterID: 20}}
 	actor := &model.Player{ID: 20, Session: session}
@@ -100,5 +133,93 @@ func TestOperatorPunishmentCommitsBeforeTargetNotification(t *testing.T) {
 	}
 	if got := hex.EncodeToString(sent[1].Payload()); got != "013700" {
 		t.Fatalf("acknowledgement = %s", got)
+	}
+}
+
+func TestOperatorRecallUserExecutesForGM(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharacterID: 20}}
+	actor := &model.Player{ID: 20, Session: session, IsGm: true}
+	target := &model.Player{ID: 30, CharName: "Target", Session: &server.Session{}}
+	recall := &operatorRecallFake{}
+	var sent network.Packet
+	handler := &OperatorHandler{
+		world:  operatorWorldFake{actor: actor, target: target},
+		recall: recall,
+		send: func(_ *server.Session, packet network.Packet) error {
+			sent = packet
+			return nil
+		},
+	}
+	request := network.EmptyClientPacket()
+	request.WriteUInt16(operatorRecallUser)
+	request.WriteString("Target")
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if recall.actor != actor || recall.target != target {
+		t.Fatalf("recall = actor:%p target:%p, want actor:%p target:%p", recall.actor, recall.target, actor, target)
+	}
+	if got := hex.EncodeToString(sent.Payload()); got != "011100" {
+		t.Fatalf("recall acknowledgement = %s", got)
+	}
+}
+
+func TestOperatorToTownUsesTargetReturnDestination(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharacterID: 20}}
+	actor := &model.Player{ID: 20, Session: session, IsGm: true}
+	target := &model.Player{ID: 30, CharName: "Target", Session: &server.Session{}}
+	resolver := &operatorReturnTownFake{destination: model.TeleportDestination{ID: 7, Region: 25000, X: 969, Z: 1369}}
+	teleport := &operatorTownTeleportFake{}
+	var sent network.Packet
+	handler := &OperatorHandler{
+		world:        operatorWorldFake{actor: actor, target: target},
+		returnTown:   resolver,
+		townTeleport: teleport,
+		send: func(_ *server.Session, packet network.Packet) error {
+			sent = packet
+			return nil
+		},
+	}
+	request := network.EmptyClientPacket()
+	request.WriteUInt16(operatorToTown)
+	request.WriteString("Target")
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.characterID != target.ID || teleport.target != target || teleport.destination != resolver.destination {
+		t.Fatalf("town teleport resolver=%d target=%p destination=%+v", resolver.characterID, teleport.target, teleport.destination)
+	}
+	if got := hex.EncodeToString(sent.Payload()); got != "010300" {
+		t.Fatalf("town acknowledgement = %s", got)
+	}
+}
+
+func TestOperatorPlayerStatisticsMatchesNativeAcknowledgement(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharacterID: 20}}
+	actor := &model.Player{ID: 20, Session: session, IsGm: true}
+	target := &model.Player{
+		ID:       30,
+		CharName: "Target",
+		Level:    42,
+		BaseStats: model.BaseStats{
+			HP: 500, MP: 300, Str: 70, Int: 65,
+		},
+	}
+	var sent network.Packet
+	handler := &OperatorHandler{
+		world: operatorWorldFake{actor: actor, target: target},
+		send: func(_ *server.Session, packet network.Packet) error {
+			sent = packet
+			return nil
+		},
+	}
+	request := network.EmptyClientPacket()
+	request.WriteUInt16(operatorPlayerStatistics)
+	request.WriteString(target.CharName)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != opcode.OperatorResponse || hex.EncodeToString(sent.Payload()) != "010500" {
+		t.Fatalf("native stat acknowledgement = %04x/%x", sent.MessageID, sent.Payload())
 	}
 }

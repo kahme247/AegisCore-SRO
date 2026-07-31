@@ -97,6 +97,8 @@ const (
 	skillParameterAggroIncrease              = 1953395762
 	skillParameterAbsoluteDamage             = 1885629799
 	skillParameterDamageToMP                 = 1684891508
+	skillParameterReturnDamage               = 1684891506 // `rgmd`
+	skillParameterBloodTrap                  = 29794      // `bt`
 	skillParameterTransformMask              = 1835229552
 	skillParameterOverlap2                   = 1870031922
 	skillParameterDamageType                 = 1685353584
@@ -121,12 +123,35 @@ type SkillRequiredItem struct {
 }
 
 type SkillStatusEffect struct {
-	Kind       CombatStatusKind
-	Power      int
-	Level      int
-	Payload    int
-	Chance     int
-	DurationMS int
+	Kind               CombatStatusKind
+	Power              int
+	Level              int
+	Payload            int
+	Chance             int
+	DurationMS         int
+	DurationChoiceMask uint32
+	NativeSubtype4     bool
+}
+
+// ReturnDamageDescriptor is the four-word native `rgmd` active-effect
+// descriptor. It is evaluated by the owning defender when it receives damage.
+// BloodTrapDescriptor is the four-word native `bt` descriptor. SR_GameServer
+// stores it at RefSkill +0x474, creates abnormal record type 0x18, and copies
+// EffectValue to the record's +0x1C subtype-4 value.
+type BloodTrapDescriptor struct {
+	DurationChoiceMask uint32
+	ChancePercent      int
+	Level              int
+	EffectValue        int
+}
+
+type ReturnDamageDescriptor struct {
+	// ChancePercent is native `rgmd` word 0. Native requires it to be
+	// positive, then uses it with the actor-owned chance accumulator.
+	ChancePercent   int
+	PhysicalPercent int
+	MagicalPercent  int
+	MaximumRange    int
 }
 
 // RecoveryStatusDescriptor is the actor-owned form of a binary `real` tuple.
@@ -234,6 +259,7 @@ type RefSkill struct {
 	TransferFalloffPercent       int
 	TransferTargetMask           uint32
 	StatusEffects                []SkillStatusEffect
+	BloodTrap                    BloodTrapDescriptor
 	ImpactDamage                 int
 	BarrierDrainMS               int
 	BarrierMPCost                int
@@ -280,6 +306,7 @@ type RefSkill struct {
 	LinkedDamageMask             uint32
 	LinkedDamagePercent          int
 	LinkedDamageUseLimit         int
+	ReturnDamage                 ReturnDamageDescriptor
 	DetectionType                int
 	DetectionLevel               int
 	HideType                     int
@@ -412,7 +439,7 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 		return SkillExecutionBarrier
 	case s.MovementDistance > 0:
 		return SkillExecutionMovement
-	case s.BuffDuration > 0 || s.UpkeepIntervalMS > 0:
+	case s.BuffDuration > 0 || s.UpkeepIntervalMS > 0 || s.ReturnDamage.ChancePercent > 0:
 		return SkillExecutionBuff
 	default:
 		return SkillExecutionUnsupported
@@ -494,6 +521,7 @@ func (s *RefSkill) parseParameters() {
 	s.RecoveryStatusMask, s.RecoveryStatusValue, s.RecoveryStatusGrade = 0, 0, 0
 	s.AggroSuppression, s.BarrierPhysical = false, false
 	s.StatusEffects = nil
+	s.BloodTrap = BloodTrapDescriptor{}
 	s.RequiredItems = nil
 	s.CureStatusMask, s.CureStatusMaxLevel = 0, 0
 	s.CureCurse = false
@@ -512,6 +540,7 @@ func (s *RefSkill) parseParameters() {
 	s.ReferenceDescriptors = [4][6]int{}
 	s.KnockOverKey, s.KnockOverChance, s.KnockbackChance, s.KnockbackDistance = 0, 0, 0, 0
 	s.LinkedDamageMask, s.LinkedDamagePercent, s.LinkedDamageUseLimit = 0, 0, 0
+	s.ReturnDamage = ReturnDamageDescriptor{}
 	s.DetectionType, s.DetectionLevel = 0, 0
 	s.HideType, s.HideLevel, s.HideChance = 0, 0, 0
 	s.BuffModifiers = BuffModifiers{}
@@ -685,6 +714,11 @@ func (s *RefSkill) parseParameters() {
 				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: kind, DurationMS: s.Params[index+1], Chance: s.Params[index+2], Level: s.Params[index+3]})
 			}
 		case skillParameterHidden:
+			// `bt` word 0 is a byte-mask. BLOODA's 0x050A0F00 happens to
+			// equal the four-byte `hidden` tag and must remain an operand.
+			if index > 0 && s.Params[index-1] == skillParameterBloodTrap {
+				continue
+			}
 			if index+3 < len(s.Params) {
 				duration := s.BuffDuration
 				if duration <= 0 {
@@ -813,6 +847,34 @@ func (s *RefSkill) parseParameters() {
 		case skillParameterAbsoluteDamage:
 			if index+1 < len(s.Params) {
 				s.AbsoluteDamage = s.Params[index+1]
+			}
+		case skillParameterReturnDamage:
+			if index+4 < len(s.Params) {
+				s.ReturnDamage = ReturnDamageDescriptor{
+					ChancePercent:   s.Params[index+1],
+					PhysicalPercent: s.Params[index+2],
+					MagicalPercent:  s.Params[index+3],
+					MaximumRange:    s.Params[index+4],
+				}
+			}
+		case skillParameterBloodTrap:
+			if index+4 < len(s.Params) {
+				s.BloodTrap = BloodTrapDescriptor{
+					DurationChoiceMask: uint32(s.Params[index+1]),
+					ChancePercent:      s.Params[index+2],
+					Level:              s.Params[index+3],
+					EffectValue:        s.Params[index+4],
+				}
+				if s.BloodTrap.DurationChoiceMask != 0 && s.BloodTrap.ChancePercent > 0 && s.BloodTrap.EffectValue > 0 {
+					s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{
+						Kind:               CombatStatusBloodTrap,
+						Level:              s.BloodTrap.Level,
+						Payload:            s.BloodTrap.EffectValue,
+						Chance:             s.BloodTrap.ChancePercent,
+						DurationChoiceMask: s.BloodTrap.DurationChoiceMask,
+						NativeSubtype4:     true,
+					})
+				}
 			}
 		case skillParameterDamageToMP:
 			if index+2 < len(s.Params) {

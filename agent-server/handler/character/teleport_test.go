@@ -3,6 +3,8 @@ package character
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"reflect"
 	"testing"
 	"time"
@@ -496,6 +498,147 @@ func TestReturnScrollUsesTeleportLoadingHandshakeWithoutGateResponse(t *testing.
 	}
 	if bootstraps != 1 {
 		t.Fatalf("bootstrap calls = %d, want 1", bootstraps)
+	}
+}
+
+func TestGMRecallUsesTeleportLoadingHandshake(t *testing.T) {
+	targetSession, target, _ := selectEntityFixture(t)
+	actorSession, actor, _ := selectEntityFixture(t)
+	for _, session := range []*server.Session{targetSession, actorSession} {
+		session.MarkAuthenticated()
+		if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+			t.Fatal("could not prepare an in-world GM recall session")
+		}
+	}
+	target.CharName = "Target"
+	targetSession.UserContext.CharName = target.CharName
+	actorPosition := target.GetNavmeshPosition()
+	actorPosition.Region = target.GetNavmeshPosition().Region
+	actorPosition.Offset = math32.NewVector3(42, 0, 84)
+	actor.SetNavmeshPosition(actorPosition)
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(25000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{
+		selectEntityWorldFake: &selectEntityWorldFake{player: target},
+		region:                region,
+	}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	var sent []network.Packet
+	handler.send = func(session *server.Session, packet network.Packet) error {
+		if session == targetSession {
+			sent = append(sent, packet)
+		}
+		return nil
+	}
+	bootstraps := 0
+	handler.bootstrap = func(*server.Session, *model.Player) error {
+		bootstraps++
+		return nil
+	}
+	if err := handler.RecallPlayer(actor, target); err != nil {
+		t.Fatalf("RecallPlayer() error = %v", err)
+	}
+	if targetSession.LifecyclePhase() != server.SessionCharacterLoading || world.resets != 1 || world.stops != 2 || target.GetLifeState() != model.Spawning {
+		t.Fatalf("recall state phase=%s resets=%d stops=%d life=%d", targetSession.LifecyclePhase(), world.resets, world.stops, target.GetLifeState())
+	}
+	if world.lastPosition.Offset.X != actor.GetNavmeshPosition().Offset.X ||
+		world.lastPosition.Offset.Y != actor.GetNavmeshPosition().Offset.Y ||
+		world.lastPosition.Offset.Z != actor.GetNavmeshPosition().Offset.Z {
+		t.Fatalf("recall destination = %+v, want actor position %+v", world.lastPosition, actor.GetNavmeshPosition())
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.TeleportReadyRequest {
+		t.Fatalf("recall packets = %#v", sent)
+	}
+	if err := handler.handleReady(context.Background(), targetSession, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("handleReady() error = %v", err)
+	}
+	handler.mu.Lock()
+	_, pending := handler.pending[targetSession]
+	handler.mu.Unlock()
+	if pending || bootstraps != 1 {
+		t.Fatalf("recall completion pending=%t bootstraps=%d", pending, bootstraps)
+	}
+	serverConn, clientConn := net.Pipe()
+	targetSession.Conn = serverConn
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+	t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+	})
+	gameReady := NewGameReadyHandler(&fakeGameReadyPlayers{player: target})
+	if err := gameReady.handleSessionPacket(context.Background(), targetSession, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("GameReady after recall: %v", err)
+	}
+	if targetSession.LifecyclePhase() != server.SessionInWorld {
+		t.Fatalf("recall GameReady lifecycle = %s, want in-world", targetSession.LifecyclePhase())
+	}
+}
+
+func TestGMRecallRejectsUnavailableAndCrossWorldTargetsBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		prepareActor  bool
+		actorWorldID  uint32
+		targetWorldID uint32
+	}{
+		{name: "actor outside world", prepareActor: false},
+		{name: "cross-world target", prepareActor: true, actorWorldID: 1, targetWorldID: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			targetSession, target, _ := selectEntityFixture(t)
+			actorSession, actor, _ := selectEntityFixture(t)
+			targetSession.MarkAuthenticated()
+			if !targetSession.EnterLobby() || !targetSession.BeginCharacterLoading() || !targetSession.CompleteCharacterLoading() {
+				t.Fatal("could not prepare target session")
+			}
+			actorSession.MarkAuthenticated()
+			if !actorSession.EnterLobby() {
+				t.Fatal("could not prepare actor session")
+			}
+			if test.prepareActor && (!actorSession.BeginCharacterLoading() || !actorSession.CompleteCharacterLoading()) {
+				t.Fatal("could not prepare actor world session")
+			}
+			actor.SetGameWorldID(test.actorWorldID)
+			target.SetGameWorldID(test.targetWorldID)
+			world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{player: target}}
+			if err := NewTeleportHandler(world, &teleportRepositoryFake{}).RecallPlayer(actor, target); err == nil {
+				t.Fatal("RecallPlayer() unexpectedly accepted unavailable target")
+			}
+			if world.stops != 0 || targetSession.LifecyclePhase() != server.SessionInWorld {
+				t.Fatalf("rejected recall mutated target stops=%d phase=%s", world.stops, targetSession.LifecyclePhase())
+			}
+		})
+	}
+}
+
+func TestTeleportPlayerToAcceptsCatalogWorldIDForPublicTarget(t *testing.T) {
+	session, target, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not prepare public target session")
+	}
+	target.SetGameWorldID(0)
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(25000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{
+		selectEntityWorldFake: &selectEntityWorldFake{player: target},
+		region:                region,
+	}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	handler.send = func(*server.Session, network.Packet) error { return nil }
+	destination := model.TeleportDestination{ID: 5, Region: 25000, X: 1138, Y: 250, Z: 153, WorldID: 1}
+	if target.GetGameWorldID() == uint32(destination.WorldID) {
+		t.Fatal("test requires distinct runtime and catalog world IDs")
+	}
+	if err := handler.TeleportPlayerTo(target, destination); err != nil {
+		t.Fatalf("TeleportPlayerTo() error = %v", err)
+	}
+	if session.LifecyclePhase() != server.SessionCharacterLoading ||
+		world.lastPosition.Region.ID != destination.Region ||
+		world.lastPosition.Offset.X != destination.X ||
+		world.lastPosition.Offset.Y != destination.Y ||
+		world.lastPosition.Offset.Z != destination.Z {
+		t.Fatalf("catalog-world teleport state=%s destination=%+v", session.LifecyclePhase(), world.lastPosition)
 	}
 }
 

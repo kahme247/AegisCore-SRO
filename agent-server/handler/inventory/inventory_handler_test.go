@@ -924,6 +924,27 @@ func TestActiveCOSItemsCannotEnterStorage(t *testing.T) {
 	}
 }
 
+func TestNPCBuyRejectsZeroQuantityWithStockFailureCode(t *testing.T) {
+	handler := &InventoryHandler{economy: &storageResyncEconomyFake{}}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	request := network.EmptyClientPacket()
+	request.WriteByte(2)
+	request.WriteByte(3)
+	request.WriteUInt16(0)
+	request.WriteUInt32(0x11223344)
+
+	if err := handler.handleBuy(context.Background(), &server.Session{}, &request); err != nil {
+		t.Fatalf("zero-quantity NPC buy returned error: %v", err)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.ItemOperationResponse || !bytes.Equal(sent[0].Payload(), []byte{2, 0x29, 0x18}) {
+		t.Fatalf("zero-quantity NPC buy response = %#v", sent)
+	}
+}
+
 type storageResyncEconomyFake struct {
 	model.EconomyRepository
 	snapshot model.StorageSnapshot

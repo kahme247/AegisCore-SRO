@@ -39,6 +39,7 @@ type GameplayRepositories struct {
 	Social                  model.SocialRepository
 	Exchange                model.ExchangeRepository
 	ItemUse                 model.ItemUseRepository
+	Cooldowns               model.CharacterCooldownStore
 	SpeedEffects            model.SpeedEffectRepository
 	ItemServices            model.ItemServiceRepository
 	ItemBuffs               model.ItemBuffRepository
@@ -74,6 +75,7 @@ type GameplayRepositories struct {
 	TAP                     model.TAPRepository
 	SeasonalEvents          model.SeasonalEventRepository
 	OperatorPunishments     model.OperatorPunishmentRepository
+	AccountModeration       model.AccountModerationRepository
 }
 
 func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, error) {
@@ -155,6 +157,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.OperatorPunishments, err = model.NewOperatorPunishmentRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent operator punishment repository: %w", err)
 	}
+	if repositories.AccountModeration, err = model.NewAccountModerationRepository(account); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent account moderation repository: %w", err)
+	}
 	if repositories.Exchange, err = model.NewExchangeRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent exchange repository: %w", err)
 	}
@@ -163,6 +168,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 		return GameplayRepositories{}, fmt.Errorf("configure Agent item-use repository: %w", err)
 	}
 	repositories.ItemUse = itemUse
+	if repositories.Cooldowns, err = model.NewCharacterCooldownRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent character cooldown repository: %w", err)
+	}
 	repositories.SpeedEffects = itemUse
 	repositories.ItemServices = itemUse
 	repositories.ItemBuffs = itemUse

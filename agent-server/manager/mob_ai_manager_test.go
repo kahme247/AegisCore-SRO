@@ -1355,6 +1355,51 @@ func (w *mobAIWorldFake) CanMoveDirectly(navmeshv2.RtNavmeshPosition, navmeshv2.
 	return !w.blocked
 }
 
+func TestMobAIQueuesRGMDReturnAgainstNPCAttackerBeforeLinkedInterception(t *testing.T) {
+	now := time.Now()
+	npc, target := mobAIFixture(1)
+	npc.ConfigureCombat(100, 0)
+	linked := &model.Player{SRObject: model.NewSRObject(), BaseStats: model.BaseStats{HP: 100}}
+	linked.SetUniqueID(300)
+	linked.SetLifeState(model.Alive)
+	npc.GetKnownObjectList().AddObject(linked)
+	const rgmdID, linkedID = uint32(7005), uint32(7006)
+	if _, ok := target.CommitActiveBuffAt(rgmdID, 1, target.GetUniqueID(), time.Minute, model.BuffModifiers{}, now); !ok {
+		t.Fatal("arrange rgmd buff")
+	}
+	if _, ok := target.CommitLinkedActiveBuffAt(linkedID, 2, linked.GetUniqueID(), 0, time.Minute, model.BuffModifiers{}, now); !ok {
+		t.Fatal("arrange linked interception")
+	}
+	var scheduled func()
+	var source *model.Player
+	var returned model.PendingReturnDamage
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return now }
+	manager.schedule = func(_ time.Duration, callback func()) { scheduled = callback }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		rgmdID:   {ID: rgmdID, ReturnDamage: model.ReturnDamageDescriptor{ChancePercent: 100, PhysicalPercent: 50, MaximumRange: 10}},
+		linkedID: {ID: linkedID, LinkedDamageMask: 15, LinkedDamagePercent: 100},
+	}}))
+	manager.ConfigureReturnDamageExecutor(func(owner *model.Player, attacker *model.NPC, record model.PendingReturnDamage) {
+		source, returned = owner, record
+		attacker.ApplyDamage(record.Amount)
+	})
+	manager.applyAttackDamage(&mobAIWorldFake{}, npc, target, 1, 40, false)
+	if target.CurrentHP() != 100 || linked.CurrentHP() != 60 {
+		t.Fatalf("linked interception HP = target:%d linked:%d, want 100/60", target.CurrentHP(), linked.CurrentHP())
+	}
+	if scheduled == nil {
+		t.Fatal("NPC hit did not schedule rgmd return")
+	}
+	scheduled()
+	if source != target || returned.SourceUID != target.GetUniqueID() || returned.Amount != 20 || returned.SkillID != rgmdID {
+		t.Fatalf("NPC rgmd record = source:%p record:%+v", source, returned)
+	}
+	if got := npc.CurrentHitPoints(); got != 80 {
+		t.Fatalf("NPC HP after queued return = %d, want 80", got)
+	}
+}
+
 func mobAIFixture(distance float32) (*model.NPC, *model.Player) {
 	npc := &model.NPC{
 		SRObject: model.NewSRObject(),

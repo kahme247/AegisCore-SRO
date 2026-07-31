@@ -629,7 +629,9 @@ func (p *PartyService) DisconnectPartyMember(playerUID uint32) (PartyTransition,
 	party.MemberCount = byte(len(party.Members))
 	delete(p.pendingInvites, playerUID)
 
-	if len(party.Members) < 2 {
+	// A remaining original master cannot keep a one-player party, but when
+	// the master disconnects the remaining member must receive leadership.
+	if len(party.Members) == 0 || (len(party.Members) == 1 && party.MasterUniqueID != playerUID) {
 		transition.Dismissed = true
 		for _, memberUID := range party.Members {
 			if member, err := p.playerAny(memberUID); err == nil {

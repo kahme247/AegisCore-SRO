@@ -70,7 +70,7 @@ func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 		packet network.Packet
 		want   string
 	}{
-		{name: "buy", packet: buildBuySuccess(2, 3, 1, []byte{13}, model.Item{}), want: "01080203010d010000000000"},
+		{name: "buy", packet: buildBuySuccess(2, 3, 1, []byte{13}), want: "01080203010d010000000000"},
 		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344, 1), want: "01090d01004433221101"},
 		{name: "buy back", packet: buildBuyBackSuccess(14, 0, 1), want: "01220e000100"},
 		{name: "buy back acknowledgement", packet: buildNPCBuyBackResponse(true), want: "01"},

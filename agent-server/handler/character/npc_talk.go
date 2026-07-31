@@ -43,6 +43,9 @@ type NPCTalkHandler struct {
 	instanceTeleport interface {
 		SubmitQuestInstanceEntry(model.QuestInstance, []*model.Player) error
 	}
+	dimensionHoleEntry interface {
+		Enter(context.Context, uint32, *model.Player) (service.DimensionHoleAdmission, error)
+	}
 }
 
 // npcTalkActionConversation is the stock menu's "Talk to this person"
@@ -137,6 +140,16 @@ func (h *NPCTalkHandler) ConfigureQuestInstanceEntry(entries *service.QuestInsta
 	}
 }
 
+// ConfigureDimensionHoleEntry connects the native INS_QUEST_TELEPORT
+// conversation action to its runtime-owned admission and loading boundary.
+func (h *NPCTalkHandler) ConfigureDimensionHoleEntry(entry interface {
+	Enter(context.Context, uint32, *model.Player) (service.DimensionHoleAdmission, error)
+}) {
+	if h != nil {
+		h.dimensionHoleEntry = entry
+	}
+}
+
 func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -184,13 +197,29 @@ func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Sessi
 	if err != nil {
 		return nil
 	}
+	portal, isDimensionHolePortal := object.(*model.DimensionHolePortal)
+	isDimensionHolePortal = isDimensionHolePortal && model.IsDimensionHolePortalObject(portal)
 	isNormalNPC := false
 	if npc, ok := object.(*model.NPC); ok {
 		isNormalNPC = npc != nil && npc.GetTypeInfo().IsNPCNpc()
 	}
 	isTeleportGate := model.IsTeleportGateObject(object)
-	if !isNormalNPC && !isTeleportGate {
+	if !isNormalNPC && !isTeleportGate && !isDimensionHolePortal {
 		logrus.Warnf("ignored non-normal NPC talk player=%s uid=%d", player.CharName, uniqueID)
+		return nil
+	}
+	if isDimensionHolePortal {
+		if action != npcTalkActionConversation || h.dimensionHoleEntry == nil {
+			return nil
+		}
+		if err := h.sendPacket(session, buildNPCTalkResponse(action)); err != nil {
+			return err
+		}
+		if _, entryErr := h.dimensionHoleEntry.Enter(ctx, portal.GetUniqueID(), player); entryErr != nil {
+			logrus.WithError(entryErr).WithFields(logrus.Fields{
+				"uid": player.GetUniqueID(), "portal_uid": portal.GetUniqueID(),
+			}).Debug("rejected Dimension Hole entry")
+		}
 		return nil
 	}
 	if isTeleportGate && action != 8 {

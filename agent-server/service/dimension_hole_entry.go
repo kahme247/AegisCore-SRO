@@ -46,9 +46,9 @@ func NewDimensionHoleEntryService(admissions *DimensionHoleAdmissionService, des
 	return &DimensionHoleEntryService{admissions: admissions, destinations: destinations, teleport: teleport}, nil
 }
 
-// Enter reserves capacity before submitting the world-loading transition. A
-// newly-created reservation is released if staging fails; an idempotent retry
-// never erases a previously successful admission.
+// Enter admits the clicking player. When the portal owner enters, every live,
+// eligible party member is staged into the same direct-world scope so the
+// original owner-led party crosses the gate as one unit.
 func (s *DimensionHoleEntryService) Enter(ctx context.Context, portalUID uint32, player *model.Player) (DimensionHoleAdmission, error) {
 	if s == nil || s.admissions == nil || s.destinations == nil || s.teleport == nil {
 		return DimensionHoleAdmission{}, ErrDimensionHoleEntryUnavailable
@@ -56,19 +56,55 @@ func (s *DimensionHoleEntryService) Enter(ctx context.Context, portalUID uint32,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	admission, created, err := s.admissions.admit(portalUID, player)
+	players, err := s.admissions.EntryPlayers(portalUID, player)
 	if err != nil {
 		return DimensionHoleAdmission{}, err
 	}
-	destination, err := s.destinations.ResolveDimensionHoleEntry(ctx, admission)
-	if err == nil {
-		err = s.teleport.SubmitDimensionHoleEntry(ctx, player, admission, destination)
+	type stagedEntry struct {
+		player      *model.Player
+		admission   DimensionHoleAdmission
+		destination DimensionHoleEntryDestination
+		created     bool
 	}
-	if err != nil {
-		if created {
-			err = errors.Join(err, s.admissions.leave(admission.PlayerUID, admission.PortalUID))
+	staged := make([]stagedEntry, 0, len(players))
+	rollback := func(cause error) error {
+		for index := len(staged) - 1; index >= 0; index-- {
+			if staged[index].created {
+				cause = errors.Join(cause, s.admissions.leave(staged[index].admission.PlayerUID, staged[index].admission.PortalUID))
+			}
 		}
-		return DimensionHoleAdmission{}, err
+		return cause
 	}
-	return admission, nil
+	for _, member := range players {
+		admission, created, admitErr := s.admissions.admit(portalUID, member)
+		if admitErr != nil {
+			return DimensionHoleAdmission{}, rollback(admitErr)
+		}
+		destination, destinationErr := s.destinations.ResolveDimensionHoleEntry(ctx, admission)
+		if destinationErr != nil {
+			if created {
+				_ = s.admissions.leave(admission.PlayerUID, admission.PortalUID)
+			}
+			return DimensionHoleAdmission{}, rollback(destinationErr)
+		}
+		staged = append(staged, stagedEntry{player: member, admission: admission, destination: destination, created: created})
+	}
+	var initiatingAdmission DimensionHoleAdmission
+	for index, entry := range staged {
+		if entry.player == player {
+			initiatingAdmission = entry.admission
+		}
+		if teleportErr := s.teleport.SubmitDimensionHoleEntry(ctx, entry.player, entry.admission, entry.destination); teleportErr != nil {
+			for remaining := index; remaining < len(staged); remaining++ {
+				if staged[remaining].created {
+					teleportErr = errors.Join(teleportErr, s.admissions.leave(staged[remaining].admission.PlayerUID, staged[remaining].admission.PortalUID))
+				}
+			}
+			return DimensionHoleAdmission{}, teleportErr
+		}
+	}
+	if initiatingAdmission.PlayerUID == 0 {
+		return DimensionHoleAdmission{}, ErrDimensionHoleEntryUnavailable
+	}
+	return initiatingAdmission, nil
 }

@@ -14,6 +14,7 @@ import (
 type Spawn struct {
 	NestID                int
 	Position              navmeshv2.RtNavmeshPosition
+	GameWorldID           uint32
 	RefObjID              uint64
 	NpcCodeName           string
 	Radius                int

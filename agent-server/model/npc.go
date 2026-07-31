@@ -83,13 +83,15 @@ func (n *NPC) QueueRespawn() bool {
 }
 
 type npcCombatState struct {
-	mutex      sync.Mutex
-	hitPoints  int
-	maxHit     int
-	experience uint64
-	decay      time.Duration
-	statuses   map[CombatStatusKind]map[uint32]CombatStatus
-	baseSpeed  *npcBaseSpeed
+	mutex                 sync.Mutex
+	hitPoints             int
+	maxHit                int
+	experience            uint64
+	decay                 time.Duration
+	statuses              map[CombatStatusKind]map[uint32]CombatStatus
+	baseSpeed             *npcBaseSpeed
+	pendingReturnDamage   []PendingReturnDamage
+	returnDamageScheduled bool
 }
 
 type npcBaseSpeed struct {
@@ -126,6 +128,9 @@ const (
 	CombatStatusPanic
 	CombatStatusCombustion
 	CombatStatusHidden
+	// CombatStatusBloodTrap models native abnormal record type 0x18, produced
+	// only by the `bt` descriptor and consumed as 0xB0BC subtype 4 on expiry.
+	CombatStatusBloodTrap
 )
 
 type CombatStatus struct {

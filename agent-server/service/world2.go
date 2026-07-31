@@ -752,6 +752,71 @@ func (w *WorldService) GetSpawnsForRegion(regionId int16) []*model.SpawnArea {
 	return append([]*model.SpawnArea(nil), w.spawns[regionId]...)
 }
 
+func (w *WorldService) InstantiateDimensionHoleSpawns(scope model.GameWorldScope, regions []int16) error {
+	if w == nil || w.mutex == nil || !scope.ValidInstance() || len(regions) == 0 {
+		return ErrWorldRepositoryConfiguration
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	for _, areas := range w.spawns {
+		for _, area := range areas {
+			if area != nil && area.GameWorldID == uint32(scope) {
+				return nil
+			}
+		}
+	}
+	countRate, respawnRate := 100, 100
+	if w.gameplayRates != nil {
+		rates := w.gameplayRates.Current()
+		countRate = int(rates.MobCountRatePercent)
+		respawnRate = int(rates.MobRespawnRatePercent)
+	}
+	created := 0
+	for _, regionID := range regions {
+		base := append([]*model.SpawnArea(nil), w.spawns[regionID]...)
+		for _, area := range base {
+			if area == nil || area.GameWorldID != 0 {
+				continue
+			}
+			spawn := area.Spawn
+			spawn.GameWorldID = uint32(scope)
+			w.spawns[regionID] = append(w.spawns[regionID], model.InitSpawnAreaFromSpawnNestWithRates(spawn, countRate, respawnRate))
+			created++
+		}
+	}
+	if created == 0 {
+		return fmt.Errorf("%w: scope=%X has no authored spawns", ErrWorldRepositoryConfiguration, uint32(scope))
+	}
+	log.Infof("instantiated Dimension Hole population scope=%X spawn_areas=%d", uint32(scope), created)
+	return nil
+}
+
+func (w *WorldService) ReleaseDimensionHoleSpawns(scope model.GameWorldScope) {
+	if w == nil || w.mutex == nil || !scope.ValidInstance() {
+		return
+	}
+	w.mutex.Lock()
+	removed := make([]*model.SpawnArea, 0)
+	for regionID, areas := range w.spawns {
+		kept := areas[:0]
+		for _, area := range areas {
+			if area != nil && area.GameWorldID == uint32(scope) {
+				removed = append(removed, area)
+				continue
+			}
+			kept = append(kept, area)
+		}
+		w.spawns[regionID] = kept
+	}
+	w.mutex.Unlock()
+	for _, area := range removed {
+		for _, npc := range area.DrainNPCs() {
+			w.RemoveVisibleObject(npc)
+		}
+	}
+	log.Infof("released Dimension Hole population scope=%X spawn_areas=%d", uint32(scope), len(removed))
+}
+
 // LoadSpawnDataForContinentContext loads one continent through the configured
 // catalog repository. Callers that need startup-grade error handling should
 // use this method instead of the compatibility wrapper below.

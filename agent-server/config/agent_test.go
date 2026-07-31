@@ -134,8 +134,12 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	if !viper.GetBool("agent.features.open_market.enabled") {
 		t.Fatal("open-market feature environment was not bound")
 	}
-	if _, err := ResolveFeatures(); err == nil {
-		t.Fatal("unavailable open-market feature was accepted")
+	features, err := ResolveFeatures()
+	if err != nil {
+		t.Fatalf("ResolveFeatures: %v", err)
+	}
+	if !features.Enabled(feature.OpenMarket) {
+		t.Fatal("open-market feature was not enabled")
 	}
 }
 

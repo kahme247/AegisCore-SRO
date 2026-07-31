@@ -157,6 +157,7 @@ type CharacterSelectionHandler struct {
 	speedEffects    model.SpeedEffectRepository
 	itemServices    model.ItemServiceRepository
 	itemBuffs       model.ItemBuffRepository
+	cooldowns       model.CharacterCooldownSnapshotRepository
 	hwan            model.HwanRepository
 	movement        model.MovementSettingsRepository
 	playerPreparer  interface {
@@ -211,6 +212,14 @@ func (h *CharacterSelectionHandler) ConfigureCharacterCreationPolicy(policy mode
 		return model.ErrCharacterCreationPolicyUnavailable
 	}
 	h.creationPolicy = policy
+	return nil
+}
+
+func (h *CharacterSelectionHandler) ConfigureCooldownRepository(repository model.CharacterCooldownSnapshotRepository) error {
+	if h == nil || repository == nil {
+		return model.ErrCharacterCooldownRepositoryUnavailable
+	}
+	h.cooldowns = repository
 	return nil
 }
 

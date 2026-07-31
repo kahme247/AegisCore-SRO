@@ -240,6 +240,9 @@ func registerMarketListing(ctx context.Context, tx *sql.Tx, command MarketRegist
 		return MarketListing{}, fmt.Errorf("insert market listing: %w", err)
 	}
 	id, _ := result.LastInsertId()
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `OPEN_MARKET_ACTIVE_ITEM_GUARD` (`LISTING_ID`,`ITEM_ID`) VALUES (?,?)", id, escrowID); err != nil {
+		return MarketListing{}, fmt.Errorf("protect active market escrow: %w", err)
+	}
 	return MarketListing{ID: uint64(id), SellerCharacterID: command.SellerCharacterID, ItemID: escrowID, ReferenceItemID: refID, TIDGroupID: command.TIDGroupID, Quantity: command.Quantity, Price: command.Price, Deposit: command.Deposit, SellFee: command.SellFee, Status: MarketListingActive, Version: 1, ExpiresAt: command.ExpiresAt.UTC()}, nil
 }
 
@@ -304,7 +307,7 @@ func scanMarketListingView(row marketListingScanner) (MarketListingView, error) 
 	return view, nil
 }
 
-const marketViewColumns = "l.ID,l.SELLER_CHAR_ID,l.BUYER_CHAR_ID,l.ITEM_ID,l.REF_ITEM_ID,l.TID_GROUP_ID,l.QUANTITY,l.PRICE,l.DEPOSIT,l.SELL_FEE,l.STATUS,l.VERSION,l.REGISTERED_AT,l.EXPIRES_AT,COALESCE(l.PURCHASE_COMMAND_KEY,''),COALESCE(l.RETURN_COMMAND_KEY,''),c.CHARNAME,CASE WHEN r.LISTING_ID IS NULL OR r.SETTLED_AT IS NOT NULL THEN 0 ELSE 1 END"
+const marketViewColumns = "l.ID,l.SELLER_CHAR_ID,l.BUYER_CHAR_ID,l.ITEM_ID,l.REF_ITEM_ID,l.TID_GROUP_ID,l.QUANTITY,l.PRICE,l.DEPOSIT,l.SELL_FEE,l.STATUS,l.VERSION,l.REGISTERED_AT,l.EXPIRES_AT,COALESCE(l.PURCHASE_COMMAND_KEY,''),COALESCE(l.RETURN_COMMAND_KEY,''),c.CHAR_NAME,CASE WHEN r.LISTING_ID IS NULL OR r.SETTLED_AT IS NOT NULL THEN 0 ELSE 1 END"
 
 func marketViewJoins() string {
 	return " FROM `OPEN_MARKET_LISTING` l JOIN `CHAR` c ON c.ID=l.SELLER_CHAR_ID JOIN `ITEMDATA` ri ON ri.ItemID=l.REF_ITEM_ID LEFT JOIN `OPEN_MARKET_RECEIVABLE` r ON r.LISTING_ID=l.ID"
@@ -317,7 +320,7 @@ func (r *SQLOpenMarketRepository) Detail(ctx context.Context, listingID uint64, 
 	if listingID == 0 || listingID > math.MaxUint32 || seller == "" || referenceItemID <= 0 {
 		return MarketListingView{}, ErrMarketInvalidCommand
 	}
-	view, err := scanMarketListingView(r.shard.QueryRowContext(ctx, "SELECT "+marketViewColumns+marketViewJoins()+" WHERE l.ID=? AND c.CHARNAME=? AND l.REF_ITEM_ID=?", listingID, seller, referenceItemID))
+	view, err := scanMarketListingView(r.shard.QueryRowContext(ctx, "SELECT "+marketViewColumns+marketViewJoins()+" WHERE l.ID=? AND c.CHAR_NAME=? AND l.REF_ITEM_ID=?", listingID, seller, referenceItemID))
 	if err != nil {
 		return MarketListingView{}, ErrMarketListingUnavailable
 	}
@@ -361,7 +364,7 @@ func (r *SQLOpenMarketRepository) Search(ctx context.Context, search MarketSearc
 	}
 	filter := "%" + search.Filter + "%"
 	var total uint64
-	if err := r.shard.QueryRowContext(ctx, "SELECT COUNT(*)"+marketViewJoins()+" WHERE l.STATUS=1 AND l.EXPIRES_AT>CURRENT_TIMESTAMP(6) AND (?=0 OR l.TID_GROUP_ID=?) AND (?=0 OR ((ri.ItemClass-1) DIV 3)+1=?) AND (?='' OR c.CHARNAME LIKE ?)", search.TIDGroupID, search.TIDGroupID, search.Degree, search.Degree, search.Filter, filter).Scan(&total); err != nil {
+	if err := r.shard.QueryRowContext(ctx, "SELECT COUNT(*)"+marketViewJoins()+" WHERE l.STATUS=1 AND l.EXPIRES_AT>CURRENT_TIMESTAMP(6) AND (?=0 OR l.TID_GROUP_ID=?) AND (?=0 OR ((ri.ItemClass-1) DIV 3)+1=?) AND (?='' OR c.CHAR_NAME LIKE ?)", search.TIDGroupID, search.TIDGroupID, search.Degree, search.Degree, search.Filter, filter).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	pages := (total + uint64(search.PageSize) - 1) / uint64(search.PageSize)
@@ -369,7 +372,7 @@ func (r *SQLOpenMarketRepository) Search(ctx context.Context, search MarketSearc
 		pages = math.MaxUint16
 	}
 	offset := uint64(search.Page) * uint64(search.PageSize)
-	rows, err := r.shard.QueryContext(ctx, "SELECT "+marketViewColumns+marketViewJoins()+" WHERE l.STATUS=1 AND l.EXPIRES_AT>CURRENT_TIMESTAMP(6) AND (?=0 OR l.TID_GROUP_ID=?) AND (?=0 OR ((ri.ItemClass-1) DIV 3)+1=?) AND (?='' OR c.CHARNAME LIKE ?) ORDER BY l.REGISTERED_AT DESC,l.ID DESC LIMIT ? OFFSET ?", search.TIDGroupID, search.TIDGroupID, search.Degree, search.Degree, search.Filter, filter, search.PageSize, offset)
+	rows, err := r.shard.QueryContext(ctx, "SELECT "+marketViewColumns+marketViewJoins()+" WHERE l.STATUS=1 AND l.EXPIRES_AT>CURRENT_TIMESTAMP(6) AND (?=0 OR l.TID_GROUP_ID=?) AND (?=0 OR ((ri.ItemClass-1) DIV 3)+1=?) AND (?='' OR c.CHAR_NAME LIKE ?) ORDER BY l.REGISTERED_AT DESC,l.ID DESC LIMIT ? OFFSET ?", search.TIDGroupID, search.TIDGroupID, search.Degree, search.Degree, search.Filter, filter, search.PageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -473,6 +476,9 @@ func (r *SQLOpenMarketRepository) expireOne(ctx context.Context, now time.Time, 
 	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
 		return MarketExpiryReturn{}, false, nil
 	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `OPEN_MARKET_ACTIVE_ITEM_GUARD` WHERE `LISTING_ID`=? AND `ITEM_ID`=?", listing.ID, listing.ItemID); err != nil {
+		return MarketExpiryReturn{}, false, err
+	}
 	listing.Status = MarketListingExpired
 	listing.Version++
 	listing.ReturnCommandKey = key
@@ -553,6 +559,9 @@ func (r *SQLOpenMarketRepository) Purchase(ctx context.Context, command MarketPu
 	}
 	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
 		return MarketListing{}, 0, ErrMarketListingUnavailable
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `OPEN_MARKET_ACTIVE_ITEM_GUARD` WHERE `LISTING_ID`=? AND `ITEM_ID`=?", l.ID, l.ItemID); err != nil {
+		return MarketListing{}, 0, err
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT INTO `OPEN_MARKET_RECEIVABLE` (LISTING_ID,SELLER_CHAR_ID,AMOUNT) VALUES (?,?,?)", l.ID, l.SellerCharacterID, amount); err != nil {
 		return MarketListing{}, 0, err
@@ -645,6 +654,9 @@ func cancelMarketListing(ctx context.Context, tx *sql.Tx, command MarketReturnCo
 	}
 	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
 		return MarketListing{}, 0, ErrMarketListingUnavailable
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `OPEN_MARKET_ACTIVE_ITEM_GUARD` WHERE `LISTING_ID`=? AND `ITEM_ID`=?", l.ID, l.ItemID); err != nil {
+		return MarketListing{}, 0, err
 	}
 	l.Status = MarketListingCancelled
 	l.Version++

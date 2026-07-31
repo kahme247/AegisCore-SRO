@@ -39,6 +39,11 @@ func NPCSelectionTalkData(codeName string) []byte {
 	upper := strings.ToUpper(codeName)
 	var data []byte
 	switch {
+	case upper == "NPC_OPEN_MARKET_JUEL":
+		// SR_GameServer.exe 0x004C7611–0x004C762F identifies this merchant
+		// and advertises service action 0x23. The stock client dispatches that
+		// action to CNIFStallNetwork.
+		data = []byte{0, 1, 0x23, 0}
 	case upper == "NPC_CH_GACHA_MACHINE":
 		data = []byte{0, 1, 0x11, 0}
 	case upper == "NPC_CH_GACHA_OPERATOR":

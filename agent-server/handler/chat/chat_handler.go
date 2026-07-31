@@ -82,6 +82,15 @@ func buildNamedChatUpdate(request MessageRequest, senderName string) (network.Pa
 	return packet, nil
 }
 
+func isPublicChatType(chatType byte) bool {
+	switch chatType {
+	case All, Global, Stall:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -127,6 +136,13 @@ func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session,
 		request.Message, _ = h.filter.Filter(request.Message)
 	}
 
+	if isPublicChatType(request.ChatType) {
+		player, lookupErr := service.GetWorldServiceInstance().GetPlayerByUniqueId(session.UserContext.UniqueID)
+		if lookupErr == nil && player != nil && player.IsGMMuted() {
+			return sendChatResult(session, request, 2)
+		}
+	}
+
 	switch request.ChatType {
 	case All:
 		return handleAllMessage(request, session)
@@ -149,9 +165,6 @@ func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session,
 		return h.handleSocialMessage(ctx, request, session)
 	case PM:
 		return handleWhisperMessage(request, session)
-	case AllGM:
-		gmh := GetGmMessageHandlerInstance()
-		return gmh.HandleAdminMessage(request, session)
 	default:
 		logrus.Debugf("unhandled chat message %v\n", request)
 	}

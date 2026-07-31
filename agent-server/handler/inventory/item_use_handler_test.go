@@ -18,11 +18,12 @@ import (
 )
 
 type itemUseRepositoryFake struct {
-	calls  int
-	err    error
-	result model.ItemUseResult
-	vitals model.ItemUseVitals
-	target model.COSItemTarget
+	calls       int
+	err         error
+	result      model.ItemUseResult
+	vitals      model.ItemUseVitals
+	target      model.COSItemTarget
+	cooldownErr error
 }
 
 type returnTeleportFake struct {
@@ -49,6 +50,14 @@ func (f *itemUseRepositoryFake) UseItem(_ context.Context, _ int64, _ byte, _ ui
 	f.calls++
 	f.vitals = vitals
 	return f.result, f.err
+}
+
+func (f *itemUseRepositoryFake) CheckCooldowns(_ context.Context, _ int, _ []model.CharacterCooldownClaim) error {
+	return f.cooldownErr
+}
+
+func (*itemUseRepositoryFake) ClaimCooldowns(context.Context, int, []model.CharacterCooldownClaim) error {
+	return nil
 }
 
 func (f *itemUseRepositoryFake) UseTargetedItem(_ context.Context, _ int64, _ byte, _ uint16, vitals model.ItemUseVitals, target model.COSItemTarget) (model.ItemUseResult, error) {
@@ -86,6 +95,42 @@ func TestDimensionHoleItemUseDoesNotCommitWhenPortalPublicationFails(t *testing.
 	}
 	if repository.calls != 0 || scopes.reserves != 1 || scopes.releases != 1 || len(world.removed) != 1 {
 		t.Fatalf("publication failure = calls:%d reserves:%d releases:%d removed:%d definition:%d", repository.calls, scopes.reserves, scopes.releases, len(world.removed), definition.ItemRefID)
+	}
+}
+
+func TestDimensionHoleItemUseRejectsActiveCooldownBeforePortalPublication(t *testing.T) {
+	_, ref, session, player := dimensionHoleItemUseFixture(t)
+	repository := &itemUseRepositoryFake{cooldownErr: model.ErrCharacterCooldownActive}
+	world := &dimensionHoleItemUseWorldFake{}
+	scopes := &dimensionHoleItemUseScopeFake{}
+	h := dimensionHoleItemUseHandler(t, player, repository, world, scopes)
+
+	if err := h.handlePacket(context.Background(), session, dimensionHoleItemUseRequest(ref)); err != nil {
+		t.Fatalf("Dimension Hole cooldown rejection error = %v", err)
+	}
+	if repository.calls != 0 || len(world.added) != 0 || len(world.removed) != 0 || scopes.reserves != 0 || scopes.releases != 0 {
+		t.Fatalf("cooldown preflight = calls:%d added:%d removed:%d reserves:%d releases:%d", repository.calls, len(world.added), len(world.removed), scopes.reserves, scopes.releases)
+	}
+}
+
+func TestDimensionHoleItemUseReportsPartyMasterRequirement(t *testing.T) {
+	_, ref, session, player := dimensionHoleItemUseFixture(t)
+	player.Party = nil
+	repository := &itemUseRepositoryFake{}
+	world := &dimensionHoleItemUseWorldFake{}
+	scopes := &dimensionHoleItemUseScopeFake{}
+	handler := dimensionHoleItemUseHandler(t, player, repository, world, scopes)
+	var sent network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = packet; return nil }
+
+	if err := handler.handlePacket(context.Background(), session, dimensionHoleItemUseRequest(ref)); err != nil {
+		t.Fatal(err)
+	}
+	if sent.MessageID != opcode.InventoryItemUseResponse || !bytes.Equal(sent.Payload(), []byte{2, 0x4F, 0x18}) {
+		t.Fatalf("party-master rejection = 0x%04X % X, want B04C 02 4F 18", sent.MessageID, sent.Payload())
+	}
+	if repository.calls != 0 || len(world.added) != 0 || scopes.reserves != 0 {
+		t.Fatalf("party-master rejection mutated state calls=%d portals=%d reserves=%d", repository.calls, len(world.added), scopes.reserves)
 	}
 }
 

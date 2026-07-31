@@ -202,6 +202,23 @@ func (p *Player) ApplyCombatStatusAt(status CombatStatus, now time.Time) bool {
 	return true
 }
 
+// ExpireCombatStatus atomically consumes one naturally expired status token.
+// A replacement or forced removal therefore cannot trigger the old actor's
+// normal-expiry effect.
+func (p *Player) ExpireCombatStatus(kind CombatStatusKind, token uint32, now time.Time) (CombatStatus, bool) {
+	if p == nil || kind == 0 || token == 0 {
+		return CombatStatus{}, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	status, exists := p.combatStatuses[kind]
+	if !exists || status.Token != token || status.ExpiresAt.After(now) {
+		return CombatStatus{}, false
+	}
+	delete(p.combatStatuses, kind)
+	return status, true
+}
+
 func (p *Player) CombatStatus(kind CombatStatusKind, now time.Time) (CombatStatus, bool) {
 	if p == nil || kind == 0 {
 		return CombatStatus{}, false

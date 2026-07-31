@@ -200,6 +200,39 @@ func BuildBuffRemove(tokens ...uint32) network.Packet {
 	return p
 }
 
+// BuildSkillApplicationRecords writes the native 0xB0BC subtype-1 contract.
+// Each three-byte record is opaque application data consumed by the resolved
+// affected entity's client callback; return damage currently has no such
+// subordinate records and therefore supplies an empty slice.
+func BuildSkillApplicationRecords(skillID uint32, applicationFlags byte, affectedUID uint32, records [][3]byte) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntitySkillApplicationResponse
+	p.WriteByte(1)
+	p.WriteUInt32(skillID)
+	p.WriteByte(applicationFlags)
+	p.WriteUInt32(affectedUID)
+	if len(records) > math.MaxUint8 {
+		records = records[:math.MaxUint8]
+	}
+	p.WriteByte(byte(len(records)))
+	for _, record := range records {
+		p.WriteBytes(record[:])
+	}
+	return p
+}
+
+// BuildSkillApplicationDepletion writes the native 0xB0BC subtype-4 branch.
+// Its caller must choose this only where the native producer selects subtype 4.
+func BuildSkillApplicationDepletion(applicationFlags byte, affectedUID uint32, effectValue uint16) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntitySkillApplicationResponse
+	p.WriteByte(4)
+	p.WriteByte(applicationFlags)
+	p.WriteUInt32(affectedUID)
+	p.WriteUInt16(effectValue)
+	return p
+}
+
 func buildAttackBeginHeader(skillID, sourceUID, targetUID, castUID uint32) network.Packet {
 	packet, _ := (vsro188.CombatAttackBeginSuccessPrefixCodec{}).Encode(vsro188.CombatAttackBeginSuccessPrefix{
 		SkillID: skillID, SourceUniqueID: sourceUID, CastUniqueID: castUID, TargetUniqueID: targetUID,

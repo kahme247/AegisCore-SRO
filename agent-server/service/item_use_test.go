@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,15 +11,18 @@ import (
 )
 
 type itemUseServiceRepository struct {
-	characterID       int64
-	slot              byte
-	itemType          uint16
-	vitals            model.ItemUseVitals
-	result            model.ItemUseResult
-	recoveryCurrentHP int
-	recoveryCurrentMP int
-	recoveryHealedHP  int
-	recoveryHealedMP  int
+	characterID         int64
+	slot                byte
+	itemType            uint16
+	vitals              model.ItemUseVitals
+	result              model.ItemUseResult
+	recoveryCurrentHP   int
+	recoveryCurrentMP   int
+	recoveryHealedHP    int
+	recoveryHealedMP    int
+	cooldownCharacterID int
+	cooldownClaims      []model.CharacterCooldownClaim
+	cooldownErr         error
 }
 
 func (r *itemUseServiceRepository) UseItem(_ context.Context, characterID int64, slot byte, itemType uint16, vitals model.ItemUseVitals) (model.ItemUseResult, error) {
@@ -34,6 +38,12 @@ func (r *itemUseServiceRepository) PersistItemBuffRecovery(_ context.Context, _ 
 	r.recoveryCurrentHP, r.recoveryCurrentMP = currentHP, currentMP
 	r.recoveryHealedHP, r.recoveryHealedMP = healedHP, healedMP
 	return true, nil
+}
+
+func (r *itemUseServiceRepository) CheckCooldowns(_ context.Context, characterID int, claims []model.CharacterCooldownClaim) error {
+	r.cooldownCharacterID = characterID
+	r.cooldownClaims = append([]model.CharacterCooldownClaim(nil), claims...)
+	return r.cooldownErr
 }
 
 func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
@@ -58,6 +68,23 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	}
 	if result.NewAmount != 3 || player.BaseStats.HP != 120 || player.BaseStats.MP != 80 || player.Inventory.Items == nil {
 		t.Fatalf("committed result/player = %+v / HP=%d MP=%d inventory=%+v", result, player.BaseStats.HP, player.BaseStats.MP, player.Inventory)
+	}
+}
+
+func TestItemUseServicePreflightsDimensionHoleCooldown(t *testing.T) {
+	repository := &itemUseServiceRepository{cooldownErr: model.ErrCharacterCooldownActive}
+	player := &model.Player{ID: 77}
+	definition := model.DimensionHoleDefinition{ItemRefID: 35883, Cooldown: time.Minute}
+
+	err := NewItemUseService(repository).CheckDimensionHoleCooldown(context.Background(), player, definition)
+	if !errors.Is(err, model.ErrCharacterCooldownActive) {
+		t.Fatalf("CheckDimensionHoleCooldown() error = %v", err)
+	}
+	if repository.cooldownCharacterID != player.ID || len(repository.cooldownClaims) != 1 ||
+		repository.cooldownClaims[0].Kind != model.CharacterCooldownItem ||
+		repository.cooldownClaims[0].SourceID != definition.ItemRefID ||
+		repository.cooldownClaims[0].Duration != definition.Cooldown {
+		t.Fatalf("cooldown preflight = character:%d claims:%+v", repository.cooldownCharacterID, repository.cooldownClaims)
 	}
 }
 

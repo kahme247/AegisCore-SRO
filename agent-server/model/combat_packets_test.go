@@ -307,3 +307,17 @@ func TestBuildTimedBuffAddUsesStockFixedLayout(t *testing.T) {
 		t.Fatalf("stock B0BD trailing bytes = %d", packet.Remaining())
 	}
 }
+
+func TestBuildSkillApplicationPacketsMatchB0BCSubtypesOneAndFour(t *testing.T) {
+	records := [][3]byte{{1, 2, 3}, {4, 5, 6}}
+	one := BuildSkillApplicationRecords(0x11223344, 0x80, 0x55667788, records)
+	wantOne := []byte{1, 0x44, 0x33, 0x22, 0x11, 0x80, 0x88, 0x77, 0x66, 0x55, 2, 1, 2, 3, 4, 5, 6}
+	if one.MessageID != opcode.EntitySkillApplicationResponse || !bytes.Equal(one.Payload(), wantOne) {
+		t.Fatalf("subtype-1 = opcode %04X payload % X, want B0BC % X", one.MessageID, one.Payload(), wantOne)
+	}
+	four := BuildSkillApplicationDepletion(0x80, 0x55667788, 0x99AA)
+	wantFour := []byte{4, 0x80, 0x88, 0x77, 0x66, 0x55, 0xAA, 0x99}
+	if four.MessageID != opcode.EntitySkillApplicationResponse || !bytes.Equal(four.Payload(), wantFour) {
+		t.Fatalf("subtype-4 = opcode %04X payload % X, want B0BC % X", four.MessageID, four.Payload(), wantFour)
+	}
+}

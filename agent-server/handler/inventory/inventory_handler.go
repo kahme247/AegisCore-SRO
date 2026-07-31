@@ -1603,6 +1603,9 @@ func (h *InventoryHandler) handleBuy(ctx context.Context, session *server.Sessio
 	if errors.Join(e1, e2, e3, e4) != nil {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
+	if amount == 0 {
+		return h.sendPacket(session, vsro188.BuildItemOperationFailure(vsro188.NPCBuyErrorInvalidQuantity))
+	}
 	player, err := h.resolvePlayer(session)
 	if err != nil {
 		return err
@@ -1625,7 +1628,7 @@ func (h *InventoryHandler) handleBuy(ctx context.Context, session *server.Sessio
 	}
 	player.CommitEconomy(result.Gold, result.Inventory)
 	goldUpdate := vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: result.Gold})
-	return h.sendPackets(session, goldUpdate, buildBuySuccess(tab, slot, amount, result.DestinationSlots, result.Item))
+	return h.sendPackets(session, goldUpdate, buildBuySuccess(tab, slot, amount, result.DestinationSlots))
 }
 
 func (h *InventoryHandler) handlePackageItemInsertion(ctx context.Context, session *server.Session, operation byte, packet *network.Packet) error {

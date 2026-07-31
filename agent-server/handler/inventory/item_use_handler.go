@@ -18,6 +18,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	dimensionHoleUseErrorUnavailable uint16 = 6206
+	dimensionHoleUseErrorJobSuit     uint16 = 6219
+	dimensionHoleUseErrorPartyMaster uint16 = 6223
+	dimensionHoleUseErrorLevel       uint16 = 6225
+	dimensionHoleUseErrorCooldown    uint16 = 6226
+)
+
 type ReturnTeleportCoordinator interface {
 	PrepareItemReturn(*server.Session, *model.Player) error
 	AbortItemReturn(*server.Session)
@@ -142,24 +150,31 @@ func questInstanceEligible(player *model.Player, questID int) bool {
 }
 
 func dimensionHoleOpenerEligible(player *model.Player, definition model.DimensionHoleDefinition) bool {
+	return dimensionHoleOpenerFailure(player, definition) == 0
+}
+
+func dimensionHoleOpenerFailure(player *model.Player, definition model.DimensionHoleDefinition) uint16 {
 	if player == nil || player.GetUniqueID() == 0 {
-		return false
+		return dimensionHoleUseErrorUnavailable
+	}
+	if model.HasActiveJobSuit(player) {
+		return dimensionHoleUseErrorJobSuit
 	}
 	player.Mutex.Lock()
 	level := player.Level
 	player.Mutex.Unlock()
-	cos := player.COSState.Snapshot()
-	if level < int(definition.MinLevel) || level > int(definition.MaxLevel) || model.HasActiveJobSuit(player) || cos.Mounted || player.GetPVPCape() != model.PvpCapeNone {
-		return false
+	if level < int(definition.MinLevel) || level > int(definition.MaxLevel) {
+		return dimensionHoleUseErrorLevel
 	}
-	// The authored Dimension Hole description permits creating its gate only in
-	// a town. Use the maintained vSRO 1.188 region catalog instead of accepting
-	// an arbitrary safe-looking world position.
-	if !model.IsTownRegionV188(player.GetNavmeshPosition().Region.ID) {
-		return false
+	cos := player.COSState.Snapshot()
+	if cos.Mounted || player.GetPVPCape() != model.PvpCapeNone || !model.IsTownRegionV188(player.GetNavmeshPosition().Region.ID) {
+		return dimensionHoleUseErrorUnavailable
 	}
 	party := player.GetParty()
-	return party != nil && party.MasterUniqueID == player.GetUniqueID()
+	if party == nil || party.MasterUniqueID != player.GetUniqueID() {
+		return dimensionHoleUseErrorPartyMaster
+	}
+	return 0
 }
 
 func RegisterItemUseHandler(target *server.Server, items model.ItemUseRepository, returnTeleport ...ReturnTeleportCoordinator) *ItemUseHandler {
@@ -287,9 +302,15 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	var preparedDimensionHole *service.PreparedDimensionHolePortal
 	dimensionHoleDefinition, isDimensionHole := model.DimensionHoleDefinitionForReference(ref)
 	if refExists && isDimensionHole {
-		if wireRequest.HasCOSTarget || len(wireRequest.ItemData) != 0 || itemType != model.InventoryItemType(ref) ||
-			h.dimensionHoles == nil || !dimensionHoleOpenerEligible(player, dimensionHoleDefinition) {
-			return h.sendFailure(session)
+		if wireRequest.HasCOSTarget || len(wireRequest.ItemData) != 0 || itemType != model.InventoryItemType(ref) || h.dimensionHoles == nil {
+			return h.sendFailureCode(session, dimensionHoleUseErrorUnavailable)
+		}
+		if failure := dimensionHoleOpenerFailure(player, dimensionHoleDefinition); failure != 0 {
+			return h.sendFailureCode(session, failure)
+		}
+		if checkErr := h.useCase.CheckDimensionHoleCooldown(ctx, player, dimensionHoleDefinition); checkErr != nil {
+			logrus.WithError(checkErr).Debug("rejected Dimension Hole cooldown")
+			return h.sendFailureCode(session, dimensionHoleUseErrorCooldown)
 		}
 		preparedDimensionHole, err = h.dimensionHoles.Prepare(ctx, dimensionHoleDefinition, player, player.GetNavmeshPosition())
 		if err != nil {
@@ -1077,6 +1098,10 @@ func buildCOSMountStateSuccess(ownerUniqueID, transportUniqueID uint32) network.
 
 func (h *ItemUseHandler) sendFailure(session *server.Session) error {
 	return h.sendPacket(session, buildItemUseFailure())
+}
+
+func (h *ItemUseHandler) sendFailureCode(session *server.Session, code uint16) error {
+	return h.sendPacket(session, vsro188.BuildItemUseFailure(code))
 }
 func (h *ItemUseHandler) sendPacket(session *server.Session, p network.Packet) error {
 	if session == nil {

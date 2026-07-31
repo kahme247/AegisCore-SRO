@@ -14,6 +14,7 @@ import (
 // player snapshot; packet decoding and response encoding remain in the handler.
 type ItemUseCase interface {
 	UseItem(context.Context, *model.Player, byte, uint16, byte, uint32) (model.ItemUseResult, error)
+	CheckDimensionHoleCooldown(context.Context, *model.Player, model.DimensionHoleDefinition) error
 }
 
 type DimensionHoleItemUseCase interface {
@@ -64,6 +65,24 @@ func (s *ItemUseService) UseDimensionHoleItem(ctx context.Context, player *model
 		return model.ItemUseResult{}, model.ErrItemUseInvalidRequest
 	}
 	return s.useItem(ctx, player, slot, itemType, 0, 0, preparedItemRefID)
+}
+
+// CheckDimensionHoleCooldown prevents a portal from being published for an
+// item that is already on its durable reuse cooldown. The transactional use
+// path still claims the cooldown to resolve concurrent requests.
+func (s *ItemUseService) CheckDimensionHoleCooldown(ctx context.Context, player *model.Player, definition model.DimensionHoleDefinition) error {
+	if s == nil || player == nil || player.ID <= 0 || definition.ItemRefID == 0 || definition.Cooldown <= 0 {
+		return model.ErrItemUseInvalidRequest
+	}
+	repository, ok := s.repository.(model.CharacterCooldownChecker)
+	if !ok {
+		return nil
+	}
+	return repository.CheckCooldowns(ctx, player.ID, []model.CharacterCooldownClaim{{
+		Kind:     model.CharacterCooldownItem,
+		SourceID: definition.ItemRefID,
+		Duration: definition.Cooldown,
+	}})
 }
 
 func (s *ItemUseService) ApplyItemBuffRecovery(ctx context.Context, player *model.Player, recoveryHP, recoveryMP int) (bool, error) {

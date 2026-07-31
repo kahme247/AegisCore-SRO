@@ -36,6 +36,7 @@ func NewDimensionHoleRuntime(world dimensionHolePortalWorld, scopes model.Dimens
 	if err != nil {
 		return nil, fmt.Errorf("configure Dimension Hole admission: %w", err)
 	}
+	lifecycle.ConfigureAdmissionCleanup(admissions.ReleasePortal)
 	return &DimensionHoleRuntime{Scopes: scopes, Portals: portals, Lifecycle: lifecycle, Admissions: admissions}, nil
 }
 

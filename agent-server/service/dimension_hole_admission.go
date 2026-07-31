@@ -82,6 +82,53 @@ func (s *DimensionHoleAdmissionService) Admit(portalUID uint32, player *model.Pl
 	return admission, err
 }
 
+func (s *DimensionHoleAdmissionService) EntryPlayers(portalUID uint32, initiator *model.Player) ([]*model.Player, error) {
+	if s == nil || initiator == nil {
+		return nil, ErrDimensionHoleAdmissionUnavailable
+	}
+	instance, ok := s.instances.Instance(portalUID)
+	if !ok || !validDimensionHoleAdmissionInstance(portalUID, instance) {
+		return nil, ErrDimensionHoleAdmissionInvalid
+	}
+	if err := s.authorize(instance, initiator); err != nil {
+		return nil, err
+	}
+	if initiator.GetUniqueID() != instance.Portal.OwnerUniqueID {
+		return []*model.Player{initiator}, nil
+	}
+	party := initiator.GetParty()
+	if party == nil {
+		return nil, ErrDimensionHoleAdmissionParty
+	}
+	if party.Mutex != nil {
+		party.Mutex.Lock()
+	}
+	memberUIDs := append([]uint32(nil), party.Members...)
+	if party.Mutex != nil {
+		party.Mutex.Unlock()
+	}
+	sort.Slice(memberUIDs, func(i, j int) bool { return memberUIDs[i] < memberUIDs[j] })
+	players := make([]*model.Player, 0, min(len(memberUIDs), int(instance.Portal.Definition.Capacity)))
+	for _, memberUID := range memberUIDs {
+		if len(players) >= int(instance.Portal.Definition.Capacity) {
+			break
+		}
+		member, err := s.players.GetPlayerByUniqueId(memberUID)
+		if err != nil || member == nil {
+			continue
+		}
+		if s.authorize(instance, member) == nil {
+			players = append(players, member)
+		}
+	}
+	for _, member := range players {
+		if member == initiator {
+			return players, nil
+		}
+	}
+	return nil, ErrDimensionHoleAdmissionOwner
+}
+
 func (s *DimensionHoleAdmissionService) admit(portalUID uint32, player *model.Player) (DimensionHoleAdmission, bool, error) {
 	if s == nil || s.instances == nil || s.players == nil {
 		return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionUnavailable
@@ -96,24 +143,25 @@ func (s *DimensionHoleAdmissionService) admit(portalUID uint32, player *model.Pl
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	playerUID := player.GetUniqueID()
 	current, ok := s.instances.Instance(portalUID)
 	if !ok || !sameDimensionHolePortalInstance(instance, current) {
 		return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionInvalid
 	}
-	playerUID := player.GetUniqueID()
 	if existingPortal, exists := s.byPlayer[playerUID]; exists {
-		if existingPortal != portalUID {
+		record := s.byPortal[existingPortal]
+		existing, available := s.instances.Instance(existingPortal)
+		if !available || record == nil || !sameDimensionHolePortalInstance(record.instance, existing) {
+			s.removeAdmissionLocked(playerUID, existingPortal)
+		} else if existingPortal != portalUID {
 			return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionConflict
+		} else {
+			admission, exists := record.members[playerUID]
+			if !exists {
+				return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionInvalid
+			}
+			return admission, false, nil
 		}
-		record := s.byPortal[portalUID]
-		if record == nil || !sameDimensionHolePortalInstance(record.instance, current) {
-			return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionInvalid
-		}
-		admission, exists := record.members[playerUID]
-		if !exists {
-			return DimensionHoleAdmission{}, false, ErrDimensionHoleAdmissionInvalid
-		}
-		return admission, false, nil
 	}
 
 	record := s.byPortal[portalUID]
@@ -136,6 +184,18 @@ func (s *DimensionHoleAdmissionService) admit(portalUID uint32, player *model.Pl
 	record.members[playerUID] = admission
 	s.byPlayer[playerUID] = portalUID
 	return admission, true, nil
+}
+
+func (s *DimensionHoleAdmissionService) removeAdmissionLocked(playerUID, portalUID uint32) {
+	delete(s.byPlayer, playerUID)
+	record := s.byPortal[portalUID]
+	if record == nil {
+		return
+	}
+	delete(record.members, playerUID)
+	if len(record.members) == 0 {
+		delete(s.byPortal, portalUID)
+	}
 }
 
 func (s *DimensionHoleAdmissionService) authorize(instance DimensionHolePortalInstance, player *model.Player) error {
@@ -201,6 +261,23 @@ func sameDimensionHolePortalInstance(left, right DimensionHolePortalInstance) bo
 
 func (s *DimensionHoleAdmissionService) Leave(playerUID uint32) error {
 	return s.leave(playerUID, 0)
+}
+
+// ReleasePortal removes every admission associated with a destroyed portal.
+func (s *DimensionHoleAdmissionService) ReleasePortal(portalUID uint32) {
+	if s == nil || portalUID == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.byPortal[portalUID]
+	if record == nil {
+		return
+	}
+	for playerUID := range record.members {
+		delete(s.byPlayer, playerUID)
+	}
+	delete(s.byPortal, portalUID)
 }
 
 func (s *DimensionHoleAdmissionService) leave(playerUID, expectedPortalUID uint32) error {

@@ -23,6 +23,9 @@ type PartyHandler struct {
 	invitationFallback interface {
 		AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
 	}
+	exchangeInvitationFallback interface {
+		AnswerInvitation(context.Context, *server.Session, bool) (bool, error)
+	}
 	instanceExit interface {
 		SubmitPartyQuestInstanceExit(context.Context, *model.Player) error
 	}
@@ -48,6 +51,11 @@ func RegisterPartyHandlers(target *server.Server, dependencies ...any) {
 			AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
 		}); ok {
 			handler.invitationFallback = fallback
+		}
+		if fallback, ok := dependency.(interface {
+			AnswerInvitation(context.Context, *server.Session, bool) (bool, error)
+		}); ok {
+			handler.exchangeInvitationFallback = fallback
 		}
 		if exit, ok := dependency.(interface {
 			SubmitPartyQuestInstanceExit(context.Context, *model.Player) error

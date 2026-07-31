@@ -520,7 +520,7 @@ func TestDisconnectPartyMasterPromotesNextMemberInJoinOrder(t *testing.T) {
 	}
 }
 
-func TestDisconnectPartyMasterDismissesTwoMemberParty(t *testing.T) {
+func TestDisconnectPartyMasterPromotesOnlyRemainingMember(t *testing.T) {
 	service, players := newPartyCoreFixture(1, 2)
 	created := acceptNewParty(t, service, 1, 2, model.ExpShareItemShare)
 	players[1].Session = nil
@@ -529,14 +529,14 @@ func TestDisconnectPartyMasterDismissesTwoMemberParty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DisconnectPartyMember: %v", err)
 	}
-	if !transition.Dismissed || transition.LeaderChanged {
-		t.Fatalf("disconnect transition = %+v, want dismissed two-member party", transition)
+	if transition.Dismissed || !transition.LeaderChanged || transition.Party.MasterUniqueID != 2 {
+		t.Fatalf("disconnect transition = %+v, want player 2 promoted", transition)
 	}
-	if players[1].GetParty() != nil || players[2].GetParty() != nil {
-		t.Fatalf("dismissed party retained memberships: master=%#v member=%#v", players[1].GetParty(), players[2].GetParty())
+	if players[1].GetParty() != nil || players[2].GetParty() == nil {
+		t.Fatalf("party memberships after promotion: master=%#v member=%#v", players[1].GetParty(), players[2].GetParty())
 	}
-	if _, err := service.SnapshotParty(created.Party.Number); !errors.Is(err, ErrPartyInvalidRequest) {
-		t.Fatalf("dismissed party snapshot error = %v, want invalid request", err)
+	if snapshot, err := service.SnapshotParty(created.Party.Number); err != nil || snapshot.MasterUniqueID != 2 || len(snapshot.Members) != 1 {
+		t.Fatalf("promoted party snapshot = %+v, err = %v", snapshot, err)
 	}
 }
 

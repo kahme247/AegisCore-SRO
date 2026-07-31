@@ -72,7 +72,9 @@ func Definitions() []Definition {
 		serverFlag(GoldenPigEvent, "SR_GameServer.GOLDEN_PIG_FEBRUARY_EVENT", false),
 		serverFlag(ThanksgivingEvent, "SR_GameServer.THANKS_GIVING_EVENT", false),
 		serverFlag(LiberationEvent, "SR_GameServer.LIBERATION_EVENT", false),
-		serverFlag(OpenMarket, "SR_GameServer.SET_FEE_RATE", true, "SR_GameServer.SELL_FEE_RATE"),
+		availableServerFlag(OpenMarket, "SR_GameServer.SET_FEE_RATE", true,
+			Evidence{Source: "SR_GameServer.exe", Locator: "0x00CD6538–0x00CD6578 (0x7506–0x750E open-market request dispatch)"},
+			"SR_GameServer.SELL_FEE_RATE"),
 		availableServerFlag(ServerEventSystem, "SR_ShardManager.SERVER_EVENT_SYSTEM", false,
 			Evidence{Source: "SR_GameServer.exe", Locator: "0x0066F4B0, 0x0066F640, 0x00670CC0"}),
 		availableServerFlag(ChristmasEvent2007, "SR_ShardManager.ChristmasEvent2007", false,
@@ -208,10 +210,10 @@ func serverFlag(key Key, directive string, legacyEnabled bool, additional ...str
 	return unavailableDefinition(key, legacyEnabled, directives, Evidence{Source: "VSRO_TestIn(EPVP)/VSRO_TestIn/VSRO_TestIn/server.cfg", Locator: strings.Join(directives, ", ")})
 }
 
-func availableServerFlag(key Key, directive string, legacyEnabled bool, evidence Evidence) Definition {
+func availableServerFlag(key Key, directive string, legacyEnabled bool, evidence Evidence, additional ...string) Definition {
 	definition := baseDefinition(key, legacyEnabled, evidence)
 	definition.Available = true
-	definition.LegacyDirectives = []string{directive}
+	definition.LegacyDirectives = append([]string{directive}, additional...)
 	return definition
 }
 

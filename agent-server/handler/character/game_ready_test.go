@@ -366,6 +366,37 @@ func TestGameReadyPublishesAvailableNPCQuestIndicators(t *testing.T) {
 	}
 }
 
+func TestGameReadyPublishesOneQuestIndicatorPerNPCTarget(t *testing.T) {
+	repository := &fakeQuestIndicatorRepository{indicators: []model.QuestNPCIndicator{
+		{QuestID: 58, NPCRefObjectID: 2003},
+		{QuestID: 57, NPCRefObjectID: 2003},
+		{QuestID: 57, NPCRefObjectID: 2003},
+	}}
+	player := &model.Player{ID: 123}
+	npc := &model.NPC{SRObject: model.SRObject{UniqueID: 0x11223344, RefObjectID: 2003}}
+	world := &fakeGameReadyPlayers{npcs: []*model.NPC{npc}}
+	var sent []network.Packet
+	if err := publishAvailableQuestIndicators(context.Background(), repository, world, player, func(packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.QuestMarkAdd {
+		t.Fatalf("indicator packets = %#v", sent)
+	}
+	payload := sent[0].Payload()
+	if len(payload) != 24 || binary.LittleEndian.Uint32(payload[:4]) != 1 ||
+		payload[4] != 0x02 || payload[5] != 1 ||
+		binary.LittleEndian.Uint32(payload[20:24]) != npc.GetUniqueID() {
+		t.Fatalf("quest indicator payload = %x", payload)
+	}
+	marks := player.QuestMarksSnapshot()
+	if len(marks) != 1 || marks[0].QuestID != 57 || marks[0].TargetID != npc.GetUniqueID() {
+		t.Fatalf("registered quest indicators = %+v", marks)
+	}
+}
+
 func newGameReadyTestSession(t *testing.T) *server.Session {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()

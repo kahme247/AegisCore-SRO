@@ -86,6 +86,39 @@ func TestDimensionHoleAdmissionServiceAdmitsPartyMembersIdempotentlyAndLeaves(t 
 	}
 }
 
+func TestDimensionHoleAdmissionServiceReleasesExpiredPortalAdmission(t *testing.T) {
+	definition := model.DimensionHoleCatalog()[0]
+	owner := dimensionHoleAdmissionTestPlayer(1, 100, int(definition.MinLevel))
+	member := dimensionHoleAdmissionTestPlayer(2, 200, int(definition.MinLevel))
+	party := dimensionHoleAdmissionTestParty(owner.GetUniqueID(), owner, member)
+	owner.Party = party
+	member.Party = party
+	expired := dimensionHoleAdmissionTestInstance(t, definition, owner, 501, 1)
+	instances := &dimensionHoleAdmissionInstancesFake{byUID: map[uint32]DimensionHolePortalInstance{501: expired}}
+	players := &dimensionHoleAdmissionPlayersFake{byUID: map[uint32]*model.Player{100: owner, 200: member}}
+	admissions, err := NewDimensionHoleAdmissionService(instances, players)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = admissions.Admit(501, member); err != nil {
+		t.Fatalf("Admit(expired portal) error = %v", err)
+	}
+	delete(instances.byUID, 501)
+	replacement := dimensionHoleAdmissionTestInstance(t, definition, owner, 502, 2)
+	instances.byUID[502] = replacement
+
+	admission, err := admissions.Admit(502, member)
+	if err != nil {
+		t.Fatalf("Admit(replacement portal) error = %v", err)
+	}
+	if admission.PortalUID != 502 || admission.Scope != replacement.Lease.Scope {
+		t.Fatalf("replacement admission = %#v", admission)
+	}
+	if members := admissions.Members(501); len(members) != 0 {
+		t.Fatalf("expired portal members = %v", members)
+	}
+}
+
 func TestDimensionHoleAdmissionServiceRejectsInvalidIdentityPartyLevelAndSourceWorld(t *testing.T) {
 	tests := []struct {
 		name string

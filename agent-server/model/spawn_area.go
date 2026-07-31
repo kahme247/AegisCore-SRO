@@ -31,6 +31,22 @@ func (s *SpawnArea) AddNPC(npc *NPC) {
 	s.mutex.Unlock()
 }
 
+func (s *SpawnArea) DrainNPCs() []*NPC {
+	if s == nil {
+		return nil
+	}
+	s.mutex.Lock()
+	npcs := make([]*NPC, 0, len(s.NPCs))
+	for _, npc := range s.NPCs {
+		npcs = append(npcs, npc)
+	}
+	s.NPCs = make(map[uint32]*NPC)
+	s.RespawnTimes = nil
+	s.targetCount = 0
+	s.mutex.Unlock()
+	return npcs
+}
+
 // MarkNPCDead removes one live spawn and schedules exactly one replacement.
 func (s *SpawnArea) MarkNPCDead(uniqueID uint32) bool {
 	if s == nil || uniqueID == 0 {

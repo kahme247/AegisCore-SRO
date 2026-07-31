@@ -10,10 +10,8 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
-func buildBuySuccess(tab, slot byte, amount uint16, destinations []byte, item model.Item) network.Packet {
-	rent := network.EmptyPacket()
-	model.WriteRentInfo(&rent, item)
-	return vsro188.BuildItemBuySuccess(tab, slot, amount, destinations, rent.Payload())
+func buildBuySuccess(tab, slot byte, amount uint16, destinations []byte) network.Packet {
+	return vsro188.BuildItemBuySuccess(tab, slot, amount, destinations)
 }
 
 func buildSellSuccess(source byte, amount uint16, npcUID uint32, buybackSlot byte) network.Packet {
@@ -66,10 +64,6 @@ func buildItemMallBalanceUpdate(balances model.ItemMallBalances) network.Packet 
 
 func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.ItemMallPurchaseResult) network.Packet {
 	if request.operation == BuyItemFromModernMallOperation {
-		itemPayload := network.EmptyPacket()
-		for range result.DestinationSlots {
-			model.WriteRentInfo(&itemPayload, result.Item)
-		}
 		return vsro188.BuildItemMallModernPurchaseSuccess(vsro188.ItemMallModernPurchaseSuccess{
 			ShopGroupID:  result.Position.RefShopGroupID,
 			GroupIndex:   result.Position.GroupIndex,
@@ -77,7 +71,6 @@ func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.
 			SlotIndex:    result.Position.SlotIndex,
 			ResultBytes:  result.DestinationSlots,
 			PackageCount: request.purchaseCount,
-			ItemPayload:  itemPayload.Payload(),
 		})
 	}
 	if request.operation == BuyItemFromMallOperation {

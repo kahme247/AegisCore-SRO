@@ -37,9 +37,16 @@ type TeleportHandler struct {
 	bootstrap  func(*server.Session, *model.Player) error
 	roll       func() int
 	instances  *model.QuestInstanceLifecycle
+	cooldowns  model.CharacterCooldownSnapshotRepository
 	mu         sync.Mutex
 	pending    map[*server.Session]*model.Player
 	prepared   map[*server.Session]*model.Player
+}
+
+func (h *TeleportHandler) ConfigureCooldownRepository(repository model.CharacterCooldownSnapshotRepository) {
+	if h != nil {
+		h.cooldowns = repository
+	}
 }
 
 func (h *TeleportHandler) ConfigureQuestInstanceExit(lifecycle *model.QuestInstanceLifecycle) {
@@ -612,6 +619,41 @@ func (h *TeleportHandler) CompleteItemReturn(session *server.Session, player *mo
 	return nil
 }
 
+// RecallPlayer moves an in-world target to an in-world GM using the same
+// loading, visibility-reset, and teleport-ready sequence as a return scroll.
+func (h *TeleportHandler) RecallPlayer(actor, target *model.Player) error {
+	if h == nil || actor == nil || target == nil || actor.Session == nil || target.Session == nil ||
+		!actor.Session.IsInWorld() || !target.Session.IsInWorld() ||
+		actor.GetGameWorldID() != target.GetGameWorldID() {
+		return fmt.Errorf("GM recall is unavailable")
+	}
+	position := actor.GetNavmeshPosition()
+	return h.TeleportPlayerTo(target, model.TeleportDestination{
+		Region:  position.Region.ID,
+		X:       position.Offset.X,
+		Y:       position.Offset.Y,
+		Z:       position.Offset.Z,
+		WorldID: int16(actor.GetGameWorldID()),
+	})
+}
+
+// TeleportPlayerTo stages an in-world player at a destination validated by
+// the world-region resolver. Teleport-point WorldID is catalog metadata, not
+// the runtime game-world scope used for instance isolation.
+func (h *TeleportHandler) TeleportPlayerTo(target *model.Player, destination model.TeleportDestination) error {
+	if h == nil || target == nil || target.Session == nil || !target.Session.IsInWorld() {
+		return fmt.Errorf("GM teleport is unavailable")
+	}
+	if err := h.PrepareItemReturn(target.Session, target); err != nil {
+		return err
+	}
+	if err := h.CompleteItemReturn(target.Session, target, destination); err != nil {
+		h.AbortItemReturn(target.Session)
+		return err
+	}
+	return nil
+}
+
 func (h *TeleportHandler) handleUse(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if packet.Remaining() != 9 {
 		return fmt.Errorf("teleport request payload length %d, want 9", packet.Remaining())
@@ -734,7 +776,7 @@ func buildTeleportReadyRequest(regionID int16) network.Packet {
 	return packet
 }
 
-func (h *TeleportHandler) handleReady(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *TeleportHandler) handleReady(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if _, err := (vsro188.TeleportReadyResponseCodec{}).Decode(packet); err != nil {
 		return err
 	}
@@ -753,13 +795,26 @@ func (h *TeleportHandler) handleReady(_ context.Context, session *server.Session
 		if err := h.bootstrap(session, player); err != nil {
 			return err
 		}
-	} else if err := lobby.SendCharacterBootstrap(session, player); err != nil {
-		return err
+	} else {
+		cooldowns, err := h.activeItemCooldowns(ctx, player)
+		if err != nil {
+			return err
+		}
+		if err = lobby.SendCharacterBootstrap(session, player, cooldowns); err != nil {
+			return err
+		}
 	}
 	logrus.WithFields(logrus.Fields{
 		"uid": player.GetUniqueID(), "region": position.Region.ID,
 	}).Info("completed teleport character bootstrap")
 	return nil
+}
+
+func (h *TeleportHandler) activeItemCooldowns(ctx context.Context, player *model.Player) ([]model.CharacterCooldownState, error) {
+	if h == nil || h.cooldowns == nil || player == nil || player.ID <= 0 {
+		return nil, model.ErrCharacterCooldownRepositoryUnavailable
+	}
+	return h.cooldowns.ActiveCooldowns(ctx, player.ID, model.CharacterCooldownItem)
 }
 
 func (h *TeleportHandler) resolveDestination(destination model.TeleportDestination) (navmeshv2.RtNavmeshPosition, error) {

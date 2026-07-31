@@ -74,6 +74,9 @@ func (h *PartyHandler) handleMatchingForm(_ context.Context, session *server.Ses
 	if err = h.sendPacket(session, response); err != nil {
 		return err
 	}
+	if err = h.sendPacket(session, buildPartyJoinAcknowledgement(session.UserContext.UniqueID)); err != nil {
+		return err
+	}
 	snapshot, err := h.core().SnapshotParty(partyNumber)
 	if err != nil {
 		return err
