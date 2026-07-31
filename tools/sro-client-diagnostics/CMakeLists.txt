@@ -9,6 +9,7 @@ add_library(Aegis SHARED
     src/client_trace.cpp
     src/auth/launch_context.cpp
     src/compat/navigation_policy.cpp
+    src/compat/debug_render_commands.cpp
     src/core/runtime.cpp
     src/compat/temporary_enhancement_tooltip.cpp
     src/network/gateway_login.cpp
