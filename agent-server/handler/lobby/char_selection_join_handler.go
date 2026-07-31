@@ -436,11 +436,15 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 	return session.Send(pReady)
 }
 
-func writeCharacterQuickSlotConfig(packet *network.Packet, _ *model.Player) {
-	// Populated 0x3013 quick-slot records are not capture-verified. Keep the
-	// proven empty marker so persisted 0x7158 data cannot misalign bootstrap.
-	packet.WriteByte(7)
-	packet.WriteByte(0)
+func writeCharacterQuickSlotConfig(packet *network.Packet, player *model.Player) {
+	slots := player.QuickSlotSnapshot()
+	packet.WriteByte(7) // Required vSRO quick-slot configuration format version.
+	packet.WriteByte(byte(len(slots)))
+	for _, slot := range slots {
+		packet.WriteByte(slot.Sequence)
+		packet.WriteByte(slot.ContentType)
+		packet.WriteUInt32(slot.ContentID)
+	}
 }
 
 func writeCharacterSkillSection(packet *network.Packet, player *model.Player) {
