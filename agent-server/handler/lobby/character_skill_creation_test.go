@@ -108,8 +108,9 @@ func TestCharacterCreationDelegatesReferenceDefaultsToRepository(t *testing.T) {
 func TestCharacterSkillLoadPopulatesPlayerSnapshot(t *testing.T) {
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "load-skills")
-	repository := &characterSkillRepositoryFake{skills: []model.CharacterSkill{{ID: 70, Enabled: 1}, {ID: 1, Enabled: 1}}}
-	handler := &CharacterSelectionHandler{skills: repository}
+	repository := &characterSkillRepositoryFake{skills: []model.CharacterSkill{{ID: 69, Enabled: 1}, {ID: 1, Enabled: 1}}}
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{69: {ID: 69, BasicActivity: 0, BuffModifiers: model.BuffModifiers{HP: 102}}}})
+	handler := &CharacterSelectionHandler{skills: repository, referenceData: catalog}
 	player := &model.Player{ID: 77}
 	if err := handler.loadPlayerSkills(ctx, player); err != nil {
 		t.Fatalf("loadPlayerSkills: %v", err)
@@ -117,9 +118,12 @@ func TestCharacterSkillLoadPopulatesPlayerSnapshot(t *testing.T) {
 	if repository.id != 77 || repository.ctx.Value(contextKey{}) != "load-skills" {
 		t.Fatalf("repository load id/context = %d/%v", repository.id, repository.ctx)
 	}
-	want := []model.CharacterSkill{{ID: 1, Enabled: 1}, {ID: 70, Enabled: 1}}
+	want := []model.CharacterSkill{{ID: 1, Enabled: 1}, {ID: 69, Enabled: 1}}
 	if got := player.SkillSnapshot(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("player skills = %#v, want %#v", got, want)
+	}
+	if player.BonusStats.HP != 102 {
+		t.Fatalf("bootstrap passive HP = %d, want 102", player.BonusStats.HP)
 	}
 }
 

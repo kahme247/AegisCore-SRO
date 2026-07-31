@@ -83,6 +83,7 @@ func (s *SkillService) LearnSkill(ctx context.Context, player *model.Player, ski
 		return model.SkillLearnResult{}, err
 	}
 	player.CommitSkill(result)
+	player.RecalculatePassiveSkillModifiers(s.catalog)
 	return result, nil
 }
 

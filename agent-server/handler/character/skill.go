@@ -24,11 +24,12 @@ const (
 )
 
 type SkillHandler struct {
-	mu         sync.Mutex
-	repository model.SkillLearningRepository
-	useCase    service.SkillUseCase
-	world      masteryWorld
-	send       func(*server.Session, network.Packet) error
+	mu            sync.Mutex
+	repository    model.SkillLearningRepository
+	useCase       service.SkillUseCase
+	referenceData *model.ReferenceDataCatalog
+	world         masteryWorld
+	send          func(*server.Session, network.Packet) error
 }
 
 func RegisterSkillHandler(target *server.Server, repository model.SkillLearningRepository) (*SkillHandler, error) {
@@ -46,6 +47,7 @@ func (h *SkillHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalo
 	}
 	h.mu.Lock()
 	h.useCase = service.NewSkillService(h.repository, catalog)
+	h.referenceData = catalog
 	h.mu.Unlock()
 	return nil
 }
@@ -74,7 +76,13 @@ func (h *SkillHandler) handlePacket(ctx context.Context, session *server.Session
 	if err := h.sendPacket(session, buildSkillSuccess(result.Skill.ID)); err != nil {
 		return err
 	}
-	return h.sendPacket(session, buildSkillPointBalance(result.SkillPoints))
+	if err := h.sendPacket(session, buildSkillPointBalance(result.SkillPoints)); err != nil {
+		return err
+	}
+	if skill, exists := h.referenceData.Skill(result.Skill.ID); exists && skill.IsPassive() {
+		return h.sendPacket(session, player.BuildStatsUpdatePacket())
+	}
+	return nil
 }
 
 func skillErrorCode(err error) uint16 {

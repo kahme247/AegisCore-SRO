@@ -130,17 +130,26 @@ func (modelInventoryStore) GetCharacterInventory(_ context.Context, characterID 
 // requests. The shared lock preserves their original process-wide ordering
 // while the registry preserves ordering for each individual session.
 type CharacterSelectionHandler struct {
-	mu         sync.Mutex
-	characters CharacterStore
-	inventory  CharacterInventoryStore
-	quests     model.CharacterQuestRepository
-	masteries  model.MasteryRepository
-	skills     model.CharacterSkillRepository
-	quickSlots model.CharacterQuickSlotRepository
-	movement   model.MovementSettingsRepository
-	creator    model.CharacterCreator
-	loadPlayer func(model.Char, *server.Session) (*model.Player, error)
-	world      characterJoinWorld
+	mu            sync.Mutex
+	characters    CharacterStore
+	inventory     CharacterInventoryStore
+	quests        model.CharacterQuestRepository
+	masteries     model.MasteryRepository
+	skills        model.CharacterSkillRepository
+	quickSlots    model.CharacterQuickSlotRepository
+	movement      model.MovementSettingsRepository
+	referenceData *model.ReferenceDataCatalog
+	creator       model.CharacterCreator
+	loadPlayer    func(model.Char, *server.Session) (*model.Player, error)
+	world         characterJoinWorld
+}
+
+func (h *CharacterSelectionHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) error {
+	if h == nil || catalog == nil {
+		return model.ErrReferenceDataRepositoryUnavailable
+	}
+	h.referenceData = catalog
+	return nil
 }
 
 func (h *CharacterSelectionHandler) ConfigureQuickSlotRepository(quickSlots model.CharacterQuickSlotRepository) error {

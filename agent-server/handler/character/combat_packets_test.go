@@ -30,9 +30,17 @@ type combatVitalsFake struct {
 	expectedMP int
 	cost       int
 	spent      bool
+	saveCalls  int
+	savedID    int
+	savedHP    int
+	savedMP    int
 }
 
-func (*combatVitalsFake) SaveVitals(context.Context, int, int, int) error { return nil }
+func (f *combatVitalsFake) SaveVitals(_ context.Context, id, hp, mp int) error {
+	f.saveCalls++
+	f.savedID, f.savedHP, f.savedMP = id, hp, mp
+	return nil
+}
 func (*combatVitalsFake) Resurrect(context.Context, int, int, int) (bool, error) {
 	return false, nil
 }
@@ -447,7 +455,7 @@ func TestCombatSelfBuffPublishesLifecycleAndExpires(t *testing.T) {
 		world:  &combatWorldFake{player: player},
 		vitals: vitals,
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-			skillID: {ID: skillID, BasicActivity: 2, BuffDuration: 15000, ReuseDelay: 30000, RequiredWeapon1: 6, RequiredWeapon2: 255, ConsumeMP: 10},
+			skillID: {ID: skillID, BasicActivity: 2, BuffDuration: 15000, ReuseDelay: 30000, RequiredWeapon1: 6, RequiredWeapon2: 255, ConsumeMP: 10, BuffModifiers: model.BuffModifiers{HP: 50, Strength: 5, PhysicalDefense: 12}},
 		}}),
 		nextSkill: make(map[skillCooldownKey]time.Time),
 		schedule: func(delay time.Duration, callback func()) {
@@ -463,16 +471,86 @@ func TestCombatSelfBuffPublishesLifecycleAndExpires(t *testing.T) {
 	if err := handler.handlePacket(context.Background(), session, combatSelfSkillPacket(skillID)); err != nil {
 		t.Fatalf("self buff cast failed: %v", err)
 	}
-	want := []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityBuffAdd, opcode.EntityActionResponse, opcode.EntityUpdateStatus}
+	want := []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityBuffAdd, opcode.EntityActionResponse, opcode.EntityUpdateStats, opcode.EntityUpdateStatus}
 	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, want) {
 		t.Fatalf("buff packets = %04X, want %04X", got, want)
 	}
 	if len(player.ActiveBuffs) != 1 || expire == nil {
 		t.Fatalf("active buffs/callback = %#v/%v", player.ActiveBuffs, expire != nil)
 	}
+	if player.BonusStats.HP != 50 || player.BonusStats.Str != 5 || player.BonusDefenseStats.PhyDef != 12 {
+		t.Fatalf("applied modifiers = base=%+v defense=%+v", player.BonusStats, player.BonusDefenseStats)
+	}
 	expire()
-	if len(player.ActiveBuffs) != 0 || sent[len(sent)-1].MessageID != opcode.EntityBuffRemove {
+	if len(player.ActiveBuffs) != 0 || sent[len(sent)-2].MessageID != opcode.EntityBuffRemove || sent[len(sent)-1].MessageID != opcode.EntityUpdateStats {
 		t.Fatalf("expired buff state = %#v packets=%04X", player.ActiveBuffs, packetOpcodesForCombat(sent))
+	}
+	if player.BonusStats.HP != 0 || player.BonusStats.Str != 0 || player.BonusDefenseStats.PhyDef != 0 {
+		t.Fatalf("rolled-back modifiers = base=%+v defense=%+v", player.BonusStats, player.BonusDefenseStats)
+	}
+}
+
+func TestCombatSelfHealingPersistsVitalsAndPublishesCast(t *testing.T) {
+	const skillID = uint32(149)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject:  model.SRObject{UniqueID: 100},
+		ID:        42,
+		Level:     10,
+		Session:   session,
+		BaseStats: model.BaseStats{HP: 10, MP: 20, Str: 20, Int: 20},
+		Skills:    map[uint32]byte{skillID: 1},
+		Inventory: model.NewInventory(nil),
+	}
+	player.SetLifeState(model.Alive)
+	vitals := &combatVitalsFake{spent: true}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:  &combatWorldFake{player: player},
+		vitals: vitals,
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, TargetSelf: true, HealHP: 50, HealMP: 20, ConsumeMP: 10, ReuseDelay: 1000},
+		}}),
+		nextSkill: make(map[skillCooldownKey]time.Time),
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatSelfSkillPacket(skillID)); err != nil {
+		t.Fatalf("self healing cast failed: %v", err)
+	}
+	if hp, mp := player.CurrentVitals(); hp != 60 || mp != 30 {
+		t.Fatalf("healed vitals = %d/%d, want 60/30", hp, mp)
+	}
+	if vitals.spendCalls != 1 || vitals.expectedMP != 20 || vitals.cost != 10 {
+		t.Fatalf("MP spend = calls:%d expected:%d cost:%d", vitals.spendCalls, vitals.expectedMP, vitals.cost)
+	}
+	if vitals.saveCalls != 1 || vitals.savedID != 42 || vitals.savedHP != 60 || vitals.savedMP != 30 {
+		t.Fatalf("saved healing = calls:%d id:%d hp:%d mp:%d", vitals.saveCalls, vitals.savedID, vitals.savedHP, vitals.savedMP)
+	}
+	want := []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse, opcode.EntityUpdateStatus}
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, want) {
+		t.Fatalf("healing packets = %04X, want %04X", got, want)
+	}
+}
+
+func TestValidHealingTargetRequiresSharedParty(t *testing.T) {
+	caster, target := &model.Player{}, &model.Player{}
+	caster.SetLifeState(model.Alive)
+	target.SetLifeState(model.Alive)
+	skill := model.RefSkill{TargetAlly: true}
+	if validHealingTarget(caster, target, skill) {
+		t.Fatal("unaffiliated player accepted as healing target")
+	}
+	party := &model.Party{Number: 9}
+	if err := caster.AddToParty(party); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.AddToParty(party); err != nil {
+		t.Fatal(err)
+	}
+	if !validHealingTarget(caster, target, skill) {
+		t.Fatal("shared party player rejected as healing target")
 	}
 }
 

@@ -24,8 +24,8 @@ func (f *skillLearningRepositoryFake) LearnSkill(_ context.Context, _ int, comma
 func TestSkillServiceUpgradesOnlyImmediateLevelAfterRequirements(t *testing.T) {
 	const original = uint32(100)
 	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-		100: {ID: 100, GroupID: 1, BasicGroup: "FIRE", BasicOriginal: original, BasicLevel: 1},
-		101: {ID: 101, GroupID: 1, BasicGroup: "FIRE", BasicOriginal: original, BasicLevel: 2, Mastery1: 257, MasteryLevel1: 2, RequiredSkill1: 200, RequiredLevel1: 1, RequiredSP: 3, RequiredRace: 0},
+		100: {ID: 100, GroupID: 1, BasicGroup: "FIRE", BasicOriginal: original, BasicLevel: 1, BuffModifiers: model.BuffModifiers{HP: 102}},
+		101: {ID: 101, GroupID: 1, BasicGroup: "FIRE", BasicOriginal: original, BasicLevel: 2, Mastery1: 257, MasteryLevel1: 2, RequiredSkill1: 200, RequiredLevel1: 1, RequiredSP: 3, RequiredRace: 0, BuffModifiers: model.BuffModifiers{HP: 197}},
 		200: {ID: 200, GroupID: 2, BasicGroup: "PASSIVE", BasicOriginal: 200, BasicLevel: 1},
 	}})
 	repository := &skillLearningRepositoryFake{result: model.SkillLearnResult{Skill: model.CharacterSkill{ID: 101, Enabled: 1}, ReplacedSkillID: 100, SkillPoints: 7}}
@@ -43,6 +43,9 @@ func TestSkillServiceUpgradesOnlyImmediateLevelAfterRequirements(t *testing.T) {
 	}
 	if _, exists := player.Skills[100]; exists {
 		t.Fatal("previous skill level remains in runtime state")
+	}
+	if player.BonusStats.HP != 197 || player.PassiveSkillModifiers.HP != 197 {
+		t.Fatalf("upgraded passive HP = bonus:%d passive:%d, want 197/197", player.BonusStats.HP, player.PassiveSkillModifiers.HP)
 	}
 }
 

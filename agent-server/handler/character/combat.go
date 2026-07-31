@@ -14,7 +14,6 @@ import (
 	"github.com/ferdoran/go-sro/framework/network"
 	"github.com/ferdoran/go-sro/framework/network/opcode"
 	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/framework/utils"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
@@ -177,6 +176,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	var skill model.RefSkill
 	isSkillCast := false
 	isSelfBuff := false
+	isSelfHealing := false
 	var player *model.Player
 	switch actionType {
 	case actionTypeAttack:
@@ -192,10 +192,13 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 				return readErr
 			}
 			candidate, exists := h.referenceSkill(candidateID)
-			if terminator == 0 && exists && candidate.ExecutionKind() == model.SkillExecutionBuff {
+			kind := candidate.ExecutionKind()
+			if terminator == 0 && exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionHealing && candidate.TargetSelf) {
 				player, err = h.resolveCombatPlayer(session)
 				if err == nil && playerOwnsSkill(player, candidateID) {
-					skill, isSkillCast, isSelfBuff = candidate, true, true
+					skill, isSkillCast = candidate, true
+					isSelfBuff = kind == model.SkillExecutionBuff
+					isSelfHealing = kind == model.SkillExecutionHealing
 					break
 				}
 			}
@@ -249,6 +252,21 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	if isSelfBuff {
 		return h.executeSelfBuff(ctx, session, player, skill)
 	}
+	if isSelfHealing {
+		return h.executeHealing(ctx, session, player, player, skill)
+	}
+	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionHealing {
+		caster, resolveErr := h.resolveCombatPlayer(session)
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+			return h.sendActionState(session, false)
+		}
+		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
+		target, targetIsPlayer := object.(*model.Player)
+		if resolveErr != nil || !targetIsPlayer || !validHealingTarget(caster, target, skill) {
+			return h.sendActionState(session, false)
+		}
+		return h.executeHealing(ctx, session, caster, target, skill)
+	}
 
 	player, target, err := h.resolveAttack(session, targetUID)
 	if err != nil {
@@ -290,6 +308,88 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if !isSkillCast && target.GetLifeState() == model.Alive && target.CurrentHitPoints() < before {
 		h.startRepeatingAttack(player, session, target)
+	}
+	return nil
+}
+
+func validHealingTarget(caster, target *model.Player, skill model.RefSkill) bool {
+	if caster == nil || target == nil || target.GetLifeState() != model.Alive {
+		return false
+	}
+	if caster == target {
+		return skill.TargetSelf || skill.TargetAlly
+	}
+	party := caster.GetParty()
+	return party != nil && party == target.GetParty() && (skill.TargetAlly || skill.TargetParty)
+}
+
+func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Session, caster, target *model.Player, skill model.RefSkill) error {
+	if caster == nil || target == nil || skill.ExecutionKind() != model.SkillExecutionHealing || h.vitals == nil {
+		return h.sendActionState(session, false)
+	}
+	if reason, rejected := skillCastRejection(caster, skill); rejected {
+		return h.sendSkillCastError(session, reason)
+	}
+	if skill.ActionRange > 0 && caster != target && navmeshv2.HorizontalDistance(caster.GetNavmeshPosition(), target.GetNavmeshPosition()) > float32(skill.ActionRange)/10 {
+		return h.sendActionState(session, false)
+	}
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	key := skillCooldownKey{playerUID: caster.GetUniqueID(), skillID: skill.ID}
+	if next := h.nextSkill[key]; !next.IsZero() && now.Before(next) {
+		return h.sendActionState(session, false)
+	}
+	casterHP, casterMP := caster.CurrentVitals()
+	if skill.ConsumeMP > 0 {
+		spent, err := h.vitals.SpendMP(ctx, caster.ID, casterMP, skill.ConsumeMP)
+		if err != nil {
+			return err
+		}
+		if !spent || !caster.CommitMP(casterMP, skill.ConsumeMP) {
+			return h.sendSkillCastError(session, skillCastErrorInvalidMP)
+		}
+		casterMP -= skill.ConsumeMP
+	}
+	expectedHP, expectedMP, healedHP, healedMP, ok := target.PreviewHealing(skill.HealHP, skill.HealMP)
+	if !ok {
+		return h.sendActionState(session, false)
+	}
+	if err := h.vitals.SaveVitals(ctx, target.ID, healedHP, healedMP); err != nil {
+		return err
+	}
+	if !target.CommitHealing(expectedHP, expectedMP, healedHP, healedMP) {
+		return h.sendActionState(session, false)
+	}
+	if h.nextSkill == nil {
+		h.nextSkill = make(map[skillCooldownKey]time.Time)
+	}
+	if skill.ReuseDelay > 0 {
+		h.nextSkill[key] = now.Add(time.Duration(skill.ReuseDelay) * time.Millisecond)
+	}
+	if err := h.sendActionState(session, true); err != nil {
+		return err
+	}
+	castUID := model.NextActionUID()
+	begin := model.BuildBuffCastBegin(skill.ID, caster.GetUniqueID(), target.GetUniqueID(), castUID)
+	end := model.BuildBuffCastEnd(caster.GetUniqueID(), castUID)
+	if err := h.emitAttack(caster, &begin); err != nil {
+		return err
+	}
+	if err := h.emitAttack(caster, &end); err != nil {
+		return err
+	}
+	if err := h.sendActionState(session, false); err != nil {
+		return err
+	}
+	targetVitals := model.BuildVitalsUpdatePacket(target.GetUniqueID(), healedHP, healedMP)
+	if err := h.sendPlayerPacket(target.Session, targetVitals); err != nil {
+		return err
+	}
+	if caster != target && skill.ConsumeMP > 0 {
+		casterVitals := model.BuildVitalsUpdatePacket(caster.GetUniqueID(), casterHP, casterMP)
+		return h.sendPlayerPacket(session, casterVitals)
 	}
 	return nil
 }
@@ -400,7 +500,7 @@ func (h *CombatHandler) executeSelfBuff(ctx context.Context, session *server.Ses
 	}
 	duration := time.Duration(skill.BuffDuration) * time.Millisecond
 	token := model.NextActionUID()
-	replacedToken, committed := player.CommitActiveBuff(skill.ID, token, duration)
+	replacedToken, committed := player.CommitActiveBuff(skill.ID, token, duration, skill.BuffModifiers)
 	if !committed {
 		return h.sendActionState(session, false)
 	}
@@ -429,6 +529,9 @@ func (h *CombatHandler) executeSelfBuff(ctx context.Context, session *server.Ses
 	if err := h.sendActionState(session, false); err != nil {
 		return err
 	}
+	if err := h.sendPlayerPacket(session, player.BuildStatsUpdatePacket()); err != nil {
+		return err
+	}
 	if h.schedule != nil {
 		h.schedule(duration, func() { h.expireBuff(player, token) })
 	}
@@ -446,6 +549,7 @@ func (h *CombatHandler) expireBuff(player *model.Player, token uint32) {
 	}
 	packet := model.BuildBuffRemove(token)
 	_ = h.emitAttack(player, &packet)
+	_ = h.sendPlayerPacket(player.Session, player.BuildStatsUpdatePacket())
 }
 
 func (h *CombatHandler) skillAttackReach(player *model.Player, target *model.NPC, skill model.RefSkill) float32 {
@@ -484,7 +588,7 @@ func (h *CombatHandler) executeAttack(ctx context.Context, session *server.Sessi
 		return h.sendActionState(session, false)
 	}
 	targetUID := target.GetUniqueID()
-	damage := (utils.BaseMinAttack(player.BaseStats.Str) + utils.BaseMaxAttack(player.BaseStats.Str)) / 2
+	damage := player.AverageAttackPower(false)
 	if damage < 1 {
 		damage = 1
 	}
@@ -616,11 +720,7 @@ func (h *CombatHandler) skillStrikes(skill model.RefSkill) []model.RefSkill {
 }
 
 func skillStrikeDamage(player *model.Player, skill model.RefSkill) int {
-	attribute := player.BaseStats.Str
-	if skill.IsMagicalAttack() {
-		attribute = player.BaseStats.Int
-	}
-	baseDamage := (utils.BaseMinAttack(attribute) + utils.BaseMaxAttack(attribute)) / 2
+	baseDamage := player.AverageAttackPower(skill.IsMagicalAttack())
 	percent := skill.AttackPercent
 	if percent <= 0 {
 		percent = 100

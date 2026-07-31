@@ -17,7 +17,33 @@ const (
 	skillParameterDuration     = 1685418593
 	skillParameterHeal         = 1751474540
 	skillParameterResurrection = 1919251317
+	skillParameterBlock        = 25202
+	skillParameterParry        = 25970
+	skillParameterHit          = 26738
+	skillParameterDamage       = 6582901
+	skillParameterHP           = 6844521
+	skillParameterMP           = 7172201
+	skillParameterDefense      = 1684366960
+	skillParameterIntellect    = 1768846441
+	skillParameterStrength     = 1937011305
 )
+
+type BuffModifiers struct {
+	HP               int
+	HPPercent        int
+	MP               int
+	MPPercent        int
+	Strength         int
+	Intellect        int
+	HitRate          int
+	HitRatePercent   int
+	DamagePercent    int
+	PhysicalDefense  int
+	MagicalDefense   int
+	BlockRate        int
+	ParryRate        int
+	ParryRatePercent int
+}
 
 // RefSkill contains the server-side timing and reach values needed to execute
 // a reference skill without inventing combat constants. The values come from
@@ -70,6 +96,7 @@ type RefSkill struct {
 	HealHP          int
 	HealMP          int
 	ResurrectLevel  int
+	BuffModifiers   BuffModifiers
 	Params          [50]int
 }
 
@@ -105,6 +132,7 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 func (s *RefSkill) parseParameters() {
 	s.AttackType, s.AttackPercent, s.AttackMin, s.AttackMax = 0, 0, 0, 0
 	s.BuffDuration, s.HealHP, s.HealMP, s.ResurrectLevel = 0, 0, 0, 0
+	s.BuffModifiers = BuffModifiers{}
 	for index, parameter := range s.Params {
 		switch parameter {
 		case skillParameterAttack:
@@ -126,6 +154,43 @@ func (s *RefSkill) parseParameters() {
 		case skillParameterResurrection:
 			if index+2 < len(s.Params) {
 				s.ResurrectLevel = s.Params[index+1]
+			}
+		case skillParameterHP:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.HP, s.BuffModifiers.HPPercent = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterMP:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.MP, s.BuffModifiers.MPPercent = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterStrength:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.Strength = s.Params[index+1]
+			}
+		case skillParameterIntellect:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.Intellect = s.Params[index+1]
+			}
+		case skillParameterHit:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.HitRate, s.BuffModifiers.HitRatePercent = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterParry:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.ParryRate, s.BuffModifiers.ParryRatePercent = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterDamage:
+			if index+1 < len(s.Params) {
+				s.BuffModifiers.DamagePercent = s.Params[index+1]
+			}
+		case skillParameterDefense:
+			if index+3 < len(s.Params) {
+				s.BuffModifiers.PhysicalDefense = s.Params[index+1]
+				s.BuffModifiers.MagicalDefense = s.Params[index+2]
+			}
+		case skillParameterBlock:
+			if index+2 < len(s.Params) {
+				s.BuffModifiers.BlockRate = s.Params[index+2]
 			}
 		}
 	}

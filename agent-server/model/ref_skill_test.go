@@ -39,3 +39,24 @@ func TestRefSkillClassifiesHealingAndResurrection(t *testing.T) {
 		t.Fatalf("resurrection skill = %+v", resurrection)
 	}
 }
+
+func TestRefSkillParsesVerifiedBuffModifiers(t *testing.T) {
+	var skill RefSkill
+	copy(skill.Params[:], []int{
+		skillParameterHP, 102, 5,
+		skillParameterMP, 80, 4,
+		skillParameterStrength, 12, 0,
+		skillParameterIntellect, 13, 0,
+		skillParameterHit, 9, 2,
+		skillParameterParry, 11, 3,
+		skillParameterDamage, 4,
+		skillParameterDefense, 37, 41, 0,
+		skillParameterBlock, 15, 3,
+	})
+	skill.parseParameters()
+
+	want := BuffModifiers{HP: 102, HPPercent: 5, MP: 80, MPPercent: 4, Strength: 12, Intellect: 13, HitRate: 9, HitRatePercent: 2, DamagePercent: 4, PhysicalDefense: 37, MagicalDefense: 41, BlockRate: 3, ParryRate: 11, ParryRatePercent: 3}
+	if skill.BuffModifiers != want {
+		t.Fatalf("buff modifiers = %+v, want %+v", skill.BuffModifiers, want)
+	}
+}

@@ -65,11 +65,12 @@ type AgentServer struct {
 	Exchange *exchange.Manager
 	// GuildStorage owns the database-backed exclusive guild chest lease and is
 	// retained so disconnect teardown can release it immediately.
-	GuildStorage  model.GuildStorageRepository
-	Combat        *character.CombatHandler
-	Skill         *character.SkillHandler
-	Vitals        model.CharacterVitalsRepository
-	GameplayRates *manager.GameplayRateManager
+	GuildStorage       model.GuildStorageRepository
+	Combat             *character.CombatHandler
+	Skill              *character.SkillHandler
+	CharacterSelection *lobby.CharacterSelectionHandler
+	Vitals             model.CharacterVitalsRepository
+	GameplayRates      *manager.GameplayRateManager
 	//SpawnEngine             *spawn.SpawnEngine
 }
 
@@ -219,6 +220,7 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureMovementSettingsRepository(repositories.MovementSettings); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent movement settings: %w", err)
 	}
+	agentServer.CharacterSelection = characterSelection
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv)
 	character.RegisterGameReadyHandler(&serv)
 	character.RegisterGuideHandler(&serv)
@@ -496,6 +498,9 @@ func main() {
 		}
 		referenceCatalog := model.NewReferenceDataCatalog(snapshot)
 		agentServer.Combat.ConfigureReferenceData(referenceCatalog)
+		if err := agentServer.CharacterSelection.ConfigureReferenceData(referenceCatalog); err != nil {
+			log.Fatalf("Agent character passive-skill bootstrap failed: %v", err)
+		}
 		if err := agentServer.Skill.ConfigureReferenceData(referenceCatalog); err != nil {
 			log.Fatalf("Agent skill reference-data bootstrap failed: %v", err)
 		}

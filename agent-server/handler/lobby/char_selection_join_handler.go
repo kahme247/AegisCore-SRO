@@ -276,6 +276,7 @@ func (h *CharacterSelectionHandler) loadPlayerSkills(ctx context.Context, player
 		return err
 	}
 	player.SetSkills(skills)
+	player.RecalculatePassiveSkillModifiers(h.referenceData)
 	return nil
 }
 
@@ -375,8 +376,13 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 	pDataBody.WriteByte(0)
 	pDataBody.WriteByte(0)
 	pDataBody.WriteByte(0xFF)
-	pDataBody.WriteUInt64(0)
-	pDataBody.WriteUInt32(uint32(player.ID))
+	// Guide bit 0 suppresses the stock client's first-login defaults. Leaving
+	// it clear makes vSRO overwrite restored quick slots 1-4 and persist those
+	// defaults back through 0x7158 on every relog.
+	pDataBody.WriteUInt64(1)
+	// Stock vSRO identifies client configuration with the account JID, not the
+	// shard character ID.
+	pDataBody.WriteUInt32(session.UserContext.UserID)
 	if player.IsGm {
 		pDataBody.WriteByte(1)
 	} else {
@@ -430,15 +436,11 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 	return session.Send(pReady)
 }
 
-func writeCharacterQuickSlotConfig(packet *network.Packet, player *model.Player) {
-	slots := player.QuickSlotSnapshot()
-	packet.WriteByte(7) // Number of client configuration families in this stream.
-	packet.WriteByte(byte(len(slots)))
-	for _, slot := range slots {
-		packet.WriteByte(slot.Sequence)
-		packet.WriteByte(slot.ContentType)
-		packet.WriteUInt32(slot.ContentID)
-	}
+func writeCharacterQuickSlotConfig(packet *network.Packet, _ *model.Player) {
+	// Populated 0x3013 quick-slot records are not capture-verified. Keep the
+	// proven empty marker so persisted 0x7158 data cannot misalign bootstrap.
+	packet.WriteByte(7)
+	packet.WriteByte(0)
 }
 
 func writeCharacterSkillSection(packet *network.Packet, player *model.Player) {

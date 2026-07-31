@@ -61,45 +61,46 @@ type Player struct {
 	LifeState
 	BodyState
 	BattleState
-	CharKnownObjectList *CharKnownObjectList
-	Session             *server.Session
-	Mutex               sync.Mutex
-	economyGate         sync.Mutex
-	Scale               byte
-	ID                  int
-	CharName            string
-	Inventory           Inventory
-	BaseStats           BaseStats
-	BaseAttackStats     AttackStats
-	BaseDefenseStats    DefenseStats
-	BonusStats          BonusBaseStats
-	BonusAttackStats    BonusAttackStats
-	BonusDefenseStats   BonusDefenseStats
-	PhyAbsorbPercent    int
-	MagAbsorbPercent    int
-	PhyBalancePercent   int
-	MagBalancePercent   int
-	SkillPoints         int
-	StatPoints          int
-	ExpOffset           uint64
-	SkillExpOffset      uint
-	Gold                uint64
-	Masteries           map[uint32]byte
-	Skills              map[uint32]byte
-	ActiveBuffs         map[uint32]ActiveBuff
-	QuickSlots          map[byte]CharacterQuickSlot
-	Quests              []CharacterQuest
-	Level               int
-	MaxLevel            int
-	PKState             PKState
-	CTFTeam             CTFTeam
-	PVPCape             PVPCape
-	IsGm                bool
-	Party               *Party
-	WalkSpeed           float32
-	RunSpeed            float32
-	HwanSpeed           float32
-	COSState            PlayerCOSState
+	CharKnownObjectList   *CharKnownObjectList
+	Session               *server.Session
+	Mutex                 sync.Mutex
+	economyGate           sync.Mutex
+	Scale                 byte
+	ID                    int
+	CharName              string
+	Inventory             Inventory
+	BaseStats             BaseStats
+	BaseAttackStats       AttackStats
+	BaseDefenseStats      DefenseStats
+	BonusStats            BonusBaseStats
+	BonusAttackStats      BonusAttackStats
+	BonusDefenseStats     BonusDefenseStats
+	PassiveSkillModifiers BuffModifiers
+	PhyAbsorbPercent      int
+	MagAbsorbPercent      int
+	PhyBalancePercent     int
+	MagBalancePercent     int
+	SkillPoints           int
+	StatPoints            int
+	ExpOffset             uint64
+	SkillExpOffset        uint
+	Gold                  uint64
+	Masteries             map[uint32]byte
+	Skills                map[uint32]byte
+	ActiveBuffs           map[uint32]ActiveBuff
+	QuickSlots            map[byte]CharacterQuickSlot
+	Quests                []CharacterQuest
+	Level                 int
+	MaxLevel              int
+	PKState               PKState
+	CTFTeam               CTFTeam
+	PVPCape               PVPCape
+	IsGm                  bool
+	Party                 *Party
+	WalkSpeed             float32
+	RunSpeed              float32
+	HwanSpeed             float32
+	COSState              PlayerCOSState
 
 	/* TODO
 	- Teleport Position
@@ -320,11 +321,30 @@ func (p *Player) MaxVitals() (int, int) {
 	p.Mutex.Lock()
 	level, stats, bonus := p.Level, p.BaseStats, p.BonusStats
 	p.Mutex.Unlock()
-	maxHP := utils.BaseHPOrMP(level, stats.Str) + bonus.HP
-	maxMP := utils.BaseHPOrMP(level, stats.Int) + bonus.MP
+	maxHP := utils.BaseHPOrMP(level, stats.Str+bonus.Str) + bonus.HP
+	maxMP := utils.BaseHPOrMP(level, stats.Int+bonus.Int) + bonus.MP
 	maxHP += maxHP * bonus.HpPercent / 100
 	maxMP += maxMP * bonus.MpPercent / 100
 	return maxHP, maxMP
+}
+
+func (p *Player) AverageAttackPower(magical bool) int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	attribute := p.BaseStats.Str + p.BonusStats.Str
+	minimumBonus, maximumBonus := p.BonusAttackStats.PhyAttackMin, p.BonusAttackStats.PhyAttackMax
+	percent := p.BonusAttackStats.PhyAttackPercent
+	if magical {
+		attribute = p.BaseStats.Int + p.BonusStats.Int
+		minimumBonus, maximumBonus = p.BonusAttackStats.MagAttackMin, p.BonusAttackStats.MagAttackMax
+		percent = p.BonusAttackStats.MagAttackPercent
+	}
+	minimum := utils.BaseMinAttack(attribute) + minimumBonus
+	maximum := utils.BaseMaxAttack(attribute) + maximumBonus
+	return applyStatPercent((minimum+maximum)/2, percent)
 }
 
 func (p *Player) CurrentVitals() (int, int) {
@@ -346,6 +366,37 @@ func (p *Player) CommitMP(expectedMP, cost int) bool {
 		return false
 	}
 	p.BaseStats.MP -= cost
+	return true
+}
+
+func (p *Player) PreviewHealing(hpAmount, mpAmount int) (hp, mp, healedHP, healedMP int, ok bool) {
+	if p == nil || hpAmount < 0 || mpAmount < 0 {
+		return 0, 0, 0, 0, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	maxHP := utils.BaseHPOrMP(p.Level, p.BaseStats.Str+p.BonusStats.Str) + p.BonusStats.HP
+	maxMP := utils.BaseHPOrMP(p.Level, p.BaseStats.Int+p.BonusStats.Int) + p.BonusStats.MP
+	maxHP += maxHP * p.BonusStats.HpPercent / 100
+	maxMP += maxMP * p.BonusStats.MpPercent / 100
+	hp, mp = p.BaseStats.HP, p.BaseStats.MP
+	healedHP, healedMP = min(hp+hpAmount, maxHP), min(mp+mpAmount, maxMP)
+	return hp, mp, healedHP, healedMP, true
+}
+
+func (p *Player) CommitHealing(expectedHP, expectedMP, hp, mp int) bool {
+	if p == nil || hp <= 0 || mp < 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.LifeState != Alive || p.BaseStats.HP != expectedHP || p.BaseStats.MP != expectedMP {
+		return false
+	}
+	p.BaseStats.HP, p.BaseStats.MP = hp, mp
 	return true
 }
 
@@ -399,27 +450,42 @@ func (p *Player) BuildStatsUpdatePacket() network.Packet {
 	level := p.Level
 	stats := p.BaseStats
 	bonus := p.BonusStats
+	attackBonus := p.BonusAttackStats
+	defenseBonus := p.BonusDefenseStats
 	p.Mutex.Unlock()
+	effectiveStr, effectiveInt := stats.Str+bonus.Str, stats.Int+bonus.Int
+	phyMin := applyStatPercent(utils.BaseMinAttack(effectiveStr)+attackBonus.PhyAttackMin, attackBonus.PhyAttackPercent)
+	phyMax := applyStatPercent(utils.BaseMaxAttack(effectiveStr)+attackBonus.PhyAttackMax, attackBonus.PhyAttackPercent)
+	magMin := applyStatPercent(utils.BaseMinAttack(effectiveInt)+attackBonus.MagAttackMin, attackBonus.MagAttackPercent)
+	magMax := applyStatPercent(utils.BaseMaxAttack(effectiveInt)+attackBonus.MagAttackMax, attackBonus.MagAttackPercent)
+	phyDef := applyStatPercent(utils.BaseDef(effectiveStr)+defenseBonus.PhyDef, defenseBonus.PhyDefPercent)
+	magDef := applyStatPercent(utils.BaseDef(effectiveInt)+defenseBonus.MagDef, defenseBonus.MagDefPercent)
+	hitRate := applyStatPercent(11+attackBonus.HitRate, attackBonus.HitRatePercent)
+	parryRate := applyStatPercent(11+defenseBonus.ParryRate, defenseBonus.ParryRatePercent)
 
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityUpdateStats
-	packet.WriteUInt32(uint32(utils.BaseMinAttack(stats.Str))) // PhyAttackMin
-	packet.WriteUInt32(uint32(utils.BaseMaxAttack(stats.Str))) // PhyAttackMax
-	packet.WriteUInt32(uint32(utils.BaseMinAttack(stats.Int))) // MagAttackMin
-	packet.WriteUInt32(uint32(utils.BaseMaxAttack(stats.Int))) // MagAttackMax
-	packet.WriteUInt16(uint16(utils.BaseDef(stats.Str)))       // Phy Def
-	packet.WriteUInt16(uint16(utils.BaseDef(stats.Int)))       // Mag Def
-	packet.WriteUInt16(11)                                     // Hit Rate
-	packet.WriteUInt16(11)                                     // Parry Rate
-	maxHP := utils.BaseHPOrMP(level, stats.Str) + bonus.HP
-	maxMP := utils.BaseHPOrMP(level, stats.Int) + bonus.MP
+	packet.WriteUInt32(uint32(phyMin))
+	packet.WriteUInt32(uint32(phyMax))
+	packet.WriteUInt32(uint32(magMin))
+	packet.WriteUInt32(uint32(magMax))
+	packet.WriteUInt16(uint16(phyDef))
+	packet.WriteUInt16(uint16(magDef))
+	packet.WriteUInt16(uint16(hitRate))
+	packet.WriteUInt16(uint16(parryRate))
+	maxHP := utils.BaseHPOrMP(level, effectiveStr) + bonus.HP
+	maxMP := utils.BaseHPOrMP(level, effectiveInt) + bonus.MP
 	maxHP += maxHP * bonus.HpPercent / 100
 	maxMP += maxMP * bonus.MpPercent / 100
 	packet.WriteUInt32(uint32(maxHP))
 	packet.WriteUInt32(uint32(maxMP))
-	packet.WriteUInt16(uint16(stats.Str))
-	packet.WriteUInt16(uint16(stats.Int))
+	packet.WriteUInt16(uint16(effectiveStr))
+	packet.WriteUInt16(uint16(effectiveInt))
 	return packet
+}
+
+func applyStatPercent(value, percent int) int {
+	return value + value*percent/100
 }
 
 func (p *Player) SendMovementStateUpdate() {
