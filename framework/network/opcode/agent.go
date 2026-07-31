@@ -23,6 +23,7 @@ const (
 	AlchemyAvatarResponse      uint16 = 0x34A8
 	AlchemyAvatarGrantRequest  uint16 = 0x34A9
 	AlchemyAvatarGrantResponse uint16 = 0x34AA
+	GMForceCircleUpdate        uint16 = 0x34BB
 
 	ItemOperationRequest         uint16 = 0x7034
 	ItemOperationResponse        uint16 = 0xB034
@@ -381,24 +382,26 @@ const (
 
 	// Fourth-pass stock-client registrations. These close the remaining gaps
 	// across CNetProcessIn, CNetProcessSecond, and CNetProcessThird.
-	UnknownUpdate3077               uint16 = 0x3077
-	COSUnknownUpdate0               uint16 = 0x30C1
-	ActionUnknownUpdate2            uint16 = 0x30D2
-	VietnamMRSystemUpdate           uint16 = 0x3122
-	PremiumUnknownUpdate315A        uint16 = 0x315A
-	LegacyRemovedUpdate315E         uint16 = 0x315E
-	UnknownUpdate3209               uint16 = 0x3209
-	UnknownUpdate320A               uint16 = 0x320A
-	UnknownUpdate320B               uint16 = 0x320B
-	UnknownUpdate320C               uint16 = 0x320C
-	UnknownUpdate325C               uint16 = 0x325C
-	UnknownUpdate325D               uint16 = 0x325D
-	UnknownUpdate325E               uint16 = 0x325E
-	UnknownUpdate34BA               uint16 = 0x34BA
-	ServerEventUpdate               uint16 = 0x34F2
-	AcademyUnknownUpdate3C86        uint16 = 0x3C86
-	AcademyUnknownUpdate3C87        uint16 = 0x3C87
-	EntitySkillUnknownResponse      uint16 = 0xB0BC
+	UnknownUpdate3077              uint16 = 0x3077
+	COSUnknownUpdate0              uint16 = 0x30C1
+	ActionUnknownUpdate2           uint16 = 0x30D2
+	VietnamMRSystemUpdate          uint16 = 0x3122
+	PremiumUnknownUpdate315A       uint16 = 0x315A
+	LegacyRemovedUpdate315E        uint16 = 0x315E
+	UnknownUpdate3209              uint16 = 0x3209
+	UnknownUpdate320A              uint16 = 0x320A
+	UnknownUpdate320B              uint16 = 0x320B
+	UnknownUpdate320C              uint16 = 0x320C
+	UnknownUpdate325C              uint16 = 0x325C
+	UnknownUpdate325D              uint16 = 0x325D
+	UnknownUpdate325E              uint16 = 0x325E
+	UnknownUpdate34BA              uint16 = 0x34BA
+	ServerEventUpdate              uint16 = 0x34F2
+	AcademyUnknownUpdate3C86       uint16 = 0x3C86
+	AcademyUnknownUpdate3C87       uint16 = 0x3C87
+	EntitySkillApplicationResponse uint16 = 0xB0BC
+	// EntitySkillUnknownResponse is retained for source compatibility.
+	EntitySkillUnknownResponse      uint16 = EntitySkillApplicationResponse
 	SilkUnknownResponse             uint16 = 0xB121
 	UnhandledResponseB461           uint16 = 0xB461
 	UnhandledResponseB462           uint16 = 0xB462

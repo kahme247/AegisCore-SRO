@@ -15,8 +15,8 @@ func TestItemEconomySuccessEnvelopesMatchMaintainedLayouts(t *testing.T) {
 	}{
 		{
 			name:   "buy",
-			packet: BuildItemBuySuccess(3, 4, 0x1234, []byte{0x0D, 0x0E}, []byte{0x99}),
-			want:   []byte{1, 0x08, 3, 4, 2, 0x0D, 0x0E, 0x34, 0x12, 0x99},
+			packet: BuildItemBuySuccess(3, 4, 0x1234, []byte{0x0D, 0x0E}),
+			want:   []byte{1, 0x08, 3, 4, 2, 0x0D, 0x0E, 0x34, 0x12, 0, 0, 0, 0},
 		},
 		{
 			name:   "sell",

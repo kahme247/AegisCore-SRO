@@ -120,17 +120,16 @@ func DecodeCashNotification(packet *network.Packet) (CashNotification, error) {
 }
 
 // ItemMallModernPurchaseSuccess is the operation-0x18 success body inside a
-// stock 0xB034 response. In the confirmed response mode, the client reads the
-// destination/result byte vector and trailing u16, then stops; it does not
-// read a variable rent/item body after that point.
+// stock 0xB034 response. The client consumes the destination/result byte
+// vector, package count, and a trailing u32.
 type ItemMallModernPurchaseSuccess struct {
-	ShopGroupID  uint16
-	GroupIndex   byte
-	TabIndex     byte
-	SlotIndex    byte
-	ResultBytes  []byte
-	PackageCount uint16
-	ItemPayload  []byte
+	ShopGroupID   uint16
+	GroupIndex    byte
+	TabIndex      byte
+	SlotIndex     byte
+	ResultBytes   []byte
+	PackageCount  uint16
+	TrailingValue uint32
 }
 
 // ItemMallLegacyPurchaseSuccess is the fixed selector/slot/count envelope
@@ -162,10 +161,9 @@ func BuildItemMallLegacyPurchaseSuccess(success ItemMallLegacyPurchaseSuccess) n
 	return packet
 }
 
-// BuildItemMallModernPurchaseSuccess writes the confirmed response envelope:
+// BuildItemMallModernPurchaseSuccess writes the stock response envelope:
 // result=1, operation=0x18, shop/group/tab/slot selectors, result-byte count,
-// result bytes, and trailing package/count u16. No variable item body follows
-// this mode-zero response grammar.
+// result bytes, package/count u16, and trailing u32.
 func BuildItemMallModernPurchaseSuccess(success ItemMallModernPurchaseSuccess) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemOperationResponse
@@ -180,14 +178,12 @@ func BuildItemMallModernPurchaseSuccess(success ItemMallModernPurchaseSuccess) n
 		packet.WriteByte(value)
 	}
 	packet.WriteUInt16(success.PackageCount)
-	_ = packet.WriteBytes(success.ItemPayload)
+	packet.WriteUInt32(success.TrailingValue)
 	return packet
 }
 
-// DecodeItemMallModernPurchaseSuccess decodes the confirmed mode-zero
-// operation-0x18 response grammar. The client consumes no bytes after the
-// trailing package/count u16, so trailing rent/item data is rejected rather
-// than silently assigned to a different packet.
+// DecodeItemMallModernPurchaseSuccess decodes the stock operation-0x18
+// response grammar, including the mandatory trailing u32.
 func DecodeItemMallModernPurchaseSuccess(packet *network.Packet) (ItemMallModernPurchaseSuccess, error) {
 	if packet == nil {
 		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("0xB034 operation-0x18 packet is nil")
@@ -232,11 +228,11 @@ func DecodeItemMallModernPurchaseSuccess(packet *network.Packet) (ItemMallModern
 	if success.PackageCount, err = packet.ReadUInt16(); err != nil {
 		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("read 0x18 trailing package count: %w", err)
 	}
+	if success.TrailingValue, err = packet.ReadUInt32(); err != nil {
+		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("read 0x18 trailing value: %w", err)
+	}
 	if packet.Remaining() != 0 {
-		success.ItemPayload, err = packet.ReadBytes(packet.Remaining())
-		if err != nil {
-			return ItemMallModernPurchaseSuccess{}, fmt.Errorf("read 0x18 item payload: %w", err)
-		}
+		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("0x18 response contains trailing data")
 	}
 	return success, nil
 }

@@ -1,7 +1,6 @@
 package vsro188
 
 import (
-	"bytes"
 	"encoding/hex"
 	"testing"
 
@@ -101,7 +100,6 @@ func TestItemMallModernPurchaseSuccessMatchesStockB034Layout(t *testing.T) {
 		SlotIndex:    13,
 		ResultBytes:  []byte{14},
 		PackageCount: 1,
-		ItemPayload:  []byte{0, 0, 0, 0},
 	})
 	if got, want := hex.EncodeToString(packet.Payload()), "01181b0402010d010e010000000000"; got != want {
 		t.Fatalf("modern purchase payload = %s, want %s", got, want)
@@ -112,22 +110,19 @@ func TestItemMallModernPurchaseSuccessMatchesStockB034Layout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.ShopGroupID != 1051 || decoded.GroupIndex != 2 || decoded.TabIndex != 1 || decoded.SlotIndex != 13 || len(decoded.ResultBytes) != 1 || decoded.ResultBytes[0] != 14 || decoded.PackageCount != 1 || !bytes.Equal(decoded.ItemPayload, []byte{0, 0, 0, 0}) {
+	if decoded.ShopGroupID != 1051 || decoded.GroupIndex != 2 || decoded.TabIndex != 1 || decoded.SlotIndex != 13 || len(decoded.ResultBytes) != 1 || decoded.ResultBytes[0] != 14 || decoded.PackageCount != 1 || decoded.TrailingValue != 0 {
 		t.Fatalf("decoded modern purchase = %+v", decoded)
 	}
 }
 
-func TestDecodeItemMallModernPurchaseSuccessPreservesItemBody(t *testing.T) {
+func TestDecodeItemMallModernPurchaseSuccessRejectsTrailingData(t *testing.T) {
 	packet := BuildItemMallModernPurchaseSuccess(ItemMallModernPurchaseSuccess{
 		ShopGroupID: 1051, GroupIndex: 2, TabIndex: 1, SlotIndex: 13,
-		ResultBytes: []byte{14}, PackageCount: 1, ItemPayload: []byte{0xAA, 0xBB, 0xCC, 0xDD},
+		ResultBytes: []byte{14}, PackageCount: 1,
 	})
-	decoded, err := DecodeItemMallModernPurchaseSuccess(&packet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(decoded.ItemPayload, []byte{0xAA, 0xBB, 0xCC, 0xDD}) {
-		t.Fatalf("item payload = %x", decoded.ItemPayload)
+	packet.WriteByte(0xAA)
+	if _, err := DecodeItemMallModernPurchaseSuccess(&packet); err == nil {
+		t.Fatal("modern purchase with trailing data decoded successfully")
 	}
 }
 

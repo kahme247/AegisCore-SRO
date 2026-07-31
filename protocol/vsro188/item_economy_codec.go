@@ -10,17 +10,17 @@ import (
 var ErrInvalidCOSSellPayload = errors.New("invalid COS sell payload")
 
 const (
-	SpecialtyErrorTraderOnly uint16 = 0x1860
-	SpecialtyErrorNoCart     uint16 = 0x1861
-	SpecialtyErrorNotBuyer   uint16 = 0x1863
-	SpecialtyErrorCartTooFar uint16 = 0x1865
-	SpecialtyErrorStolen     uint16 = 0x1868
+	SpecialtyErrorTraderOnly   uint16 = 0x1860
+	SpecialtyErrorNoCart       uint16 = 0x1861
+	SpecialtyErrorNotBuyer     uint16 = 0x1863
+	SpecialtyErrorCartTooFar   uint16 = 0x1865
+	SpecialtyErrorStolen       uint16 = 0x1868
+	NPCBuyErrorInvalidQuantity uint16 = 0x1829
 )
 
-// BuildItemBuySuccess writes the confirmed ordinary operation-0x08 success
-// envelope. RentPayload is supplied by the domain item serializer because
-// rent-field interpretation belongs to the maintained item model.
-func BuildItemBuySuccess(tab, slot byte, amount uint16, destinations []byte, rentPayload []byte) network.Packet {
+// BuildItemBuySuccess writes the complete ordinary operation-0x08 success
+// envelope consumed by the stock client.
+func BuildItemBuySuccess(tab, slot byte, amount uint16, destinations []byte) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemOperationResponse
 	packet.WriteByte(1)
@@ -30,7 +30,9 @@ func BuildItemBuySuccess(tab, slot byte, amount uint16, destinations []byte, ren
 	packet.WriteByte(byte(len(destinations)))
 	_ = packet.WriteBytes(destinations)
 	packet.WriteUInt16(amount)
-	_ = packet.WriteBytes(rentPayload)
+	// The stock client consumes this fixed u32 after the operation-0x08
+	// completion record. Omitting it leaves its 0xB034 reader at EOF.
+	packet.WriteUInt32(0)
 	return packet
 }
 

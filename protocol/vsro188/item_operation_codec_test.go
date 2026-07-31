@@ -214,7 +214,7 @@ func TestMagicCubeSuccessBodiesMatchStockB034Decoder(t *testing.T) {
 	}{
 		{name: "push", success: MagicCubeSuccess{Operation: 0x27, Source: 0x0D, Destination: 2, Amount: 0x1234}, want: []byte{1, 0x27, 0x0D, 2, 0x34, 0x12}},
 		{name: "pop", success: MagicCubeSuccess{Operation: 0x28, Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3}, want: []byte{1, 0x28, 0x44, 0x33, 0x22, 0x11, 2, 0x0E, 3, 0}},
-		{name: "delete", success: MagicCubeSuccess{Operation: 0x29, DeleteScalar: 7, Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3}, want: []byte{1, 0x29, 7, 0x44, 0x33, 0x22, 0x11, 2, 0x0E, 3, 0}},
+		{name: "delete", success: MagicCubeSuccess{Operation: 0x29, DeleteScalar: 7, Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3}, want: []byte{1, 0x29, 7, 0x44, 0x33, 0x22, 0x11, 3, 0}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

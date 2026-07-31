@@ -13,6 +13,8 @@ const (
 	ExchangeCancelRequest  uint16 = 0x7084
 	ExchangeCancelResponse uint16 = 0xB084
 
+	// 0x3080 is the shared player-invitation envelope; exchange uses kind 1.
+	ExchangeInvitationResponse  uint16 = 0x3080
 	ExchangeStartedResponse     uint16 = 0x3085
 	ExchangeConfirmedResponse   uint16 = 0x3086
 	ExchangeApprovedResponse    uint16 = 0x3087

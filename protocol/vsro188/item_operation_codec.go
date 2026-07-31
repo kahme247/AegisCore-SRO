@@ -127,8 +127,8 @@ func DecodeMagicCubeMoveRequestBody(operation byte, packet *network.Packet) (Mag
 // MagicCubeSuccess is the semantic-neutral stock 0xB034 record shared by
 // operations 0x27-0x29. Operation 0x29 is response-only: the GameServer's
 // 0x0050CE80 startup table installs request handlers for 0x27 and 0x28 but
-// leaves the 0x29 entry null. DeleteScalar and Context are emitted only by
-// 0x29; Context is also emitted first by 0x28.
+// leaves the 0x29 entry null. Its client decoder reads DeleteScalar, Context,
+// and Amount only; Source and Destination belong exclusively to 0x27/0x28.
 type MagicCubeSuccess struct {
 	Operation    byte
 	DeleteScalar byte
@@ -152,6 +152,8 @@ func BuildMagicCubeSuccess(success MagicCubeSuccess) (network.Packet, error) {
 	case ItemOperationMagicCubeDelete:
 		packet.WriteByte(success.DeleteScalar)
 		packet.WriteUInt32(success.Context)
+		packet.WriteUInt16(success.Amount)
+		return packet, nil
 	}
 	packet.WriteByte(success.Source)
 	packet.WriteByte(success.Destination)
