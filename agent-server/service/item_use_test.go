@@ -29,6 +29,7 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	player := &model.Player{ID: 77, Level: 10}
 	player.BaseStats.HP, player.BaseStats.MP = 50, 40
 	player.BaseStats.Str, player.BaseStats.Int = 20, 15
+	player.BonusStats.HP, player.BonusStats.MP = 102, 51
 
 	result, err := NewItemUseService(repository).UseRecoveryItem(context.Background(), player, 14, 0x08EC)
 	if err != nil {
@@ -37,7 +38,7 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	if repository.characterID != 77 || repository.slot != 14 || repository.itemType != 0x08EC {
 		t.Fatalf("repository request = character %d slot %d type 0x%04X", repository.characterID, repository.slot, repository.itemType)
 	}
-	if repository.vitals.HP != 50 || repository.vitals.MP != 40 || repository.vitals.MaxHP != utils.BaseHPOrMP(10, 20) || repository.vitals.MaxMP != utils.BaseHPOrMP(10, 15) {
+	if repository.vitals.HP != 50 || repository.vitals.MP != 40 || repository.vitals.MaxHP != utils.BaseHPOrMP(10, 20)+102 || repository.vitals.MaxMP != utils.BaseHPOrMP(10, 15)+51 {
 		t.Fatalf("repository vitals = %+v", repository.vitals)
 	}
 	if result.NewAmount != 3 || player.BaseStats.HP != 120 || player.BaseStats.MP != 80 || player.Inventory.Items == nil {

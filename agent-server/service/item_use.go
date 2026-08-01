@@ -33,10 +33,14 @@ func (s *ItemUseService) UseRecoveryItem(ctx context.Context, player *model.Play
 	// existing lock order and hold the player lock through the transaction so a
 	// potion cannot publish a stale pre-damage snapshot.
 	player.Mutex.Lock()
+	maxHP := utils.BaseHPOrMP(player.Level, player.BaseStats.Str+player.BonusStats.Str) + player.BonusStats.HP
+	maxMP := utils.BaseHPOrMP(player.Level, player.BaseStats.Int+player.BonusStats.Int) + player.BonusStats.MP
+	maxHP += maxHP * player.BonusStats.HpPercent / 100
+	maxMP += maxMP * player.BonusStats.MpPercent / 100
 	vitals := model.ItemUseVitals{
 		HP: player.BaseStats.HP, MP: player.BaseStats.MP,
-		MaxHP: utils.BaseHPOrMP(player.Level, player.BaseStats.Str),
-		MaxMP: utils.BaseHPOrMP(player.Level, player.BaseStats.Int),
+		MaxHP: maxHP,
+		MaxMP: maxMP,
 	}
 	result, err := s.repository.UseRecoveryItem(ctx, int64(player.ID), slot, itemType, vitals)
 	if err != nil {
