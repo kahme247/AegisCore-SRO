@@ -14,11 +14,13 @@ pin an immutable image, verify its bootstrap contents and keep DB ports private.
 
 ## Schema sources
 
-- `create_sro_account.sql` and `create_sro_shard.sql` are destructive historical
-  bootstrap dumps. They drop/recreate tables, include sample data, and do not
-  represent the fully migrated schema.
-- The baseline dumps are not consumed by `cmd/migrate`; the shard dump also
-  contains `DELIMITER` syntax that the migration parser intentionally rejects.
+- `create_sro_account.sql` and `create_sro_shard.sql` are destructive fresh-install
+  snapshots. They include the final schema, migration-owned seed/backfill data,
+  sample data, and applied migration ledgers through account `000001` and shard
+  `000026` (with the intentional `000007` gap).
+- The snapshots are not consumed by `cmd/migrate`; they must be loaded by a
+  MySQL-capable client. Their pre-seeded ledgers let `cmd/migrate` verify the
+  embedded catalog and apply only migrations added after the snapshot.
 - `grant_user_permissions.sql` grants the application user access to both
   schemas.
 - `migrations/account` and `migrations/shard` are the embedded forward catalog.

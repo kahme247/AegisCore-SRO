@@ -15,6 +15,13 @@ The catalog may be non-contiguous, so a clean ledger proceeds from `000006` to
 history. Do not add or renumber that version without reconciling every deployed
 ledger.
 
+The fresh-install snapshots in `db/create_sro_account.sql` and
+`db/create_sro_shard.sql` already contain the catalog's final schema, data
+backfills and exact `applied` ledger rows. Running this command after loading
+those snapshots is therefore a checksum/history verification and a no-op until
+a newer migration is added. Existing deployments must continue using the
+migration runner rather than reloading the destructive snapshots.
+
 ## Files and immutability
 
 ```text
