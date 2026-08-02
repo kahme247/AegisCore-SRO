@@ -1,4 +1,4 @@
-package migrations
+package db_test
 
 import (
 	"fmt"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	migrationassets "github.com/ferdoran/go-sro/db/migrations"
 	frameworkdb "github.com/ferdoran/go-sro/framework/db"
 )
 
@@ -16,8 +17,8 @@ func TestFreshInstallSnapshotsContainCompleteMigrationHistory(t *testing.T) {
 		target   frameworkdb.MigrationTarget
 		snapshot string
 	}{
-		{target: frameworkdb.MigrationTargetAccount, snapshot: "../create_sro_account.sql"},
-		{target: frameworkdb.MigrationTargetShard, snapshot: "../create_sro_shard.sql"},
+		{target: frameworkdb.MigrationTargetAccount, snapshot: "create_sro_account.sql"},
+		{target: frameworkdb.MigrationTargetShard, snapshot: "create_sro_shard.sql"},
 	}
 
 	for _, target := range targets {
@@ -25,7 +26,7 @@ func TestFreshInstallSnapshotsContainCompleteMigrationHistory(t *testing.T) {
 		t.Run(string(target.target), func(t *testing.T) {
 			t.Parallel()
 
-			catalog, err := frameworkdb.LoadMigrationCatalog(Files, string(target.target))
+			catalog, err := frameworkdb.LoadMigrationCatalog(migrationassets.Files, string(target.target))
 			if err != nil {
 				t.Fatalf("LoadMigrationCatalog: %v", err)
 			}
