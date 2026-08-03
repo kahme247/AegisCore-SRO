@@ -2,11 +2,14 @@ package service
 
 import (
 	"errors"
+	"net"
 	"sync"
 	"testing"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/ferdoran/go-sro/framework/server"
 )
 
 func TestWorldServiceRejectsDuplicateCharacterWithoutOverwritingIndexes(t *testing.T) {
@@ -92,6 +95,7 @@ func TestWorldSnapshotsDoNotExposeMutableCollectionBacking(t *testing.T) {
 	world := &WorldService{
 		regions:                map[int16]*navmeshv2.RtNavmeshTerrain{25000: {Region: navmeshv2.Region{ID: 25000}}},
 		spawns:                 map[int16][]*model.SpawnArea{25000: {}},
+		playersByUniqueId:      map[uint32]*model.Player{2: second, 1: first},
 		visibleObjectsByRegion: map[int16][]model.ISRObject{25000: {first}},
 		mutex:                  &sync.Mutex{},
 	}
@@ -128,4 +132,40 @@ func TestWorldSnapshotsDoNotExposeMutableCollectionBacking(t *testing.T) {
 		world.mutex.Unlock()
 	}
 	<-finished
+}
+
+func TestWorldActivePlayerSnapshotExcludesCharacterLoadingSessions(t *testing.T) {
+	loadingClient, loadingServer := net.Pipe()
+	defer loadingClient.Close()
+	defer loadingServer.Close()
+	activeClient, activeServer := net.Pipe()
+	defer activeClient.Close()
+	defer activeServer.Close()
+	loadingSession := server.NewSession(loadingServer, network.EncodingOptions{}, nil, nil, "loading")
+	activeSession := server.NewSession(activeServer, network.EncodingOptions{}, nil, nil, "active")
+	defer loadingSession.Close()
+	defer activeSession.Close()
+	loadingSession.MarkAuthenticated()
+	activeSession.MarkAuthenticated()
+	if !loadingSession.EnterLobby() || !loadingSession.BeginCharacterLoading() {
+		t.Fatal("failed to prepare loading session")
+	}
+	if !activeSession.EnterLobby() || !activeSession.BeginCharacterLoading() || !activeSession.CompleteCharacterLoading() {
+		t.Fatal("failed to prepare active session")
+	}
+	loading := &model.Player{Session: loadingSession, SRObject: model.SRObject{UniqueID: 1}}
+	active := &model.Player{Session: activeSession, SRObject: model.SRObject{UniqueID: 2}}
+	world := &WorldService{
+		playersByUniqueId: map[uint32]*model.Player{2: active, 1: loading},
+		mutex:             &sync.Mutex{},
+	}
+
+	players := world.GetActivePlayers()
+	if len(players) != 1 || players[0] != active {
+		t.Fatalf("active player snapshot = %#v, want only in-world player", players)
+	}
+	players[0] = loading
+	if got := world.GetActivePlayers(); len(got) != 1 || got[0] != active {
+		t.Fatal("active player snapshot shared its mutable backing array")
+	}
 }

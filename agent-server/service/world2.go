@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -837,6 +838,25 @@ func (w *WorldService) GetVisibleObjectsForRegion(regionId int16) []model.ISRObj
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	return append([]model.ISRObject(nil), w.visibleObjectsByRegion[regionId]...)
+}
+
+// GetActivePlayers returns a detached, UID-sorted snapshot of players whose
+// clients completed character loading. Staged players must not receive world
+// spawn packets before their bootstrap and GameReady exchange finishes.
+func (w *WorldService) GetActivePlayers() []*model.Player {
+	if w == nil || w.mutex == nil {
+		return nil
+	}
+	w.mutex.Lock()
+	players := make([]*model.Player, 0, len(w.playersByUniqueId))
+	for _, player := range w.playersByUniqueId {
+		if player != nil && player.GetSession() != nil && player.GetSession().IsInWorld() {
+			players = append(players, player)
+		}
+	}
+	w.mutex.Unlock()
+	sort.Slice(players, func(i, j int) bool { return players[i].GetUniqueID() < players[j].GetUniqueID() })
+	return players
 }
 
 func (w *WorldService) GetKnownObjectsAroundObject(object model.ISRObject) map[uint32]model.ISRObject {

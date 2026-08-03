@@ -35,23 +35,15 @@ func (s *SpawnManager) updateSpawns() {
 	for s.started {
 		select {
 		case <-s.ticker.C:
-			for _, regionID := range world.GetRegionIDs() {
-				for _, object := range world.GetVisibleObjectsForRegion(regionID) {
+			for _, player := range world.GetActivePlayers() {
+				objectsToDespawn := player.GetCharKnownObjectList().GetObjectsToDespawn()
+				if len(objectsToDespawn) > 0 {
+					groupSpawnObjects(player, objectsToDespawn, false)
+				}
 
-					if player, isPlayer := object.(model.IPlayer); isPlayer {
-						objectsToDespawn := player.GetCharKnownObjectList().GetObjectsToDespawn()
-						if len(objectsToDespawn) > 0 {
-							groupSpawnObjects(player, objectsToDespawn, false)
-						}
-
-						objectsToSpawn := player.GetCharKnownObjectList().GetObjectsToSpawn()
-						if len(objectsToSpawn) > 0 {
-							groupSpawnObjects(player, objectsToSpawn, true)
-						}
-
-					} else {
-						logrus.Tracef("object %d is not a player. it is a %s, %T with name %s", object.GetUniqueID(), object.GetType(), object, object.GetName())
-					}
+				objectsToSpawn := player.GetCharKnownObjectList().GetObjectsToSpawn()
+				if len(objectsToSpawn) > 0 {
+					groupSpawnObjects(player, objectsToSpawn, true)
 				}
 			}
 		}
