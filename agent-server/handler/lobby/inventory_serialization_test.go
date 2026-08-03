@@ -53,11 +53,11 @@ func TestCharacterListAppearanceIsIndependentOfInventoryMapInsertionOrder(t *tes
 	}
 
 	const itemCountOffset = 35
-	if got, want := packets[0][itemCountOffset], byte(3); got != want {
+	if got, want := packets[0][itemCountOffset], byte(2); got != want {
 		t.Fatalf("character list item count = %d, want %d", got, want)
 	}
 	offset := itemCountOffset + 1
-	for _, wantRefID := range []uint32{0x1000, 0x6000, 0x4000} {
+	for _, wantRefID := range []uint32{0x1000, 0x6000} {
 		if got := binary.LittleEndian.Uint32(packets[0][offset : offset+4]); got != wantRefID {
 			t.Fatalf("character list item at offset %d = %#x, want %#x", offset, got, wantRefID)
 		}

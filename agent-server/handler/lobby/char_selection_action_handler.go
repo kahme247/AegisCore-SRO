@@ -251,10 +251,17 @@ func (h *CharacterSelectionHandler) writeCharacterListEntry(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	p.WriteByte(byte(len(inv.Items)))
-	// This legacy appearance list does not carry a slot field, so its wire
-	// order is explicitly the ascending numeric inventory slot order.
+	appearanceSlots := make([]byte, 0, model.SlotRightRing+1)
 	for _, slot := range model.SortedInventorySlots(inv.Items) {
+		if slot <= model.SlotRightRing {
+			appearanceSlots = append(appearanceSlots, slot)
+		}
+	}
+	p.WriteByte(byte(len(appearanceSlots)))
+	// This legacy appearance list does not carry a slot field, so its wire
+	// order is explicitly the ascending equipped-slot order. Bag items are
+	// serialized later in the full in-game inventory, never as lobby equipment.
+	for _, slot := range appearanceSlots {
 		item := inv.Items[slot]
 		p.WriteUInt32(item.GetRefObjectID())
 		p.WriteByte(0) // Plus
