@@ -1,0 +1,13 @@
+CREATE TABLE `CHAR_SPEED_EFFECT` (
+    `CHAR_ID` INT NOT NULL,
+    `SKILL_ID` INT NOT NULL,
+    `SPEED_PERCENT` SMALLINT UNSIGNED NOT NULL,
+    `EXPIRES_AT` DATETIME(6) NOT NULL,
+    PRIMARY KEY (`CHAR_ID`),
+    CONSTRAINT `fk_char_speed_effect_character`
+        FOREIGN KEY (`CHAR_ID`) REFERENCES `CHAR` (`ID`) ON DELETE CASCADE,
+    CONSTRAINT `fk_char_speed_effect_skill`
+        FOREIGN KEY (`SKILL_ID`) REFERENCES `REF_SKILL` (`ID`),
+    CONSTRAINT `chk_char_speed_effect_percent`
+        CHECK (`SPEED_PERCENT` > 0)
+) ENGINE=InnoDB;

@@ -5,7 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY framework ./framework
-COPY db/migrations ./db/migrations
+COPY db ./db
 COPY gateway-server ./gateway-server
 COPY agent-server ./agent-server
 COPY protocol ./protocol

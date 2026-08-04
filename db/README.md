@@ -17,7 +17,7 @@ pin an immutable image, verify its bootstrap contents and keep DB ports private.
 - `create_sro_account.sql` and `create_sro_shard.sql` are destructive fresh-install
   snapshots. They include the final schema, migration-owned seed/backfill data,
   sample data, and applied migration ledgers through account `000001` and shard
-  `000026` (with the intentional `000007` gap).
+  `000027` (with the intentional `000007` gap).
 - The snapshots are not consumed by `cmd/migrate`; they must be loaded by a
   MySQL-capable client. Their pre-seeded ledgers let `cmd/migrate` verify the
   embedded catalog and apply only migrations added after the snapshot.
@@ -27,7 +27,7 @@ pin an immutable image, verify its bootstrap contents and keep DB ports private.
 - `cmd/migrate` is the checked-in migration entry point.
 
 The account catalog currently ends at `000001`. The shard catalog reaches
-`000026` and covers normalized identity, inventory constraints, quests,
+`000027` and covers normalized identity, inventory constraints, quests,
 economy/storage, shops, teleports, mastery/skills, guild storage, reference
 catalogs, movement settings, rental metadata, return-city recovery, progression
 and mob rates, and character quick slots. Version `000007` is absent; preserve
