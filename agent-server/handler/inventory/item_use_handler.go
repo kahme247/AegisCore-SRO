@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/agent-server/service"
@@ -14,9 +15,11 @@ import (
 )
 
 type ItemUseHandler struct {
-	players PlayerLookup
-	useCase service.RecoveryItemUseCase
-	send    func(*server.Session, network.Packet) error
+	players  PlayerLookup
+	useCase  service.RecoveryItemUseCase
+	send     func(*server.Session, network.Packet) error
+	publish  func(*model.Player, *network.Packet)
+	schedule func(time.Duration, func())
 }
 
 func NewItemUseHandler(players PlayerLookup, items model.ItemUseRepository) *ItemUseHandler {
@@ -56,8 +59,39 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	if err = h.sendPacket(session, buildItemUseSuccess(result.SourceSlot, result.ItemType, result.NewAmount)); err != nil {
 		return err
 	}
-	player.SendVitalsUpdate()
+	if result.EffectSkillID > 0 && result.SpeedPercent > 0 && result.EffectDuration > 0 {
+		token := model.NextActionUID()
+		generation, replacedToken := player.ApplyMovementSpeedEffect(result.EffectSkillID, result.SpeedPercent, result.EffectExpiresAt, token)
+		if replacedToken != 0 {
+			removed := model.BuildBuffRemove(replacedToken)
+			h.publishPacket(player, &removed)
+		}
+		added := model.BuildBuffAdd(player.GetUniqueID(), result.EffectSkillID, token)
+		h.publishPacket(player, &added)
+		player.SendMovementSpeedUpdate()
+		schedule := h.schedule
+		if schedule == nil {
+			schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
+		}
+		schedule(time.Duration(result.EffectDuration)*time.Millisecond, func() {
+			if expiredToken, cleared := player.ClearMovementSpeedEffect(generation); cleared {
+				removed := model.BuildBuffRemove(expiredToken)
+				h.publishPacket(player, &removed)
+				player.SendMovementSpeedUpdate()
+			}
+		})
+	} else {
+		player.SendVitalsUpdate()
+	}
 	return nil
+}
+
+func (h *ItemUseHandler) publishPacket(player *model.Player, packet *network.Packet) {
+	if h != nil && h.publish != nil {
+		h.publish(player, packet)
+		return
+	}
+	player.SendToSelfAndKnown(packet)
 }
 
 func (h *ItemUseHandler) sendFailure(session *server.Session) error {

@@ -19,6 +19,7 @@ type GameplayRepositories struct {
 	GuildStorage        model.GuildStorageRepository
 	Exchange            model.ExchangeRepository
 	ItemUse             model.ItemUseRepository
+	SpeedEffects        model.SpeedEffectRepository
 	Alchemy             model.AlchemyRepository
 	Teleport            model.TeleportRepository
 	CharacterCreator    model.CharacterCreator
@@ -62,9 +63,12 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.Exchange, err = model.NewExchangeRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent exchange repository: %w", err)
 	}
-	if repositories.ItemUse, err = model.NewItemUseRepository(shard); err != nil {
+	itemUse, err := model.NewItemUseRepository(shard)
+	if err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent item-use repository: %w", err)
 	}
+	repositories.ItemUse = itemUse
+	repositories.SpeedEffects = itemUse
 	if repositories.Alchemy, err = model.NewAlchemyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent alchemy repository: %w", err)
 	}

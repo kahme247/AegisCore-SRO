@@ -217,6 +217,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureQuickSlotRepository(repositories.QuickSlots); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot bootstrap: %w", err)
 	}
+	if err := characterSelection.ConfigureSpeedEffectRepository(repositories.SpeedEffects); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character speed-effect bootstrap: %w", err)
+	}
 	if err := characterSelection.ConfigureMovementSettingsRepository(repositories.MovementSettings); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent movement settings: %w", err)
 	}

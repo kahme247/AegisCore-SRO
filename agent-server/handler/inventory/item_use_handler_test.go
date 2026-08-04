@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/framework/network"
@@ -10,11 +11,14 @@ import (
 	"github.com/ferdoran/go-sro/framework/server"
 )
 
-type itemUseRepositoryFake struct{ calls int }
+type itemUseRepositoryFake struct {
+	calls  int
+	result model.ItemUseResult
+}
 
 func (f *itemUseRepositoryFake) UseRecoveryItem(context.Context, int64, byte, uint16, model.ItemUseVitals) (model.ItemUseResult, error) {
 	f.calls++
-	return model.ItemUseResult{}, nil
+	return f.result, nil
 }
 
 func TestItemUseMalformedPayloadFailsBeforeIdentityOrDatabaseLookup(t *testing.T) {
@@ -52,5 +56,42 @@ func TestItemUseResponseMatchesExactVSRO188Parser(t *testing.T) {
 	errorCode, e2 := failure.ReadUInt16()
 	if e1 != nil || e2 != nil || result != 2 || errorCode != 0 || failure.Remaining() != 0 {
 		t.Fatalf("failure response = result %d errorCode %d remaining %d errors %v/%v", result, errorCode, failure.Remaining(), e1, e2)
+	}
+}
+
+func TestSpeedItemPublishesTimedBuffIcon(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100}, ID: 7, Level: 10,
+		BaseStats: model.BaseStats{HP: 600, MP: 250, Str: 29, Int: 29},
+		WalkSpeed: 15, RunSpeed: 30, Session: session,
+	}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{
+		SourceSlot: 33, ItemType: 0x0EEC, NewAmount: 9,
+		EffectSkillID: 3977, SpeedPercent: 100, EffectDuration: 1800000, EffectExpiresAt: time.Now().Add(30 * time.Minute),
+	}}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	var published []network.Packet
+	var expire func()
+	h.send = func(_ *server.Session, packet network.Packet) error { return nil }
+	h.publish = func(_ *model.Player, packet *network.Packet) { published = append(published, *packet) }
+	h.schedule = func(delay time.Duration, callback func()) {
+		if delay != 30*time.Minute {
+			t.Fatalf("speed effect duration = %v, want 30m", delay)
+		}
+		expire = callback
+	}
+	request := network.EmptyClientPacket()
+	request.WriteByte(33)
+	request.WriteUInt16(0x0EEC)
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("speed item use failed: %v", err)
+	}
+	if len(published) != 1 || published[0].MessageID != opcode.EntityBuffAdd || expire == nil {
+		t.Fatalf("published packets = %+v, expiry scheduled = %v", published, expire != nil)
+	}
+	expire()
+	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {
+		t.Fatalf("expiration packets = %+v, want buff removal", published)
 	}
 }

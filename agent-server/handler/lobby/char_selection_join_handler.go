@@ -126,6 +126,7 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 	if err := sendCharacterBootstrap(session, player); err != nil {
 		return err
 	}
+	h.publishRestoredSpeedEffect(player)
 
 	bootstrapComplete = true
 	log.Infof("sent Agent spawn data for character %s; awaiting GameReady", player.CharName)
@@ -229,7 +230,49 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	if err := h.loadPlayerQuickSlots(ctx, player); err != nil {
 		return nil, err
 	}
+	if err := h.loadPlayerSpeedEffect(ctx, player); err != nil {
+		return nil, err
+	}
 	return player, nil
+}
+
+func (h *CharacterSelectionHandler) loadPlayerSpeedEffect(ctx context.Context, player *model.Player) error {
+	if player == nil || h == nil || h.speedEffects == nil {
+		return nil
+	}
+	effect, exists, err := h.speedEffects.LoadSpeedEffect(ctx, int64(player.ID))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	player.ApplyMovementSpeedEffect(effect.SkillID, effect.Percent, effect.ExpiresAt, model.NextActionUID())
+	return nil
+}
+
+func (h *CharacterSelectionHandler) publishRestoredSpeedEffect(player *model.Player) {
+	if player == nil {
+		return
+	}
+	skillID, _, expiresAt, generation, token, exists := player.MovementSpeedEffect()
+	if !exists {
+		return
+	}
+	added := model.BuildBuffAdd(player.GetUniqueID(), skillID, token)
+	player.SendToSelfAndKnown(&added)
+	player.SendMovementSpeedUpdate()
+	delay := time.Until(expiresAt)
+	if delay <= 0 {
+		return
+	}
+	time.AfterFunc(delay, func() {
+		if expiredToken, cleared := player.ClearMovementSpeedEffect(generation); cleared {
+			removed := model.BuildBuffRemove(expiredToken)
+			player.SendToSelfAndKnown(&removed)
+			player.SendMovementSpeedUpdate()
+		}
+	})
 }
 
 func (h *CharacterSelectionHandler) playerMovementSettings(ctx context.Context) (model.MovementSettings, error) {

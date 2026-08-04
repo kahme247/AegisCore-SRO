@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -16,13 +17,17 @@ var (
 )
 
 type ItemUseResult struct {
-	Inventory  Inventory
-	HP         int
-	MP         int
-	RefItemID  uint32
-	ItemType   uint16
-	SourceSlot byte
-	NewAmount  uint16
+	Inventory       Inventory
+	HP              int
+	MP              int
+	RefItemID       uint32
+	ItemType        uint16
+	SourceSlot      byte
+	NewAmount       uint16
+	EffectSkillID   uint32
+	SpeedPercent    int
+	EffectDuration  int
+	EffectExpiresAt time.Time
 }
 
 type ItemUseVitals struct {
@@ -32,6 +37,16 @@ type ItemUseVitals struct {
 
 type ItemUseRepository interface {
 	UseRecoveryItem(context.Context, int64, byte, uint16, ItemUseVitals) (ItemUseResult, error)
+}
+
+type SpeedEffect struct {
+	SkillID   uint32
+	Percent   int
+	ExpiresAt time.Time
+}
+
+type SpeedEffectRepository interface {
+	LoadSpeedEffect(context.Context, int64) (SpeedEffect, bool, error)
 }
 
 type SQLItemUseRepository struct{ shard *sql.DB }
@@ -85,7 +100,8 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	var itemID int64
 	var refID uint32
 	var stack int
-	if err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &stack); err != nil {
+	var skillID, durationMarker, duration, speedMarker, speedPercent int
+	if err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,COALESCE(s.`ID`,0),COALESCE(s.`PARAM3`,0),COALESCE(s.`PARAM4`,0),COALESCE(s.`PARAM5`,0),COALESCE(s.`PARAM6`,0) FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` r ON r.`ItemID`=it.`FK_REF_ITEM` LEFT JOIN `REF_SKILL` s ON s.`BASIC_CODE`=r.`Desc_1` AND s.`SERVICE`=1 WHERE i.`FK_CHAR`=? AND i.`SLOT`=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &stack, &skillID, &durationMarker, &duration, &speedMarker, &speedPercent); err != nil {
 		return result, fmt.Errorf("lock item-use inventory slot: %w", err)
 	}
 	ref, ok := RefItems[refID]
@@ -96,15 +112,46 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	if requestedType != itemType {
 		return result, ErrItemUseInvalidRequest
 	}
-	newHP, newMP, changed := recoveryValues(ref, vitals)
-	if ref.TypeID1 != 3 || ref.TypeID2 != 3 || ref.TypeID3 != 1 || ref.TypeID4 < 1 || ref.TypeID4 > 3 || !ref.IsUseable {
+	newHP, newMP := vitals.HP, vitals.MP
+	isRecovery := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 >= 1 && ref.TypeID4 <= 3
+	isSpeedDrug := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1
+	switch {
+	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
-	}
-	if !changed {
-		return result, ErrItemUseNoEffect
-	}
-	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=?", newHP, newMP, characterID); err != nil {
-		return result, fmt.Errorf("persist item-use recovery: %w", err)
+	case isRecovery:
+		var changed bool
+		newHP, newMP, changed = recoveryValues(ref, vitals)
+		if !changed {
+			return result, ErrItemUseNoEffect
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=?", newHP, newMP, characterID); err != nil {
+			return result, fmt.Errorf("persist item-use recovery: %w", err)
+		}
+	case isSpeedDrug:
+		// vSRO speed-drug skills encode duration and movement percentage in
+		// PARAM4/PARAM6, guarded by their standard parameter identifiers.
+		if skillID == 0 || durationMarker != 1685418593 || speedMarker != 1752396901 || duration <= 0 || speedPercent <= 0 {
+			return result, ErrItemUseUnsupported
+		}
+		now := time.Now().UTC()
+		var currentExpiration time.Time
+		err = tx.QueryRowContext(ctx, "SELECT `EXPIRES_AT` FROM `CHAR_SPEED_EFFECT` WHERE `CHAR_ID`=? FOR UPDATE", characterID).Scan(&currentExpiration)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, fmt.Errorf("lock character speed effect: %w", err)
+		}
+		expiresAt, extended := extendedSpeedEffectExpiration(now, currentExpiration, time.Duration(duration)*time.Millisecond)
+		if !extended {
+			return result, ErrItemUseNoEffect
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_SPEED_EFFECT` (`CHAR_ID`,`SKILL_ID`,`SPEED_PERCENT`,`EXPIRES_AT`) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE `SKILL_ID`=VALUES(`SKILL_ID`),`SPEED_PERCENT`=VALUES(`SPEED_PERCENT`),`EXPIRES_AT`=VALUES(`EXPIRES_AT`)", characterID, skillID, speedPercent, expiresAt); err != nil {
+			return result, fmt.Errorf("persist character speed effect: %w", err)
+		}
+		result.EffectSkillID = uint32(skillID)
+		result.SpeedPercent = speedPercent
+		result.EffectDuration = int(expiresAt.Sub(now).Milliseconds())
+		result.EffectExpiresAt = expiresAt
+	default:
+		return result, ErrItemUseUnsupported
 	}
 	if stack > 1 {
 		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-1 WHERE `id`=?", itemID); err != nil {
@@ -131,6 +178,47 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 		return ItemUseResult{}, fmt.Errorf("%w: %v", ErrItemUseOutcomeUnknown, err)
 	}
 	return result, nil
+}
+
+const maximumSpeedEffectDuration = 24 * time.Hour
+
+func extendedSpeedEffectExpiration(now, current time.Time, added time.Duration) (time.Time, bool) {
+	now = now.UTC()
+	maximum := now.Add(maximumSpeedEffectDuration)
+	base := now
+	if current.After(now) {
+		base = current
+	}
+	if !base.Before(maximum) {
+		return current, false
+	}
+	expiresAt := base.Add(added)
+	if expiresAt.After(maximum) {
+		expiresAt = maximum
+	}
+	return expiresAt, expiresAt.After(current)
+}
+
+func (r *SQLItemUseRepository) LoadSpeedEffect(ctx context.Context, characterID int64) (SpeedEffect, bool, error) {
+	if r == nil || r.shard == nil {
+		return SpeedEffect{}, false, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return SpeedEffect{}, false, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var effect SpeedEffect
+	err := r.shard.QueryRowContext(ctx, "SELECT `SKILL_ID`,`SPEED_PERCENT`,`EXPIRES_AT` FROM `CHAR_SPEED_EFFECT` WHERE `CHAR_ID`=? AND `EXPIRES_AT`>UTC_TIMESTAMP(6)", characterID).Scan(&effect.SkillID, &effect.Percent, &effect.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SpeedEffect{}, false, nil
+	}
+	if err != nil {
+		return SpeedEffect{}, false, fmt.Errorf("load character speed effect: %w", err)
+	}
+	effect.ExpiresAt = effect.ExpiresAt.UTC()
+	return effect, true, nil
 }
 
 func loadInventoryInItemUseTransaction(ctx context.Context, tx *sql.Tx, characterID int64) (Inventory, error) {

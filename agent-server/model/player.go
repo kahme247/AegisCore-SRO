@@ -9,6 +9,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"sync"
+	"time"
 )
 
 const PlayerType = "Player"
@@ -100,6 +101,11 @@ type Player struct {
 	WalkSpeed             float32
 	RunSpeed              float32
 	HwanSpeed             float32
+	speedEffectPercent    int
+	speedEffectGeneration uint64
+	speedEffectToken      uint32
+	speedEffectSkillID    uint32
+	speedEffectExpiresAt  time.Time
 	COSState              PlayerCOSState
 
 	/* TODO
@@ -306,6 +312,72 @@ func (p *Player) SetUniqueID(uniqueId uint32) {
 
 func (p *Player) SendPositionUpdate() {
 	packet := BuildPositionUpdatePacket(p)
+	p.SendToSelfAndKnown(&packet)
+}
+
+func BuildMovementSpeedUpdatePacket(uniqueID uint32, walkSpeed, runSpeed float32) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.EntityUpdateMovementSpeed
+	packet.WriteUInt32(uniqueID)
+	packet.WriteFloat32(walkSpeed)
+	packet.WriteFloat32(runSpeed)
+	return packet
+}
+
+func (p *Player) ApplyMovementSpeedEffect(skillID uint32, percent int, expiresAt time.Time, token uint32) (uint64, uint32) {
+	if p == nil || skillID == 0 || percent <= 0 || !expiresAt.After(time.Now()) || token == 0 {
+		return 0, 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	replacedToken := p.speedEffectToken
+	p.speedEffectGeneration++
+	p.speedEffectPercent = percent
+	p.speedEffectToken = token
+	p.speedEffectSkillID = skillID
+	p.speedEffectExpiresAt = expiresAt
+	return p.speedEffectGeneration, replacedToken
+}
+
+func (p *Player) ClearMovementSpeedEffect(generation uint64) (uint32, bool) {
+	if p == nil || generation == 0 {
+		return 0, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.speedEffectGeneration != generation || p.speedEffectPercent == 0 {
+		return 0, false
+	}
+	token := p.speedEffectToken
+	p.speedEffectPercent = 0
+	p.speedEffectToken = 0
+	p.speedEffectSkillID = 0
+	p.speedEffectExpiresAt = time.Time{}
+	return token, true
+}
+
+func (p *Player) MovementSpeedEffect() (uint32, int, time.Time, uint64, uint32, bool) {
+	if p == nil {
+		return 0, 0, time.Time{}, 0, 0, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.speedEffectPercent <= 0 || !p.speedEffectExpiresAt.After(time.Now()) {
+		return 0, 0, time.Time{}, 0, 0, false
+	}
+	return p.speedEffectSkillID, p.speedEffectPercent, p.speedEffectExpiresAt, p.speedEffectGeneration, p.speedEffectToken, true
+}
+
+func (p *Player) MovementSpeeds() (float32, float32) {
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	multiplier := float32(100+p.speedEffectPercent) / 100
+	return p.WalkSpeed * multiplier, p.RunSpeed * multiplier
+}
+
+func (p *Player) SendMovementSpeedUpdate() {
+	walkSpeed, runSpeed := p.MovementSpeeds()
+	packet := BuildMovementSpeedUpdatePacket(p.GetUniqueID(), walkSpeed, runSpeed)
 	p.SendToSelfAndKnown(&packet)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 )
@@ -11,6 +12,12 @@ import (
 type fixedMovementSettingsRepository struct {
 	settings model.MovementSettings
 	err      error
+}
+
+type fixedSpeedEffectRepository struct{ effect model.SpeedEffect }
+
+func (r fixedSpeedEffectRepository) LoadSpeedEffect(context.Context, int64) (model.SpeedEffect, bool, error) {
+	return r.effect, true, nil
 }
 
 func (r fixedMovementSettingsRepository) MovementSettings(context.Context) (model.MovementSettings, error) {
@@ -51,5 +58,23 @@ func TestCharacterSelectionMovementSettingsCompatibilityAndErrors(t *testing.T) 
 	}
 	if err := (*CharacterSelectionHandler)(nil).ConfigureMovementSettingsRepository(fixedMovementSettingsRepository{}); !errors.Is(err, model.ErrMovementSettingsRepositoryUnavailable) {
 		t.Fatalf("nil handler configure error = %v", err)
+	}
+}
+
+func TestCharacterJoinRestoresPersistedSpeedEffect(t *testing.T) {
+	expiresAt := time.Now().Add(5 * time.Hour)
+	handler := &CharacterSelectionHandler{speedEffects: fixedSpeedEffectRepository{effect: model.SpeedEffect{
+		SkillID: 3977, Percent: 100, ExpiresAt: expiresAt,
+	}}}
+	player := &model.Player{ID: 7, RunSpeed: 30}
+	if err := handler.loadPlayerSpeedEffect(context.Background(), player); err != nil {
+		t.Fatalf("loadPlayerSpeedEffect() error = %v", err)
+	}
+	skillID, percent, restoredExpiration, _, token, exists := player.MovementSpeedEffect()
+	if !exists || skillID != 3977 || percent != 100 || token == 0 || !restoredExpiration.Equal(expiresAt) {
+		t.Fatalf("restored speed effect = skill %d percent %d expiration %v token %d exists %v", skillID, percent, restoredExpiration, token, exists)
+	}
+	if got := player.GetMovementSpeed(); got != 60 {
+		t.Fatalf("restored movement speed = %f, want 60", got)
 	}
 }

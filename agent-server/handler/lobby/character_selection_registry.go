@@ -137,6 +137,7 @@ type CharacterSelectionHandler struct {
 	masteries     model.MasteryRepository
 	skills        model.CharacterSkillRepository
 	quickSlots    model.CharacterQuickSlotRepository
+	speedEffects  model.SpeedEffectRepository
 	movement      model.MovementSettingsRepository
 	referenceData *model.ReferenceDataCatalog
 	creator       model.CharacterCreator
@@ -157,6 +158,14 @@ func (h *CharacterSelectionHandler) ConfigureQuickSlotRepository(quickSlots mode
 		return model.ErrCharacterQuickSlotRepositoryUnavailable
 	}
 	h.quickSlots = quickSlots
+	return nil
+}
+
+func (h *CharacterSelectionHandler) ConfigureSpeedEffectRepository(effects model.SpeedEffectRepository) error {
+	if h == nil || effects == nil {
+		return model.ErrItemUseRepositoryUnavailable
+	}
+	h.speedEffects = effects
 	return nil
 }
 
