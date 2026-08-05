@@ -22,6 +22,12 @@ var showTerrainCells = true
 var showOnlyBlockedRegionCells = true
 var showObjectsInternalEdges = true
 var showObjectsGlobalEdges = true
+var collisionPoint1XEditing bool
+var collisionPoint1YEditing bool
+var collisionPoint1ZEditing bool
+var collisionPoint2XEditing bool
+var collisionPoint2YEditing bool
+var collisionPoint2ZEditing bool
 
 func drawToolbar() {
 	toolbarWidth := int32(rl.GetScreenWidth())
@@ -55,26 +61,32 @@ func drawToolbar() {
 		}
 
 		if rl.CheckCollisionPointRec(rl.GetMousePosition(), bounds) {
-			rl.DrawTextEx(rl.GetFontDefault(), description, rl.NewVector2(20, float32(toolbarHeight)+20), 24, 2, raygui.TextColor())
+			rl.DrawTextEx(rl.GetFontDefault(), description, rl.NewVector2(20, float32(toolbarHeight)+20), 24, 2, raygui.GetColor(raygui.DEFAULT, raygui.TEXT_COLOR_NORMAL))
 		}
 
 		return bounds.X + bounds.Width + buttonSpacing
 	}
 
 	doCheckbox := func(text string, checked *bool, bounds rl.Rectangle) (nextX float32) {
-		*checked = raygui.CheckBox(bounds, *checked)
-		textWidth := rl.MeasureText(text, int32(raygui.GetStyleProperty(raygui.GlobalTextFontsize)))
+		raygui.CheckBox(bounds, "", checked)
+		textWidth := rl.MeasureText(text, int32(raygui.GetStyle(raygui.DEFAULT, raygui.TEXT_SIZE)))
 		labelBounds := rl.NewRectangle(bounds.X+bounds.Width+buttonSpacing, bounds.Y, float32(textWidth), bounds.Height)
 		raygui.Label(labelBounds, text)
 
 		return labelBounds.X + labelBounds.Width + buttonSpacing
 	}
 
-	doCollisionPointBox := func(text string, x, y, z *int, xT, yT, zT *string, currentX float32) (nextX float32) {
-		*xT = raygui.TextBox(rl.NewRectangle(currentX, 2, 100, 20), *xT)
-		*yT = raygui.TextBox(rl.NewRectangle(currentX, 22, 100, 20), *yT)
-		*zT = raygui.TextBox(rl.NewRectangle(currentX, 42, 100, 20), *zT)
-		textWidth := rl.MeasureText(text+" X", int32(raygui.GetStyleProperty(raygui.GlobalTextFontsize)))
+	doCollisionPointBox := func(text string, x, y, z *int, xT, yT, zT *string, xEditing, yEditing, zEditing *bool, currentX float32) (nextX float32) {
+		if raygui.TextBox(rl.NewRectangle(currentX, 2, 100, 20), xT, 16, *xEditing) {
+			*xEditing = !*xEditing
+		}
+		if raygui.TextBox(rl.NewRectangle(currentX, 22, 100, 20), yT, 16, *yEditing) {
+			*yEditing = !*yEditing
+		}
+		if raygui.TextBox(rl.NewRectangle(currentX, 42, 100, 20), zT, 16, *zEditing) {
+			*zEditing = !*zEditing
+		}
+		textWidth := rl.MeasureText(text+" X", int32(raygui.GetStyle(raygui.DEFAULT, raygui.TEXT_SIZE)))
 		raygui.Label(rl.NewRectangle(currentX+100+buttonSpacing, 2, float32(textWidth), 20), text+" X")
 		raygui.Label(rl.NewRectangle(currentX+100+buttonSpacing, 22, float32(textWidth), 20), text+" Y")
 		raygui.Label(rl.NewRectangle(currentX+100+buttonSpacing, 42, float32(textWidth), 20), text+" Z")
@@ -130,8 +142,7 @@ func drawToolbar() {
 
 	nextX = doToolbarButton("Reset Camera", "Resets the camera", buttonRect(nextX, 100), func() {
 		cam = defaultCam()
-		rl.SetCameraMode(cam, rl.CameraFree)
-		rl.UpdateCamera(&cam)
+		rl.UpdateCamera(&cam, rl.CameraFree)
 	})
 
 	nextX = doCollisionPointBox("P1",
@@ -141,6 +152,9 @@ func drawToolbar() {
 		&collisionPoint1XText,
 		&collisionPoint1YText,
 		&collisionPoint1ZText,
+		&collisionPoint1XEditing,
+		&collisionPoint1YEditing,
+		&collisionPoint1ZEditing,
 		nextX)
 	nextX = doCollisionPointBox("P2",
 		&collisionPoint2X,
@@ -149,6 +163,9 @@ func drawToolbar() {
 		&collisionPoint2XText,
 		&collisionPoint2YText,
 		&collisionPoint2ZText,
+		&collisionPoint2XEditing,
+		&collisionPoint2YEditing,
+		&collisionPoint2ZEditing,
 		nextX)
 
 	raygui.Label(rl.NewRectangle(nextX, 2, 200, 20), fmt.Sprintf("Cells on path: %d", cellsOnPath))

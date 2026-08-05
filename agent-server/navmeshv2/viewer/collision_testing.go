@@ -216,7 +216,7 @@ func isPointInObject(pLocal *math32.Vector3, object navmeshv2.RtNavmeshInstObj) 
 	return inObject
 }
 
-func drawTerrainCollisions(p1, p2 *math32.Vector3, region navmeshv2.RtNavmeshTerrain, collisions *[]navmeshv2.Collision) {
+func drawTerrainCollisions(p1, p2 *math32.Vector3, region *navmeshv2.RtNavmeshTerrain, collisions *[]navmeshv2.Collision) {
 	line := navmeshv2.LineSegment{
 		A: p1,
 		B: p2,

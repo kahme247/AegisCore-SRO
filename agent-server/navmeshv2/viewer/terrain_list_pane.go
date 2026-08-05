@@ -18,6 +18,7 @@ const TerrainListPaneWidthFactor = 0.2
 const ScrollSpeed = 10.0
 
 var searchRegionText string
+var searchRegionEditing bool
 var searchedRegionId int
 var selectedRegionId int
 var terrainListCam = rl.Camera2D{
@@ -28,11 +29,11 @@ var terrainListCam = rl.Camera2D{
 }
 
 type TerrainListPane struct {
-	MeshFiles  map[int16]navmeshv2.RtNavmeshTerrain
+	MeshFiles  map[int16]*navmeshv2.RtNavmeshTerrain
 	SearchText string
 }
 
-func NewPane(regions map[int16]navmeshv2.RtNavmeshTerrain) *TerrainListPane {
+func NewPane(regions map[int16]*navmeshv2.RtNavmeshTerrain) *TerrainListPane {
 	return &TerrainListPane{
 		MeshFiles:  regions,
 		SearchText: "",
@@ -68,12 +69,14 @@ func drawTerrainListPane() {
 		default:
 			break
 		}
-		raygui.ProgressBar(rl.NewRectangle(0, ToolbarHeight+1, paneWidth-1, 20), loaderProgress)
+		raygui.ProgressBar(rl.NewRectangle(0, ToolbarHeight+1, paneWidth-1, 20), "", "", &loaderProgress, 0, 1)
 		raygui.Label(rl.NewRectangle(paneWidth*0.25, ToolbarHeight, paneWidth*0.5, 20), fmt.Sprintf("%d/%d", loaderProgressAbsolute, loader.MapProjectInfo.ActiveRegionsCount))
 	} else if len(terrainList) == 0 {
 		raygui.Label(rl.NewRectangle(0, ToolbarHeight, paneWidth, 20), "There are no terrains!")
 	} else {
-		searchRegionText = raygui.TextBox(rl.NewRectangle(0, ToolbarHeight, paneWidth*0.75, 20), searchRegionText)
+		if raygui.TextBox(rl.NewRectangle(0, ToolbarHeight, paneWidth*0.75, 20), &searchRegionText, 5, searchRegionEditing) {
+			searchRegionEditing = !searchRegionEditing
+		}
 		if raygui.Button(rl.NewRectangle(paneWidth*0.75, ToolbarHeight, paneWidth*0.25, 20), "Search") {
 			regex := regexp.MustCompile("^\\d{5}$")
 			if regex.MatchString(searchRegionText) {

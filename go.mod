@@ -4,9 +4,9 @@ go 1.26.5
 
 require (
 	github.com/fogleman/gg v1.3.0
-	github.com/g3n/engine v0.1.0
-	github.com/gen2brain/raylib-go/raygui v0.0.0-20210906160657-aabc97d1c242
-	github.com/gen2brain/raylib-go/raylib v0.0.0-20210906160657-aabc97d1c242
+	github.com/g3n/engine v0.2.0
+	github.com/gen2brain/raylib-go/raygui v0.0.0-20260619180708-8f9e96aca992
+	github.com/gen2brain/raylib-go/raylib v0.60.0
 	github.com/gizak/termui/v3 v3.1.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
@@ -24,9 +24,11 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
+	github.com/jupiterrider/ffi v0.7.0 // indirect
 	github.com/mattn/go-runewidth v0.0.2 // indirect
 	github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7 // indirect
 	github.com/nsf/termbox-go v0.0.0-20190121233118-02980233997d // indirect
@@ -39,5 +41,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )

@@ -11,7 +11,7 @@ import (
 var screenWidth = float32(1920)
 var screenHeight = float32(1080)
 var loader *navmeshv2.Loader
-var terrainList map[int16]navmeshv2.RtNavmeshTerrain
+var terrainList map[int16]*navmeshv2.RtNavmeshTerrain
 var loaderProgress = float32(0)
 var loaderProgressAbsolute = 0
 var loaderProgressChannel = make(chan int)
@@ -29,15 +29,11 @@ func Main() {
 	rl.SetWindowPosition(int(monitorWidth*0.1), int(monitorHeight*0.1))
 
 	rl.SetTargetFPS(int32(rl.GetMonitorRefreshRate(rl.GetCurrentMonitor())))
-	raygui.LoadGuiStyle("cmd/navmesh-viewer/zahnrad.style")
-	rl.SetCameraMode(cam, rl.CameraFree)
-	rl.SetCameraAltControl(rl.KeyLeftAlt)
-	rl.SetCameraPanControl(rl.MouseMiddleButton)
-	rl.SetCameraSmoothZoomControl(rl.KeyLeftShift)
+	raygui.LoadStyle("agent-server/cmd/navmesh-viewer/zahnrad.style")
 	rl.SetExitKey(0)
 
 	for !rl.WindowShouldClose() {
-		rl.UpdateCamera(&cam)
+		rl.UpdateCamera(&cam, rl.CameraFree)
 		doFrame()
 	}
 }
@@ -49,7 +45,7 @@ func doFrame() {
 	rl.BeginDrawing()
 	defer rl.EndDrawing()
 
-	rl.ClearBackground(raygui.BackgroundColor())
+	rl.ClearBackground(raygui.GetColor(raygui.DEFAULT, raygui.BACKGROUND_COLOR))
 
 	drawToolbar()
 	drawTerrainListPane()
