@@ -116,7 +116,7 @@ errors are discovered on readiness or ticket requests, then shards are projected
 offline and login fails closed. There is no shared-secret fallback.
 
 Compose publishes Gateway `15779`, Agent `15882`, MySQL `3306`, and MySQL X
-`33060`; only admission `15883` stays private. The supplied topology has no
+on loopback; only admission `15883` stays private. The supplied topology has no
 Gateway/Agent health checks and is not a complete public network perimeter.
 
 ## Known limitations

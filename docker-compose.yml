@@ -1,13 +1,15 @@
 services:
   db:
-    image: ferdoran/go-sro-db:latest
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    image: gosro-db:8.4.10
     restart: always
     container_name: gosro-db
     networks:
       - gosro
     ports:
-      - "3306:3306"
-      - "33060:33060"
+      - "127.0.0.1:3306:3306"
     deploy:
       resources:
         limits:
@@ -160,4 +162,5 @@ networks:
 
 volumes:
   mysql-data:
-    name: gosro-mysql-data
+    # Keep the 8.0 volume untouched as the pre-cutover rollback point.
+    name: ${MYSQL_DATA_VOLUME:-gosro-mysql-data-84}

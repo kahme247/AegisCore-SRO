@@ -1,0 +1,2 @@
+ALTER TABLE `CHAR`
+    ADD UNIQUE KEY `UX_CHAR_ID` (`id`);

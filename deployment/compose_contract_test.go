@@ -9,7 +9,15 @@ import (
 
 type composeService struct {
 	Volumes   []string                     `yaml:"volumes"`
+	Ports     []string                     `yaml:"ports"`
+	Image     string                       `yaml:"image"`
+	Build     composeBuild                 `yaml:"build"`
 	DependsOn map[string]composeDependency `yaml:"depends_on"`
+}
+
+type composeBuild struct {
+	Context    string `yaml:"context"`
+	Dockerfile string `yaml:"dockerfile"`
 }
 
 type composeDependency struct {
@@ -34,6 +42,15 @@ func TestComposePersistsMySQLAndWaitsForSchemaHealth(t *testing.T) {
 		t.Fatal("Compose does not declare the stable mysql-data volume")
 	}
 	database := compose.Services["db"]
+	if database.Image != "gosro-db:8.4.10" {
+		t.Fatalf("database image = %q, want pinned MySQL 8.4 application image", database.Image)
+	}
+	if database.Build.Context != "./db" || database.Build.Dockerfile != "Dockerfile" {
+		t.Fatalf("database build = %+v, want repository db/Dockerfile", database.Build)
+	}
+	if len(database.Ports) != 1 || database.Ports[0] != "127.0.0.1:3306:3306" {
+		t.Fatalf("database ports = %v, want loopback-only classic MySQL", database.Ports)
+	}
 	foundDataMount := false
 	for _, volume := range database.Volumes {
 		if volume == "mysql-data:/var/lib/mysql" {

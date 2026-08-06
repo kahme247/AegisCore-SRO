@@ -1,0 +1,3 @@
+ALTER TABLE `GAME_SERVER_REGION`
+    ADD CONSTRAINT `FK_Continent_Name`
+        FOREIGN KEY (`Continent_Name`) REFERENCES `REGION_REFERENCE` (`ContinentName`);

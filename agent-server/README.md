@@ -116,10 +116,11 @@ inventory item, and notice/guild/union/NPC/academy chat is not implemented.
 
 ## Persistence and resources
 
-Apply account `000001` and shard migrations through `000026` before runtime.
+Apply account `000001` and shard migrations through `000029` before runtime.
 Shard `000007` is intentionally unresolved. Current paths depend on movement
 settings (`000021`), rental metadata (`000022`), return city (`000023`),
-progression rates (`000024`), mob rates (`000025`) and quick slots (`000026`) in
+progression rates (`000024`), mob rates (`000025`), quick slots (`000026`),
+durable speed effects (`000027`) and MySQL 8.4 compatibility (`000028`-`000029`) in
 addition to earlier identity, economy, mastery, skill and reference migrations.
 
 The world loader eagerly retains full navmesh maps. Compose documents more than

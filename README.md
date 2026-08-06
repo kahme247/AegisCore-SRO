@@ -44,7 +44,7 @@ change the Gateway/Agent wire contract.
 | Character systems | stat allocation, combat/XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | skill casting breadth, quest lifecycle and capture-backed talk/action masks |
 | Economy and inventory | move/equip, storage, guild storage, repair, item use, elixir alchemy, exchange, stall | complete item option/rent/bind formats and transactional live testing |
 | Social | local/global/party/stall/whisper chat, party core and matching | guild, academy, jobs, stealth/invisibility rules |
-| Data and migrations | target-bound runner through shard `000026`; identity, gameplay, reference catalog, movement, rental, return-city, rate and quick-slot schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
+| Data and migrations | target-bound runner through shard `000029`; identity, gameplay, reference catalog, movement, rental, return-city, rate, quick-slot and MySQL 8.4 compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
 
 Current crash/collision safeguards include:
 
@@ -103,7 +103,7 @@ Compose requires `SRO_AGENT_TLS_DIR`, `SRO_GATEWAY_TLS_DIR`,
 `GATEWAY_PROTOCOL_CONTENT_ID`, `GATEWAY_PROTOCOL_MODULE_NAME`, and
 `GATEWAY_PROTOCOL_VERSION`. Use `GATEWAY_ENVIRONMENT=development` only when the
 advertised Agent address is loopback. The development topology publishes MySQL
-`3306`/`33060`, Gateway `15779`, and Agent `15882`; admission `15883` remains on
+`3306` on loopback, Gateway `15779`, and Agent `15882`; admission `15883` remains on
 the Compose network.
 
 ```powershell

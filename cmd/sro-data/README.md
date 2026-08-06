@@ -104,7 +104,7 @@ an advisory lock, inspect the migration ledger, checksum source files or stop
 runtime writes. Before any import:
 
 1. Stop dependent writes and back up `SRO_SHARD`.
-2. Confirm `DB_SHARD_DATABASE=SRO_SHARD` and apply migrations through `000026`.
+2. Confirm `DB_SHARD_DATABASE=SRO_SHARD` and apply migrations through `000029`.
 3. Validate filenames, JSON shape and expected source row counts.
 4. Run one importer.
 5. Verify target row counts and representative relationships before restoring

@@ -413,37 +413,50 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 26 {
-		t.Fatalf("shard migration count = %d, want 26", len(shardMigrations))
+	if len(shardMigrations) != 28 {
+		t.Fatalf("shard migration count = %d, want 28", len(shardMigrations))
 	}
-	returnCityMigration := shardMigrations[len(shardMigrations)-5]
+	returnCityMigration := shardMigrations[len(shardMigrations)-7]
 	if returnCityMigration.Version != 23 || returnCityMigration.Name != "character_return_city" ||
 		!strings.Contains(returnCityMigration.UpSQL, "RETURN_TELEPORT_ID") || !strings.Contains(returnCityMigration.DownSQL, "DROP COLUMN") {
 		t.Fatalf("return city migration = %#v, want reversible version 23 character_return_city", returnCityMigration)
 	}
-	progressionRatesMigration := shardMigrations[len(shardMigrations)-4]
+	progressionRatesMigration := shardMigrations[len(shardMigrations)-6]
 	if progressionRatesMigration.Version != 24 || progressionRatesMigration.Name != "gameplay_progression_rates" ||
 		!strings.Contains(progressionRatesMigration.UpSQL, "GAMEPLAY_PROGRESSION_RATES") ||
 		!strings.Contains(progressionRatesMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("progression rates migration = %#v, want reversible version 24 gameplay_progression_rates", progressionRatesMigration)
 	}
-	mobRatesMigration := shardMigrations[len(shardMigrations)-3]
+	mobRatesMigration := shardMigrations[len(shardMigrations)-5]
 	if mobRatesMigration.Version != 25 || mobRatesMigration.Name != "gameplay_mob_rates" ||
 		!strings.Contains(mobRatesMigration.UpSQL, "GAMEPLAY_MOB_RATES") ||
 		!strings.Contains(mobRatesMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("mob rates migration = %#v, want reversible version 25 gameplay_mob_rates", mobRatesMigration)
 	}
-	quickSlotsMigration := shardMigrations[len(shardMigrations)-2]
+	quickSlotsMigration := shardMigrations[len(shardMigrations)-4]
 	if quickSlotsMigration.Version != 26 || quickSlotsMigration.Name != "character_quick_slots" ||
 		!strings.Contains(quickSlotsMigration.UpSQL, "CHAR_QUICK_SLOT") ||
 		!strings.Contains(quickSlotsMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("quick-slot migration = %#v, want reversible version 26 character_quick_slots", quickSlotsMigration)
 	}
-	speedEffectMigration := shardMigrations[len(shardMigrations)-1]
+	speedEffectMigration := shardMigrations[len(shardMigrations)-3]
 	if speedEffectMigration.Version != 27 || speedEffectMigration.Name != "character_speed_effect" ||
 		!strings.Contains(speedEffectMigration.UpSQL, "CHAR_SPEED_EFFECT") ||
 		!strings.Contains(speedEffectMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("speed-effect migration = %#v, want reversible version 27 character_speed_effect", speedEffectMigration)
+	}
+	uniqueCharacterMigration := shardMigrations[len(shardMigrations)-2]
+	if uniqueCharacterMigration.Version != 28 || uniqueCharacterMigration.Name != "unique_character_id" ||
+		!strings.Contains(uniqueCharacterMigration.PreflightSQL, "GROUP BY `id`") ||
+		!strings.Contains(uniqueCharacterMigration.UpSQL, "UX_CHAR_ID") ||
+		!strings.Contains(uniqueCharacterMigration.DownSQL, "DROP INDEX") {
+		t.Fatalf("unique-character migration = %#v, want reversible version 28 unique_character_id", uniqueCharacterMigration)
+	}
+	continentCompatibilityMigration := shardMigrations[len(shardMigrations)-1]
+	if continentCompatibilityMigration.Version != 29 || continentCompatibilityMigration.Name != "drop_nonstandard_continent_fk" ||
+		!strings.Contains(continentCompatibilityMigration.UpSQL, "DROP FOREIGN KEY `FK_Continent_Name`") ||
+		!strings.Contains(continentCompatibilityMigration.DownSQL, "ADD CONSTRAINT `FK_Continent_Name`") {
+		t.Fatalf("continent compatibility migration = %#v, want reversible version 29 drop_nonstandard_continent_fk", continentCompatibilityMigration)
 	}
 	shardMigration := shardMigrations[0]
 	if shardMigration.Name != "normalize_character_name" || !strings.Contains(shardMigration.PreflightSQL, "HAVING COUNT(*) > 1") {
