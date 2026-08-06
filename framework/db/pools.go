@@ -44,6 +44,9 @@ const (
 type PoolConfig struct {
 	Driver string
 	DSN    string
+	// ValidationError carries configuration failures detected before a DSN is
+	// handed to database/sql. It must never include the credential value.
+	ValidationError error
 
 	MaxOpenConns    int
 	MaxIdleConns    int
@@ -121,19 +124,30 @@ func NewConfiguredPools(ctx context.Context) (*Pools, error) {
 // AccountPoolConfig returns the account connection settings without opening a
 // connection. Pool tuning defaults are applied by OpenPool.
 func AccountPoolConfig() PoolConfig {
+	password := viper.GetString(config.DatabaseAccountPassword)
 	return PoolConfig{
-		Driver: viper.GetString(config.DatabaseAccountDriver),
-		DSN:    config.ConnStringAccount(),
+		Driver:          viper.GetString(config.DatabaseAccountDriver),
+		DSN:             config.ConnStringAccount(),
+		ValidationError: requiredPasswordError(password, "DB_ACCOUNT_PW"),
 	}
 }
 
 // ShardPoolConfig returns the shard connection settings without opening a
 // connection. Pool tuning defaults are applied by OpenPool.
 func ShardPoolConfig() PoolConfig {
+	password := viper.GetString(config.DatabaseShardPassword)
 	return PoolConfig{
-		Driver: viper.GetString(config.DatabaseShardDriver),
-		DSN:    config.ConnStringShard(),
+		Driver:          viper.GetString(config.DatabaseShardDriver),
+		DSN:             config.ConnStringShard(),
+		ValidationError: requiredPasswordError(password, "DB_SHARD_PW"),
 	}
+}
+
+func requiredPasswordError(password, environmentName string) error {
+	if strings.TrimSpace(password) == "" {
+		return fmt.Errorf("%w: %s is required", ErrInvalidPoolConfig, environmentName)
+	}
+	return nil
 }
 
 // NewPools opens, configures, and verifies both database pools. If either
@@ -186,6 +200,9 @@ func OpenPool(ctx context.Context, role PoolRole, poolConfig PoolConfig) (*sql.D
 }
 
 func normalizePoolConfig(poolConfig PoolConfig) (PoolConfig, error) {
+	if poolConfig.ValidationError != nil {
+		return PoolConfig{}, poolConfig.ValidationError
+	}
 	poolConfig.Driver = strings.TrimSpace(poolConfig.Driver)
 	if poolConfig.Driver == "" {
 		return PoolConfig{}, fmt.Errorf("%w: driver is required", ErrInvalidPoolConfig)

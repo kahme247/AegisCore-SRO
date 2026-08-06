@@ -77,6 +77,22 @@ INSERT INTO `SHARD` VALUES (1,22,'GoSRO',1000,1,0);
 UNLOCK TABLES;
 
 --
+-- Table structure for table `SHARD_CHARACTER_LIMIT`
+--
+
+DROP TABLE IF EXISTS `SHARD_CHARACTER_LIMIT`;
+CREATE TABLE `SHARD_CHARACTER_LIMIT` (
+  `FK_SHARD` int NOT NULL COMMENT '0 is the default for shards without an override',
+  `CHARACTER_LIMIT` smallint unsigned NOT NULL DEFAULT '4',
+  `ENABLED` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`FK_SHARD`),
+  CONSTRAINT `CK_SHARD_CHARACTER_LIMIT_ENABLED` CHECK ((`ENABLED` in (0,1))),
+  CONSTRAINT `CK_SHARD_CHARACTER_LIMIT_POSITIVE` CHECK ((`CHARACTER_LIMIT` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO `SHARD_CHARACTER_LIMIT` VALUES (0,4,1);
+
+--
 -- Table structure for table `USER`
 --
 
@@ -92,6 +108,9 @@ CREATE TABLE `USER` (
   `IS_GM` int DEFAULT NULL,
   `CTIME` timestamp NULL DEFAULT NULL,
   `UTIME` timestamp NULL DEFAULT NULL,
+  `SILK` int unsigned NOT NULL DEFAULT '0',
+  `GIFT_SILK` int unsigned NOT NULL DEFAULT '0',
+  `SILK_POINT` int unsigned NOT NULL DEFAULT '0',
   `USERNAME_NORMALIZED` varchar(45) GENERATED ALWAYS AS (lower(trim(`USERNAME`))) STORED,
   PRIMARY KEY (`id`),
   UNIQUE KEY `UX_USER_USERNAME_NORMALIZED` (`USERNAME_NORMALIZED`)
@@ -104,7 +123,6 @@ CREATE TABLE `USER` (
 
 LOCK TABLES `USER` WRITE;
 /*!40000 ALTER TABLE `USER` DISABLE KEYS */;
-INSERT INTO `USER` (`id`, `USERNAME`, `PASSWORD`, `MAIL`, `STATUS`, `IS_GM`, `CTIME`, `UTIME`) VALUES (2,'test','$2a$12$EUJB.2CIa0E1AsXJXnhaWO0JSWlcrFXZfbDXVZeibL6kYgZ0Yzc9C','test@test.de',1,1,'2020-02-16 11:25:11',NULL),(4,'test2','$2a$12$EUJB.2CIa0E1AsXJXnhaWO0JSWlcrFXZfbDXVZeibL6kYgZ0Yzc9C','test@test.de',1,1,'2020-02-16 11:25:11',NULL);
 /*!40000 ALTER TABLE `USER` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -131,7 +149,7 @@ CREATE TABLE `go_sro_schema_migrations` (
 
 LOCK TABLES `go_sro_schema_migrations` WRITE;
 /*!40000 ALTER TABLE `go_sro_schema_migrations` DISABLE KEYS */;
-INSERT INTO `go_sro_schema_migrations` VALUES (1,'normalize_username','5c8e7e637ff56b58ca1211dacf69fc3df00d02af5dc63a4f8d6e3dde16e2eb98','applied','2026-07-16 19:24:22.003331');
+INSERT INTO `go_sro_schema_migrations` VALUES (1,'normalize_username','5c8e7e637ff56b58ca1211dacf69fc3df00d02af5dc63a4f8d6e3dde16e2eb98','applied','2026-07-16 19:24:22.003331'),(2,'item_mall_balances','9dd841c8d48e3f12282575a3ba99b9a8668b8ab3ad0c19115927a68317762a9b','applied','2026-07-17 00:00:00.000000'),(3,'shard_character_limit','d64613d0134852e205c15182fc660b2eec16516acb128938d1d4f4da160e80b2','applied','2026-07-17 00:00:00.000000');
 /*!40000 ALTER TABLE `go_sro_schema_migrations` ENABLE KEYS */;
 UNLOCK TABLES;
 

@@ -7,8 +7,8 @@ explicit maintenance operation; Agent and Gateway never start the runner.
 
 | Target | Required database | Versions |
 | --- | --- | --- |
-| `account` | exactly `SRO_ACCOUNT` | `000001` normalized username |
-| `shard` | exactly `SRO_SHARD` | `000001` normalized character name; `000002` unique inventory link; `000003` quests; `000004` economy/storage; `000005` shop catalog; `000006` teleports; `000008` masteries; `000009` guild storage; `000010` character skills; `000011`-`000014` default mastery/skill/quest data; `000015` Media level/skill data; `000016`-`000019` native vSRO skill catalog and compatibility; `000020` native item catalog; `000021` movement settings; `000022` rental metadata; `000023` return city; `000024` progression rates; `000025` mob rates; `000026` quick slots; `000027` durable character speed effects; `000028` unique character IDs; `000029` remove the non-standard continent-name foreign key for MySQL 8.4 |
+| `account` | exactly `SRO_ACCOUNT` | `000001` normalized username; `000002` Silk, Gift Silk and Silk Point balances; `000003` per-shard/default character limits |
+| `shard` | exactly `SRO_SHARD` | `000001` normalized character name; `000002` unique inventory link; `000003` quests; `000004` economy/storage; `000005` shop catalog; `000006` teleports; `000008` masteries; `000009` guild storage; `000010` character skills; `000011`-`000014` default mastery/skill/quest data; `000015` Media level/skill data; `000016`-`000019` native vSRO skill catalog and compatibility; `000020` native item catalog; `000021` movement settings; `000022` rental metadata; `000023` return city; `000024` progression rates; `000025` mob rates; `000026` quick slots; `000027` durable character speed effects; `000028` unique character IDs; `000029` remove the non-standard continent-name foreign key for MySQL 8.4; `000030` Item Mall catalog and purchase ledger; `000031` durable Gold Time, Skill Gold Time and Premium services; `000032` character creation policy and starter-item allowlist |
 
 The catalog may be non-contiguous, so a clean ledger proceeds from `000006` to
 `000008`. A ledger row for missing version `000007` is rejected as unknown

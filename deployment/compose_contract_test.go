@@ -8,11 +8,12 @@ import (
 )
 
 type composeService struct {
-	Volumes   []string                     `yaml:"volumes"`
-	Ports     []string                     `yaml:"ports"`
-	Image     string                       `yaml:"image"`
-	Build     composeBuild                 `yaml:"build"`
-	DependsOn map[string]composeDependency `yaml:"depends_on"`
+	Volumes     []string                     `yaml:"volumes"`
+	Ports       []string                     `yaml:"ports"`
+	Environment map[string]string            `yaml:"environment"`
+	Image       string                       `yaml:"image"`
+	Build       composeBuild                 `yaml:"build"`
+	DependsOn   map[string]composeDependency `yaml:"depends_on"`
 }
 
 type composeBuild struct {
@@ -60,6 +61,15 @@ func TestComposePersistsMySQLAndWaitsForSchemaHealth(t *testing.T) {
 	}
 	if !foundDataMount {
 		t.Fatal("database service does not mount mysql-data at /var/lib/mysql")
+	}
+	if got := database.Environment["MYSQL_PASSWORD"]; got != "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}" {
+		t.Fatalf("database MYSQL_PASSWORD = %q, want required interpolation", got)
+	}
+	for _, serviceName := range []string{"agent-server", "gateway-server"} {
+		environment := compose.Services[serviceName].Environment
+		if environment["DB_ACCOUNT_PW"] == "" || environment["DB_SHARD_PW"] == "" {
+			t.Fatalf("%s does not receive both required database passwords", serviceName)
+		}
 	}
 	for _, serviceName := range []string{"agent-server", "gateway-server"} {
 		dependency, exists := compose.Services[serviceName].DependsOn["db"]

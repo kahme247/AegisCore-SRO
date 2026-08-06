@@ -107,6 +107,20 @@ func TestOpenConnShardCreatesDeferredHandle(t *testing.T) {
 	t.Cleanup(func() { _ = dbHandle.Close() })
 }
 
+func TestConfiguredPoolConfigsRejectMissingPasswords(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	for role, poolConfig := range map[string]PoolConfig{
+		"account": AccountPoolConfig(),
+		"shard":   ShardPoolConfig(),
+	} {
+		if _, err := normalizePoolConfig(poolConfig); !errors.Is(err, ErrInvalidPoolConfig) {
+			t.Fatalf("%s configured pool error = %v, want ErrInvalidPoolConfig", role, err)
+		}
+	}
+}
+
 func TestNewPoolsConfiguresAndPingsBothPools(t *testing.T) {
 	resetPoolTestDriver()
 

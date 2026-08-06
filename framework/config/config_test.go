@@ -16,16 +16,16 @@ func TestDefaultsProduceExpectedDatabaseConfiguration(t *testing.T) {
 	assertConfigValue(t, DatabaseAccountHost, "127.0.0.1")
 	assertConfigValue(t, DatabaseAccountPort, 3306)
 	assertConfigValue(t, DatabaseAccountUser, "sro")
-	assertConfigValue(t, DatabaseAccountPassword, "1234")
+	assertConfigValue(t, DatabaseAccountPassword, nil)
 	assertConfigValue(t, DatabaseAccountDatabase, "SRO_ACCOUNT")
 	assertConfigValue(t, DatabaseAccountParams, "?parseTime=true")
 	assertConfigValue(t, DatabaseShardDatabase, "SRO_SHARD")
 	assertConfigValue(t, LogLevel, "info")
 
-	if got, want := ConnStringAccount(), "sro:1234@tcp(127.0.0.1:3306)/SRO_ACCOUNT?parseTime=true"; got != want {
+	if got, want := ConnStringAccount(), "sro:@tcp(127.0.0.1:3306)/SRO_ACCOUNT?parseTime=true"; got != want {
 		t.Fatalf("ConnStringAccount() = %q, want %q", got, want)
 	}
-	if got, want := ConnStringShard(), "sro:1234@tcp(127.0.0.1:3306)/SRO_SHARD?parseTime=true"; got != want {
+	if got, want := ConnStringShard(), "sro:@tcp(127.0.0.1:3306)/SRO_SHARD?parseTime=true"; got != want {
 		t.Fatalf("ConnStringShard() = %q, want %q", got, want)
 	}
 }
@@ -59,7 +59,7 @@ func TestEmptyEnvironmentValuesFallBackToDefaults(t *testing.T) {
 	t.Setenv("DB_ACCOUNT_PW", "")
 	t.Setenv("DB_ACCOUNT_PARAMS", "")
 
-	assertConfigValue(t, DatabaseAccountPassword, "1234")
+	assertConfigValue(t, DatabaseAccountPassword, nil)
 	assertConfigValue(t, DatabaseAccountParams, "?parseTime=true")
 }
 

@@ -17,7 +17,7 @@ services:
     environment:
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
       MYSQL_USER: sro
-      MYSQL_PASSWORD: 1234
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
     volumes:
       # Use a stable Compose volume rather than the image's anonymous
       # /var/lib/mysql volume, which is detached whenever the container is
@@ -51,6 +51,7 @@ services:
     environment:
       DB_ACCOUNT_HOST: db
       DB_ACCOUNT_DATABASE: SRO_ACCOUNT
+      DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
     command: ["--target=account"]
 
   migrate-shard:
@@ -68,6 +69,7 @@ services:
     environment:
       DB_SHARD_HOST: db
       DB_SHARD_DATABASE: SRO_SHARD
+      DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
     command: ["--target=shard"]
 
   agent-server:
@@ -95,12 +97,17 @@ services:
           memory: 8G
     environment:
       DB_ACCOUNT_HOST: db
+      DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       DB_SHARD_HOST: db
+      DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
       AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/go-sro/Data/Data.pk2}
       AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/go-sro/Data/prelinked_navdata.gob}
       AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/go-sro/Media/server_dep/silkroad/textdata/leveldata.txt}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
+      AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
+      AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
+      AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
       SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
       # Modes: 0/off, players/characters, mobs, or all/everything/1.
       # Prefer players for client-crash diagnostics; all can emit substantial
@@ -135,7 +142,9 @@ services:
       - gosro
     environment:
       DB_ACCOUNT_HOST: db
+      DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       DB_SHARD_HOST: db
+      DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
       SRO_SESSION_TRACE: ${GATEWAY_SESSION_TRACE:-0}
       # Gateway will not invent stock-client identifiers or advertise a

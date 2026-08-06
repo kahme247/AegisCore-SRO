@@ -78,7 +78,6 @@ func setDefaultValues() {
 	viper.SetDefault(DatabaseAccountHost, "127.0.0.1")
 	viper.SetDefault(DatabaseAccountPort, 3306)
 	viper.SetDefault(DatabaseAccountUser, "sro")
-	viper.SetDefault(DatabaseAccountPassword, "1234")
 	viper.SetDefault(DatabaseAccountDatabase, "SRO_ACCOUNT")
 	viper.SetDefault(DatabaseAccountParams, "?parseTime=true")
 
@@ -86,7 +85,6 @@ func setDefaultValues() {
 	viper.SetDefault(DatabaseShardHost, "127.0.0.1")
 	viper.SetDefault(DatabaseShardPort, 3306)
 	viper.SetDefault(DatabaseShardUser, "sro")
-	viper.SetDefault(DatabaseShardPassword, "1234")
 	viper.SetDefault(DatabaseShardDatabase, "SRO_SHARD")
 	viper.SetDefault(DatabaseShardParams, "?parseTime=true")
 }
