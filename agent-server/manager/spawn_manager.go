@@ -80,11 +80,9 @@ func groupSpawnObjects(player model.IPlayer, objects map[uint32]model.ISRObject,
 		logrus.Errorf("build grouped %s packet: %v", spawnActionName(spawning), err)
 		return
 	}
-	for _, packet := range []network.Packet{p1, p2, p3} {
-		if err := player.GetSession().Send(packet); err != nil {
-			logrus.Errorf("send grouped %s packet 0x%04X: %v", spawnActionName(spawning), packet.MessageID, err)
-			return
-		}
+	if err := player.GetSession().SendBatch([]network.Packet{p1, p2, p3}); err != nil {
+		logrus.Errorf("send grouped %s packet: %v", spawnActionName(spawning), err)
+		return
 	}
 	if spawning {
 		player.GetCharKnownObjectList().MarkSpawned(objects)
@@ -153,9 +151,11 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 		typeInfo := object.GetTypeInfo()
 		character, isCharacter := object.(model.ICharacter)
 		validPosition := isCharacter && character.GetNavmeshPosition().Offset != nil
+		_, isPlayer := object.(model.IPlayer)
+		verifiedPlayerLayout := isPlayer && typeInfo.IsPlayerCharacter()
 		verifiedMobLayout := typeInfo.IsNPCMob() && typeInfo.TypeID4 != 2 && typeInfo.TypeID4 != 3
 		verifiedNPCLayout := typeInfo.IsNPCNpc() && typeInfo.TypeID4 == 0
-		if validPosition && (verifiedMobLayout || verifiedNPCLayout) {
+		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout) {
 			supported[uid] = object
 			continue
 		}

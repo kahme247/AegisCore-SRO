@@ -73,6 +73,12 @@ func BuildBuffAdd(targetUID, skillID, token uint32) network.Packet {
 	return p
 }
 
+func BuildTimedBuffAdd(targetUID, skillID, token uint32, remainingMilliseconds uint32) network.Packet {
+	p := BuildBuffAdd(targetUID, skillID, token)
+	p.WriteUInt32(remainingMilliseconds)
+	return p
+}
+
 func BuildBuffRemove(tokens ...uint32) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.EntityBuffRemove

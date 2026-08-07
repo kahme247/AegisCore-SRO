@@ -60,6 +60,39 @@ func TestEntitySpawnInventorySerializationIsIndependentOfMapInsertionOrder(t *te
 	}
 }
 
+func TestEntitySpawnSerializesPersistedInventorySizeEquippedSlotsAndOptLevels(t *testing.T) {
+	inventory := deterministicInventoryForSerialization([]byte{40, SlotPrimaryWeapon, SlotHelmet})
+	helmet := inventory.Items[SlotHelmet]
+	helmet.OptLevel = 3
+	inventory.Items[SlotHelmet] = helmet
+	weapon := inventory.Items[SlotPrimaryWeapon]
+	weapon.OptLevel = 7
+	inventory.Items[SlotPrimaryWeapon] = weapon
+	player := deterministicInventorySerializationPlayer(inventory)
+	player.InventorySize = 60
+
+	for _, serialize := range []func(*network.Packet, *Player){
+		func(packet *network.Packet, player *Player) { WriteEntitySpawn(packet, player) },
+		func(packet *network.Packet, player *Player) { WriteEntitySpawnData(packet, player) },
+	} {
+		packet := network.EmptyPacket()
+		serialize(&packet, player)
+		payload := packet.Payload()
+		if len(payload) < 20 {
+			t.Fatalf("spawn payload is too short: %x", payload)
+		}
+		if payload[8] != 60 || payload[9] != 2 {
+			t.Fatalf("inventory size/count = %d/%d, want 60/2", payload[8], payload[9])
+		}
+		if got := payload[10:15]; !bytes.Equal(got, []byte{0x00, 0x10, 0x00, 0x00, 3}) {
+			t.Fatalf("helmet appearance = %x, want ref 0x1000 opt 3", got)
+		}
+		if got := payload[15:20]; !bytes.Equal(got, []byte{0x00, 0x60, 0x00, 0x00, 7}) {
+			t.Fatalf("weapon appearance = %x, want ref 0x6000 opt 7", got)
+		}
+	}
+}
+
 func deterministicInventoryForSerialization(order []byte) Inventory {
 	itemsBySlot := map[byte]Item{
 		SlotHelmet: {

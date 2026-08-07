@@ -504,6 +504,17 @@ func (s *Session) Send(packet network.Packet) error {
 	return err
 }
 
+// SendBatch writes an ordered protocol sequence as one sender job.
+func (s *Session) SendBatch(packets []network.Packet) error {
+	if s.Sender == nil {
+		return ErrSenderClosed
+	}
+	for index := range packets {
+		packets[index].ServerPacket = true
+	}
+	return s.Sender.SendBatch(packets)
+}
+
 // SendMassive writes a complete 0x600D header/body batch without allowing
 // another handler's packet to interleave between its frames.
 func (s *Session) SendMassive(packet network.Packet) error {

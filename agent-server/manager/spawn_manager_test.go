@@ -127,6 +127,61 @@ func TestSupportedSpawnObjectsRejectsUnverifiedGlobalLayouts(t *testing.T) {
 	}
 }
 
+func TestSupportedSpawnObjectsAcceptsPlayerLayout(t *testing.T) {
+	player := &model.Player{SRObject: model.SRObject{
+		UniqueID:          77,
+		RefObjectID:       1907,
+		TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 1},
+		RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Offset: math32.NewVector3(1, 0, 1)},
+	}}
+	filtered := supportedSpawnObjects(map[uint32]model.ISRObject{77: player})
+	if len(filtered) != 1 || filtered[77] != player {
+		t.Fatalf("supported player objects = %#v, want UID 77", filtered)
+	}
+
+	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	if err != nil {
+		t.Fatalf("build player group spawn: %v", err)
+	}
+	if begin.MessageID != opcode.EntityGroupSpawnBegin || body.MessageID != opcode.EntityGroupSpawnData || end.MessageID != opcode.EntityGroupSpawnEnd {
+		t.Fatalf("player group opcodes = %#v", []uint16{begin.MessageID, body.MessageID, end.MessageID})
+	}
+}
+
+func TestGroupSpawnDeliversPlayerBatch(t *testing.T) {
+	_, observer := mobAIFixture(100)
+	conn := &mobAICaptureConn{}
+	observer.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "player-spawn-test")
+	defer observer.Session.Close()
+
+	subject := &model.Player{
+		SRObject: model.SRObject{
+			UniqueID:          77,
+			RefObjectID:       1907,
+			TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 1},
+			RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Offset: math32.NewVector3(1, 0, 1)},
+		},
+		Scale:       34,
+		CharName:    "VisiblePlayer",
+		LifeState:   model.Alive,
+		MotionState: model.Stand,
+		BodyState:   model.Normal,
+		Inventory:   model.NewInventory(nil),
+	}
+	groupSpawnObjects(observer, map[uint32]model.ISRObject{77: subject}, true)
+	packets := readCapturedPackets(t, conn, 3)
+	want := []uint16{opcode.EntityGroupSpawnBegin, opcode.EntityGroupSpawnData, opcode.EntityGroupSpawnEnd}
+	if got := packetOpcodes(packets); len(got) != len(want) {
+		t.Fatalf("player spawn opcodes = %#v, want %#v", got, want)
+	} else {
+		for index := range want {
+			if got[index] != want[index] {
+				t.Fatalf("player spawn opcodes = %#v, want %#v", got, want)
+			}
+		}
+	}
+}
+
 func TestGroupSpawnSendsMovingEntityUpdateAfterBatch(t *testing.T) {
 	npc, player := mobAIFixture(100)
 	npc.BeginMovement(model.MovementData{

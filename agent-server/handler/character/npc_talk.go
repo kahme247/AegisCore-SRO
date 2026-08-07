@@ -3,7 +3,9 @@ package character
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/agent-server/service"
@@ -14,10 +16,8 @@ import (
 )
 
 // NPCTalkHandler admits the stock 0x7046 request only for a nearby, known
-// normal NPC. It intentionally does not invent a 0x30D4 quest-dialogue packet:
-// those packet layouts have not yet been captured and a guessed response can
-// desynchronise the stock client. The handler is the authoritative boundary
-// that the script and quest runtime will use once its protocol encoder lands.
+// normal NPC and dispatches conversation responses whose stock script contract
+// has been recovered.
 type NPCTalkHandler struct {
 	mu    sync.Mutex
 	world selectEntityWorld
@@ -30,6 +30,19 @@ type NPCTalkHandler struct {
 // their service packet has not been implemented yet.
 const npcTalkActionConversation = byte(2)
 
+const (
+	chulsanRefObjectID    = uint32(2003)
+	questListSelectorBase = byte(5)
+)
+
+var chulsanQuests = []struct {
+	nameKey string
+	talkKey string
+}{
+	{nameKey: "SN_QNO_CH_SMITH_1", talkKey: "SN_TALK_QNO_CH_SMITH_1_01"},
+	{nameKey: "SN_QNO_CH_SMITH_2", talkKey: "SN_TALK_QNO_CH_SMITH_2_01"},
+}
+
 func NewNPCTalkHandler(world selectEntityWorld) *NPCTalkHandler {
 	return &NPCTalkHandler{world: world}
 }
@@ -40,6 +53,7 @@ func RegisterNPCTalkHandler(target *server.Server) {
 	}
 	handler := NewNPCTalkHandler(service.GetWorldServiceInstance())
 	target.RegisterHandler(opcode.EntityTalkRequest, handler.handlePacket)
+	target.RegisterHandler(opcode.QuestTalk, handler.handleQuestTalkPacket)
 }
 
 func (h *NPCTalkHandler) handlePacket(_ context.Context, session *server.Session, packet network.Packet) error {
@@ -105,11 +119,58 @@ func (h *NPCTalkHandler) handlePacket(_ context.Context, session *server.Session
 
 	npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), action)
 	logrus.Debugf("accepted NPC interaction player=%s characterID=%d uid=%d refObjID=%d action=%d", player.CharName, player.ID, uniqueID, object.GetRefObjectID(), action)
-	response := buildNPCTalkResponse(action)
-	if h.send != nil {
-		return h.send(session, response)
+	if err := h.sendPacket(session, buildNPCTalkResponse(action)); err != nil {
+		return err
 	}
-	return session.Send(response)
+	if action == npcTalkActionConversation && strings.EqualFold(object.GetName(), "NPC_CH_SMITH") {
+		entries := make([]string, len(chulsanQuests))
+		for index, quest := range chulsanQuests {
+			entries[index] = quest.nameKey
+		}
+		menu, err := buildQuestTalkPacket(4, "", entries)
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, menu)
+	}
+	return nil
+}
+
+func (h *NPCTalkHandler) handleQuestTalkPacket(_ context.Context, session *server.Session, packet network.Packet) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if session == nil || session.UserContext.UniqueID == 0 || packet.Remaining() != 1 {
+		return fmt.Errorf("malformed quest talk selection")
+	}
+	selector, err := packet.ReadByte()
+	if err != nil {
+		return fmt.Errorf("read quest talk selector: %w", err)
+	}
+	interaction, ok := npcInteractions.Get(session.UserContext.UniqueID)
+	if !ok || interaction.NPCRefObjectID != chulsanRefObjectID ||
+		!HasRecentNPCInteraction(session.UserContext.UniqueID, interaction.NPCUniqueID, npcTalkActionConversation, 5*time.Minute) {
+		return nil
+	}
+	index := int(selector - questListSelectorBase)
+	if selector < questListSelectorBase || index >= len(chulsanQuests) {
+		return nil
+	}
+	offer, err := buildQuestTalkPacket(4, chulsanQuests[index].talkKey, []string{
+		"SN_TALK_COMMON_ACCEPT",
+		"SN_TALK_COMMON_DENY",
+	})
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, offer)
+}
+
+func (h *NPCTalkHandler) sendPacket(session *server.Session, packet network.Packet) error {
+	if h.send != nil {
+		return h.send(session, packet)
+	}
+	return session.Send(packet)
 }
 
 func buildNPCTalkResponse(action byte) network.Packet {

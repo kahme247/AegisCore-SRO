@@ -87,6 +87,24 @@ func (s *Sender) Send(packet network.Packet) error {
 	return s.enqueue([]outboundFrame{{packet: &clone}})
 }
 
+// SendBatch queues ordinary packets as one indivisible writer job. It is used
+// for protocol sequences whose framing state must not be interleaved, such as
+// group-spawn begin/data/end.
+func (s *Sender) SendBatch(packets []network.Packet) error {
+	if len(packets) == 0 {
+		return nil
+	}
+	frames := make([]outboundFrame, 0, len(packets))
+	for _, packet := range packets {
+		clone, err := cloneOutboundPacket(packet)
+		if err != nil {
+			return err
+		}
+		frames = append(frames, outboundFrame{packet: &clone})
+	}
+	return s.enqueue(frames)
+}
+
 // SendMassive encodes all 0x600D header/body frames before queueing them as one
 // job. It therefore preserves physical frame order even with concurrent sends.
 func (s *Sender) SendMassive(packet network.Packet) error {

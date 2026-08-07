@@ -71,6 +71,34 @@ func TestSenderWritesMassiveBatchBeforeNextJob(t *testing.T) {
 	}
 }
 
+func TestSenderWritesOrdinaryBatchInOrder(t *testing.T) {
+	writer := &shortDeadlineWriter{chunkSize: 1024}
+	sender := NewSender(writer, marshalPacket)
+	defer sender.Close()
+
+	packets := []network.Packet{
+		*network.NewServerPacket(0x3017),
+		*network.NewServerPacket(0x3019),
+		*network.NewServerPacket(0x3018),
+	}
+	if err := sender.SendBatch(packets); err != nil {
+		t.Fatalf("SendBatch() error = %v", err)
+	}
+	decoder := network.NewFrameDecoder()
+	frames, err := decoder.Push(writer.Bytes())
+	if err != nil {
+		t.Fatalf("FrameDecoder.Push() error = %v", err)
+	}
+	if len(frames) != len(packets) {
+		t.Fatalf("frame count = %d, want %d", len(frames), len(packets))
+	}
+	for index, packet := range packets {
+		if got := binary.LittleEndian.Uint16(frames[index][network.IDOffset : network.IDOffset+2]); got != packet.MessageID {
+			t.Fatalf("frame %d opcode = 0x%04X, want 0x%04X", index, got, packet.MessageID)
+		}
+	}
+}
+
 func TestSenderReturnsClosedError(t *testing.T) {
 	sender := NewSender(&shortDeadlineWriter{chunkSize: 1}, marshalPacket)
 	sender.Close()

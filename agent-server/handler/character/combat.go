@@ -786,6 +786,9 @@ func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Ses
 	skillExperienceRate := int(rates.SkillExperienceRatePercent)
 	reward := scaleCombatReward(baseReward, experienceRate)
 	skillReward := scaleCombatReward(baseReward, skillExperienceRate)
+	experienceBonus, skillExperienceBonus := player.ItemServiceRates(time.Now().UTC())
+	reward = scaleCombatReward(reward, 100+int(experienceBonus))
+	skillReward = scaleCombatReward(skillReward, 100+int(skillExperienceBonus))
 	progress := player.PreviewExperienceAward(h.levels, reward, skillReward)
 	if h.progress == nil {
 		return model.ErrCharacterProgressRepositoryUnavailable

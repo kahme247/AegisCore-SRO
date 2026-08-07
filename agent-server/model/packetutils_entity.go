@@ -29,8 +29,8 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 			p.WriteByte(byte(player.GetPVPCape()))
 			p.WriteByte(1) // AutoInverstXP
 			inventory := player.GetInventory()
-			slots := SortedInventorySlots(inventory.Items)
-			p.WriteByte(BaseInventorySize)
+			slots := equippedAppearanceSlots(inventory)
+			p.WriteByte(playerInventorySize(player))
 			p.WriteByte(byte(len(slots)))
 
 			// The legacy appearance list does not include a slot field. Keep
@@ -40,8 +40,7 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 				p.WriteUInt32(item.GetRefObjectID())
 
 				if item.IsEquipment() {
-					// TODO: write real opt level or just always 0?
-					p.WriteByte(0) // OptLevel
+					p.WriteByte(item.OptLevel)
 				}
 			}
 
@@ -259,8 +258,8 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 	p.WriteByte(byte(player.PVPCape))
 	p.WriteByte(1) // AutoInverstXP
 	inventory := player.GetInventory()
-	slots := SortedInventorySlots(inventory.Items)
-	p.WriteByte(BaseInventorySize)
+	slots := equippedAppearanceSlots(inventory)
+	p.WriteByte(player.GetInventorySize())
 	p.WriteByte(byte(len(slots)))
 
 	// The legacy appearance list does not include a slot field. Keep its
@@ -270,8 +269,7 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 		p.WriteUInt32(item.GetRefObjectID())
 
 		if item.IsEquipment() {
-			// TODO: write real opt level or just always 0?
-			p.WriteByte(0) // OptLevel
+			p.WriteByte(item.OptLevel)
 		}
 	}
 
@@ -319,6 +317,24 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 	if p.MessageID == opcode.EntitySingleSpawn {
 		p.WriteByte(0) // TODO find out what this is
 	}
+}
+
+func equippedAppearanceSlots(inventory Inventory) []byte {
+	all := SortedInventorySlots(inventory.Items)
+	slots := make([]byte, 0, len(all))
+	for _, slot := range all {
+		if slot <= SlotRightRing {
+			slots = append(slots, slot)
+		}
+	}
+	return slots
+}
+
+func playerInventorySize(player IPlayer) byte {
+	if sized, ok := player.(interface{ GetInventorySize() byte }); ok {
+		return sized.GetInventorySize()
+	}
+	return BaseInventorySize
 }
 
 // WritePlayerTransportState writes the stock player-spawn transport segment:

@@ -107,3 +107,17 @@ func TestActionUIDsAreProcessWideAndNonZero(t *testing.T) {
 		t.Fatalf("action UIDs = %d, %d; want distinct non-zero values", first, second)
 	}
 }
+
+func TestBuildTimedBuffAddAppendsAuthoritativeDuration(t *testing.T) {
+	packet := BuildTimedBuffAdd(100, 3977, 55, 5_400_000)
+	want := []uint32{100, 3977, 55, 5_400_000}
+	for index, expected := range want {
+		value, err := packet.ReadUInt32()
+		if err != nil || value != expected {
+			t.Fatalf("field %d = %d, want %d: %v", index, value, expected, err)
+		}
+	}
+	if packet.Remaining() != 0 {
+		t.Fatalf("timed buff trailing bytes = %d", packet.Remaining())
+	}
+}
