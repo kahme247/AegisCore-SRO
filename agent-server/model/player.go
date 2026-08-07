@@ -70,6 +70,7 @@ type Player struct {
 	ID                    int
 	CharName              string
 	Inventory             Inventory
+	InventorySize         byte
 	BaseStats             BaseStats
 	BaseAttackStats       AttackStats
 	BaseDefenseStats      DefenseStats
@@ -106,6 +107,8 @@ type Player struct {
 	speedEffectToken      uint32
 	speedEffectSkillID    uint32
 	speedEffectExpiresAt  time.Time
+	itemServices          map[ItemServiceKind]ItemServiceEffect
+	itemServiceTokens     map[ItemServiceKind]uint32
 	COSState              PlayerCOSState
 
 	/* TODO
@@ -114,6 +117,13 @@ type Player struct {
 	- TeleportLocation
 	- Active Buffs / Effects
 	*/
+}
+
+func (p *Player) GetInventorySize() byte {
+	if p == nil || p.InventorySize == 0 {
+		return BaseInventorySize
+	}
+	return p.InventorySize
 }
 
 func (p *Player) SetQuickSlots(slots []CharacterQuickSlot) {

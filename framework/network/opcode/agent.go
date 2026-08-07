@@ -28,6 +28,9 @@ const (
 	AlchemyElixirRequest     uint16 = 0x7150
 	AlchemyElixirResponse    uint16 = 0xB150
 	InventoryItemUpdate      uint16 = 0x3040
+	ItemMallBalanceUpdate    uint16 = 0x3153
+	ItemPerkAdd              uint16 = 0x325F
+	ItemPerkRemove           uint16 = 0x3261
 
 	StorageOpenRequest uint16 = 0x703C
 	StorageDataBegin   uint16 = 0x3047

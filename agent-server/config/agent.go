@@ -15,6 +15,9 @@ const (
 	AgentLevelDataFile        = "agent.level_data_file"
 	AgentTrafficPacketLimit   = "agent.traffic_filter.packet_limit"
 	AgentTrafficWindowMS      = "agent.traffic_filter.window_ms"
+	AgentTimedBuffDuration    = "agent.client.timed_buff_duration"
+	AgentDiagnosticsEnabled   = "agent.diagnostics.enabled"
+	AgentDiagnosticsPort      = "agent.diagnostics.port"
 
 	// AgentAdmission* configures the private Gateway-to-Agent mTLS listener.
 	// Certificate paths have no defaults so an Agent cannot start an insecure
@@ -48,6 +51,9 @@ func bindEnvAliases() {
 	viper.BindEnv(AgentLevelDataFile, "AGENT_LEVEL_DATA_FILE")
 	viper.BindEnv(AgentTrafficPacketLimit, "AGENT_TRAFFIC_FILTER_PACKET_LIMIT")
 	viper.BindEnv(AgentTrafficWindowMS, "AGENT_TRAFFIC_FILTER_WINDOW_MS")
+	viper.BindEnv(AgentTimedBuffDuration, "AGENT_TIMED_BUFF_DURATION")
+	viper.BindEnv(AgentDiagnosticsEnabled, "AGENT_DIAGNOSTICS_ENABLED")
+	viper.BindEnv(AgentDiagnosticsPort, "AGENT_DIAGNOSTICS_PORT")
 	viper.BindEnv(AgentAdmissionHost, "AGENT_ADMISSION_HOST")
 	viper.BindEnv(AgentAdmissionPort, "AGENT_ADMISSION_PORT")
 	viper.BindEnv(AgentAdmissionTLSCertFile, "AGENT_ADMISSION_TLS_CERT_FILE")
@@ -68,6 +74,9 @@ func setDefaultValues() {
 	viper.SetDefault(AgentLevelDataFile, "./Media/server_dep/silkroad/textdata/leveldata.txt")
 	viper.SetDefault(AgentTrafficPacketLimit, 200)
 	viper.SetDefault(AgentTrafficWindowMS, 1000)
+	viper.SetDefault(AgentTimedBuffDuration, false)
+	viper.SetDefault(AgentDiagnosticsEnabled, false)
+	viper.SetDefault(AgentDiagnosticsPort, 6060)
 	// A bare Agent defaults to loopback. Container deployments explicitly bind
 	// this to their private service network through AGENT_ADMISSION_HOST.
 	viper.SetDefault(AgentAdmissionHost, "127.0.0.1")

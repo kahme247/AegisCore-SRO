@@ -1,8 +1,8 @@
 // Command sro-data contains offline data-maintenance entry points.
 //
 // Verify reads a profile and an archive, produces a provenance document, and
-// exits. Import-reference is an explicitly invoked maintenance operation that
-// loads client-matched LevelData and SkillData into SRO_SHARD.
+// exits. Import commands are explicitly invoked maintenance operations that
+// load client-matched data into SRO_SHARD.
 package main
 
 import (
@@ -19,7 +19,7 @@ import (
 	"github.com/ferdoran/go-sro/protocol/profiles"
 )
 
-var errUsage = errors.New("usage: sro-data verify --profile <profile.json> --archive <Data.pk2> | sro-data import-reference --media <Media directory> | sro-data import-vsro-skills --export-dir <directory>")
+var errUsage = errors.New("usage: sro-data verify --profile <profile.json> --archive <Data.pk2> | sro-data import-reference --media <Media directory> | sro-data import-item-mall --media <Media directory> | sro-data import-vsro-skills --export-dir <directory> | sro-data import-vsro-items --export-dir <directory>")
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -45,6 +45,9 @@ func runWithCanonicalProfile(ctx context.Context, arguments []string, output io.
 	}
 	if arguments[0] == "import-reference" {
 		return importReferenceData(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-item-mall" {
+		return importItemMall(ctx, arguments[1:], output)
 	}
 	if arguments[0] == "import-vsro-skills" {
 		return importVSROSkillReference(ctx, arguments[1:], output)

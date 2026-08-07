@@ -18,6 +18,9 @@ func TestAgentDefaults(t *testing.T) {
 	assertConfigValue(t, AgentLevelDataFile, "./Media/server_dep/silkroad/textdata/leveldata.txt")
 	assertConfigValue(t, AgentTrafficPacketLimit, 200)
 	assertConfigValue(t, AgentTrafficWindowMS, 1000)
+	assertConfigValue(t, AgentTimedBuffDuration, false)
+	assertConfigValue(t, AgentDiagnosticsEnabled, false)
+	assertConfigValue(t, AgentDiagnosticsPort, 6060)
 	assertConfigValue(t, AgentAdmissionHost, "127.0.0.1")
 	assertConfigValue(t, AgentAdmissionPort, 15883)
 	assertConfigValue(t, GameTimeTicksPerSecond, 10)
@@ -40,6 +43,9 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	t.Setenv("AGENT_PORT", "16000")
 	t.Setenv("AGENT_ADMISSION_PORT", "16001")
 	t.Setenv("AGENT_TRAFFIC_FILTER_PACKET_LIMIT", "250")
+	t.Setenv("AGENT_TIMED_BUFF_DURATION", "1")
+	t.Setenv("AGENT_DIAGNOSTICS_ENABLED", "1")
+	t.Setenv("AGENT_DIAGNOSTICS_PORT", "6061")
 	t.Setenv("GAME_TIME_TICKS_PER_SECOND", "20")
 	t.Setenv("GAME_TIME_DAY_SPEED", "1.5")
 	t.Setenv("AGENT_POSITION_CHECKPOINT_SECONDS", "45")
@@ -54,6 +60,15 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	}
 	if got := viper.GetUint(AgentTrafficPacketLimit); got != 250 {
 		t.Fatalf("packet limit = %d, want 250", got)
+	}
+	if !viper.GetBool(AgentTimedBuffDuration) {
+		t.Fatal("timed buff duration extension was not enabled from environment")
+	}
+	if !viper.GetBool(AgentDiagnosticsEnabled) {
+		t.Fatal("Agent diagnostics were not enabled from environment")
+	}
+	if got := viper.GetInt(AgentDiagnosticsPort); got != 6061 {
+		t.Fatalf("diagnostics port = %d, want 6061", got)
 	}
 	if got := viper.GetInt(GameTimeTicksPerSecond); got != 20 {
 		t.Fatalf("ticks per second = %d, want 20", got)

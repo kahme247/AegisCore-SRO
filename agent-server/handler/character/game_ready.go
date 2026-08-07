@@ -3,6 +3,7 @@ package character
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/agent-server/service"
@@ -20,9 +21,8 @@ type gameReadyPlayerLookup interface {
 }
 
 // gameReadyVisibilityActivator keeps GameReady dependent on the world-domain
-// transition, rather than on a concrete WorldService or an unverified spawn
-// packet encoder. The return value is intentionally ignored here: it is a
-// UID-only domain snapshot for a future capture-backed outbound adapter.
+// transition rather than on a concrete WorldService. Visibility changes enter
+// each observer's known-object queue and SpawnManager delivers them.
 type gameReadyVisibilityActivator interface {
 	ActivatePlayer(*model.Player) []service.VisibilityDelta
 }
@@ -31,25 +31,30 @@ type gameReadyVisibilityActivator interface {
 // A staged player remains Spawning until this one-way confirmation succeeds.
 type GameReadyHandler struct {
 	players gameReadyPlayerLookup
+	mall    model.ItemMallRepository
 }
 
-func NewGameReadyHandler(players gameReadyPlayerLookup) *GameReadyHandler {
-	return &GameReadyHandler{players: players}
+func NewGameReadyHandler(players gameReadyPlayerLookup, mall ...model.ItemMallRepository) *GameReadyHandler {
+	handler := &GameReadyHandler{players: players}
+	if len(mall) > 0 {
+		handler.mall = mall[0]
+	}
+	return handler
 }
 
 // RegisterGameReadyHandler installs GameReady directly on the Agent server's
 // per-session registry. The old PacketChannel path was best-effort and left
 // the opcode unregistered, so a client could never complete the intended
 // loading lifecycle deterministically.
-func RegisterGameReadyHandler(target *server.Server) {
+func RegisterGameReadyHandler(target *server.Server, mall ...model.ItemMallRepository) {
 	if target == nil {
 		return
 	}
-	handler := NewGameReadyHandler(nil)
+	handler := NewGameReadyHandler(nil, mall...)
 	target.RegisterHandler(opcode.GameReadyRequest, handler.handleSessionPacket)
 }
 
-func (h *GameReadyHandler) handleSessionPacket(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil {
 		return fmt.Errorf("GameReady request has no session")
 	}
@@ -77,6 +82,13 @@ func (h *GameReadyHandler) handleSessionPacket(_ context.Context, session *serve
 	if player.GetLifeState() != model.Spawning {
 		return fmt.Errorf("GameReady staged player is not spawning")
 	}
+	var balances model.ItemMallBalances
+	if h.mall != nil {
+		balances, err = h.mall.Balances(ctx, session.UserContext.UserID)
+		if err != nil {
+			return fmt.Errorf("load item mall balances: %w", err)
+		}
+	}
 	if !session.CompleteCharacterLoading() {
 		return fmt.Errorf("GameReady could not complete character loading")
 	}
@@ -99,11 +111,48 @@ func (h *GameReadyHandler) handleSessionPacket(_ context.Context, session *serve
 			return fmt.Errorf("send loaded death state: %w", err)
 		}
 	}
+	if h.mall != nil {
+		balancePacket := network.EmptyPacket()
+		balancePacket.MessageID = opcode.ItemMallBalanceUpdate
+		balancePacket.WriteUInt32(balances.Silk)
+		balancePacket.WriteUInt32(balances.GiftSilk)
+		balancePacket.WriteUInt32(balances.Point)
+		if err := session.Send(balancePacket); err != nil {
+			return fmt.Errorf("send item mall balances: %w", err)
+		}
+	}
+	publishRestoredItemServices(player)
 	logrus.Debugf("player %s's client is ready", player.CharName)
-	// Visibility reconciliation has updated domain known lists above, but no
-	// spawn/despawn packet is emitted until captured bootstrap fixtures prove
-	// the exact client wire sequence.
 	return nil
+}
+
+func publishRestoredItemServices(player *model.Player) {
+	if player == nil {
+		return
+	}
+	for _, state := range player.ItemServiceStates(time.Now().UTC()) {
+		effect := state.Effect
+		token := state.Token
+		remaining := time.Until(effect.ExpiresAt)
+		if remaining <= 0 || token == 0 {
+			continue
+		}
+		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
+		player.SendToSelfAndKnown(&added)
+		if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
+			player.SendToSelfAndKnown(&buffAdded)
+		}
+		time.AfterFunc(remaining, func() {
+			if player.ClearItemService(effect.Kind, token) {
+				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
+				player.SendToSelfAndKnown(&removed)
+				if model.ItemServiceBuffSkillID(effect) != 0 {
+					buffRemoved := model.BuildBuffRemove(token)
+					player.SendToSelfAndKnown(&buffRemoved)
+				}
+			}
+		})
+	}
 }
 
 func (h *GameReadyHandler) playerLookup() gameReadyPlayerLookup {

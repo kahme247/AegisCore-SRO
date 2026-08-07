@@ -35,12 +35,15 @@ func TestWorldBootstrapUsesValidatedV2CacheWithoutOpeningPK2(t *testing.T) {
 		t.Fatalf("ConfigureRepositories() error = %v", err)
 	}
 
-	loaded, err := world.LoadGameServerRegionsContext(context.Background(), 1)
-	if err != nil {
-		t.Fatalf("LoadGameServerRegionsContext() error = %v", err)
+	if err := world.BootstrapGameServerRegionsContext(context.Background(), 1); err != nil {
+		t.Fatalf("BootstrapGameServerRegionsContext() error = %v", err)
 	}
-	if loaded[7].Filename != "cached-region" {
-		t.Fatalf("loaded region = %#v, want validated cache data", loaded[7])
+	loaded, err := world.lookupRegionPtr(7)
+	if err != nil {
+		t.Fatalf("lookup loaded region: %v", err)
+	}
+	if loaded.Filename != "cached-region" {
+		t.Fatalf("loaded region = %#v, want validated cache data", loaded)
 	}
 	if world.loader2 == nil || world.loader2.Pk2Reader != nil {
 		t.Fatalf("cache bootstrap opened PK2 reader: loader=%#v", world.loader2)

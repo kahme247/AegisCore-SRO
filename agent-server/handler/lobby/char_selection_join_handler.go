@@ -182,12 +182,13 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	// different vertical scale than the client position protocol.
 
 	player := &model.Player{
-		SRObject:  model.NewSRObject(),
-		Session:   session,
-		ID:        char.ID,
-		CharName:  char.Name,
-		Scale:     char.Scale,
-		Inventory: inventory,
+		SRObject:      model.NewSRObject(),
+		Session:       session,
+		ID:            char.ID,
+		CharName:      char.Name,
+		Scale:         char.Scale,
+		Inventory:     inventory,
+		InventorySize: char.InventorySize,
 		BaseStats: model.BaseStats{
 			HP:  char.HP,
 			MP:  char.MP,
@@ -233,7 +234,24 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	if err := h.loadPlayerSpeedEffect(ctx, player); err != nil {
 		return nil, err
 	}
+	if err := h.loadPlayerItemServices(ctx, player); err != nil {
+		return nil, err
+	}
 	return player, nil
+}
+
+func (h *CharacterSelectionHandler) loadPlayerItemServices(ctx context.Context, player *model.Player) error {
+	if player == nil || h == nil || h.itemServices == nil {
+		return nil
+	}
+	effects, err := h.itemServices.LoadItemServices(ctx, int64(player.ID))
+	if err != nil {
+		return err
+	}
+	for _, effect := range effects {
+		player.ApplyItemService(effect)
+	}
+	return nil
 }
 
 func (h *CharacterSelectionHandler) loadPlayerSpeedEffect(ctx context.Context, player *model.Player) error {
@@ -259,10 +277,17 @@ func (h *CharacterSelectionHandler) publishRestoredSpeedEffect(player *model.Pla
 	if !exists {
 		return
 	}
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return
+	}
 	added := model.BuildBuffAdd(player.GetUniqueID(), skillID, token)
+	if h.timedBuffDuration {
+		added = model.BuildTimedBuffAdd(player.GetUniqueID(), skillID, token, uint32(remaining.Milliseconds()))
+	}
 	player.SendToSelfAndKnown(&added)
 	player.SendMovementSpeedUpdate()
-	delay := time.Until(expiresAt)
+	delay := remaining
 	if delay <= 0 {
 		return
 	}

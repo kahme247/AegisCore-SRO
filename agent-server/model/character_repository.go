@@ -20,6 +20,7 @@ type Char struct {
 	Scale            byte
 	Level            int
 	MaxLevel         int
+	InventorySize    byte
 	Exp              int64
 	SkillExp         int64
 	SkillPoints      int64
@@ -41,17 +42,17 @@ type Char struct {
 }
 
 const (
-	SelectCharsByAccountAndShard string = "SELECT ID, REF_OBJ_ID, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, UTIME, FK_REGION FROM `SRO_SHARD`.`CHAR` WHERE FK_USER=? AND FK_SHARD=? ORDER BY CTIME ASC"
+	SelectCharsByAccountAndShard string = "SELECT ID, REF_OBJ_ID, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, UTIME, FK_REGION, INVENTORY_SIZE FROM `SRO_SHARD`.`CHAR` WHERE FK_USER=? AND FK_SHARD=? ORDER BY CTIME ASC"
 	// Character names use the same explicit normalized identity as the
 	// migration-backed unique key. Keep the expression in the live queries so
 	// the application remains correct both before and after that optional
 	// schema migration has been applied; referring directly to its generated
 	// column would make pre-migration startup fail.
-	SelectCharByNameAndOwner     string = "SELECT ID, REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, CTIME, UTIME, FK_REGION, SKILL_POINTS, GOLD, MAX_LEVEL FROM `SRO_SHARD`.`CHAR` WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) AND FK_USER=? AND FK_SHARD=? LIMIT 1"
+	SelectCharByNameAndOwner     string = "SELECT ID, REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, CTIME, UTIME, FK_REGION, SKILL_POINTS, GOLD, MAX_LEVEL, INVENTORY_SIZE FROM `SRO_SHARD`.`CHAR` WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) AND FK_USER=? AND FK_SHARD=? LIMIT 1"
 	select_does_charname_exist   string = "SELECT 1 FROM `SRO_SHARD`.`CHAR` WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) LIMIT 1"
 	update_is_deleting_for_owner string = "UPDATE `SRO_SHARD`.`CHAR` SET DELETING=? WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) AND FK_USER=? AND FK_SHARD=?"
 	update_character_position    string = "UPDATE `SRO_SHARD`.`CHAR` SET POS_X=?, POS_Y=?, POS_Z=?, FK_REGION=? WHERE ID=?"
-	insert_char                  string = "INSERT INTO `SRO_SHARD`.`CHAR`(REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, FK_REGION, RETURN_TELEPORT_ID) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+	insert_char                  string = "INSERT INTO `SRO_SHARD`.`CHAR`(REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, FK_REGION, RETURN_TELEPORT_ID, INVENTORY_SIZE) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 	SelectIsGm                   string = "SELECT IS_GM FROM `SRO_ACCOUNT`.`USER` WHERE ID=?"
 )
 
@@ -181,6 +182,7 @@ func scanCharacter(scanner characterScanner) (Char, error) {
 		&char.SkillPoints,
 		&char.Gold,
 		&maxLevel,
+		&char.InventorySize,
 	); err != nil {
 		return Char{}, err
 	}
@@ -224,30 +226,4 @@ func validateCharacterScope(userID uint32, shardID uint16) error {
 		return ErrCharacterShardRequired
 	}
 	return nil
-}
-
-func CreateChar(char Char, weapon, chest, boots, pants uint32) (bool, int64) {
-	conn := db.OpenConnShard()
-	defer conn.Close()
-
-	stmt, err := conn.Prepare(insert_char)
-	db.CheckError(err)
-
-	res, err := stmt.Exec(char.RefObjID, char.User, char.Shard, char.Name, char.Scale, char.Level, char.Exp, char.SkillExp, char.Str, char.Int, char.StatPoints, char.HP, char.MP, char.IsDeleting, char.PosX, char.PosY, char.PosZ, char.Region)
-	db.CheckError(err)
-
-	id, err := res.LastInsertId()
-	db.CheckError(err)
-
-	weaponId := CreateItem(weapon, 0)
-	chestId := CreateItem(chest, 0)
-	bootsId := CreateItem(boots, 0)
-	pantsId := CreateItem(pants, 0)
-
-	AddItemToInventory(id, weaponId, SlotPrimaryWeapon)
-	AddItemToInventory(id, chestId, SlotChest)
-	AddItemToInventory(id, bootsId, SlotBoots)
-	AddItemToInventory(id, pantsId, SlotPants)
-
-	return true, id
 }

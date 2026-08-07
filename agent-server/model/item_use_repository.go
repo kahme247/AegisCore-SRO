@@ -17,17 +17,20 @@ var (
 )
 
 type ItemUseResult struct {
-	Inventory       Inventory
-	HP              int
-	MP              int
-	RefItemID       uint32
-	ItemType        uint16
-	SourceSlot      byte
-	NewAmount       uint16
-	EffectSkillID   uint32
-	SpeedPercent    int
-	EffectDuration  int
-	EffectExpiresAt time.Time
+	Inventory                Inventory
+	HP                       int
+	MP                       int
+	RefItemID                uint32
+	ItemType                 uint16
+	SourceSlot               byte
+	NewAmount                uint16
+	EffectSkillID            uint32
+	SpeedPercent             int
+	EffectDuration           int
+	EffectExpiresAt          time.Time
+	ItemService              *ItemServiceEffect
+	ItemServiceToken         uint32
+	ReplacedItemServiceToken uint32
 }
 
 type ItemUseVitals struct {
@@ -47,6 +50,27 @@ type SpeedEffect struct {
 
 type SpeedEffectRepository interface {
 	LoadSpeedEffect(context.Context, int64) (SpeedEffect, bool, error)
+}
+
+type ItemServiceKind byte
+
+const (
+	ItemServiceGold ItemServiceKind = iota + 1
+	ItemServiceSkillGold
+)
+
+type ItemServiceEffect struct {
+	Kind                        ItemServiceKind
+	SourceRefItemID             uint32
+	ExperienceBonusPercent      uint32
+	SkillExperienceBonusPercent uint32
+	DailyBudget                 time.Duration
+	ActivatedAt                 time.Time
+	ExpiresAt                   time.Time
+}
+
+type ItemServiceRepository interface {
+	LoadItemServices(context.Context, int64) ([]ItemServiceEffect, error)
 }
 
 type SQLItemUseRepository struct{ shard *sql.DB }
@@ -115,6 +139,7 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	newHP, newMP := vitals.HP, vitals.MP
 	isRecovery := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 >= 1 && ref.TypeID4 <= 3
 	isSpeedDrug := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1
+	isTimeService := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && (ref.TypeID4 == 4 || ref.TypeID4 == 5 || ref.TypeID4 == 14)
 	switch {
 	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
@@ -150,16 +175,45 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 		result.SpeedPercent = speedPercent
 		result.EffectDuration = int(expiresAt.Sub(now).Milliseconds())
 		result.EffectExpiresAt = expiresAt
+	case isTimeService:
+		effect, effectErr := itemServiceFromReference(ref, time.Now().UTC())
+		if effectErr != nil {
+			return result, effectErr
+		}
+		var currentExpiration time.Time
+		err = tx.QueryRowContext(ctx, "SELECT `EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `SERVICE_KIND`=? FOR UPDATE", characterID, effect.Kind).Scan(&currentExpiration)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, fmt.Errorf("lock character item service: %w", err)
+		}
+		base := effect.ActivatedAt
+		if currentExpiration.After(base) {
+			base = currentExpiration
+		}
+		effect.ExpiresAt = base.Add(effect.ExpiresAt.Sub(effect.ActivatedAt))
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_ITEM_SERVICE` (`CHAR_ID`,`SERVICE_KIND`,`SOURCE_REF_ITEM_ID`,`EXPERIENCE_BONUS_PERCENT`,`SKILL_EXPERIENCE_BONUS_PERCENT`,`DAILY_BUDGET_MS`,`ACTIVATED_AT`,`EXPIRES_AT`) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `SOURCE_REF_ITEM_ID`=VALUES(`SOURCE_REF_ITEM_ID`),`EXPERIENCE_BONUS_PERCENT`=VALUES(`EXPERIENCE_BONUS_PERCENT`),`SKILL_EXPERIENCE_BONUS_PERCENT`=VALUES(`SKILL_EXPERIENCE_BONUS_PERCENT`),`DAILY_BUDGET_MS`=VALUES(`DAILY_BUDGET_MS`),`ACTIVATED_AT`=VALUES(`ACTIVATED_AT`),`EXPIRES_AT`=VALUES(`EXPIRES_AT`)", characterID, effect.Kind, effect.SourceRefItemID, effect.ExperienceBonusPercent, effect.SkillExperienceBonusPercent, effect.DailyBudget.Milliseconds(), effect.ActivatedAt, effect.ExpiresAt); err != nil {
+			return result, fmt.Errorf("persist character item service: %w", err)
+		}
+		result.ItemService = &effect
 	default:
 		return result, ErrItemUseUnsupported
 	}
 	if stack > 1 {
-		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-1 WHERE `id`=?", itemID); err != nil {
+		mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-1 WHERE `id`=? AND `STACK_COUNT`=?", itemID, stack)
+		if mutationErr != nil {
+			err = mutationErr
 			return result, fmt.Errorf("decrement used item: %w", err)
 		}
+		if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrItemUseInvalidRequest
+		}
 	} else {
-		if _, err = tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, slot, itemID); err != nil {
+		mutation, mutationErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, slot, itemID)
+		if mutationErr != nil {
+			err = mutationErr
 			return result, fmt.Errorf("unlink used item: %w", err)
+		}
+		if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrItemUseInvalidRequest
 		}
 		if _, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", itemID); err != nil {
 			return result, fmt.Errorf("delete used item: %w", err)
@@ -178,6 +232,65 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 		return ItemUseResult{}, fmt.Errorf("%w: %v", ErrItemUseOutcomeUnknown, err)
 	}
 	return result, nil
+}
+
+func itemServiceFromReference(ref RefItem, now time.Time) (ItemServiceEffect, error) {
+	if !ref.IsUseable || ref.TypeID1 != 3 || ref.TypeID2 != 3 || ref.TypeID3 != 13 || ref.Param1 <= 0 {
+		return ItemServiceEffect{}, ErrItemUseUnsupported
+	}
+	effect := ItemServiceEffect{SourceRefItemID: ref.ID, ActivatedAt: now.UTC(), ExpiresAt: now.UTC().Add(time.Duration(ref.Param1) * time.Second)}
+	switch ref.TypeID4 {
+	case 4:
+		effect.Kind = ItemServiceGold
+		effect.ExperienceBonusPercent = uint32(maxInt(0, ref.Param4))
+		effect.SkillExperienceBonusPercent = uint32(maxInt(0, ref.Param5))
+		effect.DailyBudget = time.Duration(maxInt(0, ref.Param3)) * time.Millisecond
+	case 5:
+		effect.Kind = ItemServiceSkillGold
+		effect.SkillExperienceBonusPercent = uint32(maxInt(0, ref.Param5))
+		effect.DailyBudget = time.Duration(maxInt(0, ref.Param3)) * time.Millisecond
+	case 14:
+		effect.Kind = ItemServiceGold
+		effect.ExperienceBonusPercent = 100
+		effect.SkillExperienceBonusPercent = 100
+		effect.DailyBudget = 3 * time.Hour
+	default:
+		return ItemServiceEffect{}, ErrItemUseUnsupported
+	}
+	if effect.DailyBudget <= 0 || (effect.ExperienceBonusPercent == 0 && effect.SkillExperienceBonusPercent == 0) {
+		return ItemServiceEffect{}, ErrItemUseUnsupported
+	}
+	return effect, nil
+}
+
+func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID int64) ([]ItemServiceEffect, error) {
+	if r == nil || r.shard == nil {
+		return nil, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return nil, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := r.shard.QueryContext(ctx, "SELECT `SERVICE_KIND`,`SOURCE_REF_ITEM_ID`,`EXPERIENCE_BONUS_PERCENT`,`SKILL_EXPERIENCE_BONUS_PERCENT`,`DAILY_BUDGET_MS`,`ACTIVATED_AT`,`EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY `SERVICE_KIND`", characterID)
+	if err != nil {
+		return nil, fmt.Errorf("load character item services: %w", err)
+	}
+	defer rows.Close()
+	var effects []ItemServiceEffect
+	for rows.Next() {
+		var effect ItemServiceEffect
+		var budgetMS int64
+		if err = rows.Scan(&effect.Kind, &effect.SourceRefItemID, &effect.ExperienceBonusPercent, &effect.SkillExperienceBonusPercent, &budgetMS, &effect.ActivatedAt, &effect.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan character item service: %w", err)
+		}
+		effect.DailyBudget = time.Duration(budgetMS) * time.Millisecond
+		effect.ActivatedAt = effect.ActivatedAt.UTC()
+		effect.ExpiresAt = effect.ExpiresAt.UTC()
+		effects = append(effects, effect)
+	}
+	return effects, rows.Err()
 }
 
 const maximumSpeedEffectDuration = 24 * time.Hour

@@ -295,6 +295,7 @@ func scanOwnerCharacter(scanner characterScanner, userID uint32) (Char, error) {
 		&deleting,
 		&utime,
 		&char.Region,
+		&char.InventorySize,
 	); err != nil {
 		return Char{}, err
 	}

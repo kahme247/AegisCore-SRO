@@ -205,6 +205,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character-selection handlers: %w", err)
 	}
+	if err := characterSelection.ConfigureCharacterCreationPolicy(repositories.CharacterCreationPolicy); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character creation policy: %w", err)
+	}
 	if err := characterSelection.ConfigureQuestRepository(repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quest bootstrap: %w", err)
 	}
@@ -220,12 +223,16 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureSpeedEffectRepository(repositories.SpeedEffects); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character speed-effect bootstrap: %w", err)
 	}
+	if err := characterSelection.ConfigureItemServiceRepository(repositories.ItemServices); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character item-service bootstrap: %w", err)
+	}
+	characterSelection.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
 	if err := characterSelection.ConfigureMovementSettingsRepository(repositories.MovementSettings); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent movement settings: %w", err)
 	}
 	agentServer.CharacterSelection = characterSelection
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv)
-	character.RegisterGameReadyHandler(&serv)
+	character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
 	character.RegisterGuideHandler(&serv)
 	movementHandler := character.RegisterMovementHandler(&serv)
 	character.RegisterSelectEntityHandler(&serv)
@@ -270,8 +277,9 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Exchange = exchangeManager
 	agentServer.GuildStorage = repositories.GuildStorage
 	agentServer.Vitals = repositories.Vitals
-	inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage)
-	inventory.RegisterItemUseHandler(&serv, repositories.ItemUse)
+	inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.ItemMall)
+	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse)
+	itemUseHandler.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
 	inventory.RegisterAlchemyHandler(&serv, repositories.Alchemy)
 	party.RegisterPartyHandlers(&serv)
 
@@ -471,6 +479,10 @@ func buildReferenceObjectIndex(items map[uint32]model.RefItem, characters map[ui
 func main() {
 	config.Initialize()
 	logging.Init()
+	diagnostics, err := startAgentDiagnostics(viper.GetBool(config.AgentDiagnosticsEnabled), viper.GetInt(config.AgentDiagnosticsPort))
+	if err != nil {
+		log.Fatalf("Agent diagnostics startup failed: %v", err)
+	}
 	boot.SetPhases("gamedata", "services", "packethandler", "network")
 	reader := bufio.NewReader(os.Stdin)
 	shutdownSignal, stopSignalHandling := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -526,7 +538,7 @@ func main() {
 		world := service.GetWorldServiceInstance()
 		bootstrapContext, cancelBootstrap := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancelBootstrap()
-		if _, err := world.LoadGameServerRegionsContext(bootstrapContext, 1); err != nil {
+		if err := world.BootstrapGameServerRegionsContext(bootstrapContext, 1); err != nil {
 			log.Fatalf("Agent world bootstrap failed: %v", err)
 		}
 	}
@@ -571,5 +583,8 @@ func main() {
 	defer cancelShutdown()
 	if err := agentServer.Close(shutdownCtx); err != nil {
 		log.Errorf("Agent shutdown did not fully drain: %v", err)
+	}
+	if err := diagnostics.Close(shutdownCtx); err != nil {
+		log.Errorf("Agent diagnostics shutdown failed: %v", err)
 	}
 }

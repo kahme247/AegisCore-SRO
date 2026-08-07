@@ -51,5 +51,8 @@ func (s *ItemUseService) UseRecoveryItem(ctx context.Context, player *model.Play
 	player.BaseStats.MP = result.MP
 	player.Inventory = result.Inventory.Snapshot()
 	player.Mutex.Unlock()
+	if result.ItemService != nil {
+		result.ItemServiceToken, result.ReplacedItemServiceToken = player.ApplyItemService(*result.ItemService)
+	}
 	return result, nil
 }

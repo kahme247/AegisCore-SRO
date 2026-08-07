@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 
@@ -39,8 +40,10 @@ func (characterCreationRepositoryTestDriver) Open(name string) (driver.Conn, err
 type characterCreationRepositoryTestStore struct {
 	sync.Mutex
 
-	characterID int64
-	nextItemID  int64
+	characterID    int64
+	nextItemID     int64
+	characterLimit int64
+	characterCount int64
 
 	beginErr      error
 	beginContexts []context.Context
@@ -67,6 +70,7 @@ type characterCreationRepositoryTestConn struct {
 var _ driver.Conn = (*characterCreationRepositoryTestConn)(nil)
 var _ driver.ConnBeginTx = (*characterCreationRepositoryTestConn)(nil)
 var _ driver.ExecerContext = (*characterCreationRepositoryTestConn)(nil)
+var _ driver.QueryerContext = (*characterCreationRepositoryTestConn)(nil)
 
 func (*characterCreationRepositoryTestConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("prepared statements are not implemented by the character creation test driver")
@@ -128,6 +132,49 @@ func (c *characterCreationRepositoryTestConn) ExecContext(ctx context.Context, q
 	}
 }
 
+func (c *characterCreationRepositoryTestConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.store.Lock()
+	defer c.store.Unlock()
+	if c.store.queryCounts == nil {
+		c.store.queryCounts = make(map[string]int)
+	}
+	c.store.queryCounts[query]++
+	c.store.calls = append(c.store.calls, characterCreationRepositoryTestCall{query: query, args: append([]driver.NamedValue(nil), args...)})
+	if query == c.store.failQuery && c.store.queryCounts[query] == c.store.failOccurrence {
+		return nil, c.store.failErr
+	}
+	switch query {
+	case lockCharacterCreationOwner:
+		return &characterCreationRepositoryTestRows{columns: []string{"ID"}, values: [][]driver.Value{{int64(42)}}}, nil
+	case selectShardCharacterLimit:
+		return &characterCreationRepositoryTestRows{columns: []string{"CHARACTER_LIMIT"}, values: [][]driver.Value{{c.store.characterLimit}}}, nil
+	case countOwnerShardCharacters:
+		return &characterCreationRepositoryTestRows{columns: []string{"COUNT"}, values: [][]driver.Value{{c.store.characterCount}}}, nil
+	default:
+		return nil, fmt.Errorf("unexpected query %q", query)
+	}
+}
+
+type characterCreationRepositoryTestRows struct {
+	columns []string
+	values  [][]driver.Value
+	index   int
+}
+
+func (r *characterCreationRepositoryTestRows) Columns() []string { return r.columns }
+func (*characterCreationRepositoryTestRows) Close() error        { return nil }
+func (r *characterCreationRepositoryTestRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.values) {
+		return io.EOF
+	}
+	copy(dest, r.values[r.index])
+	r.index++
+	return nil
+}
+
 type characterCreationRepositoryTestTx struct {
 	store *characterCreationRepositoryTestStore
 }
@@ -169,6 +216,9 @@ func newCharacterCreationRepositoryForTest(t *testing.T, store *characterCreatio
 	}
 	if store.nextItemID == 0 {
 		store.nextItemID = 900
+	}
+	if store.characterLimit == 0 {
+		store.characterLimit = 4
 	}
 	characterCreationRepositoryTestRegistry.Lock()
 	if characterCreationRepositoryTestRegistry.stores == nil {
@@ -222,7 +272,7 @@ func TestSQLCharacterCreationRepositoryCommitsCharacterAndInitialProgressInOneCo
 	if commitCount != 1 || rollbackCount != 0 {
 		t.Fatalf("transaction commits=%d rollbacks=%d, want one commit and no rollback", commitCount, rollbackCount)
 	}
-	wantQueries := []string{insert_char, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, insertReferenceCharacterSkills, insertReferenceCharacterMasteries, insertReferenceCharacterQuests}
+	wantQueries := []string{lockCharacterCreationOwner, selectShardCharacterLimit, countOwnerShardCharacters, insert_char, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, InsertItem, InsertInventoryItem, insertReferenceCharacterSkills, insertReferenceCharacterMasteries, insertReferenceCharacterQuests}
 	if len(calls) != len(wantQueries) {
 		t.Fatalf("exec calls = %d, want %d (%#v)", len(calls), len(wantQueries), calls)
 	}
@@ -231,16 +281,16 @@ func TestSQLCharacterCreationRepositoryCommitsCharacterAndInitialProgressInOneCo
 			t.Fatalf("exec %d query = %q, want %q", index, calls[index].query, want)
 		}
 	}
-	assertCharacterCreationRepositoryInteger(t, calls[0].args[0].Value, 2001)
-	assertCharacterCreationRepositoryInteger(t, calls[0].args[1].Value, 42)
-	assertCharacterCreationRepositoryInteger(t, calls[0].args[2].Value, 7)
-	assertCharacterCreationRepositoryInteger(t, calls[1].args[0].Value, 1001)
-	assertCharacterCreationRepositoryInteger(t, calls[2].args[0].Value, 77)
-	assertCharacterCreationRepositoryInteger(t, calls[2].args[1].Value, int64(SlotPrimaryWeapon))
-	assertCharacterCreationRepositoryInteger(t, calls[2].args[2].Value, 501)
-	assertCharacterCreationRepositoryInteger(t, calls[9].args[0].Value, 77)
-	assertCharacterCreationRepositoryInteger(t, calls[10].args[0].Value, 77)
-	assertCharacterCreationRepositoryInteger(t, calls[11].args[0].Value, 77)
+	assertCharacterCreationRepositoryInteger(t, calls[3].args[0].Value, 2001)
+	assertCharacterCreationRepositoryInteger(t, calls[3].args[1].Value, 42)
+	assertCharacterCreationRepositoryInteger(t, calls[3].args[2].Value, 7)
+	assertCharacterCreationRepositoryInteger(t, calls[4].args[0].Value, 1001)
+	assertCharacterCreationRepositoryInteger(t, calls[5].args[0].Value, 77)
+	assertCharacterCreationRepositoryInteger(t, calls[5].args[1].Value, int64(SlotPrimaryWeapon))
+	assertCharacterCreationRepositoryInteger(t, calls[5].args[2].Value, 501)
+	assertCharacterCreationRepositoryInteger(t, calls[12].args[0].Value, 77)
+	assertCharacterCreationRepositoryInteger(t, calls[13].args[0].Value, 77)
+	assertCharacterCreationRepositoryInteger(t, calls[14].args[0].Value, 77)
 }
 
 func TestSQLCharacterCreationRepositoryPreservesOriginalCreatorAPI(t *testing.T) {
@@ -258,6 +308,31 @@ func TestSQLCharacterCreationRepositoryPreservesOriginalCreatorAPI(t *testing.T)
 	store.Unlock()
 	if skillInserts != 0 || referenceSkillInserts != 1 || masteryInserts != 1 || questInserts != 1 || commitCount != 1 {
 		t.Fatalf("compatibility wrapper skill inserts=%d reference skill inserts=%d reference mastery inserts=%d reference quest inserts=%d commits=%d, want 0/1/1/1/1", skillInserts, referenceSkillInserts, masteryInserts, questInserts, commitCount)
+	}
+}
+
+func TestSQLCharacterCreationRepositoryRejectsConfiguredLimitBeforeWrites(t *testing.T) {
+	store := &characterCreationRepositoryTestStore{characterLimit: 4, characterCount: 4}
+	repository := newCharacterCreationRepositoryForTest(t, store)
+	_, err := repository.CreateCharacter(context.Background(), characterCreationRepositoryTestCharacter(), characterCreationRepositoryTestStarterItems())
+	if !errors.Is(err, ErrCharacterCreationLimitReached) {
+		t.Fatalf("CreateCharacter() error = %v, want ErrCharacterCreationLimitReached", err)
+	}
+	store.Lock()
+	calls := append([]characterCreationRepositoryTestCall(nil), store.calls...)
+	commits, rollbacks := store.commitCount, store.rollbackCount
+	store.Unlock()
+	want := []string{lockCharacterCreationOwner, selectShardCharacterLimit, countOwnerShardCharacters}
+	if len(calls) != len(want) {
+		t.Fatalf("calls = %#v, want only limit queries", calls)
+	}
+	for index := range want {
+		if calls[index].query != want[index] {
+			t.Fatalf("call %d = %q, want %q", index, calls[index].query, want[index])
+		}
+	}
+	if commits != 0 || rollbacks != 1 {
+		t.Fatalf("commits/rollbacks = %d/%d, want 0/1", commits, rollbacks)
 	}
 }
 
@@ -287,13 +362,13 @@ func TestSQLCharacterCreationRepositoryRollsBackEveryWriteFailure(t *testing.T) 
 		wantOperation string
 		wantCallCount int
 	}{
-		{name: "character insert", query: insert_char, occurrence: 1, wantOperation: "insert character", wantCallCount: 1},
-		{name: "starter item insert", query: InsertItem, occurrence: 2, wantOperation: "insert starter item", wantCallCount: 4},
-		{name: "inventory link insert", query: InsertInventoryItem, occurrence: 3, wantOperation: "insert starter inventory link", wantCallCount: 7},
-		{name: "starter skill insert", query: insertCharacterSkill, occurrence: 2, wantOperation: "insert starter skill", wantCallCount: 11},
-		{name: "reference starter skill insert", query: insertReferenceCharacterSkills, occurrence: 1, wantOperation: "insert reference starter skills", wantCallCount: 10},
-		{name: "reference starter mastery insert", query: insertReferenceCharacterMasteries, occurrence: 1, wantOperation: "insert reference starter masteries", wantCallCount: 11},
-		{name: "reference starter quest insert", query: insertReferenceCharacterQuests, occurrence: 1, wantOperation: "insert reference starter quests", wantCallCount: 12},
+		{name: "character insert", query: insert_char, occurrence: 1, wantOperation: "insert character", wantCallCount: 4},
+		{name: "starter item insert", query: InsertItem, occurrence: 2, wantOperation: "insert starter item", wantCallCount: 7},
+		{name: "inventory link insert", query: InsertInventoryItem, occurrence: 3, wantOperation: "insert starter inventory link", wantCallCount: 10},
+		{name: "starter skill insert", query: insertCharacterSkill, occurrence: 2, wantOperation: "insert starter skill", wantCallCount: 14},
+		{name: "reference starter skill insert", query: insertReferenceCharacterSkills, occurrence: 1, wantOperation: "insert reference starter skills", wantCallCount: 13},
+		{name: "reference starter mastery insert", query: insertReferenceCharacterMasteries, occurrence: 1, wantOperation: "insert reference starter masteries", wantCallCount: 14},
+		{name: "reference starter quest insert", query: insertReferenceCharacterQuests, occurrence: 1, wantOperation: "insert reference starter quests", wantCallCount: 15},
 	}
 
 	for _, test := range tests {
@@ -414,20 +489,21 @@ func TestSQLCharacterCreationRepositoryRejectsInvalidStarterMasteriesBeforeBegin
 
 func characterCreationRepositoryTestCharacter() Char {
 	return Char{
-		RefObjID: 2001,
-		User:     42,
-		Shard:    7,
-		Name:     "transactional-character",
-		Scale:    1,
-		Level:    1,
-		Str:      20,
-		Int:      20,
-		HP:       200,
-		MP:       200,
-		PosX:     950,
-		PosY:     40,
-		PosZ:     1091,
-		Region:   0x62A8,
+		RefObjID:      2001,
+		User:          42,
+		Shard:         7,
+		Name:          "transactional-character",
+		Scale:         1,
+		Level:         1,
+		Str:           20,
+		Int:           20,
+		HP:            200,
+		MP:            200,
+		PosX:          950,
+		PosY:          40,
+		PosZ:          1091,
+		Region:        0x62A8,
+		InventorySize: BaseInventorySize,
 	}
 }
 

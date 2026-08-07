@@ -366,20 +366,23 @@ func (w *WorldService) PlayerDisconnected(uid uint32, _ string) {
 	}
 }
 
-// LoadGameServerRegionsContext loads a complete world catalog through the
-// configured repository boundary. In the live Agent, database errors are
-// returned to startup rather than being converted into an empty catalog. The
-// legacy wrapper below remains only for direct callers that have not been
-// configured with injected repositories.
-func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameServerID int) (map[int16]navmeshv2.RtNavmeshTerrain, error) {
+// BootstrapGameServerRegionsContext loads the live world without constructing
+// a detached copy of every region. Production startup does not consume such a
+// snapshot, and creating one temporarily duplicates the largest retained data
+// structure in the Agent.
+func (w *WorldService) BootstrapGameServerRegionsContext(ctx context.Context, gameServerID int) error {
+	return w.bootstrapGameServerRegionsContext(ctx, gameServerID)
+}
+
+func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, gameServerID int) error {
 	if w == nil {
-		return nil, ErrWorldRepositoryConfiguration
+		return ErrWorldRepositoryConfiguration
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
 
 	regionCatalog, _, teleportGateCatalog := w.repositories()
@@ -392,7 +395,7 @@ func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameSer
 	} else {
 		gsRegions, err = regionCatalog.GetRegionsForGameServer(ctx, gameServerID)
 		if err != nil {
-			return nil, fmt.Errorf("load game-server region catalog: %w", err)
+			return fmt.Errorf("load game-server region catalog: %w", err)
 		}
 	}
 
@@ -408,7 +411,7 @@ func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameSer
 	for _, region := range gsRegions {
 		spawns, err := w.loadSpawnsForContinent(ctx, region.ContinentName)
 		if err != nil {
-			return nil, fmt.Errorf("load spawn catalog for continent %q: %w", region.ContinentName, err)
+			return fmt.Errorf("load spawn catalog for continent %q: %w", region.ContinentName, err)
 		}
 		continents = append(continents, continentCatalog{
 			name:    region.ContinentName,
@@ -420,11 +423,13 @@ func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameSer
 	if teleportGateCatalog != nil {
 		teleportGates, err = teleportGateCatalog.GetTeleportGates(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("load teleport gate catalog: %w", err)
+			return fmt.Errorf("load teleport gate catalog: %w", err)
 		}
 	}
 
 	log.Info("loading game server regions")
+	measurement := beginNavmeshLoadMeasurement()
+	loadSource := "raw"
 
 	cachePrefix := w.navmeshGobPath
 	cachePaths := []string{
@@ -434,15 +439,16 @@ func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameSer
 	}
 	cachePresent, err := anyRegularPathExists(cachePaths...)
 	if err != nil {
-		return nil, fmt.Errorf("inspect prepared navmesh cache: %w", err)
+		return fmt.Errorf("inspect prepared navmesh cache: %w", err)
 	}
 	if cachePresent {
+		loadSource = "prepared-gob"
 		canonicalProfile, profileErr := profiles.VSRO188Profile()
 		if profileErr != nil {
-			return nil, fmt.Errorf("load canonical navmesh profile: %w", profileErr)
+			return fmt.Errorf("load canonical navmesh profile: %w", profileErr)
 		}
 		if _, err := navmeshv2.ValidateCacheManifest(ctx, navmeshv2.CacheManifestPath(cachePrefix), profiles.VSRO188, canonicalProfile.DataPK2.SHA256); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrNavmeshCacheInvalid, err)
+			return fmt.Errorf("%w: %v", ErrNavmeshCacheInvalid, err)
 		}
 		log.Infof("loading prepared v2 navmesh cache")
 		if w.loader2 == nil {
@@ -452,37 +458,45 @@ func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameSer
 			}
 		}
 		if err := w.loader2.LoadPrecomputedNavmeshDataFromGOB(cachePrefix); err != nil {
-			return nil, fmt.Errorf("%w: decode cache: %v", ErrNavmeshCacheInvalid, err)
+			return fmt.Errorf("%w: decode cache: %v", ErrNavmeshCacheInvalid, err)
 		}
 	} else {
 		log.Infof("prepared v2 navdata cache does not exist. loading from data then")
 		if w.loader2 == nil {
 			loader, loaderErr := navmeshv2.NewLoaderSafe(viper.GetString(config.AgentDataPath))
 			if loaderErr != nil {
-				return nil, fmt.Errorf("load raw navmesh archive: %w", loaderErr)
+				return fmt.Errorf("load raw navmesh archive: %w", loaderErr)
 			}
 			w.loader2 = loader
 		}
 		if err := w.loader2.LoadNavMeshInfos(); err != nil {
-			return nil, fmt.Errorf("load raw navmesh metadata: %w", err)
+			return fmt.Errorf("load raw navmesh metadata: %w", err)
 		}
 		if err := w.loader2.LoadTerrainMeshes(nil); err != nil {
-			return nil, fmt.Errorf("load raw navmesh terrain: %w", err)
+			return fmt.Errorf("load raw navmesh terrain: %w", err)
 		}
 	}
+	measurement.log(loadSource, w.loader2.Stats())
 
 	for _, continent := range continents {
 		w.AddRegions(continent.name, continent.regions...)
 		w.loadSpawnData(continent.name, continent.spawns)
 	}
 	if err := w.loadTeleportGates(teleportGates); err != nil {
-		return nil, err
+		return err
 	}
 
 	log.Info("finished loading game server regions")
-	// Keep the world-owned map private. Startup currently loads regions before
-	// the command loops begin, but callers must still receive the same snapshot
-	// contract as concurrent readers.
+	return nil
+}
+
+// LoadGameServerRegionsContext preserves the detached-snapshot API for callers
+// that consume it. Production startup uses BootstrapGameServerRegionsContext to
+// avoid creating and immediately discarding a complete world copy.
+func (w *WorldService) LoadGameServerRegionsContext(ctx context.Context, gameServerID int) (map[int16]navmeshv2.RtNavmeshTerrain, error) {
+	if err := w.bootstrapGameServerRegionsContext(ctx, gameServerID); err != nil {
+		return nil, err
+	}
 	return w.GetRegions(), nil
 }
 

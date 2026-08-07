@@ -15,23 +15,31 @@ import (
 )
 
 type ItemUseHandler struct {
-	players  PlayerLookup
-	useCase  service.RecoveryItemUseCase
-	send     func(*server.Session, network.Packet) error
-	publish  func(*model.Player, *network.Packet)
-	schedule func(time.Duration, func())
+	players           PlayerLookup
+	useCase           service.RecoveryItemUseCase
+	send              func(*server.Session, network.Packet) error
+	publish           func(*model.Player, *network.Packet)
+	schedule          func(time.Duration, func())
+	timedBuffDuration bool
 }
 
 func NewItemUseHandler(players PlayerLookup, items model.ItemUseRepository) *ItemUseHandler {
 	return &ItemUseHandler{players: players, useCase: service.NewItemUseService(items)}
 }
 
-func RegisterItemUseHandler(target *server.Server, items model.ItemUseRepository) {
+func RegisterItemUseHandler(target *server.Server, items model.ItemUseRepository) *ItemUseHandler {
 	if target == nil {
-		return
+		return nil
 	}
 	h := NewItemUseHandler(service.GetWorldServiceInstance(), items)
 	target.RegisterHandler(opcode.InventoryItemUseRequest, h.handlePacket)
+	return h
+}
+
+func (h *ItemUseHandler) ConfigureTimedBuffDuration(enabled bool) {
+	if h != nil {
+		h.timedBuffDuration = enabled
+	}
 }
 
 func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -67,6 +75,9 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 			h.publishPacket(player, &removed)
 		}
 		added := model.BuildBuffAdd(player.GetUniqueID(), result.EffectSkillID, token)
+		if h.timedBuffDuration {
+			added = model.BuildTimedBuffAdd(player.GetUniqueID(), result.EffectSkillID, token, uint32(result.EffectDuration))
+		}
 		h.publishPacket(player, &added)
 		player.SendMovementSpeedUpdate()
 		schedule := h.schedule
@@ -80,10 +91,49 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 				player.SendMovementSpeedUpdate()
 			}
 		})
+	} else if result.ItemService != nil {
+		h.publishItemService(player, *result.ItemService, result.ItemServiceToken, result.ReplacedItemServiceToken)
 	} else {
 		player.SendVitalsUpdate()
 	}
 	return nil
+}
+
+func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.ItemServiceEffect, token, replacedToken uint32) {
+	if player == nil || token == 0 {
+		return
+	}
+	if replacedToken != 0 {
+		removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, replacedToken)
+		h.publishPacket(player, &removed)
+		if model.ItemServiceBuffSkillID(effect) != 0 {
+			buffRemoved := model.BuildBuffRemove(replacedToken)
+			h.publishPacket(player, &buffRemoved)
+		}
+	}
+	remaining := time.Until(effect.ExpiresAt)
+	if remaining <= 0 {
+		return
+	}
+	added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
+	h.publishPacket(player, &added)
+	if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
+		h.publishPacket(player, &buffAdded)
+	}
+	schedule := h.schedule
+	if schedule == nil {
+		schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
+	}
+	schedule(remaining, func() {
+		if player.ClearItemService(effect.Kind, token) {
+			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
+			h.publishPacket(player, &removed)
+			if model.ItemServiceBuffSkillID(effect) != 0 {
+				buffRemoved := model.BuildBuffRemove(token)
+				h.publishPacket(player, &buffRemoved)
+			}
+		}
+	})
 }
 
 func (h *ItemUseHandler) publishPacket(player *model.Player, packet *network.Packet) {

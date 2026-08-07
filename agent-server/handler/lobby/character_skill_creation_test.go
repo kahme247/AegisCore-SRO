@@ -15,6 +15,22 @@ type characterSkillCreatorFake struct {
 	skills    []model.CharacterSkill
 }
 
+type characterCreationPolicyFake struct{}
+
+func (characterCreationPolicyFake) Resolve(_ context.Context, selection model.CharacterCreationSelection) (model.CharacterCreationDefaults, []model.CharacterStarterItem, error) {
+	if selection.ModelID != 1907 || selection.Items[model.SlotPrimaryWeapon] != 3632 {
+		return model.CharacterCreationDefaults{}, nil, model.ErrCharacterCreationSelectionInvalid
+	}
+	items := make([]model.CharacterStarterItem, 0, 4)
+	for _, slot := range []byte{model.SlotPrimaryWeapon, model.SlotChest, model.SlotBoots, model.SlotPants} {
+		items = append(items, model.CharacterStarterItem{ReferenceItemID: selection.Items[slot], Slot: slot})
+	}
+	return model.CharacterCreationDefaults{
+		Scale: 34, Level: 1, Strength: 20, Intellect: 20, HP: 200, MP: 200,
+		PosX: 950, PosY: 40, PosZ: 1091, Region: 0x62A8, ReturnTeleportID: 1, InventorySize: model.BaseInventorySize,
+	}, items, nil
+}
+
 func (f *characterSkillCreatorFake) CreateCharacter(_ context.Context, character model.Char, items []model.CharacterStarterItem) (int64, error) {
 	return f.CreateCharacterWithSkills(context.Background(), character, items, nil)
 }
@@ -64,15 +80,11 @@ func (f *characterSkillRepositoryFake) LoadSkills(ctx context.Context, character
 }
 
 func TestCharacterCreationDelegatesReferenceDefaultsToRepository(t *testing.T) {
-	originalReferences := model.RefChars
-	model.RefChars = map[uint32]model.RefChar{
-		1907: {RefObject: model.RefObject{Country: 0}, DefaultSkill1: 1, DefaultSkill2: 2, DefaultSkill3: 40, DefaultSkill4: 70},
-	}
-	t.Cleanup(func() { model.RefChars = originalReferences })
-
 	creator := &characterSkillCreatorFake{}
 	handler := NewCharacterSelectionHandler(&fakeCharacterStore{})
 	handler.creator = creator
+	handler.creationPolicy = characterCreationPolicyFake{}
+	handler.referenceData = characterCreationTestCatalog()
 	session, clientConn := newCharacterSelectionTestSession(t)
 	defer session.Close()
 	defer clientConn.Close()
@@ -83,7 +95,7 @@ func TestCharacterCreationDelegatesReferenceDefaultsToRepository(t *testing.T) {
 		func(packet *network.Packet) error { return packet.WriteByte(CharActionCreate) },
 		func(packet *network.Packet) error { return packet.WriteString("skill-owner") },
 		func(packet *network.Packet) error { return packet.WriteUInt32(1907) },
-		func(packet *network.Packet) error { return packet.WriteByte(34) },
+		func(packet *network.Packet) error { return packet.WriteByte(255) },
 		func(packet *network.Packet) error { return packet.WriteUInt32(3640) },
 		func(packet *network.Packet) error { return packet.WriteUInt32(3641) },
 		func(packet *network.Packet) error { return packet.WriteUInt32(3642) },
@@ -103,6 +115,79 @@ func TestCharacterCreationDelegatesReferenceDefaultsToRepository(t *testing.T) {
 	if creator.character.RefObjID != 1907 || creator.character.User != 42 || creator.character.Shard != 1 {
 		t.Fatalf("created character ownership/reference = %+v", creator.character)
 	}
+	if creator.character.Scale != 34 {
+		t.Fatalf("created character scale = %d, want policy default 34", creator.character.Scale)
+	}
+}
+
+func TestCharacterCreationRejectsNonPlayableModelAndUnapprovedItem(t *testing.T) {
+	tests := []struct {
+		name    string
+		modelID uint32
+		weapon  uint32
+	}{
+		{name: "npc model", modelID: 5000, weapon: 3632},
+		{name: "high level weapon", modelID: 1907, weapon: 9000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			creator := &characterSkillCreatorFake{}
+			handler := NewCharacterSelectionHandler(&fakeCharacterStore{})
+			handler.creator = creator
+			handler.creationPolicy = characterCreationPolicyFake{}
+			handler.referenceData = characterCreationTestCatalog()
+			session, clientConn := newCharacterSelectionTestSession(t)
+			defer session.Close()
+			defer clientConn.Close()
+			session.MarkAuthenticated()
+			session.UserContext.UserID = 42
+
+			request := buildCharacterSelectionRequest(t,
+				func(packet *network.Packet) error { return packet.WriteByte(CharActionCreate) },
+				func(packet *network.Packet) error { return packet.WriteString("invalid-owner") },
+				func(packet *network.Packet) error { return packet.WriteUInt32(test.modelID) },
+				func(packet *network.Packet) error { return packet.WriteByte(255) },
+				func(packet *network.Packet) error { return packet.WriteUInt32(3640) },
+				func(packet *network.Packet) error { return packet.WriteUInt32(3641) },
+				func(packet *network.Packet) error { return packet.WriteUInt32(3642) },
+				func(packet *network.Packet) error { return packet.WriteUInt32(test.weapon) },
+			)
+			response, err := dispatchCharacterSelectionHandler(t, clientConn, func() error {
+				return handler.handleAction(context.Background(), session, request)
+			})
+			if err != nil {
+				t.Fatalf("handleAction(create): %v", err)
+			}
+			action := byte(CharActionCreate)
+			assertCharacterSelectionResult(t, &response, OpcodeCharSelectionActionResponse, &action, ResultFalse)
+			code, readErr := response.ReadUInt16()
+			if readErr != nil || code != ACTION_SMERR_INVALID_CHARGEN_INFO {
+				t.Fatalf("creation error = 0x%04X, %v; want 0x%04X", code, readErr, ACTION_SMERR_INVALID_CHARGEN_INFO)
+			}
+			if creator.character.RefObjID != 0 {
+				t.Fatalf("creator received rejected character %+v", creator.character)
+			}
+		})
+	}
+}
+
+func characterCreationTestCatalog() *model.ReferenceDataCatalog {
+	starter := func(id uint32, typeInfo model.TypeInfo) model.RefItem {
+		return model.RefItem{RefObject: model.RefObject{ID: id, TypeInfo: typeInfo, ReqLevelType1: 1, ReqLevel1: 1}, ItemClass: 1}
+	}
+	return model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{
+			1907: {RefObject: model.RefObject{ID: 1907, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 1}}, CharGender: 1},
+			5000: {RefObject: model.RefObject{ID: 5000, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2}}},
+		},
+		Items: map[uint32]model.RefItem{
+			3632: starter(3632, model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2}),
+			3640: starter(3640, model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 2, TypeID4: 3}),
+			3641: starter(3641, model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 2, TypeID4: 4}),
+			3642: starter(3642, model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 2, TypeID4: 6}),
+			9000: {RefObject: model.RefObject{ID: 9000, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2}, ReqLevelType1: 1, ReqLevel1: 100}, ItemClass: 10},
+		},
+	})
 }
 
 func TestCharacterSkillLoadPopulatesPlayerSnapshot(t *testing.T) {

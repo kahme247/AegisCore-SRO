@@ -55,6 +55,8 @@ prepared-cache validation does.
 | `AGENT_LEVEL_DATA_FILE` | `./Media/server_dep/silkroad/textdata/leveldata.txt` | Level-data path |
 | `AGENT_TRAFFIC_FILTER_PACKET_LIMIT` | `200` | Physical frames per window |
 | `AGENT_TRAFFIC_FILTER_WINDOW_MS` | `1000` | Traffic-filter window |
+| `AGENT_DIAGNOSTICS_ENABLED` | `false` | Enable loopback-only pprof and runtime metrics |
+| `AGENT_DIAGNOSTICS_PORT` | `6060` | Loopback diagnostics port |
 | `AGENT_ADMISSION_HOST` | `127.0.0.1` | Private mTLS bind host |
 | `AGENT_ADMISSION_PORT` | `15883` | Readiness/ticket API |
 | `AGENT_ADMISSION_TLS_CERT_FILE` | none | Required Agent certificate |
@@ -67,6 +69,19 @@ prepared-cache validation does.
 Shared `DB_ACCOUNT_*`, `DB_SHARD_*`, `DATABASE_*_DRIVER` and `LOG_LEVEL`
 settings are defined in `framework/config`. `SRO_SESSION_TRACE=1`,
 `SRO_MOVEMENT_TRACE`, and `MOB_AI_TRACE` enable focused diagnostics.
+
+Diagnostics bind only to `127.0.0.1`. In Compose, collect a heap profile from
+inside the Agent container, then copy it to the host for analysis:
+
+```sh
+docker compose exec agent-server wget -qO /tmp/agent-heap.pb.gz http://127.0.0.1:6060/debug/pprof/heap
+docker compose cp agent-server:/tmp/agent-heap.pb.gz ./agent-heap.pb.gz
+go tool pprof ./agent-heap.pb.gz
+```
+
+Scalar Go runtime metrics are available at `/debug/runtime/metrics`. Diagnostics
+are disabled by default and are never attached to the public SRO or admission
+listeners.
 
 ## Implemented behavior
 
@@ -105,14 +120,15 @@ inventory item, and notice/guild/union/NPC/academy chat is not implemented.
 - Movement goes through game time and `WorldService.UpdatePosition`; server
   state, not untrusted client coordinates, drives visibility updates.
 - Blocked terrain/object edges remain collision candidates.
-- Group spawn admits ordinary NPCs and selected mob layouts. Unsupported COS,
-  item and specialized structures are deferred to protect `0x3019` alignment.
+- Group spawn admits players, ordinary NPCs and selected mob layouts.
+  Unsupported COS, item and specialized structures are deferred to protect
+  `0x3019` alignment.
 - Normal service NPC spawns use talk flag `2`; selected-NPC responses provide
   family-specific actions that remain capture-provisional.
 - Random respawn uses at most 32 resolved, same-region, direct-movement-safe
   candidates before falling back to the authored point.
-- Players are staged during character bootstrap and become active only after
-  `GameReady`; capture-backed player spawn delivery remains incomplete.
+- Players are staged during character bootstrap, become active only after
+  `GameReady`, and are then delivered through reciprocal visibility queues.
 
 ## Persistence and resources
 

@@ -373,25 +373,25 @@ func TestSQLCharacterRepositoryFailsClosedWithoutInjectedDependencies(t *testing
 
 func characterRepositoryTestCharacterRow(now time.Time) []driver.Value {
 	return []driver.Value{
-		int64(100), int64(200), int64(42), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), float64(1.5), float64(2.5), float64(3.5), now, now, int64(25000), int64(9), int64(1_000_000_000), int64(120),
+		int64(100), int64(200), int64(42), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), float64(1.5), float64(2.5), float64(3.5), now, now, int64(25000), int64(9), int64(1_000_000_000), int64(120), int64(45),
 	}
 }
 
 func characterRepositoryTestListRow(now time.Time) []driver.Value {
 	return []driver.Value{
-		int64(100), int64(200), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), now, int64(25000),
+		int64(100), int64(200), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), now, int64(25000), int64(45),
 	}
 }
 
 func characterRepositoryColumnsForLookup() []string {
 	return []string{
-		"ID", "REF_OBJ_ID", "FK_USER", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "POS_X", "POS_Y", "POS_Z", "CTIME", "UTIME", "FK_REGION", "SKILL_POINTS", "GOLD", "MAX_LEVEL",
+		"ID", "REF_OBJ_ID", "FK_USER", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "POS_X", "POS_Y", "POS_Z", "CTIME", "UTIME", "FK_REGION", "SKILL_POINTS", "GOLD", "MAX_LEVEL", "INVENTORY_SIZE",
 	}
 }
 
 func characterRepositoryColumnsForList() []string {
 	return []string{
-		"ID", "REF_OBJ_ID", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "UTIME", "FK_REGION",
+		"ID", "REF_OBJ_ID", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "UTIME", "FK_REGION", "INVENTORY_SIZE",
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ferdoran/go-sro/agent-server/model"
 	"github.com/ferdoran/go-sro/agent-server/service"
@@ -35,6 +36,7 @@ type InventoryHandler struct {
 	}
 	relocator model.InventoryRelocator
 	economy   model.EconomyRepository
+	mall      model.ItemMallRepository
 	guild     model.GuildStorageRepository
 	exchange  ExchangeOperations
 	send      func(*server.Session, network.Packet) error
@@ -48,40 +50,28 @@ type ExchangeOperations interface {
 type ItemInventoryOperation byte
 
 const (
-	MoveItemOperation ItemInventoryOperation = iota
-	_
-	PutItemIntoStorageOperation
-	TakeItemFromStorageOperation
-	PutItemIntoExchangeWindowOperation
-	TakeItemFromExchangeWindowOperation // 5
-	_
-	DropItemOperation
-	BuyItemOperation
-	SellItemOperation
-	DropGoldOperation // 10
-	_
-	_
-	_
-	_
-	_ // 15
-	_
-	_
-	BuyItemFromMallOperation
-	BuySpecialtyGoodsOperation
-	SellSpecialtyGoodsOperation // 20
-	_
-	_
-	EquipAvatarItemOperation
-	UnequipAvatarItemOperation
-	_ // 25
-	PutItemIntoPetInventoryOperation
-	TakeItemFromPetInventoryOperation
-	_
-	GuildStorageMoveOperation         ItemInventoryOperation = 0x1D
-	GuildStorageDepositItemOperation  ItemInventoryOperation = 0x1E
-	GuildStorageWithdrawItemOperation ItemInventoryOperation = 0x1F
-	GuildStorageDepositGoldOperation  ItemInventoryOperation = 0x20
-	GuildStorageWithdrawGoldOperation ItemInventoryOperation = 0x21
+	MoveItemOperation                   ItemInventoryOperation = 0x00
+	PutItemIntoStorageOperation         ItemInventoryOperation = 0x02
+	TakeItemFromStorageOperation        ItemInventoryOperation = 0x03
+	PutItemIntoExchangeWindowOperation  ItemInventoryOperation = 0x04
+	TakeItemFromExchangeWindowOperation ItemInventoryOperation = 0x05
+	DropItemOperation                   ItemInventoryOperation = 0x07
+	BuyItemOperation                    ItemInventoryOperation = 0x08
+	SellItemOperation                   ItemInventoryOperation = 0x09
+	DropGoldOperation                   ItemInventoryOperation = 0x0A
+	BuyItemFromMallOperation            ItemInventoryOperation = 0x12
+	BuyItemFromModernMallOperation      ItemInventoryOperation = 0x18
+	BuySpecialtyGoodsOperation          ItemInventoryOperation = 0x2B
+	SellSpecialtyGoodsOperation         ItemInventoryOperation = 0x2C
+	EquipAvatarItemOperation            ItemInventoryOperation = 0x22
+	UnequipAvatarItemOperation          ItemInventoryOperation = 0x23
+	PutItemIntoPetInventoryOperation    ItemInventoryOperation = 0x1A
+	TakeItemFromPetInventoryOperation   ItemInventoryOperation = 0x1B
+	GuildStorageMoveOperation           ItemInventoryOperation = 0x1D
+	GuildStorageDepositItemOperation    ItemInventoryOperation = 0x1E
+	GuildStorageWithdrawItemOperation   ItemInventoryOperation = 0x1F
+	GuildStorageDepositGoldOperation    ItemInventoryOperation = 0x20
+	GuildStorageWithdrawGoldOperation   ItemInventoryOperation = 0x21
 )
 
 // NewInventoryHandler exposes the two dependencies needed for an inventory
@@ -114,13 +104,16 @@ func RegisterInventoryHandlerWithExchange(target *server.Server, relocator model
 	RegisterInventoryHandlerWithGuildStorage(target, relocator, exchange, economyRepository, nil)
 }
 
-func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository) {
+func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository, mall ...model.ItemMallRepository) {
 	if target == nil {
 		return
 	}
 	handler := NewInventoryHandler(service.GetWorldServiceInstance(), relocator, economy)
 	handler.exchange = exchange
 	handler.guild = guild
+	if len(mall) > 0 {
+		handler.mall = mall[0]
+	}
 	target.RegisterHandler(opcode.ItemOperationRequest, handler.handlePacket)
 	handler.registerRepairHandler(target)
 	RegisterStorageHandler(target, economy)
@@ -152,6 +145,9 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 	if err != nil {
 		return fmt.Errorf("read inventory operation: %w", err)
 	}
+	if operationType == byte(BuyItemFromMallOperation) || operationType == byte(BuyItemFromModernMallOperation) {
+		logrus.Infof("item mall request operation=0x%02X payload=%X", operationType, packet.Payload())
+	}
 	switch ItemInventoryOperation(operationType) {
 	case PutItemIntoExchangeWindowOperation, TakeItemFromExchangeWindowOperation, 13:
 		if h.exchange == nil {
@@ -164,6 +160,8 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		return h.exchange.HandleInventoryOperation(ctx, session, player, operationType, &packet)
 	case BuyItemOperation:
 		return h.handleBuy(ctx, session, &packet)
+	case BuyItemFromMallOperation, BuyItemFromModernMallOperation:
+		return h.handleMallBuy(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case SellItemOperation:
 		return h.handleSell(ctx, session, &packet)
 	case PutItemIntoStorageOperation, TakeItemFromStorageOperation, 1:
@@ -174,6 +172,7 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 	case MoveItemOperation:
 		// Continue through the established relocation kernel below.
 	default:
+		logrus.Infof("unsupported inventory operation=0x%02X payload=%X", operationType, packet.Payload())
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
 
@@ -201,6 +200,141 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		return err
 	}
 	return sendMoveItemSuccess(session, request)
+}
+
+type itemMallPurchaseRequest struct {
+	position      model.ItemMallPosition
+	operation     ItemInventoryOperation
+	mallVersion   byte
+	page          byte
+	packageName   string
+	purchaseCount uint16
+	clientPoints  uint32
+	clientBonus   uint32
+	packageID     uint32
+}
+
+func parseItemMallPurchaseRequest(operation ItemInventoryOperation, packet *network.Packet) (itemMallPurchaseRequest, error) {
+	if packet == nil {
+		return itemMallPurchaseRequest{}, errors.New("item mall purchase packet is unavailable")
+	}
+	request := itemMallPurchaseRequest{operation: operation}
+	var err error
+	if operation == BuyItemFromMallOperation {
+		request.position.RefShopGroupID = 1051 // GROUP_MALL in the vSRO 1.188 Media catalog.
+		if request.mallVersion, err = packet.ReadByte(); err != nil {
+			return itemMallPurchaseRequest{}, fmt.Errorf("read item mall version: %w", err)
+		}
+		if request.page, err = packet.ReadByte(); err != nil {
+			return itemMallPurchaseRequest{}, fmt.Errorf("read item mall page: %w", err)
+		}
+		if request.position.GroupIndex, err = packet.ReadByte(); err != nil {
+			return itemMallPurchaseRequest{}, fmt.Errorf("read item mall section: %w", err)
+		}
+	} else {
+		if request.position.RefShopGroupID, err = packet.ReadUInt16(); err != nil {
+			return itemMallPurchaseRequest{}, fmt.Errorf("read item mall shop group: %w", err)
+		}
+		if request.position.GroupIndex, err = packet.ReadByte(); err != nil {
+			return itemMallPurchaseRequest{}, fmt.Errorf("read item mall group index: %w", err)
+		}
+	}
+	if request.position.TabIndex, err = packet.ReadByte(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall tab index: %w", err)
+	}
+	if request.position.SlotIndex, err = packet.ReadByte(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall slot index: %w", err)
+	}
+	if request.packageName, err = packet.ReadString(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall package name: %w", err)
+	}
+	if request.purchaseCount, err = packet.ReadUInt16(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall purchase count: %w", err)
+	}
+	if request.clientPoints, err = packet.ReadUInt32(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall client points: %w", err)
+	}
+	if request.clientBonus, err = packet.ReadUInt32(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall client bonus: %w", err)
+	}
+	if request.packageID, err = packet.ReadUInt32(); err != nil {
+		return itemMallPurchaseRequest{}, fmt.Errorf("read item mall package ID: %w", err)
+	}
+	if packet.Remaining() != 0 {
+		return itemMallPurchaseRequest{}, errors.New("item mall purchase contains trailing data")
+	}
+	if request.position.RefShopGroupID == 0 || request.purchaseCount == 0 || (operation == BuyItemFromMallOperation && request.mallVersion == 0) {
+		return itemMallPurchaseRequest{}, errors.New("item mall purchase contains invalid identifiers")
+	}
+	return request, nil
+}
+
+func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
+	if h.mall == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	request, err := parseItemMallPurchaseRequest(operation, packet)
+	if err != nil {
+		logrus.Infof("invalid item mall request operation=0x%02X: %v", operation, err)
+		return err
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if h.exchange != nil && h.exchange.Busy(player.ID) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	result, err := h.mall.Purchase(ctx, int64(player.ID), session.UserContext.UserID, request.position, request.purchaseCount)
+	if err != nil {
+		if errors.Is(err, model.ErrItemMallOutcomeUnknown) {
+			return fmt.Errorf("item mall purchase outcome is unknown: %w", err)
+		}
+		logrus.WithError(err).WithFields(logrus.Fields{"shop_group": request.position.RefShopGroupID, "group": request.position.GroupIndex, "tab": request.position.TabIndex, "slot": request.position.SlotIndex}).Info("rejected item mall purchase")
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.CommitInventory(result.Inventory)
+	var serviceToken, replacedServiceToken uint32
+	if result.ItemService != nil {
+		serviceToken, replacedServiceToken = player.ApplyItemService(*result.ItemService)
+	}
+	if err := h.sendPacket(session, buildItemMallBalanceUpdate(result.Balances)); err != nil {
+		return err
+	}
+	if err := h.sendPacket(session, buildItemMallPurchaseSuccess(request, result)); err != nil {
+		return err
+	}
+	if result.ItemService != nil && serviceToken != 0 {
+		if replacedServiceToken != 0 {
+			removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, replacedServiceToken)
+			player.SendToSelfAndKnown(&removed)
+			if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
+				buffRemoved := model.BuildBuffRemove(replacedServiceToken)
+				player.SendToSelfAndKnown(&buffRemoved)
+			}
+		}
+		remaining := time.Until(result.ItemService.ExpiresAt)
+		if remaining > 0 {
+			added := model.BuildItemPerkAdd(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken, result.ItemService.DailyBudget, remaining)
+			player.SendToSelfAndKnown(&added)
+			if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), serviceToken, *result.ItemService, remaining); exists {
+				player.SendToSelfAndKnown(&buffAdded)
+			}
+			time.AfterFunc(remaining, func() {
+				if player.ClearItemService(result.ItemService.Kind, serviceToken) {
+					removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken)
+					player.SendToSelfAndKnown(&removed)
+					if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
+						buffRemoved := model.BuildBuffRemove(serviceToken)
+						player.SendToSelfAndKnown(&buffRemoved)
+					}
+				}
+			})
+		}
+	}
+	return nil
 }
 
 func (h *InventoryHandler) handleGuildStorageMutation(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
@@ -501,6 +635,48 @@ func buildUnsupportedItemOperationResponse() network.Packet {
 	packet.MessageID = opcode.ItemOperationResponse
 	packet.WriteByte(2)   // operation failed
 	packet.WriteUInt16(0) // generic failure code
+	return packet
+}
+
+func buildItemMallBalanceUpdate(balances model.ItemMallBalances) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemMallBalanceUpdate
+	packet.WriteUInt32(balances.Silk)
+	packet.WriteUInt32(balances.GiftSilk)
+	packet.WriteUInt32(balances.Point)
+	return packet
+}
+
+func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.ItemMallPurchaseResult) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemOperationResponse
+	packet.WriteByte(1)
+	packet.WriteByte(byte(request.operation))
+	if request.operation == BuyItemFromMallOperation {
+		packet.WriteByte(request.mallVersion)
+		packet.WriteByte(request.page)
+		packet.WriteByte(result.Position.GroupIndex)
+		packet.WriteByte(result.Position.TabIndex)
+		packet.WriteByte(result.Position.SlotIndex)
+		packet.WriteByte(byte(len(result.DestinationSlots)))
+		for _, slot := range result.DestinationSlots {
+			packet.WriteByte(slot)
+		}
+		packet.WriteUInt16(result.Quantity)
+		return packet
+	}
+	packet.WriteUInt16(result.Position.RefShopGroupID)
+	packet.WriteByte(result.Position.GroupIndex)
+	packet.WriteByte(result.Position.TabIndex)
+	packet.WriteByte(result.Position.SlotIndex)
+	packet.WriteByte(byte(len(result.DestinationSlots)))
+	for _, slot := range result.DestinationSlots {
+		packet.WriteByte(slot)
+	}
+	packet.WriteUInt16(result.Quantity)
+	for range result.DestinationSlots {
+		model.WriteRentInfo(&packet, result.Item)
+	}
 	return packet
 }
 

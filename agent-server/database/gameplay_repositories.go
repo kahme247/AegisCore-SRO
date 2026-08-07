@@ -11,32 +11,35 @@ import (
 // Domain services and handlers consume its narrow interfaces; only this
 // database package knows which concrete SQL implementation satisfies each one.
 type GameplayRepositories struct {
-	ReferenceData       model.ReferenceDataRepository
-	Characters          model.CharacterRepository
-	Inventory           model.InventoryRepository
-	InventoryRelocator  model.InventoryRelocator
-	Economy             model.EconomyRepository
-	GuildStorage        model.GuildStorageRepository
-	Exchange            model.ExchangeRepository
-	ItemUse             model.ItemUseRepository
-	SpeedEffects        model.SpeedEffectRepository
-	Alchemy             model.AlchemyRepository
-	Teleport            model.TeleportRepository
-	CharacterCreator    model.CharacterCreator
-	CharacterProgress   model.CharacterProgressRepository
-	CharacterAttributes model.CharacterAttributeRepository
-	Masteries           model.MasteryRepository
-	Skills              model.CharacterSkillRepository
-	SkillLearning       model.SkillLearningRepository
-	QuickSlots          model.CharacterQuickSlotRepository
-	CharacterQuests     model.CharacterQuestRepository
-	Regions             model.GameServerRegionRepository
-	Spawns              model.ContinentSpawnRepository
-	TeleportGates       model.TeleportGateRepository
-	Positions           model.CharacterPositionRepository
-	MovementSettings    model.MovementSettingsRepository
-	GameplayRates       model.GameplayRateRepository
-	Vitals              model.CharacterVitalsRepository
+	ReferenceData           model.ReferenceDataRepository
+	Characters              model.CharacterRepository
+	Inventory               model.InventoryRepository
+	InventoryRelocator      model.InventoryRelocator
+	Economy                 model.EconomyRepository
+	ItemMall                model.ItemMallRepository
+	GuildStorage            model.GuildStorageRepository
+	Exchange                model.ExchangeRepository
+	ItemUse                 model.ItemUseRepository
+	SpeedEffects            model.SpeedEffectRepository
+	ItemServices            model.ItemServiceRepository
+	Alchemy                 model.AlchemyRepository
+	Teleport                model.TeleportRepository
+	CharacterCreator        model.CharacterCreator
+	CharacterCreationPolicy model.CharacterCreationPolicyRepository
+	CharacterProgress       model.CharacterProgressRepository
+	CharacterAttributes     model.CharacterAttributeRepository
+	Masteries               model.MasteryRepository
+	Skills                  model.CharacterSkillRepository
+	SkillLearning           model.SkillLearningRepository
+	QuickSlots              model.CharacterQuickSlotRepository
+	CharacterQuests         model.CharacterQuestRepository
+	Regions                 model.GameServerRegionRepository
+	Spawns                  model.ContinentSpawnRepository
+	TeleportGates           model.TeleportGateRepository
+	Positions               model.CharacterPositionRepository
+	MovementSettings        model.MovementSettingsRepository
+	GameplayRates           model.GameplayRateRepository
+	Vitals                  model.CharacterVitalsRepository
 }
 
 func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, error) {
@@ -57,6 +60,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.Economy, err = model.NewEconomyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent economy repository: %w", err)
 	}
+	if repositories.ItemMall, err = model.NewItemMallRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent item mall repository: %w", err)
+	}
 	if repositories.GuildStorage, err = model.NewGuildStorageRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent guild-storage repository: %w", err)
 	}
@@ -69,6 +75,7 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	repositories.ItemUse = itemUse
 	repositories.SpeedEffects = itemUse
+	repositories.ItemServices = itemUse
 	if repositories.Alchemy, err = model.NewAlchemyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent alchemy repository: %w", err)
 	}
@@ -77,6 +84,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.CharacterCreator, err = model.NewCharacterCreationRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character creation repository: %w", err)
+	}
+	if repositories.CharacterCreationPolicy, err = model.NewCharacterCreationPolicyRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent character creation policy: %w", err)
 	}
 	if repositories.CharacterProgress, err = model.NewCharacterProgressRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character-progress repository: %w", err)

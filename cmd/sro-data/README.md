@@ -46,6 +46,28 @@ source are not deleted, so this is not strict synchronization.
 
 Shard migration `000015` provides `REF_LEVEL_DATA` and `REF_SKILL_DATA`.
 
+## Import Item Mall
+
+Replace the Item Mall catalog from extracted Media files:
+
+```powershell
+go run ./cmd/migrate --target=shard
+go run ./cmd/sro-data import-item-mall --media Media/Media
+```
+
+The importer follows the enabled country `15` shop group, shop, tab, goods,
+package, scrap and price-policy chain under `server_dep/silkroad/textdata`.
+Only `MALL_` tabs with positive Silk (device `2`), Gift Silk (device `4`) or
+Silk Point (device `16`) prices are imported. Source order defines group and
+tab indices. Item IDs are resolved by exact `ITEMDATA.CodeName`; unresolved or
+duplicate joins, ambiguous mapped prices, out-of-range values and an empty
+result abort without changing the existing catalog. A successful import
+deletes and inserts `ITEM_MALL_GOODS` in one transaction. `QUANTITY` and
+`ENABLED` are set to `1`, while opt level, variance and data come from the
+package scrap row.
+
+Shard migration `000030` provides `ITEM_MALL_GOODS`.
+
 ## Import native vSRO skills
 
 Export the SQL Server `_RefSkill` family as JSON arrays with

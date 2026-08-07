@@ -566,14 +566,5 @@ func assertNoAdditionalCharacterSelectionResponse(t *testing.T, clientConn net.C
 	}
 }
 
-func TestDefaultReturnTeleportIDUsesCharacterRace(t *testing.T) {
-	if got := defaultReturnTeleportID(1907); got != 1 {
-		t.Fatalf("Chinese return teleport = %d, want Jangan 1", got)
-	}
-	if got := defaultReturnTeleportID(14875); got != 20 {
-		t.Fatalf("European return teleport = %d, want Constantinople 20", got)
-	}
-}
-
 var _ CharacterStore = (*fakeCharacterStore)(nil)
 var _ CharacterStore = (*blockingCharacterStore)(nil)

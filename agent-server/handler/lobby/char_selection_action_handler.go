@@ -2,6 +2,7 @@ package lobby
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -93,7 +94,7 @@ func (h *CharacterSelectionHandler) handleCreateAction(ctx context.Context, sess
 	if err != nil || charModel == 0 {
 		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_INVALID_CHARGEN_INFO)
 	}
-	charScale, err := packet.ReadByte()
+	requestedScale, err := packet.ReadByte()
 	if err != nil {
 		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_INVALID_CHARGEN_INFO)
 	}
@@ -117,53 +118,51 @@ func (h *CharacterSelectionHandler) handleCreateAction(ctx context.Context, sess
 		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_INVALID_CHARGEN_INFO)
 	}
 
+	if h == nil || h.creator == nil || h.creationPolicy == nil {
+		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_FAILED_TO_CREATE_CHARACTER)
+	}
+	defaults, starterItems, err := h.creationPolicy.Resolve(ctx, model.CharacterCreationSelection{
+		ModelID:        charModel,
+		RequestedScale: requestedScale,
+		Items: map[byte]uint32{
+			model.SlotPrimaryWeapon: equippedWeapon,
+			model.SlotChest:         equippedChest,
+			model.SlotBoots:         equippedBoots,
+			model.SlotPants:         equippedPants,
+		},
+	})
+	if err != nil {
+		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_INVALID_CHARGEN_INFO)
+	}
 	char := model.Char{
 		RefObjID:         int(charModel),
 		User:             int(owner.UserID),
 		Shard:            int(owner.ShardID),
 		Name:             name,
-		Scale:            charScale,
-		Level:            1,
-		Exp:              0,
-		SkillExp:         0,
-		Str:              20,
-		Int:              20,
-		StatPoints:       0,
-		HP:               200,
-		MP:               200,
-		PosX:             950,
-		PosY:             40,
-		PosZ:             1091,
-		Region:           0x62A8,
-		ReturnTeleportID: defaultReturnTeleportID(charModel),
+		Scale:            defaults.Scale,
+		Level:            defaults.Level,
+		Exp:              defaults.Exp,
+		SkillExp:         defaults.SkillExp,
+		Str:              defaults.Strength,
+		Int:              defaults.Intellect,
+		StatPoints:       defaults.StatPoints,
+		HP:               defaults.HP,
+		MP:               defaults.MP,
+		PosX:             defaults.PosX,
+		PosY:             defaults.PosY,
+		PosZ:             defaults.PosZ,
+		Region:           defaults.Region,
+		ReturnTeleportID: defaults.ReturnTeleportID,
+		InventorySize:    defaults.InventorySize,
 		IsDeleting:       false,
 	}
-	if h == nil || h.creator == nil {
-		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_FAILED_TO_CREATE_CHARACTER)
-	}
-	// Keep the old request-to-slot mapping exactly, but move all writes into
-	// the injected creator's single transaction. These are supplied reference
-	// IDs, not a newly inferred starter-kit policy.
-	starterItems := []model.CharacterStarterItem{
-		{ReferenceItemID: equippedWeapon, Slot: model.SlotPrimaryWeapon},
-		{ReferenceItemID: equippedChest, Slot: model.SlotChest},
-		{ReferenceItemID: equippedBoots, Slot: model.SlotBoots},
-		{ReferenceItemID: equippedPants, Slot: model.SlotPants},
-	}
-	if _, exists := model.RefChars[charModel]; !exists {
-		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_INVALID_CHARGEN_INFO)
-	}
 	if _, err := h.creator.CreateCharacter(ctx, char, starterItems); err != nil {
+		if errors.Is(err, model.ErrCharacterCreationLimitReached) {
+			return sendCharacterActionResult(session, action, ResultFalse, ACTION_MSG_ERROR_CHARACTER_OVER_3)
+		}
 		return sendCharacterActionResult(session, action, ResultFalse, ACTION_SMERR_FAILED_TO_CREATE_CHARACTER)
 	}
 	return sendCharacterActionResult(session, action, ResultTrue, 0)
-}
-
-func defaultReturnTeleportID(refObjID uint32) uint32 {
-	if refObjID >= 14875 && refObjID <= 14900 {
-		return 20
-	}
-	return 1
 }
 
 func (h *CharacterSelectionHandler) handleDeletionAction(ctx context.Context, session *server.Session, packet network.Packet, owner characterOwnerScope, action byte, deleting bool) error {
@@ -264,7 +263,7 @@ func (h *CharacterSelectionHandler) writeCharacterListEntry(ctx context.Context,
 	for _, slot := range appearanceSlots {
 		item := inv.Items[slot]
 		p.WriteUInt32(item.GetRefObjectID())
-		p.WriteByte(0) // Plus
+		p.WriteByte(item.OptLevel)
 	}
 	p.WriteByte(0) // Avatar item count
 	return nil

@@ -27,6 +27,8 @@ var (
 	ErrCharacterCreationDuplicateStarterSkill    = errors.New("character creation contains duplicate starter skills")
 	ErrCharacterCreationDuplicateStarterMastery  = errors.New("character creation contains duplicate starter masteries")
 	ErrCharacterCreationStarterMasteryInvalid    = errors.New("character creation starter mastery is invalid")
+	ErrCharacterCreationLimitReached             = errors.New("character creation limit reached")
+	ErrCharacterCreationLimitUnavailable         = errors.New("character creation limit is unavailable")
 )
 
 // CharacterStarterItem is one caller-supplied reference item that must be
@@ -176,6 +178,9 @@ func (r *SQLCharacterCreationRepository) CreateCharacterWithProgress(ctx context
 			_ = tx.Rollback()
 		}
 	}()
+	if err := enforceCharacterCreationLimit(ctx, tx, character.User, character.Shard); err != nil {
+		return 0, err
+	}
 
 	characterID, err := insertCharacterInTransaction(ctx, tx, character)
 	if err != nil {
@@ -222,6 +227,34 @@ func (r *SQLCharacterCreationRepository) CreateCharacterWithProgress(ctx context
 	}
 	committed = true
 	return characterID, nil
+}
+
+const (
+	lockCharacterCreationOwner = "SELECT `ID` FROM `SRO_ACCOUNT`.`USER` WHERE `ID`=? FOR UPDATE"
+	selectShardCharacterLimit  = "SELECT `CHARACTER_LIMIT` FROM `SRO_ACCOUNT`.`SHARD_CHARACTER_LIMIT` WHERE `ENABLED`<>0 AND `FK_SHARD` IN (?,0) ORDER BY (`FK_SHARD`=?) DESC LIMIT 1"
+	countOwnerShardCharacters  = "SELECT COUNT(*) FROM `SRO_SHARD`.`CHAR` WHERE `FK_USER`=? AND `FK_SHARD`=?"
+)
+
+func enforceCharacterCreationLimit(ctx context.Context, tx *sql.Tx, userID, shardID int) error {
+	var lockedUserID int
+	if err := tx.QueryRowContext(ctx, lockCharacterCreationOwner, userID).Scan(&lockedUserID); err != nil {
+		return newCharacterCreationError("lock character owner", err)
+	}
+	var limit int
+	if err := tx.QueryRowContext(ctx, selectShardCharacterLimit, shardID, shardID).Scan(&limit); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = ErrCharacterCreationLimitUnavailable
+		}
+		return newCharacterCreationError("read character limit", err)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, countOwnerShardCharacters, userID, shardID).Scan(&count); err != nil {
+		return newCharacterCreationError("count owner characters", err)
+	}
+	if count >= limit {
+		return newCharacterCreationError("enforce character limit", ErrCharacterCreationLimitReached)
+	}
+	return nil
 }
 
 func validateCharacterCreationInput(character Char, starterItems []CharacterStarterItem, starterSkills []CharacterSkill, starterMasteries []MasteryProgress) error {
@@ -297,6 +330,7 @@ func insertCharacterInTransaction(ctx context.Context, tx *sql.Tx, character Cha
 		character.PosZ,
 		character.Region,
 		character.ReturnTeleportID,
+		character.InventorySize,
 	)
 	if err != nil {
 		return 0, newCharacterCreationError("insert character", err)

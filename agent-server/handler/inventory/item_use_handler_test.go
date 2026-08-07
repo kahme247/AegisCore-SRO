@@ -71,6 +71,7 @@ func TestSpeedItemPublishesTimedBuffIcon(t *testing.T) {
 		EffectSkillID: 3977, SpeedPercent: 100, EffectDuration: 1800000, EffectExpiresAt: time.Now().Add(30 * time.Minute),
 	}}
 	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	h.ConfigureTimedBuffDuration(true)
 	var published []network.Packet
 	var expire func()
 	h.send = func(_ *server.Session, packet network.Packet) error { return nil }
@@ -89,6 +90,15 @@ func TestSpeedItemPublishesTimedBuffIcon(t *testing.T) {
 	}
 	if len(published) != 1 || published[0].MessageID != opcode.EntityBuffAdd || expire == nil {
 		t.Fatalf("published packets = %+v, expiry scheduled = %v", published, expire != nil)
+	}
+	for range 3 {
+		if _, err := published[0].ReadUInt32(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	duration, err := published[0].ReadUInt32()
+	if err != nil || duration != 1800000 || published[0].Remaining() != 0 {
+		t.Fatalf("published speed duration = %d remaining %d: %v", duration, published[0].Remaining(), err)
 	}
 	expire()
 	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {

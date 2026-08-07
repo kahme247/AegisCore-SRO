@@ -40,7 +40,7 @@ change the Gateway/Agent wire contract.
 | Gateway | patch/profile, notices, shard list/ping, credential checks, login rate tracking, admission policy, mTLS ticket install | canonical client hash, locale, Content ID, module/version captures |
 | Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position and quick-slot persistence | rename persistence, guild/academy fields and broader stock-client fixtures |
 | World and movement | region/spawn repositories, Data.pk2 navmesh, visibility, authoritative movement, wall/object collision, position checkpoints, teleport | dungeon/neighbour-plane support, memory reduction, broader collision corpus |
-| Entities and spawning | staged-to-active player admission, reciprocal visibility bookkeeping, NPC/mob group spawn/despawn, headings, bounded collision-aware respawn, basic mob AI | capture-backed player spawn delivery, COS/pet/item/structure serializers and broader collision fixtures |
+| Entities and spawning | staged-to-active player admission, reciprocal player/NPC/mob group spawn/despawn, headings, bounded collision-aware respawn, basic mob AI | capture-backed player field validation, COS/pet/item/structure serializers and broader collision fixtures |
 | Character systems | stat allocation, combat/XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | skill casting breadth, quest lifecycle and capture-backed talk/action masks |
 | Economy and inventory | move/equip, storage, guild storage, repair, item use, elixir alchemy, exchange, stall | complete item option/rent/bind formats and transactional live testing |
 | Social | local/global/party/stall/whisper chat, party core and matching | guild, academy, jobs, stealth/invisibility rules |
@@ -53,7 +53,7 @@ Current crash/collision safeguards include:
   a reason to swap model axes implicitly;
 - normal service NPC spawns advertise talkability with flag `2`; selected-NPC
   responses supply family-specific actions that remain capture-provisional;
-- outbound group spawn currently admits normal NPCs and mobs only. COS and
+- outbound group spawn currently admits players, normal NPCs and mobs. COS and
   specialized structures are deferred instead of emitting malformed `0x3019`
   data that can crash the client;
 - random respawn placement uses at most 32 same-region, collision-checked
@@ -98,13 +98,17 @@ go run ./cmd/sro-data verify --profile protocol/profiles/vsro188.json --archive 
 Prerequisites are Docker Desktop and the local data/TLS inputs above. Copy the
 required environment names into a private `.env`; do not commit that file.
 
-Compose requires `SRO_AGENT_TLS_DIR`, `SRO_GATEWAY_TLS_DIR`,
+Compose requires `MYSQL_PASSWORD`, `SRO_AGENT_TLS_DIR`, `SRO_GATEWAY_TLS_DIR`,
 `AGENT_ADMISSION_TLS_SERVER_NAME`, `AGENT_PUBLIC_IP`,
 `GATEWAY_PROTOCOL_CONTENT_ID`, `GATEWAY_PROTOCOL_MODULE_NAME`, and
 `GATEWAY_PROTOCOL_VERSION`. Use `GATEWAY_ENVIRONMENT=development` only when the
 advertised Agent address is loopback. The development topology publishes MySQL
 `3306` on loopback, Gateway `15779`, and Agent `15882`; admission `15883` remains on
 the Compose network.
+
+Fresh database initialization creates no login or GM accounts. Provision the
+first administrator explicitly after startup; never add credentials to the
+checked-in snapshots or `.env` examples.
 
 ```powershell
 docker compose up --build -d
