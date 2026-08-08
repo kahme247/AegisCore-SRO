@@ -21,6 +21,7 @@ import (
 	"github.com/ferdoran/go-sro/agent-server/handler/lobby"
 	"github.com/ferdoran/go-sro/agent-server/handler/logout"
 	"github.com/ferdoran/go-sro/agent-server/handler/party"
+	"github.com/ferdoran/go-sro/agent-server/handler/ping"
 	"github.com/ferdoran/go-sro/agent-server/handler/stall"
 	"github.com/ferdoran/go-sro/agent-server/manager"
 	"github.com/ferdoran/go-sro/agent-server/model"
@@ -167,8 +168,9 @@ func NewAgentServer() (AgentServer, error) {
 			opcode.JoinLobbyRequest,
 			opcode.LobbyActionRequest,
 			opcode.LobbyRenameRequest,
+			opcode.AgentPingRequest,
 		},
-		[]uint16{opcode.GameReadyRequest},
+		[]uint16{opcode.GameReadyRequest, opcode.AgentPingRequest},
 	))
 
 	tickets := auth.NewAdmissionTicketStore()
@@ -234,6 +236,7 @@ func NewAgentServer() (AgentServer, error) {
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv)
 	character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
 	character.RegisterGuideHandler(&serv)
+	ping.RegisterHandler(&serv)
 	movementHandler := character.RegisterMovementHandler(&serv)
 	character.RegisterSelectEntityHandler(&serv)
 	character.RegisterDeselectEntityHandler(&serv)

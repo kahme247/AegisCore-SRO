@@ -13,6 +13,8 @@ const (
 	AgentLogoutSuccess        uint16 = 0x300A
 	AgentLogoutCancelRequest  uint16 = 0x7006
 	AgentLogoutCancelResponse uint16 = 0xB006
+	AgentPingRequest          uint16 = 0x7F00
+	AgentPingResponse         uint16 = 0xBF00
 
 	CharacterDataBegin uint16 = 0x34A5
 	CharacterDataBody  uint16 = 0x3013
