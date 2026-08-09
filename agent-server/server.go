@@ -163,8 +163,8 @@ func NewAgentServer() (AgentServer, error) {
 	})
 	// Before an atomically redeemed ticket marks the session authenticated,
 	// public Agent accepts exactly the stock 0x6103 AuthRequest. Afterwards
-	// it exposes lobby packets, then only GameReady while character bootstrap
-	// is pending, before admitting normal in-world traffic. In particular,
+	// it exposes lobby packets, then only loading handshake packets while a
+	// character bootstrap is pending, before admitting normal in-world traffic. In particular,
 	// legacy 0xE000 backend authentication is rejected at the listener edge.
 	serv.SetAdmissionPolicy(server.AgentLifecycleAdmissionPolicy(
 		opcode.AuthRequest,
@@ -174,7 +174,7 @@ func NewAgentServer() (AgentServer, error) {
 			opcode.LobbyRenameRequest,
 			opcode.AgentPingRequest,
 		},
-		[]uint16{opcode.GameReadyRequest, opcode.AgentPingRequest},
+		[]uint16{opcode.TeleportReadyResponse, opcode.GameReadyRequest, opcode.AgentPingRequest},
 	))
 
 	tickets := auth.NewAdmissionTicketStore()

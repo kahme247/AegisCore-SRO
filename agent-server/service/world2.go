@@ -479,7 +479,9 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 	measurement.log(loadSource, w.loader2.Stats())
 
 	for _, continent := range continents {
-		w.AddRegions(continent.name, continent.regions...)
+		if err := w.AddRegions(continent.name, continent.regions...); err != nil {
+			return err
+		}
 		w.loadSpawnData(continent.name, continent.spawns)
 	}
 	if err := w.loadTeleportGates(teleportGates); err != nil {
@@ -529,7 +531,7 @@ func anyRegularPathExists(paths ...string) (bool, error) {
 	return false, nil
 }
 
-func (w *WorldService) AddRegions(continent string, regions ...int16) {
+func (w *WorldService) AddRegions(continent string, regions ...int16) error {
 	log.Debugf("loading regions for %s", continent)
 	numRegions := len(regions)
 	dungeonsCounter := 0
@@ -543,7 +545,11 @@ func (w *WorldService) AddRegions(continent string, regions ...int16) {
 		x, z := utils.Int16ToXAndZ(reg)
 		log.Tracef("Loading region %02x%02x, X|Z (%d|%d)", z, x, x, z)
 		utils.PrintProgress(i+1, numRegions)
-		loadedRegions[reg] = w.loader2.RegionData[reg]
+		terrain, exists := w.loader2.RegionData[reg]
+		if !exists || terrain == nil {
+			return fmt.Errorf("load game server continent %q: navmesh terrain for region %d is unavailable", continent, reg)
+		}
+		loadedRegions[reg] = terrain
 	}
 
 	// Region loading is normally a startup operation, but world readers already
@@ -560,6 +566,7 @@ func (w *WorldService) AddRegions(continent string, regions ...int16) {
 
 	log.Infof("Skipped %d dungeons for %s\n", dungeonsCounter, continent)
 	log.Infof("Finished loading regions for %s\n", continent)
+	return nil
 }
 
 func (w *WorldService) GetRegion(regionId int16) (navmeshv2.RtNavmeshTerrain, error) {
@@ -727,6 +734,9 @@ func (w *WorldService) loadTeleportGates(spawns []model.TeleportGateSpawn) error
 		}
 		gate := &model.TeleportGate{SRObject: model.NewSRObject()}
 		gate.RefObjectID = spawn.RefObjectID
+		gate.TeleportID = spawn.TeleportID
+		gate.TaxRate = spawn.TaxRate
+		gate.TaxActive = spawn.TaxActive
 		gate.Name = spawn.CodeName
 		gate.Type = "TeleportGate"
 		gate.TypeInfo = model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1, TypeID4: 0}
@@ -891,7 +901,8 @@ func (w *WorldService) GetKnownObjectsAroundObject(object model.ISRObject) map[u
 			continue
 		}
 
-		if w.DistanceTo(objectPosition, otherObject.GetNavmeshPosition()) <= model.RegionHeight/3 {
+		known := object.GetKnownObjectList() != nil && object.GetKnownObjectList().Knows(otherObject)
+		if w.DistanceTo(objectPosition, otherObject.GetNavmeshPosition()) <= objectVisibilityRange(otherObject, known) {
 			// TODO What about stealth / invisible characters?
 			knownObjects[otherObject.GetUniqueID()] = otherObject
 		}

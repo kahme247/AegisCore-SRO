@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -145,6 +146,48 @@ func TestSupportedSpawnObjectsAcceptsPlayerLayout(t *testing.T) {
 	}
 	if begin.MessageID != opcode.EntityGroupSpawnBegin || body.MessageID != opcode.EntityGroupSpawnData || end.MessageID != opcode.EntityGroupSpawnEnd {
 		t.Fatalf("player group opcodes = %#v", []uint16{begin.MessageID, body.MessageID, end.MessageID})
+	}
+}
+
+func TestSupportedSpawnObjectsAdmitsTeleportGatesWithVerifiedStructureLayout(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region:  navmeshv2.NewRegionFromInt16(25000),
+		Offset:  math32.NewVector3(1254, -6, 1374),
+		Heading: 0,
+	}
+	gate := &model.TeleportGate{SRObject: model.SRObject{
+		UniqueID: 77, RefObjectID: 2094, Name: "STORE_CH_GATE",
+		TypeInfo: model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1}, RtNavmeshPosition: position,
+	}, TeleportID: 1}
+	unknownStructure := &model.SRObject{
+		UniqueID: 78, RefObjectID: 9999,
+		TypeInfo: model.TypeInfo{TypeID1: 4}, RtNavmeshPosition: position,
+	}
+	filtered := supportedSpawnObjects(map[uint32]model.ISRObject{77: gate, 78: unknownStructure})
+	if len(filtered) != 1 || filtered[77] != gate {
+		t.Fatalf("supported structure objects = %#v, want only teleport gate", filtered)
+	}
+
+	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	if err != nil {
+		t.Fatalf("build teleport gate group spawn: %v", err)
+	}
+	if got := begin.Payload(); !bytes.Equal(got, []byte{1, 1, 0}) {
+		t.Fatalf("teleport gate group begin = %x, want 010100", got)
+	}
+	// Ref ID, runtime UID, position, four gate-state bytes, then two required
+	// zeroed CGObjStruct runtime fields. RefObjectID already selects the client
+	// teleport record; TeleportID must not be serialized here.
+	wantBody := []byte{
+		0x2e, 0x08, 0, 0, 0x4d, 0, 0, 0,
+		0xa8, 0x61, 0, 0xc0, 0x9c, 0x44, 0, 0, 0xc0, 0xc0, 0, 0xc0, 0xab, 0x44, 0, 0,
+		0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+	}
+	if got := body.Payload(); !bytes.Equal(got, wantBody) {
+		t.Fatalf("teleport gate group data = %x, want %x", got, wantBody)
+	}
+	if len(end.Payload()) != 0 {
+		t.Fatalf("teleport gate group end = %x, want empty", end.Payload())
 	}
 }
 

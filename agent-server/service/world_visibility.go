@@ -31,9 +31,24 @@ type VisibilityDelta struct {
 }
 
 const (
-	visibilityRange     = float32(model.RegionHeight) / 3
-	visibilityExitRange = visibilityRange + 100
+	visibilityRange           = float32(model.RegionHeight) / 3
+	visibilityExitRange       = visibilityRange + 100
+	portalVisibilityRange     = float32(model.RegionHeight)
+	portalVisibilityExitRange = portalVisibilityRange + 100
 )
+
+func objectVisibilityRange(object model.ISRObject, known bool) float32 {
+	if model.IsTeleportGateObject(object) {
+		if known {
+			return portalVisibilityExitRange
+		}
+		return portalVisibilityRange
+	}
+	if known {
+		return visibilityExitRange
+	}
+	return visibilityRange
+}
 
 // GetNPCsKnownToPlayers returns the deduplicated NPCs currently visible to an
 // active player. Mob AI uses this bounded set instead of scanning the world.
@@ -96,6 +111,36 @@ func (w *WorldService) ActivatePlayer(player *model.Player) []VisibilityDelta {
 		player.SetLifeState(model.Alive)
 	}
 	return w.reconcilePlayerVisibilityLocked(player)
+}
+
+// ResetPlayerVisibilityForTeleport mirrors the client's SERVER_AGENT_GAME_RESET
+// transition. It removes reciprocal world visibility, then clears the
+// teleporting client's known/delivery state without queuing despawns for the
+// object table that the client has already discarded.
+func (w *WorldService) ResetPlayerVisibilityForTeleport(player *model.Player) {
+	if w == nil || w.mutex == nil || player == nil {
+		return
+	}
+
+	w.visibilityMutex.Lock()
+	defer w.visibilityMutex.Unlock()
+	if !w.isConnectedPlayer(player) {
+		return
+	}
+
+	known := player.GetCharKnownObjectList()
+	if known == nil {
+		return
+	}
+	for _, object := range known.GetKnownObjects() {
+		if object == nil {
+			continue
+		}
+		if reciprocal := object.GetKnownObjectList(); reciprocal != nil {
+			reciprocal.RemoveObject(player)
+		}
+	}
+	known.ResetClientWorld()
 }
 
 // ReconcileCharacterVisibility applies a bounded, event-driven visibility
@@ -296,10 +341,7 @@ func (w *WorldService) reconcilePlayerObject(player *model.Player, object model.
 	}
 	playerList := player.GetKnownObjectList()
 	objectList := object.GetKnownObjectList()
-	rangeLimit := visibilityRange
-	if playerList != nil && playerList.Knows(object) {
-		rangeLimit = visibilityExitRange
-	}
+	rangeLimit := objectVisibilityRange(object, playerList != nil && playerList.Knows(object))
 	inRange := playerList != nil && visibilityEligible(player) &&
 		navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), object.GetNavmeshPosition()) <= rangeLimit
 	if inRange {

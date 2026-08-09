@@ -96,6 +96,27 @@ func TestBuildNPCSelectionResponseUsesCountedMerchantActions(t *testing.T) {
 	}
 }
 
+func TestBuildTeleportGateSelectionResponseUsesConditionalFortressTax(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		gate *model.TeleportGate
+		want []byte
+	}{
+		{name: "active Jangan fortress", gate: &model.TeleportGate{TaxActive: true}, want: []byte{1, 0x78, 0x56, 0x34, 0x12, 2, 7, 8, 0, 0}},
+		{name: "inactive Donwhang fortress", gate: &model.TeleportGate{}, want: []byte{1, 0x78, 0x56, 0x34, 0x12, 2, 7, 8}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := buildNPCSelectionResponse(0x12345678, teleportGateSelectionData(test.gate))
+			if packet.MessageID != opcode.EntitySelectResponse {
+				t.Fatalf("message id = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntitySelectResponse)
+			}
+			if got := packet.Payload(); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("payload = %x, want complete gate selection body %x", got, test.want)
+			}
+		})
+	}
+}
+
 func TestTeleportGateIsSelectableOnlyWhenKnownAndInRange(t *testing.T) {
 	session, player, _ := selectEntityFixture(t)
 	gate := &model.TeleportGate{SRObject: model.SRObject{
@@ -111,6 +132,24 @@ func TestTeleportGateIsSelectableOnlyWhenKnownAndInRange(t *testing.T) {
 		t.Fatalf("known teleport gate rejected: %v", err)
 	}
 	session.UserContext.UniqueID = player.GetUniqueID()
+}
+
+func TestTeleportGateUsesExtendedSelectionRange(t *testing.T) {
+	_, player, _ := selectEntityFixture(t)
+	gate := &model.TeleportGate{SRObject: model.SRObject{
+		UniqueID: 223, RefObjectID: 2094, Name: "STORE_CH_GATE",
+		TypeInfo:          model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1},
+		RtNavmeshPosition: selectEntityPosition(30000, 20, 0, 20),
+	}}
+	if !player.GetKnownObjectList().AddObject(gate) {
+		t.Fatal("fixture could not add teleport gate")
+	}
+	world := &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{gate.GetUniqueID(): gate}, distance: selectionKnownRange + 500,
+	}
+	if err := validateNPCSelection(world, player, gate.GetUniqueID()); err != nil {
+		t.Fatalf("teleport gate inside extended range rejected: %v", err)
+	}
 }
 
 func TestValidateNPCSelectionAdmitsKnownMobAcrossAdjacentRegionBoundary(t *testing.T) {

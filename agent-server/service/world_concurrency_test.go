@@ -156,7 +156,20 @@ func TestWorldNeighbourAndKnownObjectLookupsSynchronizeRegionStartup(t *testing.
 	// known-object paths read. Running it concurrently makes this test fail
 	// under -race if either read bypasses the world mutex.
 	for range 1_000 {
-		world.AddRegions("test", regionID)
+		if err := world.AddRegions("test", regionID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	<-readerDone
+}
+
+func TestAddRegionsRejectsMissingTerrain(t *testing.T) {
+	world := &WorldService{
+		loader2: &navmeshv2.Loader{RegionData: make(map[int16]*navmeshv2.RtNavmeshTerrain)},
+		mutex:   &sync.Mutex{},
+	}
+
+	if err := world.AddRegions("missing", 12345); err == nil {
+		t.Fatal("AddRegions accepted a region without navmesh terrain")
+	}
 }

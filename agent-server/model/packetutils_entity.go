@@ -217,7 +217,16 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		p.WriteByte(0) // TODO unkByte0
 		p.WriteByte(0) // TODO unkByte1
 		p.WriteByte(0) // TODO unkByte2
-		p.WriteByte(0) // TODO unkByte3
+		p.WriteByte(1) // CGObjStruct's normal runtime state
+
+		if IsTeleportGateObject(object) {
+			// These are CGObjStruct runtime-state fields, not RefTeleport IDs.
+			// The client resolves the teleport-data record from RefObjectID. Treating
+			// TeleportID as the first runtime field makes it an invalid object/state
+			// reference and crashes while the group-spawn record is consumed.
+			p.WriteUInt32(0)
+			p.WriteUInt32(0)
+		}
 
 		// if unkByte3 == 1 {
 		//     p.WriteUint32(0) // TODO unkUint0

@@ -52,6 +52,12 @@ func TestSessionLifecycleRequiresOrderedCharacterTransitions(t *testing.T) {
 	if !session.IsInWorld() {
 		t.Fatal("completed lifecycle is not in world")
 	}
+	if !session.BeginTeleportLoading() {
+		t.Fatal("in-world session could not begin teleport loading")
+	}
+	if !session.AbortTeleportLoading() {
+		t.Fatal("teleport loading could not return to in-world")
+	}
 	if session.AbortCharacterLoading() {
 		t.Fatal("in-world session returned to lobby through abort")
 	}
@@ -72,7 +78,7 @@ func TestAgentLifecycleAdmissionPolicyRejectsGameplayDuringCharacterLoading(t *t
 	policy := AgentLifecycleAdmissionPolicy(
 		0x6103,
 		[]uint16{0x7001, 0x7007, 0x7450},
-		[]uint16{0x3012},
+		[]uint16{0x34B6, 0x3012},
 	)
 	if err := policy(session, 0x6103); err != nil {
 		t.Fatalf("authentication opcode rejected before admission: %v", err)
@@ -99,6 +105,9 @@ func TestAgentLifecycleAdmissionPolicyRejectsGameplayDuringCharacterLoading(t *t
 	}
 	if err := policy(session, 0x3012); err != nil {
 		t.Fatalf("GameReady opcode rejected while character bootstrap is pending: %v", err)
+	}
+	if err := policy(session, 0x34B6); err != nil {
+		t.Fatalf("TeleportReady opcode rejected while character bootstrap is pending: %v", err)
 	}
 	if !session.CompleteCharacterLoading() {
 		t.Fatal("could not complete character loading")

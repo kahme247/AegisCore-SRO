@@ -2,14 +2,16 @@ package manager
 
 import (
 	"fmt"
+	"os"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/sirupsen/logrus"
-	"sort"
-	"sync"
-	"time"
 )
 
 type SpawnManager struct {
@@ -117,7 +119,7 @@ func sendSpawnedObjectMovements(player model.IPlayer, objects map[uint32]model.I
 }
 
 func tracePlayerVisibility(player model.IPlayer, objects map[uint32]model.ISRObject, spawning bool) {
-	if !service.MovementTraceEnabled() || player == nil {
+	if (os.Getenv("SRO_SESSION_TRACE") != "1" && !service.MovementTraceEnabled()) || player == nil {
 		return
 	}
 	ids := make([]uint32, 0, len(objects))
@@ -141,7 +143,9 @@ func tracePlayerVisibility(player model.IPlayer, objects map[uint32]model.ISRObj
 // layout is implemented. The same filter applies to despawns so the client is
 // never asked to remove an entity that was deliberately withheld from it.
 // NPC_COS and specialized structures require their own trailing fields;
-// serializing them as ordinary NPCs corrupts the rest of a 3019 batch.
+// serializing them as ordinary NPCs corrupts the rest of a 3019 batch. Teleport
+// gates are the one verified structure exception: their serializer supplies the
+// stock client's four state bytes and two zeroed CGObjStruct runtime fields.
 func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.ISRObject {
 	supported := make(map[uint32]model.ISRObject, len(objects))
 	for uid, object := range objects {
@@ -149,13 +153,14 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 			continue
 		}
 		typeInfo := object.GetTypeInfo()
-		character, isCharacter := object.(model.ICharacter)
-		validPosition := isCharacter && character.GetNavmeshPosition().Offset != nil
+		_, isCharacter := object.(model.ICharacter)
+		validPosition := object.GetNavmeshPosition().Offset != nil
 		_, isPlayer := object.(model.IPlayer)
 		verifiedPlayerLayout := isPlayer && typeInfo.IsPlayerCharacter()
 		verifiedMobLayout := typeInfo.IsNPCMob() && typeInfo.TypeID4 != 2 && typeInfo.TypeID4 != 3
 		verifiedNPCLayout := typeInfo.IsNPCNpc() && typeInfo.TypeID4 == 0
-		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout) {
+		verifiedTeleportGateLayout := model.IsTeleportGateObject(object)
+		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedTeleportGateLayout) {
 			supported[uid] = object
 			continue
 		}

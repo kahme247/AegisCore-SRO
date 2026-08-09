@@ -30,7 +30,11 @@ var (
 // selectionKnownRange deliberately matches the existing world known-object
 // visibility threshold. There is no captured NPC interaction-radius fixture
 // yet, so the admission guard must not invent a narrower protocol rule.
-const selectionKnownRange = float32(model.RegionHeight) / 3
+const (
+	selectionKnownRange   = float32(model.RegionHeight) / 3
+	teleportTaskDesignate = byte(7)
+	teleportTaskUse       = byte(8)
+)
 
 // selectEntityWorld is the bounded domain surface needed before a selection
 // can be admitted. It contains no packet or socket operations, which keeps
@@ -105,13 +109,26 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 	}
 	if object.GetTypeInfo().IsNPCNpc() || model.IsTeleportGateObject(object) {
 		selectionData := model.NPCSelectionTalkData(object.GetName())
-		logrus.Infof("NPC_SELECT player=%s uid=%d code=%s selectionData=%x", player.CharName, uniqueID, object.GetName(), selectionData)
-		if model.IsTeleportGateObject(object) {
+		if gate, ok := object.(*model.TeleportGate); ok && model.IsTeleportGateObject(gate) {
+			// TeleportBuilding has its own B045 layout: task count followed directly
+			// by task bytes and, only for a fortress enabled by siegefortress.txt,
+			// its tax rate. The client rejects both a missing active tax and an
+			// unexpected tax on an inactive fortress gate.
+			selectionData = teleportGateSelectionData(gate)
 			npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), 8)
 		}
+		logrus.Infof("NPC_SELECT player=%s uid=%d code=%s selectionData=%x", player.CharName, uniqueID, object.GetName(), selectionData)
 		return session.Send(buildNPCSelectionResponse(uniqueID, selectionData))
 	}
 	return nil
+}
+
+func teleportGateSelectionData(gate *model.TeleportGate) []byte {
+	data := []byte{2, teleportTaskDesignate, teleportTaskUse}
+	if gate != nil && gate.TaxActive {
+		data = append(data, byte(gate.TaxRate), byte(gate.TaxRate>>8))
+	}
+	return data
 }
 
 func buildMobSelectionResponse(uniqueID uint32, hitPoints int) network.Packet {
@@ -141,7 +158,7 @@ func buildNPCSelectionResponse(uniqueID uint32, selectionData []byte) network.Pa
 	p.MessageID = opcode.EntitySelectResponse
 	p.WriteByte(1) // selection accepted
 	p.WriteUInt32(uniqueID)
-	// Unlike the spawn mask, B045 carries a counted action list and terminator.
+	// Unlike the spawn mask, B045 carries object-specific selection data.
 	p.WriteBytes(selectionData)
 	return p
 }
@@ -229,9 +246,13 @@ func validateNPCSelection(world selectEntityWorld, player *model.Player, uniqueI
 	// an adjacent region. The original server searches the surrounding region
 	// set; the known-list identity check above and global-coordinate distance
 	// below provide the equivalent admission boundary here.
+	rangeLimit := selectionKnownRange
+	if model.IsTeleportGateObject(target) {
+		rangeLimit = float32(model.RegionHeight)
+	}
 	distance := world.DistanceTo(playerPosition, targetPosition)
-	if math.IsNaN(float64(distance)) || math.IsInf(float64(distance), 0) || distance < 0 || distance > selectionKnownRange {
-		return fmt.Errorf("%w: distance=%g maximum=%g", ErrSelectEntityTargetOutOfRange, distance, selectionKnownRange)
+	if math.IsNaN(float64(distance)) || math.IsInf(float64(distance), 0) || distance < 0 || distance > rangeLimit {
+		return fmt.Errorf("%w: distance=%g maximum=%g", ErrSelectEntityTargetOutOfRange, distance, rangeLimit)
 	}
 	return nil
 }

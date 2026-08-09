@@ -24,6 +24,7 @@ type teleportWorld interface {
 	GetRegion(int16) (navmeshv2.RtNavmeshTerrain, error)
 	StopMovingCharacter(model.ICharacter, navmeshv2.RtNavmeshPosition, string, bool) bool
 	FlushPlayerPosition(uint32) error
+	ResetPlayerVisibilityForTeleport(*model.Player)
 }
 
 type TeleportHandler struct {
@@ -96,6 +97,15 @@ func (h *TeleportHandler) handleUse(ctx context.Context, session *server.Session
 		logrus.WithError(err).Warn("rejected teleport to unavailable world position")
 		return h.reject(session, 0x0001)
 	}
+	if !session.BeginTeleportLoading() {
+		return fmt.Errorf("teleport could not begin loading while session is %s", session.LifecyclePhase())
+	}
+	teleportLoading := true
+	defer func() {
+		if teleportLoading {
+			session.AbortTeleportLoading()
+		}
+	}()
 	// Cancel movement and drain the last pre-teleport checkpoint before the
 	// gold+position transaction. Otherwise an older queued movement snapshot
 	// could commit after this transaction and move the character back.
@@ -115,6 +125,12 @@ func (h *TeleportHandler) handleUse(ctx context.Context, session *server.Session
 	}
 
 	player.SetGold(result.Gold)
+	// GameReady activates only staged players. Re-enter that state before the
+	// client and server both discard the old area's visibility state. The reset
+	// must not queue ordinary despawns: 0x34B5 has already cleared those UIDs
+	// from the client's global object table.
+	player.SetLifeState(model.Spawning)
+	h.world.ResetPlayerVisibilityForTeleport(player)
 	h.world.StopMovingCharacter(player, destination, "teleport", false)
 	npcInteractions.Clear(player.GetUniqueID())
 	h.mu.Lock()
@@ -123,9 +139,22 @@ func (h *TeleportHandler) handleUse(ctx context.Context, session *server.Session
 	if err = h.sendPacket(session, buildTeleportSuccess()); err != nil {
 		return err
 	}
-	ready := network.EmptyPacket()
-	ready.MessageID = opcode.TeleportReadyRequest
-	return h.sendPacket(session, ready)
+	ready := buildTeleportReadyRequest(quote.Region)
+	if err = h.sendPacket(session, ready); err != nil {
+		return err
+	}
+	teleportLoading = false
+	return nil
+}
+
+func buildTeleportReadyRequest(regionID int16) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.TeleportReadyRequest
+	// SERVER_AGENT_GAME_RESET carries the destination region. The stock client
+	// reads this uint16 before choosing its loading screen and resetting world
+	// state, even though clientless bot handlers commonly ignore the payload.
+	packet.WriteUInt16(uint16(regionID))
+	return packet
 }
 
 func (h *TeleportHandler) handleReady(_ context.Context, session *server.Session, packet network.Packet) error {

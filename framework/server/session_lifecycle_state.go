@@ -122,6 +122,24 @@ func (s *Session) BeginCharacterLoading() bool {
 	return s.lifecyclePhase.CompareAndSwap(uint32(SessionLobby), uint32(SessionCharacterLoading))
 }
 
+// BeginTeleportLoading reuses the stock character-data loading exchange after
+// an in-server teleport. It deliberately accepts only an active world session.
+func (s *Session) BeginTeleportLoading() bool {
+	if s == nil || !s.IsAuthenticated() {
+		return false
+	}
+	return s.lifecyclePhase.CompareAndSwap(uint32(SessionInWorld), uint32(SessionCharacterLoading))
+}
+
+// AbortTeleportLoading restores an active session if a teleport fails before
+// its loading handshake has been sent.
+func (s *Session) AbortTeleportLoading() bool {
+	if s == nil {
+		return false
+	}
+	return s.lifecyclePhase.CompareAndSwap(uint32(SessionCharacterLoading), uint32(SessionInWorld))
+}
+
 // AbortCharacterLoading returns a failed bootstrap to the lobby. Callers must
 // first remove any partially admitted player and clear the selected character
 // fields in UserContext.

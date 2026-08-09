@@ -12,6 +12,7 @@ type ICharKnownObjectList interface {
 	MarkSpawned(map[uint32]ISRObject)
 	MarkDespawned(map[uint32]ISRObject)
 	ClientKnows(uint32) bool
+	ResetClientWorld()
 }
 
 type CharKnownObjectList struct {
@@ -107,6 +108,23 @@ func (k *CharKnownObjectList) ClientKnows(uid uint32) bool {
 	defer k.mutex.Unlock()
 	_, exists := k.ClientObjects[uid]
 	return exists
+}
+
+// ResetClientWorld forgets every visibility association and delivery queue
+// without producing despawns. The Agent game-reset packet makes the client
+// discard its complete object table during teleport loading, so replaying
+// removals for the previous area would reference UIDs the client no longer
+// owns.
+func (k *CharKnownObjectList) ResetClientWorld() {
+	k.mutex.Lock()
+	defer k.mutex.Unlock()
+
+	k.KnownObjectList.mutex.Lock()
+	k.KnownObjectList.KnownObjects = make(map[uint32]ISRObject)
+	k.KnownObjectList.mutex.Unlock()
+	k.ObjectsToSpawn = make(map[uint32]ISRObject)
+	k.ObjectsToDespawn = make(map[uint32]ISRObject)
+	k.ClientObjects = make(map[uint32]ISRObject)
 }
 
 func NewCharKnownObjectList(owner ISRObject) *CharKnownObjectList {

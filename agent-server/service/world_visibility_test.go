@@ -55,6 +55,26 @@ func TestWorldVisibilityActivationQueuesExistingNPC(t *testing.T) {
 	}
 }
 
+func TestWorldVisibilityActivationQueuesPortalBeyondGenericObjectRange(t *testing.T) {
+	regionID := int16(25000)
+	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	world := newVisibilityTestWorld(t, player)
+	gate := &model.TeleportGate{SRObject: model.SRObject{
+		RefObjectID:       2094,
+		TypeInfo:          model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1},
+		RtNavmeshPosition: visibilityTestPosition(regionID, 100+visibilityRange+500, 100),
+	}}
+	world.AddVisibleObject(gate)
+
+	world.ActivatePlayer(player)
+	if !player.GetKnownObjectList().Knows(gate) {
+		t.Fatal("portal outside generic visibility range was not queued")
+	}
+	if queued := player.GetCharKnownObjectList().GetObjectsToSpawn(); queued[gate.GetUniqueID()] != gate {
+		t.Fatalf("portal spawn was not queued for the client: %#v", queued)
+	}
+}
+
 func TestWorldNPCsKnownToPlayersOnlyIncludesVisibleNPCsAfterActivation(t *testing.T) {
 	regionID := int16(25000)
 	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
@@ -510,6 +530,49 @@ func TestWorldVisibilitySerializesReconcileAgainstDisconnect(t *testing.T) {
 	}
 	if bob.GetKnownObjectList().Knows(alice) {
 		t.Fatal("disconnect left the reconciled player in the reciprocal known list")
+	}
+}
+
+func TestResetPlayerVisibilityForTeleportDoesNotQueueOldWorldDespawns(t *testing.T) {
+	oldRegionID := int16(25000)
+	newRegionID := int16(25010)
+	player := newVisibilityTestPlayer(1, "Traveler", visibilityTestPosition(oldRegionID, 100, 100))
+	oldNPC := newVisibilityTestNPC(visibilityTestPosition(oldRegionID, 120, 100))
+	newNPC := newVisibilityTestNPC(visibilityTestPosition(newRegionID, 120, 100))
+	world := newVisibilityTestWorld(t, player)
+	world.AddVisibleObject(oldNPC)
+	world.AddVisibleObject(newNPC)
+
+	world.ActivatePlayer(player)
+	spawned := player.GetCharKnownObjectList().GetObjectsToSpawn()
+	player.GetCharKnownObjectList().MarkSpawned(spawned)
+	if !player.GetKnownObjectList().Knows(oldNPC) || !oldNPC.GetKnownObjectList().Knows(player) {
+		t.Fatal("precondition: old-area visibility was not reciprocal")
+	}
+
+	player.SetLifeState(model.Spawning)
+	world.ResetPlayerVisibilityForTeleport(player)
+	if player.GetKnownObjectList().Knows(oldNPC) || oldNPC.GetKnownObjectList().Knows(player) {
+		t.Fatal("teleport reset retained old-area visibility")
+	}
+	if despawns := player.GetCharKnownObjectList().GetObjectsToDespawn(); len(despawns) != 0 {
+		t.Fatalf("teleport reset queued stale despawns: %#v", despawns)
+	}
+	if player.GetCharKnownObjectList().ClientKnows(oldNPC.GetUniqueID()) {
+		t.Fatal("teleport reset retained old client-delivery state")
+	}
+
+	player.SetNavmeshPosition(visibilityTestPosition(newRegionID, 100, 100))
+	world.ActivatePlayer(player)
+	if despawns := player.GetCharKnownObjectList().GetObjectsToDespawn(); len(despawns) != 0 {
+		t.Fatalf("destination activation queued stale despawns: %#v", despawns)
+	}
+	spawns := player.GetCharKnownObjectList().GetObjectsToSpawn()
+	if spawns[newNPC.GetUniqueID()] != newNPC {
+		t.Fatalf("destination activation spawns = %#v, want new NPC %d", spawns, newNPC.GetUniqueID())
+	}
+	if _, exists := spawns[oldNPC.GetUniqueID()]; exists {
+		t.Fatalf("destination activation respawned old NPC %d", oldNPC.GetUniqueID())
 	}
 }
 

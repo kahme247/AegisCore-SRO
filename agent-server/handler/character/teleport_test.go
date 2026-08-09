@@ -17,6 +17,7 @@ type teleportWorldFake struct {
 	region       navmeshv2.RtNavmeshTerrain
 	stops        int
 	flushes      int
+	resets       int
 	lastPosition navmeshv2.RtNavmeshPosition
 }
 
@@ -33,6 +34,10 @@ func (f *teleportWorldFake) StopMovingCharacter(_ model.ICharacter, position nav
 func (f *teleportWorldFake) FlushPlayerPosition(_ uint32) error {
 	f.flushes++
 	return nil
+}
+
+func (f *teleportWorldFake) ResetPlayerVisibilityForTeleport(_ *model.Player) {
+	f.resets++
 }
 
 type teleportRepositoryFake struct {
@@ -55,6 +60,10 @@ func (f *teleportRepositoryFake) Commit(context.Context, int64, uint32, uint32, 
 
 func TestTeleportUsesValidatedLinkAndCompletesLoadingHandshake(t *testing.T) {
 	session, player, npc := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not prepare an in-world teleport session")
+	}
 	session.UserContext.UserID = 7
 	npc.RefObjectID = 2094
 	player.Gold = 10_000
@@ -89,13 +98,19 @@ func TestTeleportUsesValidatedLinkAndCompletesLoadingHandshake(t *testing.T) {
 	if err := handler.handleUse(context.Background(), session, request); err != nil {
 		t.Fatalf("handleUse: %v", err)
 	}
-	if repository.quotes != 1 || repository.commits != 1 || world.stops != 2 || world.flushes != 1 {
-		t.Fatalf("transaction path quotes=%d commits=%d stops=%d flushes=%d", repository.quotes, repository.commits, world.stops, world.flushes)
+	if repository.quotes != 1 || repository.commits != 1 || world.stops != 2 || world.flushes != 1 || world.resets != 1 {
+		t.Fatalf("transaction path quotes=%d commits=%d stops=%d flushes=%d resets=%d", repository.quotes, repository.commits, world.stops, world.flushes, world.resets)
 	}
 	if player.Gold != 5000 {
 		t.Fatalf("runtime gold = %d, want 5000", player.Gold)
 	}
-	if len(sent) != 2 || sent[0].MessageID != opcode.TeleportUseResponse || !reflect.DeepEqual(sent[0].Payload(), []byte{1}) || sent[1].MessageID != opcode.TeleportReadyRequest || len(sent[1].Payload()) != 0 {
+	if got, want := session.LifecyclePhase(), server.SessionCharacterLoading; got != want {
+		t.Fatalf("teleport lifecycle = %s, want %s", got, want)
+	}
+	if got, want := player.GetLifeState(), model.Spawning; got != want {
+		t.Fatalf("teleport player life state = %d, want %d", got, want)
+	}
+	if len(sent) != 2 || sent[0].MessageID != opcode.TeleportUseResponse || !reflect.DeepEqual(sent[0].Payload(), []byte{1}) || sent[1].MessageID != opcode.TeleportReadyRequest || !reflect.DeepEqual(sent[1].Payload(), []byte{0x99, 0x66}) {
 		t.Fatalf("teleport handshake = %#v", sent)
 	}
 
