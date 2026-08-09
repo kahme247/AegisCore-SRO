@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const characterPositionRepositoryTestDriverName = "go-sro-character-position-repository-test"
+const characterPositionRepositoryTestDriverName = "aegiscore-character-position-repository-test"
 
 var characterPositionRepositoryTestState struct {
 	sync.Mutex

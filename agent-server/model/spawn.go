@@ -7,8 +7,8 @@ import (
 	"math"
 	"sort"
 
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 type Spawn struct {

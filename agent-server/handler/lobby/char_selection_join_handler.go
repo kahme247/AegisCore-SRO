@@ -4,18 +4,19 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/engine/environment"
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/agent-server/engine/environment"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
 	log "github.com/sirupsen/logrus"
 )
@@ -120,10 +121,13 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 	session.UserContext.CharName = player.CharName
 	session.UserContext.RefObjId = player.GetRefObjectID()
 
-	if err := sendJoinResult(session, ResultTrue); err != nil {
+	joinResult := buildJoinResult(ResultTrue)
+	dataBegin := network.EmptyPacket()
+	dataBegin.MessageID = opcode.CharacterDataBegin
+	if err := session.SendBatch([]network.Packet{joinResult, dataBegin}); err != nil {
 		return err
 	}
-	if err := sendCharacterBootstrap(session, player); err != nil {
+	if err := sendCharacterBootstrapBody(session, player); err != nil {
 		return err
 	}
 	h.publishRestoredSpeedEffect(player)
@@ -382,10 +386,14 @@ func sendJoinResult(session *server.Session, result byte) error {
 	if session == nil {
 		return fmt.Errorf("character join has no session")
 	}
-	p := network.EmptyPacket()
-	p.MessageID = OpcodeCharSelectionJoinResponse
-	p.WriteByte(result)
-	return session.Send(p)
+	return session.Send(buildJoinResult(result))
+}
+
+func buildJoinResult(result byte) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = OpcodeCharSelectionJoinResponse
+	packet.WriteByte(result)
+	return packet
 }
 
 func sendCharacterBootstrap(session *server.Session, player *model.Player) error {
@@ -394,12 +402,26 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 	if err := session.Send(pDataBegin); err != nil {
 		return err
 	}
+	return sendCharacterBootstrapBody(session, player)
+}
+
+func sendCharacterBootstrapBody(session *server.Session, player *model.Player) error {
+	traceBootstrap := os.Getenv("SRO_SESSION_TRACE") == "1"
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE start character=%s id=%d", player.CharName, player.ID)
+	}
 
 	pDataBody := network.EmptyPacket()
 	pDataBody.MessageID = opcode.CharacterDataBody
 	pDataBody.WriteUInt32(utils.ToSilkroadTime(time.Now()))
 	WriteCharDataToPacket(&pDataBody, player)
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE character-data character=%s size=%d", player.CharName, pDataBody.PayloadLen())
+	}
 	WriteInventoryToPacket(&pDataBody, player.Inventory)
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE inventory character=%s size=%d", player.CharName, pDataBody.PayloadLen())
+	}
 	pDataBody.WriteByte(5) // Avatar inventory size
 	pDataBody.WriteByte(0) // Avatar inventory item count
 	pDataBody.WriteByte(0) // Mastery section begin
@@ -413,9 +435,18 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 		WriteMasteryOrSkill(&pDataBody, masteryID, masteries[masteryID])
 	}
 	pDataBody.WriteByte(2) // Mastery section end
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE masteries character=%s count=%d size=%d", player.CharName, len(masteryIDs), pDataBody.PayloadLen())
+	}
 	writeCharacterSkillSection(&pDataBody, player)
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE skills character=%s size=%d", player.CharName, pDataBody.PayloadLen())
+	}
 	if err := model.WriteQuestLog(&pDataBody, player.QuestSnapshot()); err != nil {
 		return fmt.Errorf("write character quest log: %w", err)
+	}
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE quests character=%s size=%d", player.CharName, pDataBody.PayloadLen())
 	}
 	pDataBody.WriteByte(0)
 	pDataBody.WriteUInt32(0)
@@ -464,6 +495,9 @@ func sendCharacterBootstrap(session *server.Session, player *model.Player) error
 	pDataBody.WriteByte(0)
 	pDataBody.WriteUInt32(0x00010001)
 	pDataBody.WriteByte(0)
+	if traceBootstrap {
+		log.Infof("CHAR_BOOTSTRAP_TRACE sending-body character=%s size=%d", player.CharName, pDataBody.PayloadLen())
+	}
 	if err := session.Send(pDataBody); err != nil {
 		return err
 	}

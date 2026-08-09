@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
@@ -68,6 +68,7 @@ type CombatHandler struct {
 	world         combatWorld
 	referenceData *model.ReferenceDataCatalog
 	progress      model.CharacterProgressRepository
+	quests        model.QuestRuntimeRepository
 	vitals        model.CharacterVitalsRepository
 	levels        *model.LevelTable
 	rates         combatRateProvider
@@ -82,7 +83,7 @@ type CombatHandler struct {
 	now           func() time.Time
 }
 
-func RegisterCombatHandler(target *server.Server, progress model.CharacterProgressRepository, levels *model.LevelTable, rates combatRateProvider) *CombatHandler {
+func RegisterCombatHandler(target *server.Server, progress model.CharacterProgressRepository, levels *model.LevelTable, rates combatRateProvider, quests ...model.QuestRuntimeRepository) *CombatHandler {
 	if target == nil {
 		return nil
 	}
@@ -107,6 +108,9 @@ func RegisterCombatHandler(target *server.Server, progress model.CharacterProgre
 		nextAttack: make(map[uint32]time.Time),
 		nextSkill:  make(map[skillCooldownKey]time.Time),
 		now:        time.Now,
+	}
+	if len(quests) != 0 {
+		handler.quests = quests[0]
 	}
 	target.RegisterHandler(opcode.EntityActionRequest, handler.handlePacket)
 	return handler
@@ -797,7 +801,28 @@ func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Ses
 		return err
 	}
 	player.CommitProgress(progress)
-	return sendExperienceUpdate(session, targetUID, reward, skillReward, progress)
+	if err := sendExperienceUpdate(session, targetUID, reward, skillReward, progress); err != nil {
+		return err
+	}
+	if h.quests == nil {
+		return nil
+	}
+	questProgress, err := h.quests.RecordMobKill(ctx, player.ID, target.GetRefObjectID())
+	if err != nil {
+		return err
+	}
+	if !questProgress.Changed {
+		return nil
+	}
+	player.CommitQuestMutation(questProgress.Quest)
+	update, err := buildQuestStatePacket(questProgress.Quest)
+	if err != nil {
+		return err
+	}
+	if h.send != nil {
+		return h.send(session, update)
+	}
+	return session.Send(update)
 }
 
 func (h *CombatHandler) baseAttackCooldown(player *model.Player) time.Duration {
@@ -1145,6 +1170,10 @@ func writeDamageBlock(p *network.Packet, targetUID, damage uint32, killed bool) 
 }
 
 func sendExperienceUpdate(session *server.Session, sourceUID uint32, gained, gainedSkillExperience uint64, progress model.ProgressionResult) error {
+	return session.Send(buildExperienceUpdate(sourceUID, gained, gainedSkillExperience, progress))
+}
+
+func buildExperienceUpdate(sourceUID uint32, gained, gainedSkillExperience uint64, progress model.ProgressionResult) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.EntityUpdateExperience
 	p.WriteUInt32(sourceUID)
@@ -1154,7 +1183,7 @@ func sendExperienceUpdate(session *server.Session, sourceUID uint32, gained, gai
 	if progress.LevelsGained > 0 {
 		p.WriteUInt16(uint16(progress.StatPointsGained))
 	}
-	return session.Send(p)
+	return p
 }
 
 func scaleCombatReward(base uint64, percent int) uint64 {

@@ -1,13 +1,15 @@
+name: aegiscore
+
 services:
   db:
     build:
       context: ./db
       dockerfile: Dockerfile
-    image: gosro-db:8.4.10
+    image: aegiscore-db:8.4.10
     restart: always
-    container_name: gosro-db
+    container_name: aegiscore-db
     networks:
-      - gosro
+      - aegiscore
     ports:
       - "127.0.0.1:3306:3306"
     deploy:
@@ -41,10 +43,10 @@ services:
     build:
       context: .
       dockerfile: cmd/migrate/Dockerfile
-    image: gosro-migrations:local
+    image: aegiscore-migrations:local
     restart: "no"
     networks:
-      - gosro
+      - aegiscore
     depends_on:
       db:
         condition: service_healthy
@@ -59,10 +61,10 @@ services:
     build:
       context: .
       dockerfile: cmd/migrate/Dockerfile
-    image: gosro-migrations:local
+    image: aegiscore-migrations:local
     restart: "no"
     networks:
-      - gosro
+      - aegiscore
     depends_on:
       db:
         condition: service_healthy
@@ -76,17 +78,17 @@ services:
     build:
       context: .
       dockerfile: agent-server/Dockerfile
-    image: gosro-agent-server:local
+    image: aegiscore-agent-server:local
     restart: always
-    container_name: gosro-agent-server
+    container_name: aegiscore-agent-server
     networks:
-      - gosro
+      - aegiscore
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "15882:15882"
-    # This is reachable only by services on the gosro network; do not publish
+    # This is reachable only by services on the aegiscore network; do not publish
     # the Gateway-to-Agent ticket installation port to the host.
     expose:
       - "15883"
@@ -101,9 +103,9 @@ services:
       DB_SHARD_HOST: db
       DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
-      AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/go-sro/Data/Data.pk2}
-      AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/go-sro/Data/prelinked_navdata.gob}
-      AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/go-sro/Media/server_dep/silkroad/textdata/leveldata.txt}
+      AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/aegiscore/Data/Data.pk2}
+      AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/aegiscore/Data/prelinked_navdata.gob}
+      AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/aegiscore/Media/server_dep/silkroad/textdata/leveldata.txt}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
@@ -116,21 +118,21 @@ services:
       MOB_AI_TRACE: ${MOB_AI_TRACE:-0}
       AGENT_ADMISSION_HOST: "0.0.0.0"
       AGENT_ADMISSION_PORT: "15883"
-      AGENT_ADMISSION_TLS_CERT_FILE: /run/secrets/go-sro/agent-cert.pem
-      AGENT_ADMISSION_TLS_KEY_FILE: /run/secrets/go-sro/agent-key.pem
-      AGENT_ADMISSION_TLS_CLIENT_CA_FILE: /run/secrets/go-sro/gateway-ca.pem
+      AGENT_ADMISSION_TLS_CERT_FILE: /run/secrets/aegiscore/agent-cert.pem
+      AGENT_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/agent-key.pem
+      AGENT_ADMISSION_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore/gateway-ca.pem
     volumes:
-    - ./Data:/etc/go-sro/Data:ro
-    - ./Media/Media:/etc/go-sro/Media:ro
-    - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/go-sro:ro"
+    - ./Data:/etc/aegiscore/Data:ro
+    - ./Media/Media:/etc/aegiscore/Media:ro
+    - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
 
   gateway-server:
     build:
       context: .
       dockerfile: gateway-server/Dockerfile
-    image: gosro-gateway-server:local
+    image: aegiscore-gateway-server:local
     restart: always
-    container_name: gosro-gateway-server
+    container_name: aegiscore-gateway-server
     depends_on:
       db:
         condition: service_healthy
@@ -139,7 +141,7 @@ services:
     ports:
       - "15779:15779"
     networks:
-      - gosro
+      - aegiscore
     environment:
       DB_ACCOUNT_HOST: db
       DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
@@ -157,19 +159,20 @@ services:
       GATEWAY_PROTOCOL_CONTENT_ID: "${GATEWAY_PROTOCOL_CONTENT_ID:?Set GATEWAY_PROTOCOL_CONTENT_ID from an approved client capture}"
       GATEWAY_PROTOCOL_MODULE_NAME: "${GATEWAY_PROTOCOL_MODULE_NAME:?Set GATEWAY_PROTOCOL_MODULE_NAME from an approved client capture}"
       GATEWAY_PROTOCOL_VERSION: "${GATEWAY_PROTOCOL_VERSION:?Set GATEWAY_PROTOCOL_VERSION from an approved client capture}"
+      GATEWAY_FARM_NAME: "${GATEWAY_FARM_NAME:-AegisCore}"
       AGENT_ADMISSION_PORT: "15883"
       AGENT_ADMISSION_TIMEOUT_SECONDS: ${AGENT_ADMISSION_TIMEOUT_SECONDS:-5}
-      AGENT_ADMISSION_TLS_CA_FILE: /run/secrets/go-sro/agent-ca.pem
+      AGENT_ADMISSION_TLS_CA_FILE: /run/secrets/aegiscore/agent-ca.pem
       AGENT_ADMISSION_TLS_SERVER_NAME: "${AGENT_ADMISSION_TLS_SERVER_NAME:?Set AGENT_ADMISSION_TLS_SERVER_NAME to the Agent certificate DNS SAN}"
-      GATEWAY_ADMISSION_TLS_CERT_FILE: /run/secrets/go-sro/gateway-cert.pem
-      GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/go-sro/gateway-key.pem
+      GATEWAY_ADMISSION_TLS_CERT_FILE: /run/secrets/aegiscore/gateway-cert.pem
+      GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/gateway-key.pem
     volumes:
-    - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/go-sro:ro"
+    - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/aegiscore:ro"
 
 networks:
-  gosro:
+  aegiscore:
 
 volumes:
   mysql-data:
     # Keep the 8.0 volume untouched as the pre-cutover rollback point.
-    name: ${MYSQL_DATA_VOLUME:-gosro-mysql-data-84}
+    name: ${MYSQL_DATA_VOLUME:-aegiscore-mysql-data-84}

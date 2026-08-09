@@ -1,6 +1,6 @@
 package environment
 
-import "github.com/ferdoran/go-sro/agent-server/model"
+import "github.com/Harvi8/AegisCore/agent-server/model"
 
 type WeatherManager struct{}
 

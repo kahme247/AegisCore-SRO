@@ -13,8 +13,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ferdoran/go-sro/framework/config"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	"github.com/Harvi8/AegisCore/framework/config"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 var errItemMallImportUsage = errors.New("usage: sro-data import-item-mall --media <Media directory>")

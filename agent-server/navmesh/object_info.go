@@ -3,7 +3,7 @@ package navmesh
 import (
 	"bufio"
 	"bytes"
-	"github.com/ferdoran/go-sro/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/pk2"
 	"github.com/sirupsen/logrus"
 	"io"
 	"os"

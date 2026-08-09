@@ -14,7 +14,7 @@
 ../.idea
 *.iml
 *.mwb.bak
-go-sro.exe
+aegiscore.exe
 logs.txt
 config.json
 *.log

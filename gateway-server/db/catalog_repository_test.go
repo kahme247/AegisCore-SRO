@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const gatewayCatalogTestDriverName = "go-sro-gateway-catalog-test"
+const gatewayCatalogTestDriverName = "aegiscore-gateway-catalog-test"
 
 var gatewayCatalogTestState struct {
 	sync.Mutex
@@ -150,7 +150,7 @@ func TestNoticeRepositoryList(t *testing.T) {
 func TestShardRepositoryList(t *testing.T) {
 	resetGatewayCatalogTestState()
 	gatewayCatalogTestState.Lock()
-	gatewayCatalogTestState.shardRows = [][]driver.Value{{int64(1), int64(122), "GoSRO", int64(1000), int64(42), int64(1)}}
+	gatewayCatalogTestState.shardRows = [][]driver.Value{{int64(1), int64(122), "AegisCore", int64(1000), int64(42), int64(1)}}
 	gatewayCatalogTestState.Unlock()
 
 	repository, err := NewShardRepository(openGatewayCatalogTestDB(t))
@@ -161,7 +161,7 @@ func TestShardRepositoryList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if got, want := shards, []Shard{{Id: 1, ContentId: 122, Name: "GoSRO", Capacity: 1000, OnlinePlayers: 42, Status: 1}}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := shards, []Shard{{Id: 1, ContentId: 122, Name: "AegisCore", Capacity: 1000, OnlinePlayers: 42, Status: 1}}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("shards = %#v, want %#v", got, want)
 	}
 	assertGatewayCatalogQuery(t, selectShards)

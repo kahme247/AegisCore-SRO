@@ -6,10 +6,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 func TestWorldServiceRejectsDuplicateCharacterWithoutOverwritingIndexes(t *testing.T) {

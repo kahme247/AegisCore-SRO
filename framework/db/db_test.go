@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
 	"github.com/spf13/viper"
 )
 
-const poolTestDriverName = "go-sro-pool-test"
+const poolTestDriverName = "aegiscore-pool-test"
 
 var poolTestState struct {
 	sync.Mutex

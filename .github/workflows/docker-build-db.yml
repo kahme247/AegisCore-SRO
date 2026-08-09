@@ -24,7 +24,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKER_REGISTRY || 'local' }}/go-sro/db
+            ${{ secrets.DOCKER_REGISTRY || 'local' }}/aegiscore/db
           tags: |
             type=sha
             type=semver,pattern={{version}}

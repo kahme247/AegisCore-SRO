@@ -43,7 +43,7 @@ func TestComposePersistsMySQLAndWaitsForSchemaHealth(t *testing.T) {
 		t.Fatal("Compose does not declare the stable mysql-data volume")
 	}
 	database := compose.Services["db"]
-	if database.Image != "gosro-db:8.4.10" {
+	if database.Image != "aegiscore-db:8.4.10" {
 		t.Fatalf("database image = %q, want pinned MySQL 8.4 application image", database.Image)
 	}
 	if database.Build.Context != "./db" || database.Build.Dockerfile != "Dockerfile" {

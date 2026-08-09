@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 const DefaultWriteTimeout = 5 * time.Second

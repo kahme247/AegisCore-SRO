@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/model"
 )
 
 type SkillUseCase interface {

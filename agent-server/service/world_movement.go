@@ -3,7 +3,7 @@ package service
 import (
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/model"
 )
 
 // movementCoordinator owns movement timing and delegates world mutation back

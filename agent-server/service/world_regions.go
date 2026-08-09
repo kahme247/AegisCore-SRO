@@ -1,6 +1,6 @@
 package service
 
-import "github.com/ferdoran/go-sro/agent-server/navmeshv2"
+import "github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 
 // worldRegions centralizes access to the immutable post-bootstrap terrain
 // catalog. It returns pointers only to internal callers and detached snapshots

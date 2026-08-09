@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-const characterSkillTestDriverName = "go-sro-character-skill-test"
+const characterSkillTestDriverName = "aegiscore-character-skill-test"
 
 var characterSkillTestState struct {
 	sync.Mutex

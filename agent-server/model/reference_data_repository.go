@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	"github.com/sirupsen/logrus"
 )
 

@@ -13,7 +13,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-const characterCreationRepositoryTestDriverName = "go-sro-character-creation-repository-test"
+const characterCreationRepositoryTestDriverName = "aegiscore-character-creation-repository-test"
 
 var characterCreationRepositoryTestRegistry struct {
 	sync.Mutex

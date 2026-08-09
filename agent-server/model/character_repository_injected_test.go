@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const characterRepositoryTestDriverName = "go-sro-character-repository-test"
+const characterRepositoryTestDriverName = "aegiscore-character-repository-test"
 
 var characterRepositoryTestState struct {
 	sync.Mutex

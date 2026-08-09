@@ -3,9 +3,9 @@ package stall
 import (
 	"context"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 func RegisterStallDestroyHandler(target *server.Server) {

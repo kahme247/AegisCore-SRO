@@ -1,6 +1,6 @@
-# SRO Nexus
+# AegisCore
 
-SRO Nexus is a Go implementation of a Silkroad Online server stack focused on
+AegisCore is a Go implementation of a Silkroad Online server stack focused on
 one compatibility boundary: **vSRO 1.188** (Gateway version `188`, profile
 `vsro188`). The current deployable
 topology is MySQL + Gateway + Agent; game, world, chat, and shard behavior still
@@ -12,9 +12,9 @@ production-complete emulator. Code paths described as implemented have
 automated coverage, but wire formats remain provisional until they are backed
 by sanitized stock-client captures.
 
-The public project name is SRO Nexus. The Go module path and several Compose
-resource names still use the legacy `github.com/ferdoran/go-sro`/`gosro` names;
-changing those identifiers is a separate compatibility migration.
+The public project name is AegisCore. Its Go module path is
+`github.com/Harvi8/AegisCore`, and local Compose resources use the `aegiscore`
+slug. Original Ferdoran identifiers remain only where required for attribution.
 
 ## Current architecture
 
@@ -74,7 +74,7 @@ checkouts are intentionally ignored by Git.
 | Level/skill Media | `Media/Media/server_dep/silkroad/textdata/` | XP, level, mastery and skill reference input |
 | Environment | `.env` | protocol identity, advertised Agent address and TLS mount paths; never commit secrets |
 | TLS material | `.local/admission-tls/` or external directories | Gateway/Agent mutual TLS |
-| Reference DBs | `VSRO_OLDDB/`, `VSRO_TestIn(EPVP)/` | offline comparison only; live SRO Nexus uses MySQL |
+| Reference DBs | `VSRO_OLDDB/`, `VSRO_TestIn(EPVP)/` | offline comparison only; live AegisCore uses MySQL |
 | Research sources | `.local/rsbot/`, `.local/SilkroadLauncher-source/` | packet-reader and launcher cross-checks |
 | Prepared cache | configured cache prefix | manifest-bound navmesh acceleration |
 
@@ -218,7 +218,7 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
 
 ## License and acknowledgement
 
-SRO Nexus retains the original GO-SRO license; see [LICENSE](LICENSE). The
+AegisCore retains the original GO-SRO license; see [LICENSE](LICENSE). The
 project builds on [ferdoran/go-sro](https://github.com/ferdoran/go-sro), which
 credits DaxterSoul for packet and file-structure knowledge and the related
 Ferdoran projects. Current recovery work also cross-checks the open SilkroadDoc,

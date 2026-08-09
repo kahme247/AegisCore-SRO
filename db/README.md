@@ -1,13 +1,13 @@
-# SRO Nexus database
+# AegisCore database
 
-SRO Nexus uses MySQL with two logical schemas:
+AegisCore uses MySQL with two logical schemas:
 
 - `SRO_ACCOUNT` stores accounts, credentials, notices and shard admission data.
 - `SRO_SHARD` stores characters, inventory, world/reference data and gameplay
   persistence. Some shard tables reference `SRO_ACCOUNT`, so the schemas are
   logically separate but not fully independent.
 
-Compose builds `gosro-db:8.4.10` from the repository-owned `db/Dockerfile`, whose
+Compose builds `aegiscore-db:8.4.10` from the repository-owned `db/Dockerfile`, whose
 official MySQL base is pinned by digest and whose bootstrap order is explicit.
 Development publishes classic MySQL `3306` on loopback only; production should
 remove that host binding and keep database traffic on the private network.
@@ -32,7 +32,7 @@ existing `mysql-data` volume; rotate the MySQL user and remove legacy test
 accounts explicitly in an operator-reviewed maintenance window.
 
 The account catalog currently ends at `000003`. The shard catalog reaches
-`000032` and covers normalized identity, character limits and creation policy,
+`000033` and covers normalized identity, character limits and creation policy,
 Item Mall balances, purchases and timed services,
 inventory constraints, quests,
 economy/storage, shops, teleports, mastery/skills, guild storage, reference
@@ -62,7 +62,7 @@ docker compose --profile maintenance up --build migrate-account
 docker compose --profile maintenance up --build migrate-shard
 ```
 
-Each target owns a `go_sro_schema_migrations` ledger and requires
+Each target owns an `aegiscore_schema_migrations` ledger and requires
 `SELECT DATABASE()` to match exactly. Dirty `applying` or `rolling_back` states
 require manual schema/ledger reconciliation; do not delete rows or blindly
 retry uncertain MySQL DDL.
@@ -77,7 +77,18 @@ go run ./cmd/sro-data import-item-mall --media Media/Media
 ```
 
 Local MSSQL backups under `VSRO_OLDDB/` and `VSRO_TestIn(EPVP)/` are ignored
-comparison inputs, not the live SRO Nexus database.
+comparison inputs, not the live AegisCore database.
+
+The client-visible server name is stored in `SRO_ACCOUNT.SHARD.NAME`. Gateway
+reads it on every shard-list request, so no process restart is required after a
+valid update:
+
+```sql
+UPDATE SRO_ACCOUNT.SHARD SET NAME = 'AegisCore' WHERE ID = 1;
+```
+
+Keep the value nonblank, trimmed, valid UTF-8 and within the column's
+32-character limit.
 
 See [migration safety](migrations/README.md), the
 [migration command](../cmd/migrate/README.md), and the

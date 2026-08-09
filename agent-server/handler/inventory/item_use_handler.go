@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/sirupsen/logrus"
 )
 
@@ -104,8 +104,10 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 		return
 	}
 	if replacedToken != 0 {
-		removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, replacedToken)
-		h.publishPacket(player, &removed)
+		if model.ItemServiceUsesItemPerk(effect) {
+			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, replacedToken)
+			h.publishPacket(player, &removed)
+		}
 		if model.ItemServiceBuffSkillID(effect) != 0 {
 			buffRemoved := model.BuildBuffRemove(replacedToken)
 			h.publishPacket(player, &buffRemoved)
@@ -115,8 +117,10 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 	if remaining <= 0 {
 		return
 	}
-	added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
-	h.publishPacket(player, &added)
+	if model.ItemServiceUsesItemPerk(effect) {
+		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
+		h.publishPacket(player, &added)
+	}
 	if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
 		h.publishPacket(player, &buffAdded)
 	}
@@ -126,8 +130,10 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 	}
 	schedule(remaining, func() {
 		if player.ClearItemService(effect.Kind, token) {
-			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
-			h.publishPacket(player, &removed)
+			if model.ItemServiceUsesItemPerk(effect) {
+				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
+				h.publishPacket(player, &removed)
+			}
 			if model.ItemServiceBuffSkillID(effect) != 0 {
 				buffRemoved := model.BuildBuffRemove(token)
 				h.publishPacket(player, &buffRemoved)

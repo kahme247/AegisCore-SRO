@@ -3,8 +3,8 @@
 package main
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/navmesh"
-	"github.com/ferdoran/go-sro/framework/pk2"
+	"github.com/Harvi8/AegisCore/agent-server/navmesh"
+	"github.com/Harvi8/AegisCore/framework/pk2"
 	"github.com/fogleman/gg"
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"

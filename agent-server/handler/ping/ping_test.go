@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func TestPingResponseEchoesToken(t *testing.T) {

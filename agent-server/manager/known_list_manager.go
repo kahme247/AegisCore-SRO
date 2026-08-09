@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/service"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"sync"
 	"time"
 )

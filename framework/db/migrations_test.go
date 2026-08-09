@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const migrationTestDriverName = "go-sro-migration-test"
+const migrationTestDriverName = "aegiscore-migration-test"
 
 var migrationTestState struct {
 	sync.Mutex
@@ -349,7 +349,7 @@ func migrationTestRunnerForTarget(t *testing.T, target MigrationTarget) *Migrati
 
 	runner, err := NewMigrationRunner(database, MigrationRunnerOptions{
 		Target:      target,
-		LockName:    "go-sro:migrations:test",
+		LockName:    "aegiscore:migrations:test",
 		LockTimeout: time.Second,
 	})
 	if err != nil {
@@ -424,73 +424,78 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 31 {
-		t.Fatalf("shard migration count = %d, want 31", len(shardMigrations))
+	if len(shardMigrations) != 32 {
+		t.Fatalf("shard migration count = %d, want 32", len(shardMigrations))
 	}
-	returnCityMigration := shardMigrations[len(shardMigrations)-10]
+	returnCityMigration := shardMigrations[len(shardMigrations)-11]
 	if returnCityMigration.Version != 23 || returnCityMigration.Name != "character_return_city" ||
 		!strings.Contains(returnCityMigration.UpSQL, "RETURN_TELEPORT_ID") || !strings.Contains(returnCityMigration.DownSQL, "DROP COLUMN") {
 		t.Fatalf("return city migration = %#v, want reversible version 23 character_return_city", returnCityMigration)
 	}
-	progressionRatesMigration := shardMigrations[len(shardMigrations)-9]
+	progressionRatesMigration := shardMigrations[len(shardMigrations)-10]
 	if progressionRatesMigration.Version != 24 || progressionRatesMigration.Name != "gameplay_progression_rates" ||
 		!strings.Contains(progressionRatesMigration.UpSQL, "GAMEPLAY_PROGRESSION_RATES") ||
 		!strings.Contains(progressionRatesMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("progression rates migration = %#v, want reversible version 24 gameplay_progression_rates", progressionRatesMigration)
 	}
-	mobRatesMigration := shardMigrations[len(shardMigrations)-8]
+	mobRatesMigration := shardMigrations[len(shardMigrations)-9]
 	if mobRatesMigration.Version != 25 || mobRatesMigration.Name != "gameplay_mob_rates" ||
 		!strings.Contains(mobRatesMigration.UpSQL, "GAMEPLAY_MOB_RATES") ||
 		!strings.Contains(mobRatesMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("mob rates migration = %#v, want reversible version 25 gameplay_mob_rates", mobRatesMigration)
 	}
-	quickSlotsMigration := shardMigrations[len(shardMigrations)-7]
+	quickSlotsMigration := shardMigrations[len(shardMigrations)-8]
 	if quickSlotsMigration.Version != 26 || quickSlotsMigration.Name != "character_quick_slots" ||
 		!strings.Contains(quickSlotsMigration.UpSQL, "CHAR_QUICK_SLOT") ||
 		!strings.Contains(quickSlotsMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("quick-slot migration = %#v, want reversible version 26 character_quick_slots", quickSlotsMigration)
 	}
-	speedEffectMigration := shardMigrations[len(shardMigrations)-6]
+	speedEffectMigration := shardMigrations[len(shardMigrations)-7]
 	if speedEffectMigration.Version != 27 || speedEffectMigration.Name != "character_speed_effect" ||
 		!strings.Contains(speedEffectMigration.UpSQL, "CHAR_SPEED_EFFECT") ||
 		!strings.Contains(speedEffectMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("speed-effect migration = %#v, want reversible version 27 character_speed_effect", speedEffectMigration)
 	}
-	uniqueCharacterMigration := shardMigrations[len(shardMigrations)-5]
+	uniqueCharacterMigration := shardMigrations[len(shardMigrations)-6]
 	if uniqueCharacterMigration.Version != 28 || uniqueCharacterMigration.Name != "unique_character_id" ||
 		!strings.Contains(uniqueCharacterMigration.PreflightSQL, "GROUP BY `id`") ||
 		!strings.Contains(uniqueCharacterMigration.UpSQL, "UX_CHAR_ID") ||
 		!strings.Contains(uniqueCharacterMigration.DownSQL, "DROP INDEX") {
 		t.Fatalf("unique-character migration = %#v, want reversible version 28 unique_character_id", uniqueCharacterMigration)
 	}
-	continentCompatibilityMigration := shardMigrations[len(shardMigrations)-4]
+	continentCompatibilityMigration := shardMigrations[len(shardMigrations)-5]
 	if continentCompatibilityMigration.Version != 29 || continentCompatibilityMigration.Name != "drop_nonstandard_continent_fk" ||
 		!strings.Contains(continentCompatibilityMigration.UpSQL, "DROP FOREIGN KEY `FK_Continent_Name`") ||
 		!strings.Contains(continentCompatibilityMigration.DownSQL, "ADD CONSTRAINT `FK_Continent_Name`") {
 		t.Fatalf("continent compatibility migration = %#v, want reversible version 29 drop_nonstandard_continent_fk", continentCompatibilityMigration)
 	}
-	itemMallMigration := shardMigrations[len(shardMigrations)-3]
+	itemMallMigration := shardMigrations[len(shardMigrations)-4]
 	if itemMallMigration.Version != 30 || itemMallMigration.Name != "item_mall" ||
 		!strings.Contains(itemMallMigration.UpSQL, "ITEM_MALL_GOODS") ||
 		!strings.Contains(itemMallMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("item mall migration = %#v, want reversible version 30 item_mall", itemMallMigration)
 	}
-	itemServiceMigration := shardMigrations[len(shardMigrations)-2]
+	itemServiceMigration := shardMigrations[len(shardMigrations)-3]
 	if itemServiceMigration.Version != 31 || itemServiceMigration.Name != "character_item_services" ||
 		!strings.Contains(itemServiceMigration.UpSQL, "CHAR_ITEM_SERVICE") ||
 		!strings.Contains(itemServiceMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("item service migration = %#v, want reversible version 31 character_item_services", itemServiceMigration)
 	}
-	creationPolicyMigration := shardMigrations[len(shardMigrations)-1]
+	creationPolicyMigration := shardMigrations[len(shardMigrations)-2]
 	if creationPolicyMigration.Version != 32 || creationPolicyMigration.Name != "character_creation_policy" ||
 		!strings.Contains(creationPolicyMigration.UpSQL, "CHARACTER_CREATION_SETTING") ||
-		!strings.Contains(creationPolicyMigration.UpSQL, "(14875, 2, 1") ||
-		!strings.Contains(creationPolicyMigration.UpSQL, "(14900, 2, 0") ||
-		!strings.Contains(creationPolicyMigration.UpSQL, "item.`TypeID_4` BETWEEN 7 AND 15") ||
-		!strings.Contains(creationPolicyMigration.UpSQL, "item.`TypeID_3` IN (9, 10, 11)") ||
-		!strings.Contains(creationPolicyMigration.UpSQL, "item.`Req_Level_Type_1` IN (1, 513, 514)") ||
 		!strings.Contains(creationPolicyMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("creation policy migration = %#v, want reversible version 32 character_creation_policy", creationPolicyMigration)
+	}
+	europeanCreationMigration := shardMigrations[len(shardMigrations)-1]
+	if europeanCreationMigration.Version != 33 || europeanCreationMigration.Name != "european_character_creation" ||
+		!strings.Contains(europeanCreationMigration.UpSQL, "(14875, 2, 1") ||
+		!strings.Contains(europeanCreationMigration.UpSQL, "(14900, 2, 0") ||
+		!strings.Contains(europeanCreationMigration.UpSQL, "item.`TypeID_4` BETWEEN 7 AND 15") ||
+		!strings.Contains(europeanCreationMigration.UpSQL, "item.`TypeID_3` IN (9, 10, 11)") ||
+		!strings.Contains(europeanCreationMigration.UpSQL, "item.`Req_Level_Type_1` IN (1, 513, 514)") ||
+		!strings.Contains(europeanCreationMigration.DownSQL, "BETWEEN 14875 AND 14900") {
+		t.Fatalf("European creation migration = %#v, want reversible version 33 european_character_creation", europeanCreationMigration)
 	}
 	shardMigration := shardMigrations[0]
 	if shardMigration.Name != "normalize_character_name" || !strings.Contains(shardMigration.PreflightSQL, "HAVING COUNT(*) > 1") {

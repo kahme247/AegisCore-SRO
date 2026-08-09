@@ -4,7 +4,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"github.com/ferdoran/go-sro/framework/security"
+	"github.com/Harvi8/AegisCore/framework/security"
 )
 
 type SecurityContext struct {

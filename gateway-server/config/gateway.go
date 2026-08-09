@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -150,7 +150,7 @@ func setDefaultValues() {
 	viper.SetDefault(GatewayEnvironment, EnvironmentProduction)
 	viper.SetDefault(GatewayProtocolProfileName, VSRO188Profile)
 	viper.SetDefault(GatewayFarmID, 1)
-	viper.SetDefault(GatewayFarmName, "SRO_DEUTSCHLAND")
+	viper.SetDefault(GatewayFarmName, "AegisCore")
 }
 
 // LoadProtocolProfile returns the exact single-client Gateway contract. There

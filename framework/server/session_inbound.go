@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 // inboundMassive owns the mutable 0x600D assembly state for one Session.

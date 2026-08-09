@@ -3,9 +3,9 @@ package inventory
 import (
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func TestParseAlchemyElixirRequestVSRO188(t *testing.T) {

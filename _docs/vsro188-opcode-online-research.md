@@ -3,7 +3,7 @@
 Research date: 2026-07-16
 
 This report surveys the public vSRO/Silkroad protocol material that can help
-GO-SRO. It does not treat an online opcode list as protocol proof. The target
+AegisCore. It does not treat an online opcode list as protocol proof. The target
 remains the pinned Vietnam vSRO **1.188** client, and sanitized bytes from that
 exact client outrank every source below.
 
@@ -18,7 +18,7 @@ The useful material is split between:
 - capture/analyzer tools for producing our own authoritative fixtures;
 - the local TestIn binaries for original-server handler confirmation.
 
-GO-SRO currently declares **173 opcode constants / 169 unique numeric values**
+AegisCore currently declares **173 opcode constants / 169 unique numeric values**
 and registers **55 unique application-level inbound handlers**, in addition to
 the four framework handlers for `0x5000`, `0x9000`, `0x2001`, and `0x2002`.
 For comparison, the inspected SilkroadDoc summary tables mention **414 unique
@@ -26,7 +26,7 @@ numeric values**, while the inspected RSBot tree has **123 unique values in
 explicit handler declarations**. These counts measure catalog breadth, not
 implementation completeness: many documented packets are server-to-client
 notifications, internal framework messages, newer-version branches, or packet
-families that GO-SRO intentionally does not implement yet.
+families that AegisCore intentionally does not implement yet.
 
 The highest-value improvement is therefore not to paste hundreds of numbers
 into Go constants. It is to build one provenance-aware registry, generate the
@@ -73,7 +73,7 @@ The wiki/repository does not provide a clear license for copying content into
 the server, so use facts and independent implementation rather than copied
 code or prose.
 
-High-value families for GO-SRO include:
+High-value families for AegisCore include:
 
 - handshake/framework: `0x5000`, `0x9000`, `0x2001`, `0x2002`;
 - massive framing: `0x600D`;
@@ -92,7 +92,7 @@ High-value families for GO-SRO include:
 - Repository: <https://github.com/myildirimofficial/RSBot>
 - Inspected snapshot: commit
   `1723fed61b7c75cdb7db58cf04cd5a19dc560fc5` (2026-05-22).
-- License: AGPL-3.0; do not copy implementation into GO-SRO.
+- License: AGPL-3.0; do not copy implementation into AegisCore.
 
 RSBot is the broadest executable client-side cross-check. Its value is not
 only the numeric `Opcode` declarations: readers reveal field order and
@@ -110,7 +110,7 @@ Useful paths in the inspected tree:
 - `Library/RSBot.Core/Objects/Spawn` for entity/COS/item parsing;
 - `Library/RSBot.Core/Components` for packet writers and sequencing.
 
-RSBot independently confirms many GO-SRO anchors, including `0x3012`, the
+RSBot independently confirms many AegisCore anchors, including `0x3012`, the
 `0x3017/0x3019/0x3018` group-spawn sequence, `0x6100`-`0x6103`, `0x7001`,
 `0x7021`, `0x7045`, `0x7046`, `0x705A`, `0x7074`, `0xB0A2`, and the
 `0x34B5`/`0x34B6` game-reset exchange.
@@ -149,7 +149,7 @@ It is not a vSRO 1.188 opcode authority.
 
 Its strongest contribution is architecture: typed packet definitions,
 serialization derives, stream registries, handshake state, checksum/count
-security, and bounded codecs. Use these ideas to improve GO-SRO's type safety
+security, and bounded codecs. Use these ideas to improve AegisCore's type safety
 and tests, not as v188 packet-layout evidence.
 
 ## Capture and analysis sources
@@ -183,7 +183,7 @@ Historical emulators, clientless bots, filter projects, and forum posts can
 identify a packet family or expected state transition. They cannot establish
 vSRO 1.188 bytes by themselves. In particular, recent generic opcode lists are
 not automatically better: one 2026 list labels `0x7025` as movement, while
-SilkroadDoc, RSBot, and GO-SRO all identify `0x7025` as the Agent chat request.
+SilkroadDoc, RSBot, and AegisCore all identify `0x7025` as the Agent chat request.
 That source is suitable only as a warning about unversioned aggregation.
 
 Do not download or execute leaked server/client archives, filter binaries, or
@@ -195,16 +195,16 @@ licensed implementations.
 
 ### 1. Game reset opcode conflict
 
-GO-SRO's local opcode corpus and RSBot use server `0x34B5` followed by client
+AegisCore's local opcode corpus and RSBot use server `0x34B5` followed by client
 `0x34B6`. The current SilkroadDoc Agent table lists `0x35B5` and `0x35B6`.
-GO-SRO currently names `0x34B6` `TeleportReadyResponse`, although the other
+AegisCore currently names `0x34B6` `TeleportReadyResponse`, although the other
 sources describe it as game-reset completion. Preserve the current behavior
 until captured, but rename/document the semantic alias and add the conflict to
 the canonical registry.
 
 ### 2. Opcode aliases need direction and phase
 
-GO-SRO intentionally or historically has numeric aliases:
+AegisCore intentionally or historically has numeric aliases:
 
 - `0x3080`: party invitation and generic player invitation;
 - `0x7001`: lobby join and character-selection alias;
@@ -231,12 +231,12 @@ handlers, response writers, docs, and tests agree.
 
 ### 5. Breadth is ahead of proof
 
-GO-SRO has a useful central constant package and 55 registered application
+AegisCore has a useful central constant package and 55 registered application
 handlers, but the pinned protocol profile remains evidence-pending and no
 sanitized stock-client fixtures are checked in. Adding more handler breadth
 from an online table would increase drift faster than confidence.
 
-## Prioritized improvements for GO-SRO
+## Prioritized improvements for AegisCore
 
 ### P0 — build the evidence-backed opcode registry
 

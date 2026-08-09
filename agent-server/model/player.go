@@ -2,10 +2,10 @@ package model
 
 import (
 	"fmt"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"sync"
@@ -216,6 +216,15 @@ func (p *Player) SetGold(gold uint64) {
 	p.Mutex.Unlock()
 }
 
+func (p *Player) GoldSnapshot() uint64 {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.Gold
+}
+
 // MarkQuestAbandoned updates the session-owned snapshot after the database
 // compare-and-swap succeeds. Later bootstrap streams (including reconnect-like
 // world reloads) therefore cannot resurrect the abandoned quest.
@@ -231,6 +240,72 @@ func (p *Player) MarkQuestAbandoned(questID int) {
 			return
 		}
 	}
+}
+
+// CommitQuestActivation publishes the database-backed active quest to the
+// session snapshot used by subsequent quest updates and reconnect bootstrap.
+func (p *Player) CommitQuestActivation(quest CharacterQuest) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	for index := range p.Quests {
+		if p.Quests[index].QuestID == quest.QuestID {
+			p.Quests[index] = quest
+			return
+		}
+	}
+	p.Quests = append(p.Quests, quest)
+}
+
+func (p *Player) CommitQuestMutation(quest CharacterQuest) {
+	p.CommitQuestActivation(quest)
+}
+
+func (p *Player) CommitQuestItemGrant(result QuestItemGrantResult) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.Inventory = result.Inventory.Snapshot()
+	p.commitQuestLocked(result.Quest)
+	p.Mutex.Unlock()
+}
+
+// CommitQuestCompletion publishes every persistence-backed completion result
+// under one lock after the cross-resource database transaction commits.
+func (p *Player) CommitQuestCompletion(result QuestCompletionResult) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.Inventory = result.Inventory.Snapshot()
+	p.Gold = result.Gold
+	p.Level = result.Progress.Level
+	p.ExpOffset = result.Progress.Experience
+	if result.Progress.SkillExperience > uint64(^uint(0)) {
+		p.SkillExpOffset = ^uint(0)
+	} else {
+		p.SkillExpOffset = uint(result.Progress.SkillExperience)
+	}
+	p.SkillPoints = result.Progress.SkillPoints
+	p.StatPoints = result.Progress.StatPoints
+	if p.MaxLevel < p.Level {
+		p.MaxLevel = p.Level
+	}
+	p.commitQuestLocked(result.Quest)
+	p.Mutex.Unlock()
+}
+
+func (p *Player) commitQuestLocked(quest CharacterQuest) {
+	for index := range p.Quests {
+		if p.Quests[index].QuestID == quest.QuestID {
+			p.Quests[index] = quest
+			return
+		}
+	}
+	p.Quests = append(p.Quests, quest)
 }
 
 func (p *Player) QuestSnapshot() []CharacterQuest {

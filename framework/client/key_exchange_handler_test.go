@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/security"
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/security"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 func TestKeyExchangeHandlerFailsClosedOnMalformedAndInvalidPhases(t *testing.T) {

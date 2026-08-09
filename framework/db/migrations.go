@@ -21,9 +21,9 @@ const (
 	// MigrationLedgerTable is created in the database currently being migrated.
 	// Run account and shard catalogs against their respective database handles so
 	// their histories remain independent.
-	MigrationLedgerTable = "go_sro_schema_migrations"
+	MigrationLedgerTable = "aegiscore_schema_migrations"
 
-	DefaultMigrationLockName    = "go-sro:migrations"
+	DefaultMigrationLockName    = "aegiscore:migrations"
 	DefaultMigrationLockTimeout = 30 * time.Second
 	MaxMigrationLockTimeout     = 5 * time.Minute
 )
@@ -711,7 +711,7 @@ func (r *MigrationRunner) releaseLock(ctx context.Context, connection *sql.Conn)
 }
 
 func ensureMigrationLedger(ctx context.Context, connection *sql.Conn) error {
-	const createLedgerSQL = "CREATE TABLE IF NOT EXISTS `go_sro_schema_migrations` (" +
+	const createLedgerSQL = "CREATE TABLE IF NOT EXISTS `aegiscore_schema_migrations` (" +
 		"`version` BIGINT UNSIGNED NOT NULL, " +
 		"`name` VARCHAR(255) NOT NULL, " +
 		"`checksum` CHAR(64) NOT NULL, " +

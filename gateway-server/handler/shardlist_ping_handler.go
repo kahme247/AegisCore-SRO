@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/gateway-server/config"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/gateway-server/config"
 )
 
 // ShardlistPingHandler writes the documented 0xA106 success branch only after

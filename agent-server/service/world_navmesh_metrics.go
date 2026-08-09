@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	log "github.com/sirupsen/logrus"
 )
 

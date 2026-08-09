@@ -1,7 +1,7 @@
 package model
 
 import (
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 func WriteRentInfo(p *network.Packet, item Item) {

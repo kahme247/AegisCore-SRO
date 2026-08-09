@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 func TestFrameEncoderEncryptsAndDecryptsPaddedPayloadOverLegacyBuffer(t *testing.T) {

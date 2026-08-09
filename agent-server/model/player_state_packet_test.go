@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func TestJoiningPlayerBodyStateUpdateIsNormal(t *testing.T) {

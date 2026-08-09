@@ -2,13 +2,13 @@
 
 package main
 
-import "github.com/ferdoran/go-sro/agent-server/navmeshv2/viewer"
+import "github.com/Harvi8/AegisCore/agent-server/navmeshv2/viewer"
 
 func main() {
 	viewer.Main()
 	//var width int32 = 800
 	//var height int32 = 450
-	//rl.InitWindow(width, height, "Go SRO Navmesh Viewer")
+	//rl.InitWindow(width, height, "AegisCore Navmesh Viewer")
 	//rl.SetTargetFPS(60)
 	//raygui.LoadGuiStyle("zahnrad.style")
 	//
@@ -29,7 +29,7 @@ func main() {
 	//		loadingNavmeshes = true
 	//		go navmeshLoader.LoadTerrainMeshes(progressChan)
 	//	}
-	//	rl.DrawText("Go SRO Navmesh Viewer", width/4, height/5, 20, rl.LightGray)
+	//	rl.DrawText("AegisCore Navmesh Viewer", width/4, height/5, 20, rl.LightGray)
 	//	buttonClicked = raygui.Button(rl.NewRectangle(float32(width/4), float32(height/3), float32(width/2), 50), "Load Navmesh Files")
 	//
 	//	if loadingNavmeshes {

@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"github.com/ferdoran/go-sro/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/pk2"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"io"

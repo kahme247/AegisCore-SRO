@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const inventoryRepositoryTestDriverName = "go-sro-inventory-repository-test"
+const inventoryRepositoryTestDriverName = "aegiscore-inventory-repository-test"
 
 var inventoryRepositoryTestRegistry struct {
 	sync.Mutex

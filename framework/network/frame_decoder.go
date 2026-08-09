@@ -7,7 +7,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 const (

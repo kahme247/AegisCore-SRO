@@ -1,4 +1,4 @@
-module github.com/ferdoran/go-sro
+module github.com/Harvi8/AegisCore
 
 go 1.26.5
 

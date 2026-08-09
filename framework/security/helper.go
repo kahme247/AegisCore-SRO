@@ -1,7 +1,7 @@
 package security
 
 import (
-	utils2 "github.com/ferdoran/go-sro/framework/utils"
+	utils2 "github.com/Harvi8/AegisCore/framework/utils"
 )
 
 func G_pow_X_mod_P(generator, private, prime uint32) uint32 {

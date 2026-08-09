@@ -1,7 +1,7 @@
-# GO-SRO reference catalog
+# AegisCore reference catalog
 
 This catalog records the external research sources used while recovering and
-expanding GO-SRO for the pinned **vSRO 1.188** client. A reference is evidence,
+expanding AegisCore for the pinned **vSRO 1.188** client. A reference is evidence,
 not proof: version differences, incomplete implementations and guessed fields
 are common throughout historical Silkroad projects.
 
@@ -70,7 +70,7 @@ versions.
 - Research snapshot inspected on 2026-07-16: commit
   `1723fed61b7c75cdb7db58cf04cd5a19dc560fc5`.
 - License: AGPL-3.0. Use it to cross-check behavior and fixtures; do not copy
-  implementation into GO-SRO.
+  implementation into AegisCore.
 
 ### JellyBitz/SilkroadLauncher
 
@@ -87,7 +87,7 @@ versions.
 - Relationship: original GO-SRO PK2/navmesh implementation lineage.
 - Use for: PK2 reader history, `mapinfo.mfo`, `nv_XXYY.nvm`, `.dat`, `.ifo`,
   1920-unit region geometry and item-data parsing.
-- Caution: archived since 2021. GO-SRO's bounded safe reader and manifest checks
+- Caution: archived since 2021. AegisCore's bounded safe reader and manifest checks
   take precedence over legacy unchecked behavior.
 
 ### JellyBitz/xSROMap
@@ -98,7 +98,7 @@ versions.
 - Media inputs documented by the project include `characterdata_*.txt`,
   `textdata_object_all.txt`, `textzonename_all.txt`, `npcpos.txt`,
   `teleportdata.txt`, `teleportbuilding.txt` and `teleportlink.txt`.
-- Direct GO-SRO value: cross-check spawn axes, NPC placement and teleport
+- Direct AegisCore value: cross-check spawn axes, NPC placement and teleport
   repository imports.
 
 ### JellyBitz/JMX-File-Editor
@@ -112,7 +112,7 @@ versions.
 
 - Source: <https://github.com/JellyBitz/SRO.PK2API>
 - Use for: independent PK2 directory, read, create and mutation behavior.
-- Caution: it is a cross-check, not a replacement for GO-SRO's fail-closed
+- Caution: it is a cross-check, not a replacement for AegisCore's fail-closed
   reader; the project documents lowercase-name behavior for new entries.
 
 ### JellyBitz/SR_Db2Media
@@ -120,7 +120,7 @@ versions.
 - Source: <https://github.com/JellyBitz/SR_Db2Media>
 - Use for: understanding DB-to-Media extraction, skill-data encryption and
   Media.pk2 import workflows.
-- Caution: GO-SRO should first build deterministic, read-only import/verification
+- Caution: AegisCore should first build deterministic, read-only import/verification
   paths. Never mutate the canonical client archive during server startup.
 
 ### Veykril/GFXFileManager
@@ -155,7 +155,7 @@ versions.
 - Source: <https://github.com/kumpelblase2/skrillax-network>
 - Use for: layered Silkroad serialization, packet definitions, TCP framing,
   secured stream establishment and handshake organization.
-- Caution: its protocol-independent transport design is more useful to GO-SRO
+- Caution: its protocol-independent transport design is more useful to AegisCore
   than any version-specific packet assumption.
 - Research snapshot inspected on 2026-07-16: commit
   `20b525964959996957f3d4d13dbbdfe0d539a9c2` (MIT).
@@ -193,7 +193,7 @@ versions.
 - Use for: an MIT-licensed wrapper/proxy interoperability harness around the
   historical SilkroadSecurity API and simple stream-building examples.
 - Caution: it wraps native security behavior rather than providing a pure
-  Python protocol authority; validate output against GO-SRO and pinned-client
+  Python protocol authority; validate output against AegisCore and pinned-client
   captures.
 
 ### XSniff
@@ -236,7 +236,7 @@ versions.
 Unversioned forum opcode lists are discovery leads only. Do not import them
 into `framework/network/opcode` without an exact client profile and a stronger
 confirming source. A 2026 generic vSRO list, for example, labels `0x7025` as
-movement even though the vSRO 1.188 SilkroadDoc table, RSBot, and GO-SRO all use
+movement even though the vSRO 1.188 SilkroadDoc table, RSBot, and AegisCore all use
 it for Agent chat. Publication date and apparent list size are not confidence.
 
 The full 2026 online survey, source revisions, conflicts, coverage counts and
@@ -326,7 +326,7 @@ not automatically compatible with vSRO 1.188.
 - Caution: unverified archive provenance and executable safety. Lead only; do
   not download, execute, vendor or cite layouts from the packages.
 
-## Using a historical reference in GO-SRO
+## Using a historical reference in AegisCore
 
 Before implementing a behavior found in one of these sources:
 
@@ -339,9 +339,9 @@ Before implementing a behavior found in one of these sources:
 6. label remaining unknown bytes and never guess a variable-length branch;
 7. document the adopted evidence beside the test or protocol type.
 
-The best immediate emulator comparisons for the current GO-SRO gaps are:
+The best immediate emulator comparisons for the current AegisCore gaps are:
 
-| GO-SRO area | First references to compare |
+| AegisCore area | First references to compare |
 | --- | --- |
 | Handshake and admission | Phoenix, SilkroadDoc, Silkroad.Net, skrillax-network |
 | Character join and group spawn | Phoenix, RSBot, SilkroadDoc, SSCv3 behavior |

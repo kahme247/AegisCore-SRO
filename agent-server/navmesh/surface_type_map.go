@@ -1,7 +1,7 @@
 package navmesh
 
 import (
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 const (

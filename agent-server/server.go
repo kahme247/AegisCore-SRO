@@ -11,29 +11,29 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/config"
-	"github.com/ferdoran/go-sro/agent-server/database"
-	"github.com/ferdoran/go-sro/agent-server/handler/character"
-	"github.com/ferdoran/go-sro/agent-server/handler/chat"
-	"github.com/ferdoran/go-sro/agent-server/handler/cos"
-	"github.com/ferdoran/go-sro/agent-server/handler/exchange"
-	"github.com/ferdoran/go-sro/agent-server/handler/inventory"
-	"github.com/ferdoran/go-sro/agent-server/handler/lobby"
-	"github.com/ferdoran/go-sro/agent-server/handler/logout"
-	"github.com/ferdoran/go-sro/agent-server/handler/party"
-	"github.com/ferdoran/go-sro/agent-server/handler/ping"
-	"github.com/ferdoran/go-sro/agent-server/handler/stall"
-	"github.com/ferdoran/go-sro/agent-server/manager"
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/boot"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
-	"github.com/ferdoran/go-sro/framework/logging"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/security/auth"
-	"github.com/ferdoran/go-sro/framework/server"
-	gwHandlers "github.com/ferdoran/go-sro/gateway-server/handler"
+	"github.com/Harvi8/AegisCore/agent-server/config"
+	"github.com/Harvi8/AegisCore/agent-server/database"
+	"github.com/Harvi8/AegisCore/agent-server/handler/character"
+	"github.com/Harvi8/AegisCore/agent-server/handler/chat"
+	"github.com/Harvi8/AegisCore/agent-server/handler/cos"
+	"github.com/Harvi8/AegisCore/agent-server/handler/exchange"
+	"github.com/Harvi8/AegisCore/agent-server/handler/inventory"
+	"github.com/Harvi8/AegisCore/agent-server/handler/lobby"
+	"github.com/Harvi8/AegisCore/agent-server/handler/logout"
+	"github.com/Harvi8/AegisCore/agent-server/handler/party"
+	"github.com/Harvi8/AegisCore/agent-server/handler/ping"
+	"github.com/Harvi8/AegisCore/agent-server/handler/stall"
+	"github.com/Harvi8/AegisCore/agent-server/manager"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/boot"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/logging"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/server"
+	gwHandlers "github.com/Harvi8/AegisCore/gateway-server/handler"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -123,6 +123,10 @@ func NewAgentServer() (AgentServer, error) {
 	repositories, err := database.NewGameplayRepositories(shardPool, accountPool)
 	if err != nil {
 		return AgentServer{}, err
+	}
+	questRuntime, err := model.NewQuestRuntimeRepository(shardPool, levelTable)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent quest runtime: %w", err)
 	}
 	gameplayRates, err := manager.NewGameplayRateManager(repositories.GameplayRates, manager.GameplayRateRefreshInterval)
 	if err != nil {
@@ -241,7 +245,9 @@ func NewAgentServer() (AgentServer, error) {
 	character.RegisterSelectEntityHandler(&serv)
 	character.RegisterDeselectEntityHandler(&serv)
 	cos.RegisterMountStateHandler(&serv)
-	character.RegisterNPCTalkHandler(&serv)
+	if err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent NPC talk handler: %w", err)
+	}
 	if err := character.RegisterQuestHandler(&serv, repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest handlers: %w", err)
 	}
@@ -249,7 +255,7 @@ func NewAgentServer() (AgentServer, error) {
 	character.RegisterResurrectionHandler(&serv, repositories.Vitals)
 	manager.GetMobAIManagerInstance().ConfigureVitals(repositories.Vitals)
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
-	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates)
+	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
 	agentServer.Combat.ConfigureVitals(repositories.Vitals)
 	movementHandler.ConfigureCombatCancellation(agentServer.Combat.CancelPlayerAttack)
 	if err := character.RegisterAttributeHandlers(&serv, repositories.CharacterAttributes); err != nil {

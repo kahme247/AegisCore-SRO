@@ -21,7 +21,7 @@ func TestGatewayDefaults(t *testing.T) {
 	assertGatewayConfigValue(t, GatewayEnvironment, EnvironmentProduction)
 	assertGatewayConfigValue(t, GatewayProtocolProfileName, VSRO188Profile)
 	assertGatewayConfigValue(t, GatewayFarmID, 1)
-	assertGatewayConfigValue(t, GatewayFarmName, "SRO_DEUTSCHLAND")
+	assertGatewayConfigValue(t, GatewayFarmName, "AegisCore")
 
 	for _, key := range []string{GatewayProtocolContentID, GatewayProtocolModuleName, GatewayProtocolVersion, AgentAdmissionTLSCAFile, AgentAdmissionTLSServerName, GatewayAdmissionTLSCertFile, GatewayAdmissionTLSKeyFile} {
 		if viper.IsSet(key) {

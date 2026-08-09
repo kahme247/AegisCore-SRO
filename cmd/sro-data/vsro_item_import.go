@@ -10,8 +10,8 @@ import (
 	"io"
 	"path/filepath"
 
-	"github.com/ferdoran/go-sro/framework/config"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	"github.com/Harvi8/AegisCore/framework/config"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 var errVSROItemImportUsage = errors.New("usage: sro-data import-vsro-items --export-dir <SRO_VT_SHARD JSON export directory>")

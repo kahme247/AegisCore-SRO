@@ -1,4 +1,4 @@
-# SRO Nexus framework
+# AegisCore framework
 
 `framework` is the shared runtime used by Gateway, Agent and maintenance tools.
 It remains part of this monorepo rather than a separately versioned dependency.

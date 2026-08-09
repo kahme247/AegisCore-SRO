@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	migrationassets "github.com/ferdoran/go-sro/db/migrations"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	migrationassets "github.com/Harvi8/AegisCore/db/migrations"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 func TestEmbeddedCatalogsLoadForEveryMigrationTarget(t *testing.T) {

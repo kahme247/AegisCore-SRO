@@ -3,7 +3,7 @@ package model
 import (
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/sirupsen/logrus"
 	"sync"
 )

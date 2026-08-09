@@ -51,7 +51,7 @@ func TestValidateAgentEndpointRequiresExternalIPv4InProduction(t *testing.T) {
 }
 
 func TestValidateFarmRejectsEmptyOrZeroFields(t *testing.T) {
-	if err := ValidateFarm(Farm{ID: 1, Name: "SRO_DEUTSCHLAND"}); err != nil {
+	if err := ValidateFarm(Farm{ID: 1, Name: "AegisCore"}); err != nil {
 		t.Fatalf("ValidateFarm(valid) error = %v", err)
 	}
 	for _, farm := range []Farm{{Name: "Farm"}, {ID: 1}, {ID: 1, Name: " Farm"}} {

@@ -1,7 +1,7 @@
 package client
 
 import (
-	network2 "github.com/ferdoran/go-sro/framework/network"
+	network2 "github.com/Harvi8/AegisCore/framework/network"
 	log "github.com/sirupsen/logrus"
 )
 

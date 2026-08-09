@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"math"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 const SelectMovementSettings = "SELECT `PLAYER_WALK_SPEED`, `PLAYER_RUN_SPEED` FROM `SRO_SHARD`.`GAMEPLAY_MOVEMENT_SETTINGS` WHERE `SETTING_ID`=1"

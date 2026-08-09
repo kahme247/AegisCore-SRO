@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const goldDropRateTestDriverName = "go-sro-gold-drop-rate-test"
+const goldDropRateTestDriverName = "aegiscore-gold-drop-rate-test"
 
 var goldDropRateTestState struct {
 	sync.Mutex

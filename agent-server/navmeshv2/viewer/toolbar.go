@@ -4,7 +4,7 @@ package viewer
 
 import (
 	"fmt"
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/gen2brain/raylib-go/raygui"
 	rl "github.com/gen2brain/raylib-go/raylib"
 	"github.com/sirupsen/logrus"
@@ -102,7 +102,7 @@ func drawToolbar() {
 
 	nextX = doToolbarButton("Open", "Open PK2 File", buttonRect(nextX, 100), func() {
 		var err error
-		loader, err = navmeshv2.NewLoader("/Users/rmu/workspaces/private/go-sro/agent-server/Data.pk2")
+		loader, err = navmeshv2.NewLoader("/Users/rmu/workspaces/private/aegiscore/agent-server/Data.pk2")
 		if err != nil {
 			logrus.WithError(err).Error("failed to open navmesh archive")
 			return

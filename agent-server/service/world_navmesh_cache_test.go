@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/protocol/profiles"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
 func TestWorldBootstrapUsesValidatedV2CacheWithoutOpeningPK2(t *testing.T) {

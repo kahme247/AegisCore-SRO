@@ -1,6 +1,6 @@
 package model
 
-import "github.com/ferdoran/go-sro/framework/db"
+import "github.com/Harvi8/AegisCore/framework/db"
 
 const (
 	InsertItem = "INSERT INTO `SRO_SHARD`.`ITEM` (FK_REF_ITEM, VARIANCE) VALUES (?, ?);"

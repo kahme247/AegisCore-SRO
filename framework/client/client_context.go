@@ -1,7 +1,7 @@
 package client
 
 import (
-	security2 "github.com/ferdoran/go-sro/framework/security"
+	security2 "github.com/Harvi8/AegisCore/framework/security"
 )
 
 type SecurityContext struct {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 func TestLoginAttemptConfigParsingFailsClosedForInvalidNumbers(t *testing.T) {

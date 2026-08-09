@@ -2,8 +2,8 @@ package db
 
 import (
 	"database/sql"
-	"github.com/ferdoran/go-sro/framework/db"
-	"github.com/ferdoran/go-sro/framework/security/hashing"
+	"github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/security/hashing"
 	"time"
 )
 

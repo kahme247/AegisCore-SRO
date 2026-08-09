@@ -17,7 +17,7 @@ if (Test-Path -LiteralPath $bundledGo) {
 
 $version = (& $go version).Trim()
 if ($version -notmatch '^go version go1\.26\.5 ') {
-    throw "GO-SRO requires Go 1.26.5; found '$version'."
+    throw "AegisCore requires Go 1.26.5; found '$version'."
 }
 
 $goBin = Split-Path -Parent $go

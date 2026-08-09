@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ferdoran/go-sro/protocol/profiles"
+	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
 const (

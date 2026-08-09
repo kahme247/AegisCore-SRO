@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/gateway-server/handler"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/gateway-server/handler"
 )
 
 // GatewayDependencies is the process-composition boundary for infrastructure

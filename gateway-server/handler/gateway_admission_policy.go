@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 const (

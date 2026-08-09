@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	log "github.com/sirupsen/logrus"
 )
 

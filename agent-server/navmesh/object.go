@@ -2,7 +2,7 @@ package navmesh
 
 import (
 	"encoding/binary"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
 	log "github.com/sirupsen/logrus"
 )

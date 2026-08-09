@@ -32,7 +32,7 @@ const (
 	// QueueID before this acknowledgement succeeds.
 	DefaultAdmissionTicketInstallTimeout = 5 * time.Second
 	maxAdmissionTicketInstallBody        = 4 << 10
-	admissionInstallErrorHeader          = "X-Go-SRO-Admission-Error"
+	admissionInstallErrorHeader          = "X-AegisCore-Admission-Error"
 	admissionInstallAlreadyConnected     = "already-connected"
 )
 

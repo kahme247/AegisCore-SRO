@@ -13,7 +13,7 @@ RUN GOOS=linux CGO_ENABLED=0 go build -trimpath -o /app/migrate ./cmd/migrate
 
 FROM alpine:3.22
 RUN apk --no-cache add ca-certificates
-WORKDIR /etc/go-sro
+WORKDIR /etc/aegiscore
 COPY --from=builder /app/migrate ./migrate
 
 # The job needs no writable application directory or root privileges.

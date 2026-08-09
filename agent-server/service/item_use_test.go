@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 type itemUseServiceRepository struct {

@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const gatewayAdmissionStoreTestDriverName = "go-sro-gateway-admission-store-test"
+const gatewayAdmissionStoreTestDriverName = "aegiscore-gateway-admission-store-test"
 
 var gatewayAdmissionStoreTestState struct {
 	sync.Mutex

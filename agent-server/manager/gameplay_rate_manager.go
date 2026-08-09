@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	log "github.com/sirupsen/logrus"
 )
 

@@ -1,7 +1,7 @@
 package model
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"math"
 	"time"
 )

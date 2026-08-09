@@ -72,7 +72,7 @@ CREATE TABLE `SHARD` (
 
 LOCK TABLES `SHARD` WRITE;
 /*!40000 ALTER TABLE `SHARD` DISABLE KEYS */;
-INSERT INTO `SHARD` VALUES (1,22,'GoSRO',1000,1,0);
+INSERT INTO `SHARD` VALUES (1,22,'AegisCore',1000,1,0);
 /*!40000 ALTER TABLE `SHARD` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -127,13 +127,13 @@ LOCK TABLES `USER` WRITE;
 UNLOCK TABLES;
 
 --
--- Table structure for table `go_sro_schema_migrations`
+-- Table structure for table `aegiscore_schema_migrations`
 --
 
-DROP TABLE IF EXISTS `go_sro_schema_migrations`;
+DROP TABLE IF EXISTS `aegiscore_schema_migrations`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
-CREATE TABLE `go_sro_schema_migrations` (
+CREATE TABLE `aegiscore_schema_migrations` (
   `version` bigint unsigned NOT NULL,
   `name` varchar(255) NOT NULL,
   `checksum` char(64) NOT NULL,
@@ -144,13 +144,13 @@ CREATE TABLE `go_sro_schema_migrations` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
--- Dumping data for table `go_sro_schema_migrations`
+-- Dumping data for table `aegiscore_schema_migrations`
 --
 
-LOCK TABLES `go_sro_schema_migrations` WRITE;
-/*!40000 ALTER TABLE `go_sro_schema_migrations` DISABLE KEYS */;
-INSERT INTO `go_sro_schema_migrations` VALUES (1,'normalize_username','5c8e7e637ff56b58ca1211dacf69fc3df00d02af5dc63a4f8d6e3dde16e2eb98','applied','2026-07-16 19:24:22.003331'),(2,'item_mall_balances','9dd841c8d48e3f12282575a3ba99b9a8668b8ab3ad0c19115927a68317762a9b','applied','2026-07-17 00:00:00.000000'),(3,'shard_character_limit','d64613d0134852e205c15182fc660b2eec16516acb128938d1d4f4da160e80b2','applied','2026-07-17 00:00:00.000000');
-/*!40000 ALTER TABLE `go_sro_schema_migrations` ENABLE KEYS */;
+LOCK TABLES `aegiscore_schema_migrations` WRITE;
+/*!40000 ALTER TABLE `aegiscore_schema_migrations` DISABLE KEYS */;
+INSERT INTO `aegiscore_schema_migrations` VALUES (1,'normalize_username','5c8e7e637ff56b58ca1211dacf69fc3df00d02af5dc63a4f8d6e3dde16e2eb98','applied','2026-07-16 19:24:22.003331'),(2,'item_mall_balances','9dd841c8d48e3f12282575a3ba99b9a8668b8ab3ad0c19115927a68317762a9b','applied','2026-07-17 00:00:00.000000'),(3,'shard_character_limit','d64613d0134852e205c15182fc660b2eec16516acb128938d1d4f4da160e80b2','applied','2026-07-17 00:00:00.000000');
+/*!40000 ALTER TABLE `aegiscore_schema_migrations` ENABLE KEYS */;
 UNLOCK TABLES;
 
 --

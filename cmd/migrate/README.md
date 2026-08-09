@@ -49,7 +49,7 @@ and runs the final binary as UID/GID 65532.
 ```sql
 SELECT DATABASE();
 SELECT version, name, checksum, state, applied_at
-FROM go_sro_schema_migrations
+FROM aegiscore_schema_migrations
 ORDER BY version;
 ```
 

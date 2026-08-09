@@ -1,6 +1,6 @@
 package model
 
-import "github.com/ferdoran/go-sro/protocol/vsro188"
+import "github.com/Harvi8/AegisCore/protocol/vsro188"
 
 // LifeState, BodyState, and MotionState share the wire-format-neutral
 // authoritative values defined by the pinned vSRO 1.88 profile. Keeping these

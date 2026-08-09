@@ -3,7 +3,7 @@ package network
 import (
 	"errors"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 var ErrNilPacket = errors.New("cannot encode a nil packet")

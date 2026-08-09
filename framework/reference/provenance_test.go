@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ferdoran/go-sro/protocol/profiles"
+	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
 func TestVerifyArchiveProducesDeterministicProvenance(t *testing.T) {

@@ -1,9 +1,9 @@
 package model
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func BuildMovementUpdatePacket(character ICharacter, movement MovementData, startPosition navmeshv2.RtNavmeshPosition) network.Packet {

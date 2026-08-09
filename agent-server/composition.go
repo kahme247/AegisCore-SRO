@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ferdoran/go-sro/agent-server/handler/exchange"
-	"github.com/ferdoran/go-sro/agent-server/manager"
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
-	"github.com/ferdoran/go-sro/framework/security/auth"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/handler/exchange"
+	"github.com/Harvi8/AegisCore/agent-server/manager"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/server"
 	log "github.com/sirupsen/logrus"
 )
 

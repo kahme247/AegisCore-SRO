@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 
-	network2 "github.com/ferdoran/go-sro/framework/network"
-	security2 "github.com/ferdoran/go-sro/framework/security"
-	blowfish2 "github.com/ferdoran/go-sro/framework/security/blowfish"
-	utils2 "github.com/ferdoran/go-sro/framework/utils"
+	network2 "github.com/Harvi8/AegisCore/framework/network"
+	security2 "github.com/Harvi8/AegisCore/framework/security"
+	blowfish2 "github.com/Harvi8/AegisCore/framework/security/blowfish"
+	utils2 "github.com/Harvi8/AegisCore/framework/utils"
 	log "github.com/sirupsen/logrus"
 )
 

@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-const referenceDataRepositoryTestDriverName = "go-sro-agent-reference-data-repository-test"
+const referenceDataRepositoryTestDriverName = "aegiscore-agent-reference-data-repository-test"
 
 var referenceDataRepositoryTestState struct {
 	sync.Mutex

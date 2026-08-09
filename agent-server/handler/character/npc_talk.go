@@ -2,16 +2,17 @@ package character
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,9 +20,11 @@ import (
 // normal NPC and dispatches conversation responses whose stock script contract
 // has been recovered.
 type NPCTalkHandler struct {
-	mu    sync.Mutex
-	world selectEntityWorld
-	send  func(*server.Session, network.Packet) error
+	mu         sync.Mutex
+	world      selectEntityWorld
+	repository model.CharacterQuestRepository
+	runtime    model.QuestRuntimeRepository
+	send       func(*server.Session, network.Packet) error
 }
 
 // npcTalkActionConversation is the stock menu's "Talk to this person"
@@ -32,31 +35,52 @@ const npcTalkActionConversation = byte(2)
 
 const (
 	chulsanRefObjectID    = uint32(2003)
+	jingyoRefObjectID     = uint32(2037)
 	questListSelectorBase = byte(5)
 )
 
-var chulsanQuests = []struct {
-	nameKey string
-	talkKey string
-}{
-	{nameKey: "SN_QNO_CH_SMITH_1", talkKey: "SN_TALK_QNO_CH_SMITH_1_01"},
-	{nameKey: "SN_QNO_CH_SMITH_2", talkKey: "SN_TALK_QNO_CH_SMITH_2_01"},
+type chulsanQuestDefinition struct {
+	questID      int
+	nameKey      string
+	talkKey      string
+	acceptedKey  string
+	deniedKey    string
+	progressKey  string
+	fullKey      string
+	completedKey string
 }
 
-func NewNPCTalkHandler(world selectEntityWorld) *NPCTalkHandler {
-	return &NPCTalkHandler{world: world}
+var chulsanQuests = []chulsanQuestDefinition{
+	{questID: model.QuestWeaponListID, nameKey: "SN_QNO_CH_SMITH_1", talkKey: "SN_TALK_QNO_CH_SMITH_1_01", acceptedKey: "SN_TALK_QNO_CH_SMITH_1_02", deniedKey: "SN_TALK_QNO_CH_SMITH_1_03", progressKey: "SN_TALK_QNO_CH_SMITH_1_04", completedKey: "SN_TALK_QNO_CH_SMITH_1_08"},
+	{questID: model.QuestChulsanAngerID, nameKey: "SN_QNO_CH_SMITH_2", talkKey: "SN_TALK_QNO_CH_SMITH_2_01", acceptedKey: "SN_TALK_QNO_CH_SMITH_2_02", deniedKey: "SN_TALK_QNO_CH_SMITH_2_03", progressKey: "SN_TALK_QNO_CH_SMITH_2_04", fullKey: "SN_TALK_QNO_CH_SMITH_2_05", completedKey: "SN_TALK_QNO_CH_SMITH_2_06"},
 }
 
-func RegisterNPCTalkHandler(target *server.Server) {
-	if target == nil {
-		return
+func NewNPCTalkHandler(world selectEntityWorld, repositories ...model.CharacterQuestRepository) *NPCTalkHandler {
+	handler := &NPCTalkHandler{world: world}
+	if len(repositories) != 0 {
+		handler.repository = repositories[0]
 	}
-	handler := NewNPCTalkHandler(service.GetWorldServiceInstance())
+	return handler
+}
+
+func RegisterNPCTalkHandler(target *server.Server, repository model.CharacterQuestRepository, runtimes ...model.QuestRuntimeRepository) error {
+	if target == nil {
+		return fmt.Errorf("NPC talk server is required")
+	}
+	if repository == nil {
+		return model.ErrCharacterQuestRepositoryUnavailable
+	}
+	handler := NewNPCTalkHandler(service.GetWorldServiceInstance(), repository)
+	if len(runtimes) == 0 || runtimes[0] == nil {
+		return model.ErrQuestRuntimeUnavailable
+	}
+	handler.runtime = runtimes[0]
 	target.RegisterHandler(opcode.EntityTalkRequest, handler.handlePacket)
 	target.RegisterHandler(opcode.QuestTalk, handler.handleQuestTalkPacket)
+	return nil
 }
 
-func (h *NPCTalkHandler) handlePacket(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -122,6 +146,9 @@ func (h *NPCTalkHandler) handlePacket(_ context.Context, session *server.Session
 	if err := h.sendPacket(session, buildNPCTalkResponse(action)); err != nil {
 		return err
 	}
+	if action == npcTalkActionConversation && strings.EqualFold(object.GetName(), "NPC_CH_SOLDIER_SO1") {
+		return h.handleJingyoTalk(ctx, session, player)
+	}
 	if action == npcTalkActionConversation && strings.EqualFold(object.GetName(), "NPC_CH_SMITH") {
 		entries := make([]string, len(chulsanQuests))
 		for index, quest := range chulsanQuests {
@@ -136,10 +163,7 @@ func (h *NPCTalkHandler) handlePacket(_ context.Context, session *server.Session
 	return nil
 }
 
-func (h *NPCTalkHandler) handleQuestTalkPacket(_ context.Context, session *server.Session, packet network.Packet) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || session.UserContext.UniqueID == 0 || packet.Remaining() != 1 {
 		return fmt.Errorf("malformed quest talk selection")
 	}
@@ -152,11 +176,40 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(_ context.Context, session *serve
 		!HasRecentNPCInteraction(session.UserContext.UniqueID, interaction.NPCUniqueID, npcTalkActionConversation, 5*time.Minute) {
 		return nil
 	}
+	if selector == 1 || selector == 2 {
+		return h.handleChulsanOfferSelection(ctx, session, interaction, selector)
+	}
 	index := int(selector - questListSelectorBase)
 	if selector < questListSelectorBase || index >= len(chulsanQuests) {
 		return nil
 	}
-	offer, err := buildQuestTalkPacket(4, chulsanQuests[index].talkKey, []string{
+	quest := chulsanQuests[index]
+	world := h.world
+	if world == nil {
+		world = service.GetWorldServiceInstance()
+	}
+	player, err := resolveSelectingPlayer(world, session)
+	if err != nil {
+		return err
+	}
+	if active, exists := playerQuest(player, quest.questID); exists {
+		switch active.Status {
+		case model.QuestReadyToTurnIn, model.QuestReadyToTurnInByUser:
+			return h.completeChulsanQuest(ctx, session, interaction, player, quest)
+		case model.QuestActive, model.QuestStartedByUser:
+			progress, buildErr := buildQuestTalkPacket(1, quest.progressKey, nil)
+			if buildErr != nil {
+				return buildErr
+			}
+			return h.sendPacket(session, progress)
+		case model.QuestCompleted, model.QuestCompletedMultipleTimes:
+			return nil
+		}
+	}
+	if !npcInteractions.SelectQuest(session.UserContext.UniqueID, quest.questID) {
+		return nil
+	}
+	offer, err := buildQuestTalkPacket(4, quest.talkKey, []string{
 		"SN_TALK_COMMON_ACCEPT",
 		"SN_TALK_COMMON_DENY",
 	})
@@ -164,6 +217,243 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(_ context.Context, session *serve
 		return err
 	}
 	return h.sendPacket(session, offer)
+}
+
+func (h *NPCTalkHandler) handleChulsanOfferSelection(ctx context.Context, session *server.Session, interaction NPCInteraction, selector byte) error {
+	quest, ok := chulsanQuestByID(interaction.PendingQuestID)
+	if !ok {
+		return nil
+	}
+	if selector == 2 {
+		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
+		denied, err := buildQuestTalkPacket(1, quest.deniedKey, nil)
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, denied)
+	}
+	if h.repository == nil {
+		return model.ErrCharacterQuestRepositoryUnavailable
+	}
+	world := h.world
+	if world == nil {
+		world = service.GetWorldServiceInstance()
+	}
+	player, err := resolveSelectingPlayer(world, session)
+	if err != nil {
+		return err
+	}
+	if err := validateNPCSelection(world, player, interaction.NPCUniqueID); err != nil {
+		return nil
+	}
+	activated, err := h.repository.Activate(ctx, session.UserContext.CharacterID, model.CharacterQuest{
+		QuestID: quest.questID, Status: model.QuestActive, AchievementCount: 1,
+	})
+	if errors.Is(err, model.ErrCharacterQuestNotAvailable) {
+		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	player.CommitQuestActivation(activated)
+	npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
+	added, err := buildQuestAddPacket(activated)
+	if err != nil {
+		return err
+	}
+	if err := h.sendPacket(session, added); err != nil {
+		return err
+	}
+	accepted, err := buildQuestTalkPacket(1, quest.acceptedKey, nil)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, accepted)
+}
+
+func (h *NPCTalkHandler) handleJingyoTalk(ctx context.Context, session *server.Session, player *model.Player) error {
+	quest, exists := playerQuest(player, model.QuestWeaponListID)
+	if !exists {
+		return nil
+	}
+	if quest.Status == model.QuestReadyToTurnIn || quest.Status == model.QuestReadyToTurnInByUser {
+		message, err := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_07", nil)
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, message)
+	}
+	if quest.Status != model.QuestActive && quest.Status != model.QuestStartedByUser {
+		return nil
+	}
+	if h.runtime == nil {
+		return model.ErrQuestRuntimeUnavailable
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	result, err := h.runtime.GrantMissionItem(ctx, player.ID, model.QuestWeaponListID)
+	if errors.Is(err, model.ErrQuestInventoryFull) {
+		message, buildErr := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_05", nil)
+		if buildErr != nil {
+			return buildErr
+		}
+		return h.sendPacket(session, message)
+	}
+	if err != nil {
+		return err
+	}
+	player.CommitQuestItemGrant(result)
+	if err := h.sendPacket(session, buildQuestItemAdded(result.Added)); err != nil {
+		return err
+	}
+	update, err := buildQuestStatePacket(result.Quest)
+	if err != nil {
+		return err
+	}
+	if err := h.sendPacket(session, update); err != nil {
+		return err
+	}
+	message, err := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_06", nil)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, message)
+}
+
+func (h *NPCTalkHandler) completeChulsanQuest(ctx context.Context, session *server.Session, interaction NPCInteraction, player *model.Player, quest chulsanQuestDefinition) error {
+	if h.runtime == nil {
+		return model.ErrQuestRuntimeUnavailable
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	result, err := h.runtime.Complete(ctx, player.ID, quest.questID)
+	if errors.Is(err, model.ErrQuestInventoryFull) {
+		if quest.fullKey == "" {
+			return nil
+		}
+		message, buildErr := buildQuestTalkPacket(1, quest.fullKey, nil)
+		if buildErr != nil {
+			return buildErr
+		}
+		return h.sendPacket(session, message)
+	}
+	if err != nil {
+		return err
+	}
+	previousGold := player.GoldSnapshot()
+	player.CommitQuestCompletion(result)
+	npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
+	if result.RemovedSlot != nil {
+		if err := h.sendPacket(session, buildQuestItemRemoved(*result.RemovedSlot)); err != nil {
+			return err
+		}
+	}
+	if result.Added != nil {
+		if err := h.sendPacket(session, buildQuestItemAdded(*result.Added)); err != nil {
+			return err
+		}
+	}
+	if result.Gold != previousGold {
+		if err := h.sendPacket(session, buildQuestGoldUpdate(result.Gold)); err != nil {
+			return err
+		}
+	}
+	if err := h.sendPacket(session, buildExperienceUpdate(interaction.NPCUniqueID, result.Experience, result.SkillExp, result.Progress)); err != nil {
+		return err
+	}
+	if result.Progress.LevelsGained > 0 {
+		stats := player.BuildStatsUpdatePacket()
+		if err := h.sendPacket(session, stats); err != nil {
+			return err
+		}
+	}
+	if err := h.sendPacket(session, buildQuestRemovePacket(result.Quest.QuestID)); err != nil {
+		return err
+	}
+	message, err := buildQuestTalkPacket(1, quest.completedKey, nil)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, message)
+}
+
+func playerQuest(player *model.Player, questID int) (model.CharacterQuest, bool) {
+	for _, quest := range player.QuestSnapshot() {
+		if quest.QuestID == questID {
+			return quest, true
+		}
+	}
+	return model.CharacterQuest{}, false
+}
+
+func chulsanQuestByID(questID int) (chulsanQuestDefinition, bool) {
+	for _, quest := range chulsanQuests {
+		if quest.questID == questID {
+			return quest, true
+		}
+	}
+	return chulsanQuestDefinition{}, false
+}
+
+func buildQuestAddPacket(quest model.CharacterQuest) (network.Packet, error) {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.QuestUpdate
+	packet.WriteByte(1)
+	packet.WriteUInt32(uint32(quest.QuestID))
+	if err := model.WriteActiveQuestRecord(&packet, quest); err != nil {
+		return network.Packet{}, err
+	}
+	return packet, nil
+}
+
+func buildQuestStatePacket(quest model.CharacterQuest) (network.Packet, error) {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.QuestUpdate
+	packet.WriteByte(2)
+	packet.WriteUInt32(uint32(quest.QuestID))
+	if err := model.WriteActiveQuestRecord(&packet, quest); err != nil {
+		return network.Packet{}, err
+	}
+	return packet, nil
+}
+
+func buildQuestRemovePacket(questID int) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.QuestUpdate
+	packet.WriteByte(3)
+	packet.WriteUInt32(uint32(questID))
+	return packet
+}
+
+func buildQuestItemAdded(mutation model.QuestItemMutation) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemOperationResponse
+	packet.WriteByte(1)
+	packet.WriteByte(14) // SP_ADD_ITEM_BY_SERVER
+	packet.WriteByte(mutation.Slot)
+	packet.WriteByte(0x3C)
+	model.WriteRentInfo(&packet, mutation.Item)
+	packet.WriteUInt32(mutation.Item.GetRefObjectID())
+	model.WriteInventoryItem(&packet, mutation.Item)
+	return packet
+}
+
+func buildQuestItemRemoved(slot byte) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemOperationResponse
+	packet.WriteByte(1)
+	packet.WriteByte(15) // SP_DEL_ITEM_BY_SERVER
+	packet.WriteByte(slot)
+	return packet
+}
+
+func buildQuestGoldUpdate(gold uint64) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.EntityUpdatePoints
+	packet.WriteByte(1)
+	packet.WriteUInt64(gold)
+	return packet
 }
 
 func (h *NPCTalkHandler) sendPacket(session *server.Session, packet network.Packet) error {

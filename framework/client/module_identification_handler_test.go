@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 func TestModuleIdentificationHandlerFailsClosedOnMalformedPayload(t *testing.T) {

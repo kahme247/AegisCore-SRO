@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const catalogRepositoryTestDriverName = "go-sro-agent-catalog-repository-test"
+const catalogRepositoryTestDriverName = "aegiscore-agent-catalog-repository-test"
 
 var catalogRepositoryTestState struct {
 	sync.Mutex

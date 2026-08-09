@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/g3n/engine/math32"
 )
 

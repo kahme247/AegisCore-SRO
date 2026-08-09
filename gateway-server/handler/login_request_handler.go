@@ -6,12 +6,12 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/security/auth"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/gateway-server/config"
-	"github.com/ferdoran/go-sro/gateway-server/db"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/gateway-server/config"
+	"github.com/Harvi8/AegisCore/gateway-server/db"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )

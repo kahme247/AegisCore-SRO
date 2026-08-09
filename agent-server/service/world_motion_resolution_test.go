@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/g3n/engine/math32"
 )
 

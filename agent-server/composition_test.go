@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 func TestNewAgentServerWithDependenciesRequiresPublicServer(t *testing.T) {

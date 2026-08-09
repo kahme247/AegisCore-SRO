@@ -1,9 +1,9 @@
 package manager
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/config"
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
+	"github.com/Harvi8/AegisCore/agent-server/config"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/spf13/viper"
 	"sync"
 	"time"

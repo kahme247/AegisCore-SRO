@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 func TestOpenPk2ReaderRejectsTruncatedAndInvalidHeaders(t *testing.T) {

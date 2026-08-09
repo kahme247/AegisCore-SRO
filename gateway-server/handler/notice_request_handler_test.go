@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/gateway-server/config"
-	"github.com/ferdoran/go-sro/gateway-server/db"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/gateway-server/config"
+	"github.com/Harvi8/AegisCore/gateway-server/db"
 )
 
 func TestParseNoticeRequestRequiresExactlyOneContentID(t *testing.T) {

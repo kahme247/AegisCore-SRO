@@ -40,7 +40,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKER_REGISTRY || 'local' }}/go-sro/agent-server
+            ${{ secrets.DOCKER_REGISTRY || 'local' }}/aegiscore/agent-server
           tags: |
             type=sha
             type=semver,pattern={{version}}

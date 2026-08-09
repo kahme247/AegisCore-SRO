@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 	log "github.com/sirupsen/logrus"
 )
 

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
-	"github.com/ferdoran/go-sro/gateway-server/config"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/gateway-server/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -131,7 +131,7 @@ func buildPatchSuccessResponse() (network.Packet, error) {
 // buildPatchResponse implements only TestIn branches whose response bytes and
 // comparisons are confirmed in GatewayServer.exe. Exact versions succeed.
 // Unknown clients and higher-than-known versions return [2,1]. Older clients
-// return [2,3] because GO-SRO does not yet advertise a verified patch server.
+// return [2,3] because AegisCore does not yet advertise a verified patch server.
 func buildPatchResponse(request PatchRequest, profile config.ProtocolProfile) (network.Packet, string, error) {
 	if err := config.ValidateProtocolProfile(profile); err != nil {
 		return network.Packet{}, "", fmt.Errorf("invalid pinned gateway profile: %w", err)

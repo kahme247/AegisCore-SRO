@@ -1,4 +1,4 @@
-# SRO Nexus Agent server
+# AegisCore Agent server
 
 Agent owns the post-Gateway vSRO 1.188 session: character lobby, world state,
 movement, combat, economy and social handlers. The checked-in `vsro188` profile
@@ -31,7 +31,7 @@ sessions, flushes queued positions, stops managers and closes database pools.
   overridden.
 - `AGENT_LEVEL_DATA_FILE` should be
   `Media/Media/server_dep/silkroad/textdata/leveldata.txt` when running from the
-  repository root. Compose maps `Media/Media` to `/etc/go-sro/Media`.
+  repository root. Compose maps `Media/Media` to `/etc/aegiscore/Media`.
 - `AGENT_PRELINKED_NAVDATA_FILE` is a prefix. For `prelinked_navdata.gob`, Agent
   expects `_regions`, `_objects`, and `_manifest.json` suffixes.
 - If any prepared-cache artifact exists, the complete schema-3 cache must match

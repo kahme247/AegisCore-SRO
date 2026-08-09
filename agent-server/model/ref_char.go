@@ -1,7 +1,7 @@
 package model
 
 import (
-	"github.com/ferdoran/go-sro/framework/db"
+	"github.com/Harvi8/AegisCore/framework/db"
 	"github.com/sirupsen/logrus"
 )
 

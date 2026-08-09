@@ -12,9 +12,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	migrationassets "github.com/ferdoran/go-sro/db/migrations"
-	"github.com/ferdoran/go-sro/framework/config"
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	migrationassets "github.com/Harvi8/AegisCore/db/migrations"
+	"github.com/Harvi8/AegisCore/framework/config"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 func main() {
@@ -56,7 +56,7 @@ func run(ctx context.Context, arguments []string) (runErr error) {
 
 	runner, err := frameworkdb.NewMigrationRunner(pool, frameworkdb.MigrationRunnerOptions{
 		Target:   target,
-		LockName: "go-sro:migrations:" + string(target),
+		LockName: "aegiscore:migrations:" + string(target),
 	})
 	if err != nil {
 		return fmt.Errorf("configure %s migration runner: %w", target, err)

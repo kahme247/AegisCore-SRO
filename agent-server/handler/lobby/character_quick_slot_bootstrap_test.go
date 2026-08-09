@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 func TestWriteCharacterQuickSlotConfigUsesVSROLayoutAndSlotOrder(t *testing.T) {

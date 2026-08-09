@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 const UpdateCharacterProgress = "UPDATE `SRO_SHARD`.`CHAR` SET CURRENT_LEVEL=?, EXP=?, SKILL_EXP=?, SKILL_POINTS=?, STAT_POINTS=?, MAX_LEVEL=? WHERE ID=?"

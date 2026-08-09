@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 // QuestStatus keeps the persisted values compatible with the original
-// _CharQuest.Status field while making transitions explicit in Go-SRO.
+// _CharQuest.Status field while making transitions explicit in AegisCore.
 type QuestStatus byte
 
 const (
@@ -47,12 +47,14 @@ const upsertCharacterQuest = `INSERT INTO ` + "`SRO_SHARD`.`CHAR_QUEST`" + `
 
 var ErrCharacterQuestRepositoryUnavailable = errors.New("character quest repository is unavailable")
 var ErrCharacterQuestNotActive = errors.New("character quest is not active")
+var ErrCharacterQuestNotAvailable = errors.New("character quest is not available")
 
 // CharacterQuestRepository is the persistence boundary used by script actions
 // once an NPC conversation accepts, updates, or abandons a quest.
 type CharacterQuestRepository interface {
 	Save(context.Context, int, CharacterQuest) error
 	List(context.Context, int) ([]CharacterQuest, error)
+	Activate(context.Context, int, CharacterQuest) (CharacterQuest, error)
 	Abandon(context.Context, int, int) error
 }
 
@@ -97,6 +99,48 @@ func (r *SQLCharacterQuestRepository) Save(ctx context.Context, characterID int,
 		return fmt.Errorf("save character quest affected %d rows", affected)
 	}
 	return nil
+}
+
+const activateCharacterQuest = `INSERT INTO ` + "`SRO_SHARD`.`CHAR_QUEST`" + `
+    (FK_CHAR, QUEST_ID, STATUS, ACHIEVEMENT_COUNT, STARTED_AT, COMPLETED_AT, QUEST_DATA_1, QUEST_DATA_2)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, ?, ?)
+    ON DUPLICATE KEY UPDATE
+        STARTED_AT=IF(STATUS=?, CURRENT_TIMESTAMP, STARTED_AT),
+        COMPLETED_AT=IF(STATUS=?, NULL, COMPLETED_AT),
+        ACHIEVEMENT_COUNT=IF(STATUS=?, VALUES(ACHIEVEMENT_COUNT), ACHIEVEMENT_COUNT),
+        QUEST_DATA_1=IF(STATUS=?, VALUES(QUEST_DATA_1), QUEST_DATA_1),
+        QUEST_DATA_2=IF(STATUS=?, VALUES(QUEST_DATA_2), QUEST_DATA_2),
+        STATUS=IF(STATUS=?, VALUES(STATUS), STATUS)`
+
+// Activate atomically inserts a new quest or restarts an abandoned one. Other
+// persisted states are preserved so duplicate accepts cannot reset progress and
+// completed one-time quests cannot regress to active.
+func (r *SQLCharacterQuestRepository) Activate(ctx context.Context, characterID int, quest CharacterQuest) (CharacterQuest, error) {
+	if r == nil || r.shard == nil {
+		return CharacterQuest{}, ErrCharacterQuestRepositoryUnavailable
+	}
+	if characterID <= 0 || quest.QuestID <= 0 || quest.Status != QuestActive || quest.AchievementCount == 0 {
+		return CharacterQuest{}, fmt.Errorf("invalid character quest activation")
+	}
+	quest.CompletedAt = nil
+	result, err := r.shard.ExecContext(ctx, activateCharacterQuest,
+		characterID, quest.QuestID, quest.Status, quest.AchievementCount, quest.Data1, quest.Data2,
+		QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned)
+	if err != nil {
+		return CharacterQuest{}, fmt.Errorf("activate character quest: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return CharacterQuest{}, fmt.Errorf("read activated character quest result: %w", err)
+	}
+	if affected == 0 {
+		return CharacterQuest{}, ErrCharacterQuestNotAvailable
+	}
+	if affected != 1 && affected != 2 {
+		return CharacterQuest{}, fmt.Errorf("activate character quest affected %d rows", affected)
+	}
+	quest.StartedAt = time.Now()
+	return quest, nil
 }
 
 const selectCharacterQuests = `SELECT QUEST_ID, STATUS, ACHIEVEMENT_COUNT, STARTED_AT, COMPLETED_AT, QUEST_DATA_1, QUEST_DATA_2

@@ -3,7 +3,7 @@
 package viewer
 
 import (
-	"github.com/ferdoran/go-sro/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/gen2brain/raylib-go/raygui"
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
@@ -19,7 +19,7 @@ var loadingMeshes = false
 
 func Main() {
 	rl.SetConfigFlags(rl.FlagWindowResizable)
-	rl.InitWindow(int32(screenWidth), int32(screenHeight), "GoSro Navmesh Viewer")
+	rl.InitWindow(int32(screenWidth), int32(screenHeight), "AegisCore Navmesh Viewer")
 
 	defer rl.CloseWindow()
 

@@ -14,7 +14,7 @@ RUN GOOS=linux CGO_ENABLED=0 go build -o /app/gateway-server-bin ./gateway-serve
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
-WORKDIR /etc/go-sro
+WORKDIR /etc/aegiscore
 COPY --from=builder /app/gateway-server-bin ./gateway-server
 
 EXPOSE 15779

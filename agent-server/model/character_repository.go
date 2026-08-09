@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/db"
+	"github.com/Harvi8/AegisCore/framework/db"
 )
 
 type Char struct {

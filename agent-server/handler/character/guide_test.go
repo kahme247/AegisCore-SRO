@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 func TestGuideRequestConsumesFlagWithoutGuessedResponse(t *testing.T) {

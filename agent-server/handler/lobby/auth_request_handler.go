@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/security/auth"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/server"
 	log "github.com/sirupsen/logrus"
 )
 

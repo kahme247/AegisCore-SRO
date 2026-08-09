@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/pk2"
 )
 
 func TestNewLoaderSafeRejectsMalformedArchive(t *testing.T) {

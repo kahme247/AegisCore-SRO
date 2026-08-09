@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 func TestFrameDecoderRetainsFragmentedHeaderAndPayload(t *testing.T) {

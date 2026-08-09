@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
 func TestSelectMigrationTargetAcceptsExactlyOneKnownTarget(t *testing.T) {

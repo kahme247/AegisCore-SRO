@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network"
 )
 
 func TestServerShutdownStopsAcceptsAndDrainsRegisteredSessions(t *testing.T) {

@@ -4,21 +4,26 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 type questRepositoryStub struct {
-	characterID int
-	questID     int
-	err         error
+	characterID    int
+	questID        int
+	activatedQuest model.CharacterQuest
+	err            error
 }
 
 func (r *questRepositoryStub) Save(context.Context, int, model.CharacterQuest) error { return nil }
 func (r *questRepositoryStub) List(context.Context, int) ([]model.CharacterQuest, error) {
 	return nil, nil
+}
+func (r *questRepositoryStub) Activate(_ context.Context, characterID int, quest model.CharacterQuest) (model.CharacterQuest, error) {
+	r.characterID, r.questID, r.activatedQuest = characterID, quest.QuestID, quest
+	return quest, r.err
 }
 func (r *questRepositoryStub) Abandon(_ context.Context, characterID, questID int) error {
 	r.characterID, r.questID = characterID, questID

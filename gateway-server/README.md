@@ -1,4 +1,4 @@
-# SRO Nexus Gateway server
+# AegisCore Gateway server
 
 Gateway is the public vSRO 1.188 entry point. It handles patch negotiation,
 notices, shard listing, login policy and one-time handoff to Agent. Runtime
@@ -27,6 +27,18 @@ capped at 255. Shards are filtered by the configured Content ID, validated and
 sorted by ID. A one-second cached mTLS readiness probe projects listed shards as
 offline while Agent is unavailable. Shard ping is configuration-backed, does
 not perform readiness, and returns farm ID plus Agent IPv4 bytes without a port.
+
+The client-visible server name comes from `SRO_ACCOUNT.SHARD.NAME` and is read
+for every shard-list request, so a valid database update takes effect without a
+Gateway restart:
+
+```sql
+UPDATE SRO_ACCOUNT.SHARD SET NAME = 'AegisCore' WHERE ID = 1;
+```
+
+Names must be nonblank, trimmed, valid UTF-8 and at most 32 characters. The
+separate farm heading is controlled by `GATEWAY_FARM_NAME` and requires a
+Gateway restart after changing it.
 
 ## Login and admission
 
@@ -90,7 +102,7 @@ Important defaults:
 | `GATEWAY_HOST` / `GATEWAY_PORT` | `127.0.0.1` / `15779` |
 | `GATEWAY_PROTOCOL_PROFILE` | `vsro188` |
 | `GATEWAY_ENVIRONMENT` | `production` |
-| `GATEWAY_FARM_ID` / `GATEWAY_FARM_NAME` | `1` / `SRO_DEUTSCHLAND` |
+| `GATEWAY_FARM_ID` / `GATEWAY_FARM_NAME` | `1` / `AegisCore` |
 | `AGENT_HOST` / `AGENT_PORT` | `127.0.0.1` / `15882` |
 | `AGENT_ADMISSION_PORT` | `15883` |
 | `AGENT_ADMISSION_TIMEOUT_SECONDS` | `5` |

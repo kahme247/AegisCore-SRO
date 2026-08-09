@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 func TestSessionCloseIsIdempotentAndNeverBlocksOnLegacyNotification(t *testing.T) {

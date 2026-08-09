@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	frameworkdb "github.com/ferdoran/go-sro/framework/db"
-	"github.com/ferdoran/go-sro/framework/security/hashing"
+	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/security/hashing"
 )
 
 // ErrCredentialRepositoryUnavailable is returned when Gateway login cannot

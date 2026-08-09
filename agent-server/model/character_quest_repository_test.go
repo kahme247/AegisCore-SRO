@@ -51,6 +51,38 @@ func TestCharacterQuestRepositoryRequiresCompletionTime(t *testing.T) {
 	}
 }
 
+func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
+	for _, affected := range []int64{1, 2} {
+		database := &questExecer{rows: affected}
+		repository, err := NewCharacterQuestRepository(database)
+		if err != nil {
+			t.Fatalf("NewCharacterQuestRepository: %v", err)
+		}
+		quest := CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1}
+		activated, err := repository.Activate(context.Background(), 77, quest)
+		if err != nil {
+			t.Fatalf("Activate affected=%d: %v", affected, err)
+		}
+		if database.query != activateCharacterQuest {
+			t.Fatalf("query = %q", database.query)
+		}
+		if activated.QuestID != 3 || activated.Status != QuestActive || activated.StartedAt.IsZero() {
+			t.Fatalf("activated quest = %#v", activated)
+		}
+	}
+}
+
+func TestCharacterQuestRepositoryDoesNotOverwriteUnavailableQuest(t *testing.T) {
+	repository, err := NewCharacterQuestRepository(&questExecer{rows: 0})
+	if err != nil {
+		t.Fatalf("NewCharacterQuestRepository: %v", err)
+	}
+	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1})
+	if !errors.Is(err, ErrCharacterQuestNotAvailable) {
+		t.Fatalf("Activate error = %v, want ErrCharacterQuestNotAvailable", err)
+	}
+}
+
 func TestCharacterQuestRepositoryAbandonIsCompareAndSwap(t *testing.T) {
 	database := &questExecer{rows: 1}
 	repository, err := NewCharacterQuestRepository(database)

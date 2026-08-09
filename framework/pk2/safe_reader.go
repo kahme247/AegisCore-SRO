@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/security/blowfish"
+	"github.com/Harvi8/AegisCore/framework/security/blowfish"
 )
 
 const (

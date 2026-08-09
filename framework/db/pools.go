@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
 
@@ -192,6 +193,7 @@ func OpenPool(ctx context.Context, role PoolRole, poolConfig PoolConfig) (*sql.D
 	pingContext, cancel := context.WithTimeout(ctx, poolConfig.PingTimeout)
 	defer cancel()
 	if err := pool.PingContext(pingContext); err != nil {
+		logrus.Errorf("%s database pool ping diagnostic: %T: %v", role, err, err)
 		_ = pool.Close()
 		return nil, &PoolError{Role: role, Operation: "ping", Err: err}
 	}

@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )

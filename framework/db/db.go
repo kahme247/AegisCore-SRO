@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"github.com/spf13/viper"
 
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
 
 	_ "github.com/go-sql-driver/mysql"
 )

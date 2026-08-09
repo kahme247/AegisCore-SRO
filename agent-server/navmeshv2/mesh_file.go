@@ -2,8 +2,8 @@ package navmeshv2
 
 import (
 	"encoding/binary"
-	"github.com/ferdoran/go-sro/framework/pk2"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 	"os"

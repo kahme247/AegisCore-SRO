@@ -3,8 +3,8 @@ package service
 import (
 	"context"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 // RecoveryItemUseCase is the gameplay boundary consumed by the packet handler.

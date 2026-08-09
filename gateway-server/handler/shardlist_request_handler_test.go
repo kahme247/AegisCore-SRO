@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/gateway-server/config"
-	"github.com/ferdoran/go-sro/gateway-server/db"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/gateway-server/config"
+	"github.com/Harvi8/AegisCore/gateway-server/db"
 )
 
 type readinessProbeFunc func(context.Context) error
@@ -69,10 +69,10 @@ func TestAgentReadinessDoesNotHoldLockOrUseRequestContextDuringProbe(t *testing.
 }
 
 func TestBuildShardlistResponseUsesVSRONetworkLayout(t *testing.T) {
-	packet, err := buildShardlistResponse(config.Farm{ID: 1, Name: "SRO_DEUTSCHLAND"}, []db.Shard{{
+	packet, err := buildShardlistResponse(config.Farm{ID: 1, Name: "AegisCore"}, []db.Shard{{
 		Id:            1,
 		ContentId:     122,
-		Name:          "GoSRO",
+		Name:          "AegisCore",
 		Capacity:      1000,
 		OnlinePlayers: 0,
 		Status:        1,
@@ -105,8 +105,8 @@ func TestBuildShardlistResponseUsesVSRONetworkLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if globalOperationName != "SRO_DEUTSCHLAND" {
-		t.Fatalf("global operation name = %q, want SRO_DEUTSCHLAND", globalOperationName)
+	if globalOperationName != "AegisCore" {
+		t.Fatalf("global operation name = %q, want AegisCore", globalOperationName)
 	}
 
 	operationFlag, err := packet.ReadByte()
@@ -137,8 +137,8 @@ func TestBuildShardlistResponseUsesVSRONetworkLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shardName != "GoSRO" {
-		t.Fatalf("shard name = %q, want GoSRO", shardName)
+	if shardName != "AegisCore" {
+		t.Fatalf("shard name = %q, want AegisCore", shardName)
 	}
 
 	if _, err = packet.ReadUInt16(); err != nil {
@@ -174,12 +174,12 @@ func TestBuildShardlistResponseRejectsValuesThatWouldWrapOnWire(t *testing.T) {
 		name  string
 		shard db.Shard
 	}{
-		{name: "zero id", shard: db.Shard{ContentId: 22, Name: "GoSRO", Capacity: 1, Status: 1}},
-		{name: "zero content", shard: db.Shard{Id: 1, Name: "GoSRO", Capacity: 1, Status: 1}},
-		{name: "unknown status", shard: db.Shard{Id: 1, ContentId: 22, Name: "GoSRO", Capacity: 1, Status: 2}},
-		{name: "negative players", shard: db.Shard{Id: 1, ContentId: 22, Name: "GoSRO", Capacity: 1, OnlinePlayers: -1, Status: 1}},
-		{name: "over capacity", shard: db.Shard{Id: 1, ContentId: 22, Name: "GoSRO", Capacity: 1, OnlinePlayers: 2, Status: 1}},
-		{name: "uint16 overflow", shard: db.Shard{Id: 1, ContentId: 22, Name: "GoSRO", Capacity: 65536, Status: 1}},
+		{name: "zero id", shard: db.Shard{ContentId: 22, Name: "AegisCore", Capacity: 1, Status: 1}},
+		{name: "zero content", shard: db.Shard{Id: 1, Name: "AegisCore", Capacity: 1, Status: 1}},
+		{name: "unknown status", shard: db.Shard{Id: 1, ContentId: 22, Name: "AegisCore", Capacity: 1, Status: 2}},
+		{name: "negative players", shard: db.Shard{Id: 1, ContentId: 22, Name: "AegisCore", Capacity: 1, OnlinePlayers: -1, Status: 1}},
+		{name: "over capacity", shard: db.Shard{Id: 1, ContentId: 22, Name: "AegisCore", Capacity: 1, OnlinePlayers: 2, Status: 1}},
+		{name: "uint16 overflow", shard: db.Shard{Id: 1, ContentId: 22, Name: "AegisCore", Capacity: 65536, Status: 1}},
 	}
 
 	for _, test := range tests {

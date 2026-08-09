@@ -3,9 +3,9 @@ package model
 import (
 	"sync"
 
-	"github.com/ferdoran/go-sro/agent-server/engine/geo/math"
-	"github.com/ferdoran/go-sro/agent-server/navmesh"
-	"github.com/ferdoran/go-sro/framework/utils"
+	"github.com/Harvi8/AegisCore/agent-server/engine/geo/math"
+	"github.com/Harvi8/AegisCore/agent-server/navmesh"
+	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )

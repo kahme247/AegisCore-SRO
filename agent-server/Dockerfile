@@ -15,7 +15,7 @@ RUN GOOS=linux CGO_ENABLED=0 go build -o /app/agent-server-bin ./agent-server
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
-WORKDIR /etc/go-sro
+WORKDIR /etc/aegiscore
 COPY --from=builder /app/agent-server-bin ./agent-server
 
 EXPOSE 15882

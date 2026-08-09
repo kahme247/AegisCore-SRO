@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/sirupsen/logrus"
 )
 
@@ -308,8 +308,10 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 	}
 	if result.ItemService != nil && serviceToken != 0 {
 		if replacedServiceToken != 0 {
-			removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, replacedServiceToken)
-			player.SendToSelfAndKnown(&removed)
+			if model.ItemServiceUsesItemPerk(*result.ItemService) {
+				removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, replacedServiceToken)
+				player.SendToSelfAndKnown(&removed)
+			}
 			if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
 				buffRemoved := model.BuildBuffRemove(replacedServiceToken)
 				player.SendToSelfAndKnown(&buffRemoved)
@@ -317,15 +319,19 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 		}
 		remaining := time.Until(result.ItemService.ExpiresAt)
 		if remaining > 0 {
-			added := model.BuildItemPerkAdd(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken, result.ItemService.DailyBudget, remaining)
-			player.SendToSelfAndKnown(&added)
+			if model.ItemServiceUsesItemPerk(*result.ItemService) {
+				added := model.BuildItemPerkAdd(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken, result.ItemService.DailyBudget, remaining)
+				player.SendToSelfAndKnown(&added)
+			}
 			if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), serviceToken, *result.ItemService, remaining); exists {
 				player.SendToSelfAndKnown(&buffAdded)
 			}
 			time.AfterFunc(remaining, func() {
 				if player.ClearItemService(result.ItemService.Kind, serviceToken) {
-					removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken)
-					player.SendToSelfAndKnown(&removed)
+					if model.ItemServiceUsesItemPerk(*result.ItemService) {
+						removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken)
+						player.SendToSelfAndKnown(&removed)
+					}
 					if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
 						buffRemoved := model.BuildBuffRemove(serviceToken)
 						player.SendToSelfAndKnown(&buffRemoved)

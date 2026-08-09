@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ferdoran/go-sro/framework/security/hashing"
+	"github.com/Harvi8/AegisCore/framework/security/hashing"
 )
 
-const credentialRepositoryTestDriverName = "go-sro-gateway-credential-repository-test"
+const credentialRepositoryTestDriverName = "aegiscore-gateway-credential-repository-test"
 
 var credentialRepositoryTestState struct {
 	sync.Mutex

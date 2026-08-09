@@ -3,7 +3,7 @@ package service
 import (
 	"fmt"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/pkg/errors"
 )
 

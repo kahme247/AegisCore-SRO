@@ -1,6 +1,6 @@
 package navmesh
 
-import "github.com/ferdoran/go-sro/framework/math"
+import "github.com/Harvi8/AegisCore/framework/math"
 
 type ObjectCell struct {
 	*math.Triangle

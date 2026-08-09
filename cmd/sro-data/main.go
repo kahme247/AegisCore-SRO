@@ -15,8 +15,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ferdoran/go-sro/framework/reference"
-	"github.com/ferdoran/go-sro/protocol/profiles"
+	"github.com/Harvi8/AegisCore/framework/reference"
+	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
 var errUsage = errors.New("usage: sro-data verify --profile <profile.json> --archive <Data.pk2> | sro-data import-reference --media <Media directory> | sro-data import-item-mall --media <Media directory> | sro-data import-vsro-skills --export-dir <directory> | sro-data import-vsro-items --export-dir <directory>")

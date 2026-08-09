@@ -13,6 +13,7 @@ type NPCInteraction struct {
 	NPCUniqueID    uint32
 	NPCRefObjectID uint32
 	Action         byte
+	PendingQuestID int
 	OpenedAt       time.Time
 }
 
@@ -58,6 +59,35 @@ func (r *NPCInteractionRegistry) Get(playerUID uint32) (NPCInteraction, bool) {
 	interaction, ok := r.entries[playerUID]
 	r.mu.RUnlock()
 	return interaction, ok
+}
+
+func (r *NPCInteractionRegistry) SelectQuest(playerUID uint32, questID int) bool {
+	if r == nil || playerUID == 0 || questID <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingQuestID = questID
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) ClearSelectedQuest(playerUID uint32) {
+	if r == nil || playerUID == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return
+	}
+	interaction.PendingQuestID = 0
+	r.entries[playerUID] = interaction
 }
 
 func (r *NPCInteractionRegistry) Clear(playerUID uint32) {

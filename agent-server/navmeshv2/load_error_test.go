@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ferdoran/go-sro/agent-server/navmesh"
+	"github.com/Harvi8/AegisCore/agent-server/navmesh"
 )
 
 func TestLoadNavMeshInfosConvertsParserPanicToTypedError(t *testing.T) {

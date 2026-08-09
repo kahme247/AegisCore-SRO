@@ -1,7 +1,7 @@
 package logging
 
 import (
-	"github.com/ferdoran/go-sro/framework/config"
+	"github.com/Harvi8/AegisCore/framework/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"os"

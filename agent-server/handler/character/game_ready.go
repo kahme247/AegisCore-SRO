@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ferdoran/go-sro/agent-server/model"
-	"github.com/ferdoran/go-sro/agent-server/service"
-	"github.com/ferdoran/go-sro/framework/network"
-	"github.com/ferdoran/go-sro/framework/network/opcode"
-	"github.com/ferdoran/go-sro/framework/server"
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/sirupsen/logrus"
 )
 
@@ -137,15 +137,19 @@ func publishRestoredItemServices(player *model.Player) {
 		if remaining <= 0 || token == 0 {
 			continue
 		}
-		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
-		player.SendToSelfAndKnown(&added)
+		if model.ItemServiceUsesItemPerk(effect) {
+			added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
+			player.SendToSelfAndKnown(&added)
+		}
 		if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
 			player.SendToSelfAndKnown(&buffAdded)
 		}
 		time.AfterFunc(remaining, func() {
 			if player.ClearItemService(effect.Kind, token) {
-				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
-				player.SendToSelfAndKnown(&removed)
+				if model.ItemServiceUsesItemPerk(effect) {
+					removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
+					player.SendToSelfAndKnown(&removed)
+				}
 				if model.ItemServiceBuffSkillID(effect) != 0 {
 					buffRemoved := model.BuildBuffRemove(token)
 					player.SendToSelfAndKnown(&buffRemoved)

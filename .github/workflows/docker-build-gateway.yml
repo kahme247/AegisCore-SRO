@@ -38,7 +38,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKER_REGISTRY || 'local' }}/go-sro/gateway-server
+            ${{ secrets.DOCKER_REGISTRY || 'local' }}/aegiscore/gateway-server
           tags: |
             type=sha
             type=semver,pattern={{version}}

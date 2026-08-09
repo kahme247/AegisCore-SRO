@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ferdoran/go-sro/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/security/auth"
 )
 
 const (
