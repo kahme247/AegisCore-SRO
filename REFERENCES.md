@@ -10,12 +10,24 @@ provenance. Do not run historical binaries, loaders or archive downloads on a
 development machine. Prefer static source inspection inside an ignored local
 research directory.
 
-## Evidence order
+## Main references and evidence order
+
+The two main external documentation sources for AegisCore are:
+
+1. [DummkopfOfHachtenduden/SilkroadDoc](https://github.com/DummkopfOfHachtenduden/SilkroadDoc/wiki)
+   for version-pinned vSRO 1.188 packet and file-format evidence;
+2. [SRODevs documentation](https://srodevs.gitbook.io/docs) for the primary
+   browsable packet catalog and broader development cross-reference.
+
+Use both during protocol research. SilkroadDoc has the stronger version match;
+SRODevs often has the more accessible catalog, but each page still needs its
+client profile verified. Captured bytes remain the final authority.
 
 When sources disagree, use this order:
 
 1. sanitized wire bytes captured from the exact pinned stock vSRO 1.188 client;
-2. DummkopfOfHachtenduden SilkroadDoc pages explicitly based on vSRO 1.188;
+2. the main documentation references: version-pinned SilkroadDoc first, then
+   SRODevs when the page's packet/profile scope is verified;
 3. Phoenix behavior because it explicitly targets the Vietnam v188 client;
 4. the vSRO 188 profile/readers in RSBot;
 5. agreement between multiple independent file readers or emulators;
@@ -26,12 +38,13 @@ When sources disagree, use this order:
 Never resolve a conflict by silently mixing structures from different client
 versions.
 
-## Primary vSRO 1.188 references
+## Main documentation references
 
 ### DummkopfOfHachtenduden/SilkroadDoc
 
 - Repository: <https://github.com/DummkopfOfHachtenduden/SilkroadDoc>
 - Wiki: <https://github.com/DummkopfOfHachtenduden/SilkroadDoc/wiki>
+- Packet index: <https://github.com/DummkopfOfHachtenduden/SilkroadDoc/wiki/Packets>
 - Target: vSRO 1.188.
 - Status: archived and read-only since June 2025.
 - Use for: security handshake, framework packets, Gateway/Agent opcodes,
@@ -43,6 +56,28 @@ versions.
   `21e8ccdeaecb7ad7d641352ffc78da287377ec9c`. No clear content/code license
   was found, so use independently verified protocol facts rather than copied
   prose or implementation.
+
+### SRODevs documentation
+
+- Source: <https://srodevs.gitbook.io/docs>
+- Complete index: <https://srodevs.gitbook.io/docs/llms.txt>
+- Markdown home: <https://srodevs.gitbook.io/docs/readme.md>
+- Packet index: <https://srodevs.gitbook.io/docs/packets>
+- Agent packet index: <https://srodevs.gitbook.io/docs/packets/agent>
+- Scope: a community compilation covering file formats, packets, Lua, CScript
+  and client internals; the top-level documentation does not pin all pages to a
+  single Silkroad client version.
+- Use for: a maintained, readable packet catalog, opcode direction, packet
+  names, message-type conventions, and cross-checking Gateway and Agent packet
+  research.
+- Rule: treat it as strong public documentation, but verify the packet's client
+  profile before applying a layout to vSRO 1.188. Captures and version-pinned
+  SilkroadDoc evidence take precedence when the sources differ.
+- Website inspected on 2026-07-18. The packet and Agent indexes reported a
+  recent update, but GitBook exposes no repository revision in the public page;
+  record the page URL and inspection date when adopting a fact.
+
+## Supporting version-specific references
 
 ### Phoenix
 

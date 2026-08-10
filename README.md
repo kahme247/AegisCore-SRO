@@ -162,8 +162,11 @@ race gate uses the pinned Linux Go container and requires Docker Desktop.
 When sources conflict, use this order:
 
 1. sanitized bytes captured from the pinned stock vSRO 1.88 client;
-2. [DummkopfOfHachtenduden/SilkroadDoc](https://github.com/DummkopfOfHachtenduden/SilkroadDoc)
-   vSRO 1.188 packet and file notes;
+2. the two main documentation references:
+   [DummkopfOfHachtenduden/SilkroadDoc](https://github.com/DummkopfOfHachtenduden/SilkroadDoc/wiki)
+   for version-pinned vSRO 1.188 evidence and
+   [SRODevs](https://srodevs.gitbook.io/docs) as the primary browsable catalog,
+   after verifying the applicable client profile;
 3. [RSBot](https://github.com/myildirimofficial/RSBot) readers and
    [JellyBitz SilkroadLauncher](https://github.com/JellyBitz/SilkroadLauncher)
    behavior;
@@ -174,6 +177,9 @@ When sources conflict, use this order:
 SilkroadDoc is especially useful for the security handshake, massive
 `0x600D` framing, Gateway replies, movement branches and state enums. RSBot is
 useful as an independent packet-reader cross-check, not as final wire authority.
+SRODevs is the main browsable packet-reference index, including its
+[Agent catalog](https://srodevs.gitbook.io/docs/packets/agent); confirm the
+client profile before relying on a packet layout.
 Capture handling rules live in [protocol/captures/README.md](protocol/captures/README.md).
 The complete, version-labeled research catalog—including historical emulators
 and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md).
