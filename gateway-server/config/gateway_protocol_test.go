@@ -8,9 +8,13 @@ import (
 )
 
 func TestValidateProtocolProfileRequiresCaptureBackedValues(t *testing.T) {
-	valid := ProtocolProfile{Name: VSRO188Profile, ContentID: 122, ModuleName: "SR_Client", Version: 188}
-	if err := ValidateProtocolProfile(valid); err != nil {
-		t.Fatalf("ValidateProtocolProfile(valid) error = %v", err)
+	for _, valid := range []ProtocolProfile{
+		{Name: VSRO188Profile, ContentID: 122, ModuleName: "SR_Client", Version: 188},
+		{Name: VSRO274Profile, ContentID: 22, ModuleName: "SR_Client", Version: 274},
+	} {
+		if err := ValidateProtocolProfile(valid); err != nil {
+			t.Fatalf("ValidateProtocolProfile(%+v) error = %v", valid, err)
+		}
 	}
 
 	for _, profile := range []ProtocolProfile{

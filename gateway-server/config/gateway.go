@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -51,6 +52,7 @@ const (
 	// has no ContentID/module/version defaults; operators must set all three
 	// from an approved vSRO 1.88 capture before Gateway admits those requests.
 	GatewayProtocolProfileName = "gateway.protocol.profile"
+	GatewayProtocolProfiles    = "gateway.protocol.profiles"
 	GatewayProtocolContentID   = "gateway.protocol.content_id"
 	GatewayProtocolModuleName  = "gateway.protocol.module_name"
 	GatewayProtocolVersion     = "gateway.protocol.version"
@@ -66,6 +68,7 @@ const (
 	EnvironmentDevelopment = "development"
 	EnvironmentProduction  = "production"
 	VSRO188Profile         = "vsro188"
+	VSRO274Profile         = "vsro274"
 )
 
 // ProtocolProfile is the capture-backed Gateway contract for the single
@@ -123,6 +126,7 @@ func bindEnvAliases() {
 	viper.BindEnv(GatewayTrafficWindowMS, "GATEWAY_TRAFFIC_FILTER_WINDOW_MS")
 	viper.BindEnv(GatewayEnvironment, "GATEWAY_ENVIRONMENT")
 	viper.BindEnv(GatewayProtocolProfileName, "GATEWAY_PROTOCOL_PROFILE")
+	viper.BindEnv(GatewayProtocolProfiles, "GATEWAY_PROTOCOL_PROFILES")
 	viper.BindEnv(GatewayProtocolContentID, "GATEWAY_PROTOCOL_CONTENT_ID")
 	viper.BindEnv(GatewayProtocolModuleName, "GATEWAY_PROTOCOL_MODULE_NAME")
 	viper.BindEnv(GatewayProtocolVersion, "GATEWAY_PROTOCOL_VERSION")
@@ -153,11 +157,59 @@ func setDefaultValues() {
 	viper.SetDefault(GatewayFarmName, "AegisCore")
 }
 
-// LoadProtocolProfile returns the exact single-client Gateway contract. There
-// are no fallback ContentID/module/version guesses: protocol/profiles/vsro188
-// is evidence-pending, and accepting guessed values would create a false
-// compatibility claim.
+// LoadProtocolProfiles returns the configured exact-client Gateway contracts.
+// GATEWAY_PROTOCOL_PROFILES uses comma-separated name:content-id:module:version
+// entries. The legacy single-profile settings remain supported when it is unset.
+func LoadProtocolProfiles() ([]ProtocolProfile, error) {
+	raw := strings.TrimSpace(viper.GetString(GatewayProtocolProfiles))
+	if raw == "" {
+		profile, err := loadProtocolProfile()
+		if err != nil {
+			return nil, err
+		}
+		return []ProtocolProfile{profile}, nil
+	}
+
+	entries := strings.Split(raw, ",")
+	profiles := make([]ProtocolProfile, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		parts := strings.Split(strings.TrimSpace(entry), ":")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("gateway protocol profile %q must be name:content-id:module:version", entry)
+		}
+		contentID, err := strconv.ParseUint(parts[1], 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("gateway protocol profile %q has invalid content ID: %w", entry, err)
+		}
+		version, err := strconv.ParseUint(parts[3], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("gateway protocol profile %q has invalid version: %w", entry, err)
+		}
+		profile := ProtocolProfile{Name: parts[0], ContentID: byte(contentID), ModuleName: parts[2], Version: uint32(version)}
+		if err := ValidateProtocolProfile(profile); err != nil {
+			return nil, err
+		}
+		if _, exists := seen[profile.Name]; exists {
+			return nil, fmt.Errorf("gateway protocol profile %q is duplicated", profile.Name)
+		}
+		seen[profile.Name] = struct{}{}
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
+}
+
+// LoadProtocolProfile returns the first configured profile for handlers that
+// only need a content ID. Patch negotiation uses LoadProtocolProfiles instead.
 func LoadProtocolProfile() (ProtocolProfile, error) {
+	profiles, err := LoadProtocolProfiles()
+	if err != nil {
+		return ProtocolProfile{}, err
+	}
+	return profiles[0], nil
+}
+
+func loadProtocolProfile() (ProtocolProfile, error) {
 	contentID := viper.GetInt64(GatewayProtocolContentID)
 	version := viper.GetInt64(GatewayProtocolVersion)
 	profile := ProtocolProfile{
@@ -180,7 +232,7 @@ func LoadProtocolProfile() (ProtocolProfile, error) {
 // request handlers. Keeping it independent from Viper makes the capture-bound
 // contract straightforward to test.
 func ValidateProtocolProfile(profile ProtocolProfile) error {
-	if profile.Name != VSRO188Profile {
+	if profile.Name != VSRO188Profile && profile.Name != VSRO274Profile {
 		return fmt.Errorf("unsupported gateway protocol profile %q", profile.Name)
 	}
 	if profile.ContentID == 0 {
@@ -273,7 +325,7 @@ func ValidateAgentEndpoint(environment string, endpoint AgentEndpoint) error {
 // check. Handlers call the narrower loaders as defense in depth so a later
 // configuration reload cannot reintroduce an unsafe advertised endpoint.
 func ValidateGatewayRuntime() error {
-	if _, err := LoadProtocolProfile(); err != nil {
+	if _, err := LoadProtocolProfiles(); err != nil {
 		return err
 	}
 	if _, err := LoadFarm(); err != nil {

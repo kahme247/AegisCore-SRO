@@ -150,3 +150,19 @@ func TestBuildPatchResponseFollowsBinaryConfirmedVersionBranches(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPatchResponseAcceptsEachConfiguredProfile(t *testing.T) {
+	profiles := []config.ProtocolProfile{
+		{Name: config.VSRO188Profile, ContentID: 22, ModuleName: "SR_Client", Version: 188},
+		{Name: config.VSRO274Profile, ContentID: 22, ModuleName: "SR_Client", Version: 274},
+	}
+	for _, profile := range profiles {
+		response, outcome, err := buildPatchResponseForProfiles(PatchRequest{ContentID: profile.ContentID, ModuleName: profile.ModuleName, Version: profile.Version}, profiles)
+		if err != nil {
+			t.Fatalf("buildPatchResponseForProfiles(%d): %v", profile.Version, err)
+		}
+		if outcome != "result=1" || !bytes.Equal(response.Payload(), []byte{1}) {
+			t.Fatalf("profile %d response = %q % X, want success", profile.Version, outcome, response.Payload())
+		}
+	}
+}

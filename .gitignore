@@ -17,6 +17,8 @@
 /.cache/
 /.env
 /VSRO_Client/
+/VSRO_274/
+
 
 # Test binary, build with `go test -c`
 *.test

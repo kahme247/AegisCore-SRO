@@ -1,9 +1,9 @@
 # AegisCore Gateway server
 
-Gateway is the public vSRO 1.188 entry point. It handles patch negotiation,
+Gateway is the public vSRO 1.188 or 1.274 entry point. It handles patch negotiation,
 notices, shard listing, login policy and one-time handoff to Agent. Runtime
 compatibility values come from explicit configuration; Gateway does not load or
-transmit `protocol/profiles/vsro188.json`.
+transmit the client profile JSON.
 
 ## Protocol surface
 
@@ -115,6 +115,12 @@ Loopback advertised Agent addresses require
 `GATEWAY_ENVIRONMENT=development`. Gateway opens and pings both configured MySQL
 pools at startup. Normal startup does not apply migrations.
 
+To use the supplied v274 client, select `GATEWAY_PROTOCOL_PROFILE=vsro274` and
+configure its patch tuple: `GATEWAY_PROTOCOL_CONTENT_ID=22`,
+`GATEWAY_PROTOCOL_MODULE_NAME=SR_Client`, and `GATEWAY_PROTOCOL_VERSION=274`.
+The core `0x5000`/`0x9000` handshake is shared by Gateway and Agent and does
+not require a v274-specific configuration branch.
+
 ## mTLS and deployment
 
 Admission port `15883` exposes `GET /v1/readiness` and
@@ -133,9 +139,11 @@ Gateway/Agent health checks and is not a complete public network perimeter.
 
 ## Known limitations
 
-- Canonical client executable identity, locale, Content ID and sanitized wire
-  corpus are not checked in.
-- `vsro188.json` is evidence metadata, not Gateway runtime configuration.
+- The v188 executable identity, locale, Content ID and sanitized wire corpus
+  are not checked in. The v274 executable/archive identities and seed-database
+  Content ID are recorded, but its complete wire corpus is still pending.
+- `vsro188.json` and `vsro274.json` are evidence metadata, not Gateway runtime
+  configuration.
 - Shard discovery is a DB catalog read for one Agent endpoint, not service
   registration or multi-Agent discovery.
 - Shard ping does not check readiness or serialize Agent port.

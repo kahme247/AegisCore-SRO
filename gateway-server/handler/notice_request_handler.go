@@ -78,6 +78,13 @@ func (h *NoticeRequestHandler) Handle(ctx context.Context, session *server.Sessi
 	if contentID != profile.ContentID {
 		return fmt.Errorf("unsupported notice content ID %d", contentID)
 	}
+	if session != nil && session.UserContext.ProtocolProfile == config.VSRO274Profile {
+		response, err := BuildNoticeResponse(nil)
+		if err != nil {
+			return err
+		}
+		return session.SendMassive(response)
+	}
 	notices := h.Notices
 	if notices == nil {
 		notices = db.LegacyNoticeCatalog()

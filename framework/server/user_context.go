@@ -12,4 +12,7 @@ type UserContext struct {
 	UniqueID    uint32
 	RefObjId    uint32
 	Username    string
+	// ProtocolProfile is selected by Gateway patch negotiation and scopes
+	// profile-specific behavior for the lifetime of that connection.
+	ProtocolProfile string
 }

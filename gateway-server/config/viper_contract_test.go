@@ -70,6 +70,49 @@ func TestGatewayEnvironmentBindingsLoadValidatedRuntime(t *testing.T) {
 	}
 }
 
+func TestGatewayEnvironmentBindingsLoadVSRO274Runtime(t *testing.T) {
+	resetViperContract(t)
+	setDefaultValues()
+	bindEnvAliases()
+
+	t.Setenv("GATEWAY_PROTOCOL_PROFILE", VSRO274Profile)
+	t.Setenv("GATEWAY_PROTOCOL_CONTENT_ID", "22")
+	t.Setenv("GATEWAY_PROTOCOL_MODULE_NAME", "SR_Client")
+	t.Setenv("GATEWAY_PROTOCOL_VERSION", "274")
+
+	profile, err := LoadProtocolProfile()
+	if err != nil {
+		t.Fatalf("LoadProtocolProfile: %v", err)
+	}
+	if profile != (ProtocolProfile{Name: VSRO274Profile, ContentID: 22, ModuleName: "SR_Client", Version: 274}) {
+		t.Fatalf("profile = %#v", profile)
+	}
+}
+
+func TestGatewayEnvironmentBindingsLoadMultipleProfiles(t *testing.T) {
+	resetViperContract(t)
+	setDefaultValues()
+	bindEnvAliases()
+
+	t.Setenv("GATEWAY_PROTOCOL_PROFILES", "vsro188:22:SR_Client:188,vsro274:22:SR_Client:274")
+	profiles, err := LoadProtocolProfiles()
+	if err != nil {
+		t.Fatalf("LoadProtocolProfiles: %v", err)
+	}
+	want := []ProtocolProfile{
+		{Name: VSRO188Profile, ContentID: 22, ModuleName: "SR_Client", Version: 188},
+		{Name: VSRO274Profile, ContentID: 22, ModuleName: "SR_Client", Version: 274},
+	}
+	if len(profiles) != len(want) {
+		t.Fatalf("profiles = %#v, want %#v", profiles, want)
+	}
+	for index := range want {
+		if profiles[index] != want[index] {
+			t.Fatalf("profiles[%d] = %#v, want %#v", index, profiles[index], want[index])
+		}
+	}
+}
+
 func TestGatewayMalformedEnvironmentScalarsFailClosed(t *testing.T) {
 	tests := []struct {
 		name     string

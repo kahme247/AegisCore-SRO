@@ -18,8 +18,11 @@ const (
 	// CurrentSchemaVersion is the format version understood by this package.
 	CurrentSchemaVersion = 1
 
-	// VSRO188 is the only supported client profile at this stage.
+	// VSRO188 identifies the original supported client profile.
 	VSRO188 = "vsro188"
+
+	// VSRO274 identifies the supplied vSRO 1.274 client profile.
+	VSRO274 = "vsro274"
 
 	// StatusEvidencePending marks a profile whose client/capture evidence has
 	// not completed the release promotion requirements.
@@ -63,11 +66,20 @@ type DataPK2 struct {
 //go:embed vsro188.json
 var vsro188JSON []byte
 
+//go:embed vsro274.json
+var vsro274JSON []byte
+
 // VSRO188Profile returns a fresh copy of the canonical checked-in vSRO 1.88
 // profile. Embedding keeps command verification independent of the current
 // working directory while preserving the JSON file as the reviewed source.
 func VSRO188Profile() (Profile, error) {
 	return Parse(vsro188JSON)
+}
+
+// VSRO274Profile returns a fresh copy of the canonical checked-in vSRO 1.274
+// profile.
+func VSRO274Profile() (Profile, error) {
+	return Parse(vsro274JSON)
 }
 
 // LoadFile reads and decodes a profile supplied to an offline tool.

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile": "vsro274",
+  "status": "evidence-pending",
+  "client": {
+    "executable": "SRO_Client.exe",
+    "sha256": "7C48BFD31C0A0861A84A8CD8476E1CD96A95B5FD5A96B366CC1E5CA123B65263",
+    "file_version": null
+  },
+  "data_pk2": {
+    "path": "Data.pk2",
+    "size_bytes": 2986786816,
+    "sha256": "C4B2D126655A80AE014761098A7611787C6DA2CF791F7D8E2F71C59F11166413",
+    "archive_format": "0x01000002",
+    "encrypted": true
+  },
+  "locale": null,
+  "content_id": 22,
+  "unvalidated_content_id_values": [],
+  "captures": [],
+  "promotion_requirements": [
+    "Capture the complete Gateway and Agent login exchange from this exact executable.",
+    "Confirm the 0x6100 module name and patch version against that capture.",
+    "Add sanitized capture fixtures with provenance and wire-byte hashes.",
+    "Resolve gameplay packet layout differences against this exact Data.pk2 hash."
+  ]
+}
