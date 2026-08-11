@@ -498,7 +498,7 @@ CREATE TABLE `GAME_SERVER_REGION` (
 
 LOCK TABLES `GAME_SERVER_REGION` WRITE;
 /*!40000 ALTER TABLE `GAME_SERVER_REGION` DISABLE KEYS */;
-INSERT INTO `GAME_SERVER_REGION` VALUES ('Donwhang',1),('Hotan',1),('Jangan',1);
+INSERT INTO `GAME_SERVER_REGION` VALUES ('Constantinople',1),('DELTA',1),('Donwhang',1),('Hotan',1),('Jangan',1),('Samarkand',1);
 /*!40000 ALTER TABLE `GAME_SERVER_REGION` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1838,6 +1838,7 @@ CREATE TABLE `TELEPORT_LINK` (
   `OWNER_TELEPORT_ID` int unsigned NOT NULL,
   `TARGET_TELEPORT_ID` int unsigned NOT NULL,
   `FEE` bigint unsigned NOT NULL,
+  `MIN_LEVEL` tinyint unsigned NOT NULL DEFAULT '1',
   `SERVICE` tinyint unsigned NOT NULL DEFAULT '1',
   PRIMARY KEY (`OWNER_TELEPORT_ID`,`TARGET_TELEPORT_ID`),
   KEY `FK_TELEPORT_LINK_TARGET` (`TARGET_TELEPORT_ID`),
@@ -1852,7 +1853,7 @@ CREATE TABLE `TELEPORT_LINK` (
 
 LOCK TABLES `TELEPORT_LINK` WRITE;
 /*!40000 ALTER TABLE `TELEPORT_LINK` DISABLE KEYS */;
-INSERT INTO `TELEPORT_LINK` VALUES (1,2,5000,1),(2,1,5000,1),(2,5,5000,1),(5,2,5000,1),(5,25,5000,1),(20,25,5000,1),(25,5,5000,1),(25,20,5000,1);
+INSERT INTO `TELEPORT_LINK` VALUES (1,2,5000,1,1),(1,175,40000,95,1),(1,176,40000,95,1),(2,1,5000,1,1),(2,5,5000,1,1),(5,2,5000,1,1),(5,25,5000,1,1),(5,175,30000,95,1),(5,176,30000,95,1),(20,25,5000,1,1),(25,5,5000,1,1),(25,20,5000,1,1),(175,1,40000,1,1),(175,5,30000,1,1),(175,176,0,1,1),(176,1,40000,1,1),(176,5,30000,1,1),(176,175,0,1,1);
 /*!40000 ALTER TABLE `TELEPORT_LINK` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1884,7 +1885,7 @@ CREATE TABLE `TELEPORT_POINT` (
 
 LOCK TABLES `TELEPORT_POINT` WRITE;
 /*!40000 ALTER TABLE `TELEPORT_POINT` DISABLE KEYS */;
-INSERT INTO `TELEPORT_POINT` VALUES (1,'GATE_CH',2094,25000,969,0,1369,1,1),(2,'GATE_WC',2095,26265,957,-80,1508,1,1),(5,'GATE_KT',2096,23687,1138,250,153,1,1),(20,'GATE_EU',19554,26959,950,84,1070,1,1),(25,'GATE_CA',19555,27244,270,180,1421,1,1);
+INSERT INTO `TELEPORT_POINT` VALUES (1,'GATE_CH',2094,25000,969,0,1369,1,1),(2,'GATE_WC',2095,26265,957,-80,1508,1,1),(5,'GATE_KT',2096,23687,1138,250,153,1,1),(20,'GATE_EU',19554,26959,950,84,1070,1,1),(25,'GATE_CA',19555,27244,270,180,1421,1,1),(175,'GATE_SD1',27753,23088,663,863,526,1,1),(176,'GATE_SD2',27754,23603,111,1537,524,1,1);
 /*!40000 ALTER TABLE `TELEPORT_POINT` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1907,6 +1908,20 @@ CREATE TABLE `CHAR_ITEM_SERVICE` (
   CONSTRAINT `FK_CHAR_ITEM_SERVICE_ITEM` FOREIGN KEY (`SOURCE_REF_ITEM_ID`) REFERENCES `ITEMDATA` (`ItemID`),
   CONSTRAINT `CK_CHAR_ITEM_SERVICE_KIND` CHECK ((`SERVICE_KIND` in (1,2))),
   CONSTRAINT `CK_CHAR_ITEM_SERVICE_EXPIRY` CHECK ((`EXPIRES_AT` > `ACTIVATED_AT`))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+--
+-- Table structure for table `CHAR_ITEM_SERVICE_DAILY`
+--
+
+DROP TABLE IF EXISTS `CHAR_ITEM_SERVICE_DAILY`;
+CREATE TABLE `CHAR_ITEM_SERVICE_DAILY` (
+  `CHAR_ID` int NOT NULL,
+  `SERVICE_KIND` tinyint unsigned NOT NULL,
+  `USED_ON` date NOT NULL,
+  `ACTIVE_UNTIL` datetime(6) NOT NULL,
+  PRIMARY KEY (`CHAR_ID`,`SERVICE_KIND`),
+  CONSTRAINT `FK_CHAR_ITEM_SERVICE_DAILY_SERVICE` FOREIGN KEY (`CHAR_ID`, `SERVICE_KIND`) REFERENCES `CHAR_ITEM_SERVICE` (`CHAR_ID`, `SERVICE_KIND`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 --
@@ -2078,6 +2093,10 @@ INSERT INTO `aegiscore_schema_migrations` VALUES (30,'item_mall','14f15bacc51d77
 INSERT INTO `aegiscore_schema_migrations` VALUES (31,'character_item_services','e2c8135d97d85e1242320e1e60262ff5874a8b9056fa2b09a294a40b8185b81d','applied','2026-07-17 00:00:00.000000');
 INSERT INTO `aegiscore_schema_migrations` VALUES (32,'character_creation_policy','554da0e8b968f3297d14934051d0d40ac372f53f2a148cb7aef53c673986c3cb','applied','2026-07-17 00:00:00.000000');
 INSERT INTO `aegiscore_schema_migrations` VALUES (33,'european_character_creation','9b395171ea005e33211a141618faed00f2352a553eeaefff6d9cddab7cf2fe77','applied','2026-07-17 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` VALUES (34,'enable_constantinople','eacc4ccbc69a4aa5f1e64e1f356d43dfb0681eb136020fa2c2cffb528f20262f','applied','2026-07-17 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` VALUES (35,'enable_samarkand','5344735c09d748541194555dc6700c95d60b0a47f26a3fba2db0bc890e60bc24','applied','2026-07-17 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` VALUES (36,'enable_alexandria','1ab62174e126d3a9b1d9ce94168912a3a1f488d29c110f78ce0bfee027e133bb','applied','2026-07-17 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` VALUES (37,'premium_daily_activation','9972b96cc2ec5111cddfc55305c42d48196c2f428cf08fed36001122787cbfb8','applied','2026-07-17 00:00:00.000000');
 LOCK TABLES `aegiscore_schema_migrations` WRITE;
 /*!40000 ALTER TABLE `aegiscore_schema_migrations` DISABLE KEYS */;
 INSERT INTO `aegiscore_schema_migrations` VALUES (1,'normalize_character_name','216acc1381802aa4c167e94483250b6073e1cbc0da7f2b4094255efc3d567ac0','applied','2026-07-16 19:24:31.568927'),(2,'unique_inventory_item_link','85d64eff0348df9cf6533f192fee636ba1f44857f648bdb03f34777eb3f9aabe','applied','2026-07-16 19:24:31.757180'),(3,'character_quests','334e1fb5fe0bb686a94df1d7ab3de31edf2fa11f061eb60a3300e68fbb412b45','applied','2026-07-16 19:24:31.832675'),(4,'economy_storage','a2da6d01130c7a954525e8350fefb1880c86ded73e0d15f20f4b64c2ee79b1cf','applied','2026-07-16 19:24:31.904344'),(5,'reference_shop_catalog','e3bae15dbb6d959e0683d4cebf7f4645567276694f6a5d25a682ca28a37e7bdf','applied','2026-07-16 19:24:32.176393'),(6,'teleport_catalog','96258fcd7321d432554818ca1a0b72cedcce9d5855b196ee5549fc4cc46b568f','applied','2026-07-16 19:24:32.507372'),(8,'character_masteries','242617109c9d719e23a1641a8a220639666683a78c2d75b7d8ea9a10ab03b550','applied','2026-07-16 19:24:32.695895'),(9,'guild_storage','589ed79db5762177d96ad98c89984d95c868e133d5a55ed09a1458c643bed158','applied','2026-07-16 19:24:32.768453'),(10,'character_skills','50dbfb30c83e18e0590a21e9eef0b7e7e0f7241b692a495f1426f8b5dbaa2f2f','applied','2026-07-16 19:24:33.032294'),(11,'character_default_masteries','e6d3ad9d09c5b9c4ee207ddf5f96e136bf6a2527f4a50ffeb42410fe5883b487','applied','2026-07-16 19:24:33.114246'),(12,'reference_default_masteries','8f218ff5a531a9bab3836bfa5a4dc3d93dc1c1acb6c53b98b0b9fa7f44cdc497','applied','2026-07-16 19:24:33.157129'),(13,'reference_default_skills','2f5ad98b4392fb56ffe5df951dbb7be96e4ef7e5741fcddeb3adf06dcb9b7f5b','applied','2026-07-16 19:24:33.239472'),(14,'reference_default_quests','c366c1f5e8f61cc3ebd819cfc031dabedf9f840ac297182be0873e26e9497f88','applied','2026-07-16 19:24:33.335305'),(15,'reference_level_and_skill_data','12f7a8c6e1558135a120cdbe15641c5665385a6a7c9f52d970ccafa4c88d32e1','applied','2026-07-16 19:24:33.429029'),(16,'vsro_reference_skill_catalog','e7fb268ead197a9e22873fafa9a435bb5d25e11081a3e616d87a298c232d9131','applied','2026-07-16 19:24:33.569786'),(17,'vsro_skill_unsigned_tinyints','94633d5c561f9ada96903b2fa9fd4cabd9bd871598d5d81af69e954e384082ed','applied','2026-07-16 19:24:34.012095'),(18,'vsro_skill_group_reference_compatibility','6930fac2b4a394306787c9ed3721492897b0cedaa5825c385cec9fa3610c2833','applied','2026-07-16 19:24:34.367486'),(19,'vsro_skill_item_opt_level_link_compatibility','b13e510af1d5a425c89256459655838a6ee0d760fb902579835ba756347867a8','applied','2026-07-16 19:24:34.413105'),(20,'vsro_item_reference_catalog','2df3c7dddfd4c26237b04e431ec290f0ff9fe77d7ba27ba0d84ff801c56d48d3','applied','2026-07-16 19:24:34.575408'),(21,'gameplay_movement_settings','f318e178db45d7744616080e5b352bfa07d9f10982cd36669d79f5c995bd1dc5','applied','2026-07-16 19:24:35.035793'),(22,'item_rental_info','b907764c42d4ca85416d08cf46fb1b202f5c3e355a5dceeb0e3e2d8660b4a55f','applied','2026-07-16 19:24:35.107022'),(23,'character_return_city','7a0d4c71e2d3348caa6f2ea3b8c656d7f5edcfd3afbdcfb19ceebb710e33f979','applied','2026-07-16 19:24:35.191886'),(24,'gameplay_progression_rates','bed29abcb6f9d092715dee25d445b2070aa1c871c4042a85001b9f5e35a36b32','applied','2026-07-16 19:24:35.478125'),(25,'gameplay_mob_rates','9fabe2736e00a053ab61d00926cdf17f8c656eff027325ee3a739391d4cead89','applied','2026-07-16 19:24:35.552127'),(26,'character_quick_slots','2f22b9652b02b29fdb5148b7c7ccec53e5adf279edd9450995a9c71dbd54c10a','applied','2026-07-16 19:24:35.623666'),(27,'character_speed_effect','c33cd30e7d1e2a47d7a95c7803d3d56204037e03e1ec8249d664f6a237d5a289','applied','2026-07-16 19:49:02.552203'),(28,'unique_character_id','07132dbf09ed1cdcc9d987c96c4031323f1aaf2a6e509cfd52c0b36623bdb83e','applied','2026-07-16 20:52:11.645645'),(29,'drop_nonstandard_continent_fk','51b6e97359109363dfb5a392f419c3bf95f6c13f41a89dfefbf2f1fbc1495de0','applied','2026-07-16 20:52:11.719016');

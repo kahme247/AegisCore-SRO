@@ -86,3 +86,32 @@ func TestFreshShardSnapshotEnablesChineseAndEuropeanCharacterCreation(t *testing
 		}
 	}
 }
+
+func TestFreshShardSnapshotEnablesSupportedContinents(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(shard), "('Constantinople',1),('DELTA',1),('Donwhang',1),('Hotan',1),('Jangan',1),('Samarkand',1)") {
+		t.Fatal("shard snapshot does not enable the supported continent set")
+	}
+}
+
+func TestFreshShardSnapshotContainsAlexandriaTravelCatalog(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"`MIN_LEVEL` tinyint unsigned NOT NULL DEFAULT '1'",
+		"(175,'GATE_SD1',27753,23088,663,863,526,1,1)",
+		"(176,'GATE_SD2',27754,23603,111,1537,524,1,1)",
+		"(1,175,40000,95,1)",
+		"(5,176,30000,95,1)",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks Alexandria travel data %q", required)
+		}
+	}
+}
