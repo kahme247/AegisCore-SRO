@@ -92,7 +92,7 @@ func (r *SQLQuestRuntimeRepository) GrantMissionItem(ctx context.Context, charac
 		return QuestItemGrantResult{}, err
 	}
 	quest, err := lockCharacterQuest(ctx, tx, characterID, questID)
-	if err != nil || quest.Status != QuestActive {
+	if err != nil || quest.Status != QuestStartedByUser {
 		return QuestItemGrantResult{}, ErrQuestStateConflict
 	}
 	items, err := lockQuestInventory(ctx, tx, characterID)
@@ -110,9 +110,9 @@ func (r *SQLQuestRuntimeRepository) GrantMissionItem(ctx context.Context, charac
 	if err != nil {
 		return QuestItemGrantResult{}, err
 	}
-	quest.Status = QuestReadyToTurnIn
+	quest.Status = QuestReadyToTurnInByUser
 	quest.Data1 = 1
-	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, questID, QuestActive)
+	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, questID, QuestStartedByUser)
 	if err != nil {
 		return QuestItemGrantResult{}, err
 	}
@@ -152,7 +152,7 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 		}
 	}()
 	quest, err := lockCharacterQuest(ctx, tx, characterID, QuestChulsanAngerID)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && quest.Status != QuestActive) {
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && quest.Status != QuestStartedByUser) {
 		_ = tx.Rollback()
 		committed = true
 		return QuestProgressResult{}, nil
@@ -168,9 +168,9 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 	quest.Data1++
 	if quest.Data1 >= QuestBanditBowmanGoal {
 		quest.Data1 = QuestBanditBowmanGoal
-		quest.Status = QuestReadyToTurnIn
+		quest.Status = QuestReadyToTurnInByUser
 	}
-	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, quest.QuestID, QuestActive)
+	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, quest.QuestID, QuestStartedByUser)
 	if err != nil {
 		return QuestProgressResult{}, err
 	}
@@ -205,7 +205,7 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, err
 	}
 	quest, err := lockCharacterQuest(ctx, tx, characterID, questID)
-	if err != nil || quest.Status != QuestReadyToTurnIn {
+	if err != nil || quest.Status != QuestReadyToTurnInByUser {
 		return QuestCompletionResult{}, ErrQuestStateConflict
 	}
 	items, err := lockQuestInventory(ctx, tx, characterID)
@@ -263,7 +263,7 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, err
 	}
 	now := time.Now().UTC()
-	completed, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`COMPLETED_AT`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", QuestCompleted, now, characterID, questID, QuestReadyToTurnIn)
+	completed, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`COMPLETED_AT`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", QuestCompleted, now, characterID, questID, QuestReadyToTurnInByUser)
 	if err != nil {
 		return QuestCompletionResult{}, err
 	}

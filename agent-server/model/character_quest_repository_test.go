@@ -58,7 +58,7 @@ func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewCharacterQuestRepository: %v", err)
 		}
-		quest := CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1}
+		quest := CharacterQuest{QuestID: 3, Status: QuestStartedByUser, AchievementCount: 1}
 		activated, err := repository.Activate(context.Background(), 77, quest)
 		if err != nil {
 			t.Fatalf("Activate affected=%d: %v", affected, err)
@@ -66,7 +66,13 @@ func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
 		if database.query != activateCharacterQuest {
 			t.Fatalf("query = %q", database.query)
 		}
-		if activated.QuestID != 3 || activated.Status != QuestActive || activated.StartedAt.IsZero() {
+		wantArgs := []any{77, 3, QuestStartedByUser, uint16(1), uint64(0), uint64(0),
+			QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned,
+			QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned}
+		if !reflect.DeepEqual(database.args, wantArgs) {
+			t.Fatalf("args = %#v, want %#v", database.args, wantArgs)
+		}
+		if activated.QuestID != 3 || activated.Status != QuestStartedByUser || activated.StartedAt.IsZero() {
 			t.Fatalf("activated quest = %#v", activated)
 		}
 	}
@@ -77,7 +83,7 @@ func TestCharacterQuestRepositoryDoesNotOverwriteUnavailableQuest(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewCharacterQuestRepository: %v", err)
 	}
-	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1})
+	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestStartedByUser, AchievementCount: 1})
 	if !errors.Is(err, ErrCharacterQuestNotAvailable) {
 		t.Fatalf("Activate error = %v, want ErrCharacterQuestNotAvailable", err)
 	}

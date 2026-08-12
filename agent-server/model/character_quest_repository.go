@@ -15,6 +15,8 @@ type QuestStatus byte
 
 const (
 	// These values are the stock client values used by _CharQuest.Status.
+	// QuestActive is the initialized/offered state; a player acceptance uses
+	// QuestStartedByUser.
 	QuestActive                 QuestStatus = 1
 	QuestReadyToTurnIn          QuestStatus = 2
 	QuestCompleted              QuestStatus = 3
@@ -105,27 +107,28 @@ const activateCharacterQuest = `INSERT INTO ` + "`SRO_SHARD`.`CHAR_QUEST`" + `
     (FK_CHAR, QUEST_ID, STATUS, ACHIEVEMENT_COUNT, STARTED_AT, COMPLETED_AT, QUEST_DATA_1, QUEST_DATA_2)
     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, ?, ?)
     ON DUPLICATE KEY UPDATE
-        STARTED_AT=IF(STATUS=?, CURRENT_TIMESTAMP, STARTED_AT),
-        COMPLETED_AT=IF(STATUS=?, NULL, COMPLETED_AT),
-        ACHIEVEMENT_COUNT=IF(STATUS=?, VALUES(ACHIEVEMENT_COUNT), ACHIEVEMENT_COUNT),
-        QUEST_DATA_1=IF(STATUS=?, VALUES(QUEST_DATA_1), QUEST_DATA_1),
-        QUEST_DATA_2=IF(STATUS=?, VALUES(QUEST_DATA_2), QUEST_DATA_2),
-        STATUS=IF(STATUS=?, VALUES(STATUS), STATUS)`
+        STARTED_AT=IF(STATUS IN (?, ?), CURRENT_TIMESTAMP, STARTED_AT),
+        COMPLETED_AT=IF(STATUS IN (?, ?), NULL, COMPLETED_AT),
+        ACHIEVEMENT_COUNT=IF(STATUS IN (?, ?), VALUES(ACHIEVEMENT_COUNT), ACHIEVEMENT_COUNT),
+        QUEST_DATA_1=IF(STATUS IN (?, ?), VALUES(QUEST_DATA_1), QUEST_DATA_1),
+        QUEST_DATA_2=IF(STATUS IN (?, ?), VALUES(QUEST_DATA_2), QUEST_DATA_2),
+        STATUS=IF(STATUS IN (?, ?), VALUES(STATUS), STATUS)`
 
-// Activate atomically inserts a new quest or restarts an abandoned one. Other
-// persisted states are preserved so duplicate accepts cannot reset progress and
-// completed one-time quests cannot regress to active.
+// Activate atomically inserts a player-started quest or promotes an initialized
+// or abandoned row. Other persisted states are preserved so duplicate accepts
+// cannot reset progress and completed one-time quests cannot regress to active.
 func (r *SQLCharacterQuestRepository) Activate(ctx context.Context, characterID int, quest CharacterQuest) (CharacterQuest, error) {
 	if r == nil || r.shard == nil {
 		return CharacterQuest{}, ErrCharacterQuestRepositoryUnavailable
 	}
-	if characterID <= 0 || quest.QuestID <= 0 || quest.Status != QuestActive || quest.AchievementCount == 0 {
+	if characterID <= 0 || quest.QuestID <= 0 || quest.Status != QuestStartedByUser || quest.AchievementCount == 0 {
 		return CharacterQuest{}, fmt.Errorf("invalid character quest activation")
 	}
 	quest.CompletedAt = nil
 	result, err := r.shard.ExecContext(ctx, activateCharacterQuest,
 		characterID, quest.QuestID, quest.Status, quest.AchievementCount, quest.Data1, quest.Data2,
-		QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned, QuestAbandoned)
+		QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned,
+		QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned)
 	if err != nil {
 		return CharacterQuest{}, fmt.Errorf("activate character quest: %w", err)
 	}

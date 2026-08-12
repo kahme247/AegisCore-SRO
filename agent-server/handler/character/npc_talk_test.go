@@ -174,7 +174,7 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 		t.Fatalf("select quest: %v", err)
 	}
 	accept := network.EmptyClientPacket()
-	accept.WriteByte(1)
+	accept.WriteByte(questListSelectorBase)
 	if err := handler.handleQuestTalkPacket(context.Background(), session, accept); err != nil {
 		t.Fatalf("accept quest: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 	if sent[3].MessageID != opcode.QuestUpdate {
 		t.Fatalf("quest add opcode = 0x%04X, want 0x%04X", sent[3].MessageID, opcode.QuestUpdate)
 	}
-	wantAdd := []byte{1, 3, 0, 0, 0, 1, 0, 0x18, 1, 1, 1, 1, 21, 0}
+	wantAdd := []byte{1, 3, 0, 0, 0, 1, 0, 0x18, 7, 1, 1, 1, 21, 0}
 	wantAdd = append(wantAdd, "SN_CON_QNO_CH_SMITH_1"...)
 	wantAdd = append(wantAdd, 0)
 	if got := sent[3].Payload(); !reflect.DeepEqual(got, wantAdd) {
@@ -203,7 +203,7 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 		t.Fatalf("acceptance payload = % X, want % X", got, wantAccepted)
 	}
 	quests := player.QuestSnapshot()
-	if len(quests) != 1 || quests[0].QuestID != 3 || quests[0].Status != model.QuestActive {
+	if len(quests) != 1 || quests[0].QuestID != 3 || quests[0].Status != model.QuestStartedByUser {
 		t.Fatalf("player quests = %#v", quests)
 	}
 	npcInteractions.Clear(player.GetUniqueID())
@@ -213,9 +213,9 @@ func TestNPCTalkJingyoGrantsWeaponListAndAdvancesQuest(t *testing.T) {
 	session, player, npc := selectEntityFixture(t)
 	npc.Name = "NPC_CH_SOLDIER_SO1"
 	npc.RefObjectID = jingyoRefObjectID
-	player.Quests = []model.CharacterQuest{{QuestID: model.QuestWeaponListID, Status: model.QuestActive, AchievementCount: 1}}
+	player.Quests = []model.CharacterQuest{{QuestID: model.QuestWeaponListID, Status: model.QuestStartedByUser, AchievementCount: 1}}
 	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
-	quest := model.CharacterQuest{QuestID: model.QuestWeaponListID, Status: model.QuestReadyToTurnIn, AchievementCount: 1, Data1: 1}
+	quest := model.CharacterQuest{QuestID: model.QuestWeaponListID, Status: model.QuestReadyToTurnInByUser, AchievementCount: 1, Data1: 1}
 	item := model.Item{SRObject: model.SRObject{RefObjectID: model.QuestWeaponListItemID}}
 	runtime := &questRuntimeStub{grantResult: model.QuestItemGrantResult{
 		Quest: quest, Inventory: model.NewInventory(map[byte]model.Item{13: item}), Added: model.QuestItemMutation{Slot: 13, Item: item},
@@ -238,7 +238,7 @@ func TestNPCTalkJingyoGrantsWeaponListAndAdvancesQuest(t *testing.T) {
 		}
 	}
 	got, exists := playerQuest(player, model.QuestWeaponListID)
-	if !exists || got.Status != model.QuestReadyToTurnIn || got.Data1 != 1 {
+	if !exists || got.Status != model.QuestReadyToTurnInByUser || got.Data1 != 1 {
 		t.Fatalf("player quest = %#v, exists=%t", got, exists)
 	}
 	npcInteractions.Clear(player.GetUniqueID())
@@ -250,7 +250,7 @@ func TestNPCTalkCompletesReadyChulsanQuestAndPublishesRewards(t *testing.T) {
 	npc.RefObjectID = chulsanRefObjectID
 	player.Level = 1
 	player.Gold = 100
-	player.Quests = []model.CharacterQuest{{QuestID: model.QuestWeaponListID, Status: model.QuestReadyToTurnIn, AchievementCount: 1, Data1: 1}}
+	player.Quests = []model.CharacterQuest{{QuestID: model.QuestWeaponListID, Status: model.QuestReadyToTurnInByUser, AchievementCount: 1, Data1: 1}}
 	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
 	completed := model.CharacterQuest{QuestID: model.QuestWeaponListID, Status: model.QuestCompleted, AchievementCount: 1}
 	runtime := &questRuntimeStub{completeResult: model.QuestCompletionResult{

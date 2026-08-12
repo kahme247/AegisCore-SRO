@@ -39,11 +39,11 @@ func TestWriteQuestLogRejectsInvalidStatus(t *testing.T) {
 
 func TestWriteQuestLogEncodesRecoveredActiveQuestRecord(t *testing.T) {
 	packet := network.EmptyPacket()
-	quest := CharacterQuest{QuestID: 58, Status: QuestActive, AchievementCount: 1, Data1: 7}
+	quest := CharacterQuest{QuestID: 58, Status: QuestStartedByUser, AchievementCount: 1, Data1: 7}
 	if err := WriteQuestLog(&packet, []CharacterQuest{quest}); err != nil {
 		t.Fatalf("WriteQuestLog: %v", err)
 	}
-	want := []byte{0, 0, 1, 58, 0, 0, 0, 1, 0, 0x18, 1, 1, 1, 1, 21, 0}
+	want := []byte{0, 0, 1, 58, 0, 0, 0, 1, 0, 0x18, 7, 1, 1, 1, 21, 0}
 	want = append(want, "SN_CON_QNO_CH_SMITH_2"...)
 	want = append(want, 1, 7, 0, 0, 0)
 	if got := packet.Payload(); string(got) != string(want) {

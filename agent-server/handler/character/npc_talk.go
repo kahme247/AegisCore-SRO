@@ -165,6 +165,9 @@ func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Sessi
 
 func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || session.UserContext.UniqueID == 0 || packet.Remaining() != 1 {
+		if session != nil {
+			logrus.Infof("quest trace rejected selection characterID=%d playerUID=%d payloadBytes=%d", session.UserContext.CharacterID, session.UserContext.UniqueID, packet.Remaining())
+		}
 		return fmt.Errorf("malformed quest talk selection")
 	}
 	selector, err := packet.ReadByte()
@@ -174,10 +177,20 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *ser
 	interaction, ok := npcInteractions.Get(session.UserContext.UniqueID)
 	if !ok || interaction.NPCRefObjectID != chulsanRefObjectID ||
 		!HasRecentNPCInteraction(session.UserContext.UniqueID, interaction.NPCUniqueID, npcTalkActionConversation, 5*time.Minute) {
+		logrus.Infof("quest trace ignored selection characterID=%d playerUID=%d selector=%d interaction=%+v present=%t", session.UserContext.CharacterID, session.UserContext.UniqueID, selector, interaction, ok)
 		return nil
 	}
-	if selector == 1 || selector == 2 {
-		return h.handleChulsanOfferSelection(ctx, session, interaction, selector)
+	logrus.Infof("quest trace selection characterID=%d playerUID=%d selector=%d pendingQuestID=%d", session.UserContext.CharacterID, session.UserContext.UniqueID, selector, interaction.PendingQuestID)
+	if interaction.PendingQuestID != 0 {
+		switch selector {
+		case questListSelectorBase:
+			return h.handleChulsanOfferSelection(ctx, session, interaction, 1)
+		case questListSelectorBase + 1:
+			return h.handleChulsanOfferSelection(ctx, session, interaction, 2)
+		default:
+			logrus.Infof("quest trace ignored offer selector characterID=%d selector=%d pendingQuestID=%d", session.UserContext.CharacterID, selector, interaction.PendingQuestID)
+			return nil
+		}
 	}
 	index := int(selector - questListSelectorBase)
 	if selector < questListSelectorBase || index >= len(chulsanQuests) {
@@ -194,9 +207,18 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *ser
 	}
 	if active, exists := playerQuest(player, quest.questID); exists {
 		switch active.Status {
-		case model.QuestReadyToTurnIn, model.QuestReadyToTurnInByUser:
+		case model.QuestReadyToTurnInByUser:
 			return h.completeChulsanQuest(ctx, session, interaction, player, quest)
-		case model.QuestActive, model.QuestStartedByUser:
+		case model.QuestStartedByUser:
+			// Re-publish the record in case the client missed its original Add
+			// notification while the NPC dialogue remained open.
+			added, buildErr := buildQuestAddPacket(active)
+			if buildErr != nil {
+				return buildErr
+			}
+			if err := h.sendPacket(session, added); err != nil {
+				return err
+			}
 			progress, buildErr := buildQuestTalkPacket(1, quest.progressKey, nil)
 			if buildErr != nil {
 				return buildErr
@@ -222,6 +244,7 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *ser
 func (h *NPCTalkHandler) handleChulsanOfferSelection(ctx context.Context, session *server.Session, interaction NPCInteraction, selector byte) error {
 	quest, ok := chulsanQuestByID(interaction.PendingQuestID)
 	if !ok {
+		logrus.Infof("quest trace ignored offer selection characterID=%d selector=%d pendingQuestID=%d", session.UserContext.CharacterID, selector, interaction.PendingQuestID)
 		return nil
 	}
 	if selector == 2 {
@@ -244,18 +267,23 @@ func (h *NPCTalkHandler) handleChulsanOfferSelection(ctx context.Context, sessio
 		return err
 	}
 	if err := validateNPCSelection(world, player, interaction.NPCUniqueID); err != nil {
+		logrus.Infof("quest trace rejected acceptance characterID=%d questID=%d: %v", session.UserContext.CharacterID, quest.questID, err)
 		return nil
 	}
+	logrus.Infof("quest trace activating characterID=%d questID=%d", session.UserContext.CharacterID, quest.questID)
 	activated, err := h.repository.Activate(ctx, session.UserContext.CharacterID, model.CharacterQuest{
-		QuestID: quest.questID, Status: model.QuestActive, AchievementCount: 1,
+		QuestID: quest.questID, Status: model.QuestStartedByUser, AchievementCount: 1,
 	})
 	if errors.Is(err, model.ErrCharacterQuestNotAvailable) {
+		logrus.Infof("quest trace activation unavailable characterID=%d questID=%d", session.UserContext.CharacterID, quest.questID)
 		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
 		return nil
 	}
 	if err != nil {
+		logrus.Infof("quest trace activation failed characterID=%d questID=%d: %v", session.UserContext.CharacterID, quest.questID, err)
 		return err
 	}
+	logrus.Infof("quest trace activated characterID=%d questID=%d status=%d", session.UserContext.CharacterID, activated.QuestID, activated.Status)
 	player.CommitQuestActivation(activated)
 	npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
 	added, err := buildQuestAddPacket(activated)
@@ -277,14 +305,14 @@ func (h *NPCTalkHandler) handleJingyoTalk(ctx context.Context, session *server.S
 	if !exists {
 		return nil
 	}
-	if quest.Status == model.QuestReadyToTurnIn || quest.Status == model.QuestReadyToTurnInByUser {
+	if quest.Status == model.QuestReadyToTurnInByUser {
 		message, err := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_07", nil)
 		if err != nil {
 			return err
 		}
 		return h.sendPacket(session, message)
 	}
-	if quest.Status != model.QuestActive && quest.Status != model.QuestStartedByUser {
+	if quest.Status != model.QuestStartedByUser {
 		return nil
 	}
 	if h.runtime == nil {
@@ -314,7 +342,7 @@ func (h *NPCTalkHandler) handleJingyoTalk(ctx context.Context, session *server.S
 	if err := h.sendPacket(session, update); err != nil {
 		return err
 	}
-	message, err := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_06", nil)
+	message, err := buildQuestTalkPacket(1, "SN_TALK_QNO_CH_SMITH_1_09", nil)
 	if err != nil {
 		return err
 	}

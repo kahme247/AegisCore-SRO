@@ -38,8 +38,7 @@ func WriteActiveQuestRecord(packet *network.Packet, quest CharacterQuest) error 
 	if !ok {
 		return fmt.Errorf("quest %d has no verified active protocol definition", quest.QuestID)
 	}
-	if quest.Status != QuestActive && quest.Status != QuestReadyToTurnIn &&
-		quest.Status != QuestStartedByUser && quest.Status != QuestReadyToTurnInByUser {
+	if quest.Status != QuestStartedByUser && quest.Status != QuestReadyToTurnInByUser {
 		return fmt.Errorf("quest %d status %d is not active", quest.QuestID, quest.Status)
 	}
 	if quest.AchievementCount == 0 || quest.AchievementCount > math.MaxUint8 {
@@ -81,12 +80,12 @@ func WriteQuestLog(packet *network.Packet, quests []CharacterQuest) error {
 		switch quest.Status {
 		case QuestCompleted, QuestCompletedMultipleTimes:
 			completed = append(completed, quest)
-		case QuestActive, QuestReadyToTurnIn, QuestStartedByUser, QuestReadyToTurnInByUser:
+		case QuestStartedByUser, QuestReadyToTurnInByUser:
 			if _, ok := questObjectiveForProtocol(quest.QuestID); ok {
 				active = append(active, quest)
 			}
-		case QuestAbandoned, QuestUnavailable:
-			// Historical/non-active rows are intentionally absent from the log.
+		case QuestActive, QuestReadyToTurnIn, QuestAbandoned, QuestUnavailable:
+			// Initialized, historical, and non-player-started rows are absent.
 		default:
 			return fmt.Errorf("quest %d has invalid status %d", quest.QuestID, quest.Status)
 		}
