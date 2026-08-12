@@ -12,18 +12,20 @@ var (
 	ErrTeleportLinkNotFound          = errors.New("teleport link does not exist")
 	ErrTeleportCharacterNotFound     = errors.New("teleport character does not exist")
 	ErrTeleportOwnerMismatch         = errors.New("teleport character owner mismatch")
+	ErrTeleportLevelRequired         = errors.New("character level is too low for teleport")
 	ErrTeleportInsufficientGold      = errors.New("insufficient gold for teleport")
 	ErrTeleportOutcomeUnknown        = errors.New("teleport commit outcome is unknown")
 )
 
 type TeleportDestination struct {
-	ID      uint32
-	Region  int16
-	X       float32
-	Y       float32
-	Z       float32
-	WorldID int16
-	Fee     uint64
+	ID       uint32
+	Region   int16
+	X        float32
+	Y        float32
+	Z        float32
+	WorldID  int16
+	Fee      uint64
+	MinLevel uint8
 }
 
 type TeleportResult struct {
@@ -45,7 +47,7 @@ func NewTeleportRepository(shard *sql.DB) (*SQLTeleportRepository, error) {
 	return &SQLTeleportRepository{shard: shard}, nil
 }
 
-const selectTeleportLink = `SELECT target.ID,target.REGION_ID,target.POS_X,target.POS_Y,target.POS_Z,target.WORLD_ID,link.FEE
+const selectTeleportLink = `SELECT target.ID,target.REGION_ID,target.POS_X,target.POS_Y,target.POS_Z,target.WORLD_ID,link.FEE,link.MIN_LEVEL
 FROM TELEPORT_LINK link
 JOIN TELEPORT_POINT owner ON owner.ID=link.OWNER_TELEPORT_ID AND owner.SERVICE=1
 JOIN TELEPORT_POINT target ON target.ID=link.TARGET_TELEPORT_ID AND target.SERVICE=1
@@ -76,7 +78,8 @@ func (r *SQLTeleportRepository) Commit(ctx context.Context, characterID int64, u
 
 	var owner uint32
 	var gold uint64
-	if err = tx.QueryRowContext(ctx, "SELECT FK_USER,GOLD FROM `CHAR` WHERE ID=? FOR UPDATE", characterID).Scan(&owner, &gold); err != nil {
+	var level uint8
+	if err = tx.QueryRowContext(ctx, "SELECT FK_USER,GOLD,CURRENT_LEVEL FROM `CHAR` WHERE ID=? FOR UPDATE", characterID).Scan(&owner, &gold, &level); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			err = ErrTeleportCharacterNotFound
 		}
@@ -88,6 +91,9 @@ func (r *SQLTeleportRepository) Commit(ctx context.Context, characterID int64, u
 	result.Destination, err = scanTeleportDestination(tx.QueryRowContext(ctx, selectTeleportLink, sourceNPCRefID, targetTeleportID))
 	if err != nil {
 		return result, err
+	}
+	if level < result.Destination.MinLevel {
+		return result, ErrTeleportLevelRequired
 	}
 	if gold < result.Destination.Fee {
 		return result, ErrTeleportInsufficientGold
@@ -116,7 +122,7 @@ type teleportRow interface{ Scan(...any) error }
 
 func scanTeleportDestination(row teleportRow) (TeleportDestination, error) {
 	var destination TeleportDestination
-	err := row.Scan(&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee)
+	err := row.Scan(&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TeleportDestination{}, ErrTeleportLinkNotFound
 	}
