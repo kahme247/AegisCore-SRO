@@ -141,6 +141,9 @@ func publishRestoredItemServices(player *model.Player) {
 			added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
 			player.SendToSelfAndKnown(&added)
 		}
+		if premiumAdded, exists := model.BuildPremiumDailyAdd(token, effect, remaining); exists {
+			player.SendToSelf(&premiumAdded)
+		}
 		if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
 			player.SendToSelfAndKnown(&buffAdded)
 		}
@@ -149,6 +152,9 @@ func publishRestoredItemServices(player *model.Player) {
 				if model.ItemServiceUsesItemPerk(effect) {
 					removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
 					player.SendToSelfAndKnown(&removed)
+				}
+				if premiumRemoved, exists := model.BuildPremiumDailyRemove(token, effect); exists {
+					player.SendToSelf(&premiumRemoved)
 				}
 				if model.ItemServiceBuffSkillID(effect) != 0 {
 					buffRemoved := model.BuildBuffRemove(token)

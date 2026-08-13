@@ -312,6 +312,9 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 				removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, replacedServiceToken)
 				player.SendToSelfAndKnown(&removed)
 			}
+			if premiumRemoved, exists := model.BuildPremiumDailyRemove(replacedServiceToken, *result.ItemService); exists {
+				player.SendToSelf(&premiumRemoved)
+			}
 			if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
 				buffRemoved := model.BuildBuffRemove(replacedServiceToken)
 				player.SendToSelfAndKnown(&buffRemoved)
@@ -323,6 +326,9 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 				added := model.BuildItemPerkAdd(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken, result.ItemService.DailyBudget, remaining)
 				player.SendToSelfAndKnown(&added)
 			}
+			if premiumAdded, exists := model.BuildPremiumDailyAdd(serviceToken, *result.ItemService, remaining); exists {
+				player.SendToSelf(&premiumAdded)
+			}
 			if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), serviceToken, *result.ItemService, remaining); exists {
 				player.SendToSelfAndKnown(&buffAdded)
 			}
@@ -331,6 +337,9 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 					if model.ItemServiceUsesItemPerk(*result.ItemService) {
 						removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken)
 						player.SendToSelfAndKnown(&removed)
+					}
+					if premiumRemoved, exists := model.BuildPremiumDailyRemove(serviceToken, *result.ItemService); exists {
+						player.SendToSelf(&premiumRemoved)
 					}
 					if model.ItemServiceBuffSkillID(*result.ItemService) != 0 {
 						buffRemoved := model.BuildBuffRemove(serviceToken)

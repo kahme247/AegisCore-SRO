@@ -828,10 +828,14 @@ func (p *Player) Broadcast(packet *network.Packet) {
 }
 
 func (p *Player) SendToSelfAndKnown(packet *network.Packet) {
-	if p.Session != nil && p.Session.Conn != nil {
-		p.Session.Send(*packet)
-	}
+	p.SendToSelf(packet)
 	p.Broadcast(packet)
+}
+
+func (p *Player) SendToSelf(packet *network.Packet) {
+	if p != nil && packet != nil && p.Session != nil && p.Session.Conn != nil {
+		_ = p.Session.Send(*packet)
+	}
 }
 
 func (p *Player) StopMovement() {

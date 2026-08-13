@@ -14,6 +14,7 @@ var (
 	ErrItemUseUnsupported           = errors.New("item use is not supported")
 	ErrItemUseNoEffect              = errors.New("item use would have no effect")
 	ErrItemUseOutcomeUnknown        = errors.New("item-use transaction outcome is unknown")
+	ErrItemServiceDailyUnavailable  = errors.New("item-service daily activation is unavailable")
 )
 
 type ItemUseResult struct {
@@ -65,12 +66,15 @@ type ItemServiceEffect struct {
 	ExperienceBonusPercent      uint32
 	SkillExperienceBonusPercent uint32
 	DailyBudget                 time.Duration
+	DailyUsedOn                 time.Time
+	DailyActiveUntil            time.Time
 	ActivatedAt                 time.Time
 	ExpiresAt                   time.Time
 }
 
 type ItemServiceRepository interface {
 	LoadItemServices(context.Context, int64) ([]ItemServiceEffect, error)
+	ActivateItemServiceDaily(context.Context, int64, ItemServiceKind, time.Time) (time.Time, error)
 }
 
 type SQLItemUseRepository struct{ shard *sql.DB }
@@ -273,7 +277,7 @@ func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rows, err := r.shard.QueryContext(ctx, "SELECT `SERVICE_KIND`,`SOURCE_REF_ITEM_ID`,`EXPERIENCE_BONUS_PERCENT`,`SKILL_EXPERIENCE_BONUS_PERCENT`,`DAILY_BUDGET_MS`,`ACTIVATED_AT`,`EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY `SERVICE_KIND`", characterID)
+	rows, err := r.shard.QueryContext(ctx, "SELECT s.`SERVICE_KIND`,s.`SOURCE_REF_ITEM_ID`,s.`EXPERIENCE_BONUS_PERCENT`,s.`SKILL_EXPERIENCE_BONUS_PERCENT`,s.`DAILY_BUDGET_MS`,s.`ACTIVATED_AT`,s.`EXPIRES_AT`,d.`USED_ON`,d.`ACTIVE_UNTIL` FROM `CHAR_ITEM_SERVICE` s LEFT JOIN `CHAR_ITEM_SERVICE_DAILY` d ON d.`CHAR_ID`=s.`CHAR_ID` AND d.`SERVICE_KIND`=s.`SERVICE_KIND` WHERE s.`CHAR_ID`=? AND s.`EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY s.`SERVICE_KIND`", characterID)
 	if err != nil {
 		return nil, fmt.Errorf("load character item services: %w", err)
 	}
@@ -282,15 +286,72 @@ func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID
 	for rows.Next() {
 		var effect ItemServiceEffect
 		var budgetMS int64
-		if err = rows.Scan(&effect.Kind, &effect.SourceRefItemID, &effect.ExperienceBonusPercent, &effect.SkillExperienceBonusPercent, &budgetMS, &effect.ActivatedAt, &effect.ExpiresAt); err != nil {
+		var usedOn, activeUntil sql.NullTime
+		if err = rows.Scan(&effect.Kind, &effect.SourceRefItemID, &effect.ExperienceBonusPercent, &effect.SkillExperienceBonusPercent, &budgetMS, &effect.ActivatedAt, &effect.ExpiresAt, &usedOn, &activeUntil); err != nil {
 			return nil, fmt.Errorf("scan character item service: %w", err)
 		}
 		effect.DailyBudget = time.Duration(budgetMS) * time.Millisecond
 		effect.ActivatedAt = effect.ActivatedAt.UTC()
 		effect.ExpiresAt = effect.ExpiresAt.UTC()
+		if usedOn.Valid {
+			effect.DailyUsedOn = usedOn.Time.UTC()
+		}
+		if activeUntil.Valid {
+			effect.DailyActiveUntil = activeUntil.Time.UTC()
+		}
 		effects = append(effects, effect)
 	}
 	return effects, rows.Err()
+}
+
+func (r *SQLItemUseRepository) ActivateItemServiceDaily(ctx context.Context, characterID int64, kind ItemServiceKind, now time.Time) (activeUntil time.Time, err error) {
+	if r == nil || r.shard == nil {
+		return time.Time{}, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 || kind == 0 {
+		return time.Time{}, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now = now.UTC()
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("begin item-service daily activation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var sourceRefItemID uint32
+	var budgetMS int64
+	var expiresAt time.Time
+	if err = tx.QueryRowContext(ctx, "SELECT `SOURCE_REF_ITEM_ID`,`DAILY_BUDGET_MS`,`EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `SERVICE_KIND`=? FOR UPDATE", characterID, kind).Scan(&sourceRefItemID, &budgetMS, &expiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, ErrItemServiceDailyUnavailable
+		}
+		return time.Time{}, fmt.Errorf("lock item-service daily activation: %w", err)
+	}
+	if premiumDailyServiceRefItemID(ItemServiceEffect{SourceRefItemID: sourceRefItemID}) == 0 || budgetMS <= 0 || !expiresAt.After(now) {
+		return time.Time{}, ErrItemServiceDailyUnavailable
+	}
+	var usedOn time.Time
+	err = tx.QueryRowContext(ctx, "SELECT `USED_ON` FROM `CHAR_ITEM_SERVICE_DAILY` WHERE `CHAR_ID`=? AND `SERVICE_KIND`=?", characterID, kind).Scan(&usedOn)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("load item-service daily activation: %w", err)
+	}
+	if err == nil && sameUTCDate(usedOn, now) {
+		return time.Time{}, ErrItemServiceDailyUnavailable
+	}
+	activeUntil = now.Add(time.Duration(budgetMS) * time.Millisecond)
+	if activeUntil.After(expiresAt) {
+		activeUntil = expiresAt
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_ITEM_SERVICE_DAILY` (`CHAR_ID`,`SERVICE_KIND`,`USED_ON`,`ACTIVE_UNTIL`) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE `USED_ON`=VALUES(`USED_ON`),`ACTIVE_UNTIL`=VALUES(`ACTIVE_UNTIL`)", characterID, kind, now.Format("2006-01-02"), activeUntil); err != nil {
+		return time.Time{}, fmt.Errorf("persist item-service daily activation: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return time.Time{}, fmt.Errorf("commit item-service daily activation: %w", err)
+	}
+	return activeUntil.UTC(), nil
 }
 
 const maximumSpeedEffectDuration = 24 * time.Hour

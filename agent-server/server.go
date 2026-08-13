@@ -240,6 +240,7 @@ func NewAgentServer() (AgentServer, error) {
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv)
 	character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
 	character.RegisterGuideHandler(&serv)
+	character.RegisterPremiumDailyHandler(&serv, repositories.ItemServices)
 	ping.RegisterHandler(&serv)
 	movementHandler := character.RegisterMovementHandler(&serv)
 	character.RegisterSelectEntityHandler(&serv)

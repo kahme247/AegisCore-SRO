@@ -108,6 +108,9 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, replacedToken)
 			h.publishPacket(player, &removed)
 		}
+		if premiumRemoved, exists := model.BuildPremiumDailyRemove(replacedToken, effect); exists {
+			player.SendToSelf(&premiumRemoved)
+		}
 		if model.ItemServiceBuffSkillID(effect) != 0 {
 			buffRemoved := model.BuildBuffRemove(replacedToken)
 			h.publishPacket(player, &buffRemoved)
@@ -121,6 +124,9 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
 		h.publishPacket(player, &added)
 	}
+	if premiumAdded, exists := model.BuildPremiumDailyAdd(token, effect, remaining); exists {
+		player.SendToSelf(&premiumAdded)
+	}
 	if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
 		h.publishPacket(player, &buffAdded)
 	}
@@ -133,6 +139,9 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 			if model.ItemServiceUsesItemPerk(effect) {
 				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
 				h.publishPacket(player, &removed)
+			}
+			if premiumRemoved, exists := model.BuildPremiumDailyRemove(token, effect); exists {
+				player.SendToSelf(&premiumRemoved)
 			}
 			if model.ItemServiceBuffSkillID(effect) != 0 {
 				buffRemoved := model.BuildBuffRemove(token)

@@ -43,10 +43,58 @@ func (p *Player) ItemServiceRates(now time.Time) (experienceBonus, skillExperien
 			delete(p.itemServiceTokens, kind)
 			continue
 		}
+		if premiumDailyServiceRefItemID(effect) != 0 && !effect.DailyActiveUntil.After(now) {
+			continue
+		}
 		experienceBonus += effect.ExperienceBonusPercent
 		skillExperienceBonus += effect.SkillExperienceBonusPercent
 	}
 	return experienceBonus, skillExperienceBonus
+}
+
+func (p *Player) PremiumDailyState(now time.Time, serviceRefItemID, token uint32) (ItemServiceEffect, bool) {
+	if p == nil || serviceRefItemID == 0 || token == 0 {
+		return ItemServiceEffect{}, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	for kind, effect := range p.itemServices {
+		if !effect.ExpiresAt.After(now) {
+			delete(p.itemServices, kind)
+			delete(p.itemServiceTokens, kind)
+			continue
+		}
+		if p.itemServiceTokens[kind] == token && premiumDailyServiceRefItemID(effect) == serviceRefItemID {
+			return effect, true
+		}
+	}
+	return ItemServiceEffect{}, false
+}
+
+func (p *Player) ActivateItemServiceDaily(kind ItemServiceKind, token uint32, usedOn, activeUntil time.Time) bool {
+	if p == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.itemServiceTokens[kind] != token {
+		return false
+	}
+	effect, exists := p.itemServices[kind]
+	if !exists {
+		return false
+	}
+	effect.DailyUsedOn = usedOn.UTC()
+	effect.DailyActiveUntil = activeUntil.UTC()
+	p.itemServices[kind] = effect
+	return true
+}
+
+func sameUTCDate(left, right time.Time) bool {
+	left = left.UTC()
+	right = right.UTC()
+	leftYear, leftDay := left.Year(), left.YearDay()
+	return leftYear == right.Year() && leftDay == right.YearDay()
 }
 
 func (p *Player) ItemServices(now time.Time) []ItemServiceEffect {

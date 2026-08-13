@@ -31,6 +31,10 @@ const (
 	AlchemyElixirResponse    uint16 = 0xB150
 	InventoryItemUpdate      uint16 = 0x3040
 	ItemMallBalanceUpdate    uint16 = 0x3153
+	PremiumDailyAdd          uint16 = 0x3159
+	PremiumDailyRemove       uint16 = 0x315B
+	PremiumDailyUseRequest   uint16 = 0x715F
+	PremiumDailyUseResponse  uint16 = 0xB15F
 	ItemPerkAdd              uint16 = 0x325F
 	ItemPerkRemove           uint16 = 0x3261
 
