@@ -73,6 +73,116 @@ type npcCombatState struct {
 	maxHit     int
 	experience uint64
 	decay      time.Duration
+	statuses   map[CombatStatusKind]CombatStatus
+	baseSpeed  *npcBaseSpeed
+}
+
+type npcBaseSpeed struct {
+	walk float32
+	run  float32
+}
+
+type CombatStatusKind byte
+
+const (
+	CombatStatusShock CombatStatusKind = iota + 1
+	CombatStatusBurn
+	CombatStatusFreeze
+	CombatStatusFrostbite
+)
+
+type CombatStatus struct {
+	Kind      CombatStatusKind
+	Token     uint32
+	SourceUID uint32
+	SkillID   uint32
+	Power     int
+	ExpiresAt time.Time
+}
+
+func (n *NPC) ApplyCombatStatus(status CombatStatus) bool {
+	if n == nil || status.Kind == 0 || status.SkillID == 0 || status.ExpiresAt.IsZero() {
+		return false
+	}
+	n.combat.mutex.Lock()
+	if n.LifeState == Dead || n.combat.hitPoints <= 0 {
+		n.combat.mutex.Unlock()
+		return false
+	}
+	if n.combat.statuses == nil {
+		n.combat.statuses = make(map[CombatStatusKind]CombatStatus)
+	}
+	n.combat.statuses[status.Kind] = status
+	n.combat.mutex.Unlock()
+	n.applyStatusMovementEffect(status.Kind, status.Power, time.Now())
+	return true
+}
+
+func (n *NPC) CombatStatus(kind CombatStatusKind, now time.Time) (CombatStatus, bool) {
+	if n == nil || kind == 0 {
+		return CombatStatus{}, false
+	}
+	n.combat.mutex.Lock()
+	status, exists := n.combat.statuses[kind]
+	if !exists {
+		n.combat.mutex.Unlock()
+		return CombatStatus{}, false
+	}
+	if !status.ExpiresAt.After(now) {
+		delete(n.combat.statuses, kind)
+		n.combat.mutex.Unlock()
+		n.restoreStatusMovementEffect(kind)
+		return CombatStatus{}, false
+	}
+	n.combat.mutex.Unlock()
+	return status, true
+}
+
+func (n *NPC) applyStatusMovementEffect(kind CombatStatusKind, power int, now time.Time) {
+	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite) {
+		return
+	}
+	n.combat.mutex.Lock()
+	if n.combat.baseSpeed == nil {
+		n.combat.baseSpeed = &npcBaseSpeed{walk: n.GetWalkSpeed(), run: n.GetRunSpeed()}
+	}
+	base := *n.combat.baseSpeed
+	n.combat.mutex.Unlock()
+	if kind == CombatStatusFreeze {
+		n.WalkSpeed = 0
+		n.RunSpeed = 0
+		return
+	}
+	reduction := power
+	if reduction > 100 {
+		reduction = 100
+	}
+	if reduction < 0 {
+		reduction = 0
+	}
+	factor := float32(100-reduction) / 100
+	n.WalkSpeed = base.walk * factor
+	n.RunSpeed = base.run * factor
+}
+
+func (n *NPC) restoreStatusMovementEffect(kind CombatStatusKind) {
+	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite) {
+		return
+	}
+	n.combat.mutex.Lock()
+	base := n.combat.baseSpeed
+	if kind == CombatStatusFreeze {
+		n.combat.baseSpeed = nil
+	} else if _, frozen := n.combat.statuses[CombatStatusFreeze]; frozen {
+		n.combat.mutex.Unlock()
+		return
+	}
+	n.combat.mutex.Unlock()
+	if base == nil {
+		return
+	}
+	n.WalkSpeed = base.walk
+	n.RunSpeed = base.run
 }
 
 type npcAIState struct {

@@ -40,6 +40,55 @@ func TestRefSkillClassifiesHealingAndResurrection(t *testing.T) {
 	}
 }
 
+func TestRefSkillParsesLightningImbueTransferAndShock(t *testing.T) {
+	skill := RefSkill{BasicActivity: 2}
+	skill.Params = [50]int{
+		3, skillParameterDuration, 8000,
+		skillParameterAttack, 8, 100, 964, 1791, 100,
+		skillParameterShock, 240, 25, 50,
+		skillParameterTransfer, 1, 6, 50, 2, 80, 24,
+	}
+	skill.parseParameters()
+	if !skill.IsWeaponImbue() || skill.ExecutionKind() != SkillExecutionBuff {
+		t.Fatalf("lightning skill was not classified as an imbue: %+v", skill)
+	}
+	if skill.ShockPower != 240 || skill.ShockChance != 25 || skill.ShockDuration != 5000 {
+		t.Fatalf("shock = power:%d chance:%d duration:%d", skill.ShockPower, skill.ShockChance, skill.ShockDuration)
+	}
+	if skill.TransferRange != 50 || skill.TransferCount != 2 {
+		t.Fatalf("transfer = range:%d count:%d", skill.TransferRange, skill.TransferCount)
+	}
+}
+
+func TestRefSkillParsesFireAndColdImbueStatuses(t *testing.T) {
+	fire := RefSkill{BasicActivity: 2}
+	copy(fire.Params[:], []int{
+		3, skillParameterDuration, 8000,
+		skillParameterAttack, 8, 100, 1216, 2026, 100,
+		skillParameterBurn, 240, 25, 108,
+	})
+	fire.parseParameters()
+	if len(fire.StatusEffects) != 1 || fire.StatusEffects[0] != (SkillStatusEffect{Kind: CombatStatusBurn, Power: 240, Chance: 25, DurationMS: 10800}) {
+		t.Fatalf("fire statuses = %+v", fire.StatusEffects)
+	}
+
+	cold := RefSkill{BasicActivity: 2}
+	copy(cold.Params[:], []int{
+		3, skillParameterDuration, 8000,
+		skillParameterAttack, 8, 100, 993, 1489, 100,
+		skillParameterFreeze, 240, 5,
+		skillParameterFrostbite, 240, 25,
+	})
+	cold.parseParameters()
+	want := []SkillStatusEffect{
+		{Kind: CombatStatusFreeze, Power: 240, Chance: 5, DurationMS: 5000},
+		{Kind: CombatStatusFrostbite, Power: 240, Chance: 25, DurationMS: 5000},
+	}
+	if len(cold.StatusEffects) != len(want) || cold.StatusEffects[0] != want[0] || cold.StatusEffects[1] != want[1] {
+		t.Fatalf("cold statuses = %+v, want %+v", cold.StatusEffects, want)
+	}
+}
+
 func TestRefSkillParsesVerifiedBuffModifiers(t *testing.T) {
 	var skill RefSkill
 	copy(skill.Params[:], []int{

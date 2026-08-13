@@ -27,6 +27,9 @@ const (
 	mobWanderDelay       = 8 * time.Second
 	mobPursuitRefresh    = time.Second
 	maximumMobWireDamage = 0xFFFFFF
+	// B071 must arrive after B070 has created the client action; otherwise the
+	// stock client applies HP but discards the hit effect and damage text.
+	mobClientActionRegistrationDelay = 100 * time.Millisecond
 )
 
 type mobAIWorld interface {
@@ -184,6 +187,19 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		m.clearPendingAttack(npc.GetUniqueID())
 		return
 	}
+	_, frozen := npc.CombatStatus(model.CombatStatusFreeze, now)
+	_, shocked := npc.CombatStatus(model.CombatStatusShock, now)
+	if frozen || shocked {
+		m.clearPendingAttack(npc.GetUniqueID())
+		if npc.GetMotionState() != model.NoMotion {
+			reason := "mob-shocked"
+			if frozen {
+				reason = "mob-frozen"
+			}
+			world.StopMovingCharacter(npc, npc.GetNavmeshPosition(), reason, true)
+		}
+		return
+	}
 	if m.resolvePendingAttack(world, npc, now) {
 		return
 	}
@@ -303,7 +319,12 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 		attackRange = mobAttackRange
 	}
 
-	delay := milliseconds(skill.ActionDuration)
+	// The client plays the full action duration independently. Damage belongs at
+	// the authored impact point: preparation plus casting time.
+	delay := milliseconds(skill.ActionPreparingTime + skill.ActionCastingTime)
+	if delay < mobClientActionRegistrationDelay {
+		delay = mobClientActionRegistrationDelay
+	}
 	cooldown := milliseconds(skill.CoolTime)
 	if reuse := milliseconds(skill.ReuseDelay); reuse > cooldown {
 		cooldown = reuse

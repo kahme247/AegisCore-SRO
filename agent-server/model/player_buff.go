@@ -9,6 +9,19 @@ type ActiveBuff struct {
 	Modifiers BuffModifiers
 }
 
+func (p *Player) ActiveBuffSnapshot() []ActiveBuff {
+	if p == nil {
+		return nil
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	buffs := make([]ActiveBuff, 0, len(p.ActiveBuffs))
+	for _, buff := range p.ActiveBuffs {
+		buffs = append(buffs, buff)
+	}
+	return buffs
+}
+
 func (p *Player) CommitActiveBuff(skillID, token uint32, duration time.Duration, modifiers BuffModifiers) (replacedToken uint32, ok bool) {
 	if p == nil || skillID == 0 || token == 0 || duration <= 0 {
 		return 0, false
@@ -44,6 +57,23 @@ func (p *Player) RemoveActiveBuff(token uint32) bool {
 	p.applyBuffModifiersLocked(buff.Modifiers, -1)
 	delete(p.ActiveBuffs, token)
 	return true
+}
+
+func (p *Player) RemoveActiveBuffBySkill(skillID uint32) (uint32, bool) {
+	if p == nil || skillID == 0 {
+		return 0, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	for token, buff := range p.ActiveBuffs {
+		if buff.SkillID != skillID {
+			continue
+		}
+		p.applyBuffModifiersLocked(buff.Modifiers, -1)
+		delete(p.ActiveBuffs, token)
+		return token, true
+	}
+	return 0, false
 }
 
 func (p *Player) applyBuffModifiersLocked(modifiers BuffModifiers, direction int) {

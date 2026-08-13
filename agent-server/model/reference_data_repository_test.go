@@ -160,7 +160,7 @@ func TestReferenceDataRepositoryLoadsCompleteSnapshotThroughInjectedPool(t *test
 	if got, ok := snapshot.Characters[2002]; !ok || got.ID != 2002 {
 		t.Fatalf("character snapshot = %#v, present = %t; want ID 2002", got, ok)
 	}
-	if got, ok := snapshot.Skills[160]; !ok || got.BasicActivity != 2 || got.ConsumeMP != 50 || got.RequiredWeapon1 != 11 || !got.TargetEnemyMob || !got.IsMagicalAttack() || got.ActionDuration != 2400 || got.ReuseDelay != 3000 || got.ActionRange != 10 || got.AttackPercent != 325 || got.AttackMin != 32 || got.AttackMax != 39 {
+	if got, ok := snapshot.Skills[160]; !ok || got.BasicActivity != 2 || got.ConsumeMP != 50 || got.RequiredWeapon1 != 11 || !got.TargetEnemyMob || !got.IsMagicalAttack() || got.ActionPreparingTime != 200 || got.ActionCastingTime != 600 || got.ActionDuration != 2400 || got.ReuseDelay != 3000 || got.ActionRange != 10 || got.AttackPercent != 325 || got.AttackMin != 32 || got.AttackMax != 39 {
 		t.Fatalf("skill snapshot = %#v, present = %t; want reference timing for skill 160", got, ok)
 	}
 	if len(snapshot.Items) != 1 || len(snapshot.Characters) != 1 || len(snapshot.Skills) != 1 {
@@ -380,7 +380,7 @@ func referenceDataCountResponse(count int64) referenceDataRepositoryTestResponse
 }
 
 func referenceDataSkillDriverRow(id int64) ([]string, []driver.Value) {
-	columns := []string{"ID", "GROUP_ID", "BASIC_GROUP", "BASIC_ORIGINAL", "BASIC_LEVEL", "BASIC_ACTIVITY", "BASIC_CHAINCODE", "REQCOMMON_MASTERY1", "REQCOMMON_MASTERY2", "REQCOMMON_MASTERYLEVEL1", "REQCOMMON_MASTERYLEVEL2", "REQCOMMON_STR", "REQCOMMON_INT", "REQLEARN_SKILL1", "REQLEARN_SKILL2", "REQLEARN_SKILL3", "REQLEARN_SKILLLEVEL1", "REQLEARN_SKILLLEVEL2", "REQLEARN_SKILLLEVEL3", "REQLEARN_SP", "REQLEARN_RACE", "TARGET_REQUIRED", "TARGETGROUP_SELF", "TARGETGROUP_ALLY", "TARGETGROUP_PARTY", "TARGETGROUP_ENEMY_M", "TARGETGROUP_ENEMY_P", "TARGETETC_SELECTDEADBODY", "REQCAST_WEAPON1", "REQCAST_WEAPON2", "CONSUME_HP", "CONSUME_MP", "CONSUME_HPRATIO", "CONSUME_MPRATIO", "ACTION_ACTIONDURATION", "ACTION_REUSEDELAY", "ACTION_COOLTIME", "ACTION_RANGE"}
+	columns := []string{"ID", "GROUP_ID", "BASIC_GROUP", "BASIC_ORIGINAL", "BASIC_LEVEL", "BASIC_ACTIVITY", "BASIC_CHAINCODE", "REQCOMMON_MASTERY1", "REQCOMMON_MASTERY2", "REQCOMMON_MASTERYLEVEL1", "REQCOMMON_MASTERYLEVEL2", "REQCOMMON_STR", "REQCOMMON_INT", "REQLEARN_SKILL1", "REQLEARN_SKILL2", "REQLEARN_SKILL3", "REQLEARN_SKILLLEVEL1", "REQLEARN_SKILLLEVEL2", "REQLEARN_SKILLLEVEL3", "REQLEARN_SP", "REQLEARN_RACE", "TARGET_REQUIRED", "TARGETGROUP_SELF", "TARGETGROUP_ALLY", "TARGETGROUP_PARTY", "TARGETGROUP_ENEMY_M", "TARGETGROUP_ENEMY_P", "TARGETETC_SELECTDEADBODY", "REQCAST_WEAPON1", "REQCAST_WEAPON2", "CONSUME_HP", "CONSUME_MP", "CONSUME_HPRATIO", "CONSUME_MPRATIO", "ACTION_PREPARINGTIME", "ACTION_CASTINGTIME", "ACTION_ACTIONDURATION", "ACTION_REUSEDELAY", "ACTION_COOLTIME", "ACTION_RANGE"}
 	for index := range 50 {
 		columns = append(columns, fmt.Sprintf("PARAM%d", index+1))
 	}
@@ -392,8 +392,8 @@ func referenceDataSkillDriverRow(id int64) ([]string, []driver.Value) {
 	row[4], row[5], row[7], row[9] = int64(1), int64(2), int64(257), int64(1)
 	row[18], row[20], row[21], row[25] = int64(1), int64(0), int64(1), int64(1)
 	row[28], row[29], row[31] = int64(11), int64(255), int64(50)
-	row[34], row[35], row[36], row[37] = int64(2400), int64(3000), int64(3000), int64(10)
-	row[39], row[40], row[41], row[42], row[43] = int64(skillParameterAttack), int64(9), int64(325), int64(32), int64(39)
+	row[34], row[35], row[36], row[37], row[38], row[39] = int64(200), int64(600), int64(2400), int64(3000), int64(3000), int64(10)
+	row[41], row[42], row[43], row[44], row[45] = int64(skillParameterAttack), int64(9), int64(325), int64(32), int64(39)
 	return columns, row
 }
 

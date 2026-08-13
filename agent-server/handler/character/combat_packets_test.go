@@ -237,6 +237,102 @@ func TestCombatNormalAttackAppliesToAllNearbyFieldMobReferences(t *testing.T) {
 	}
 }
 
+func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
+	const imbueID = uint32(8129)
+	now := time.Unix(1000, 0)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, BaseStats: model.BaseStats{Str: 20, Int: 20}, Skills: map[uint32]byte{imbueID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	newMob := func(uid uint32, x float32) *model.NPC {
+		mob := &model.NPC{SRObject: model.SRObject{
+			UniqueID: uid, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+			RtNavmeshPosition: combatTestPosition(24231, x, 0, 100),
+		}, Type: "NPC", Mutex: &sync.Mutex{}}
+		mob.ConfigureCombat(10000, 10)
+		mob.SetLifeState(model.Alive)
+		mob.KnownObjectList = model.NewKnownObjectList(mob)
+		player.GetKnownObjectList().AddObject(mob)
+		return mob
+	}
+	primary := newMob(200, 104)
+	secondary1 := newMob(201, 106)
+	secondary2 := newMob(202, 108)
+	outside := newMob(203, 110)
+	imbue := model.RefSkill{
+		ID: imbueID, BasicActivity: 2, BuffDuration: 8000, AttackType: 8, AttackPercent: 100, AttackMin: 964, AttackMax: 1791,
+		ShockPower: 240, ShockChance: 25, ShockDuration: 5000, TransferRange: 50, TransferCount: 2,
+	}
+	if _, ok := player.CommitActiveBuff(imbueID, 900, 8*time.Second, model.BuffModifiers{}); !ok {
+		t.Fatal("failed to arrange lightning imbue")
+	}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:         &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{primary.GetUniqueID(): primary}},
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{imbueID: imbue}}),
+		nextAttack:    make(map[uint32]time.Time), now: func() time.Time { return now }, rollPercent: func(chance int) bool { return chance == 25 },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatAttackPacket(primary.GetUniqueID())); err != nil {
+		t.Fatalf("imbued attack: %v", err)
+	}
+	if got, want := primary.CurrentHitPoints(), 8601; got != want {
+		t.Fatalf("primary HP = %d, want %d", got, want)
+	}
+	for _, mob := range []*model.NPC{secondary1, secondary2} {
+		if got, want := mob.CurrentHitPoints(), 8612; got != want {
+			t.Fatalf("secondary %d HP = %d, want %d", mob.GetUniqueID(), got, want)
+		}
+		status, exists := mob.CombatStatus(model.CombatStatusShock, now)
+		if !exists || status.Power != 240 || !status.ExpiresAt.Equal(now.Add(5*time.Second)) {
+			t.Fatalf("secondary %d shock = %+v exists=%t", mob.GetUniqueID(), status, exists)
+		}
+	}
+	if outside.CurrentHitPoints() != 10000 {
+		t.Fatalf("outside target HP = %d, want untouched", outside.CurrentHitPoints())
+	}
+	if status, exists := primary.CombatStatus(model.CombatStatusShock, now); !exists || status.Power != 240 {
+		t.Fatalf("primary shock = %+v exists=%t", status, exists)
+	}
+}
+
+func TestCombatFireImbueBurnTicksAuthoritativeDamage(t *testing.T) {
+	const imbueID = uint32(8214)
+	now := time.Unix(1000, 0)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session}
+	player.SetLifeState(model.Alive)
+	target := &model.NPC{SRObject: model.SRObject{
+		UniqueID: 200, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+	}, Mutex: &sync.Mutex{}}
+	target.ConfigureCombat(1000, 10)
+	target.SetLifeState(model.Alive)
+	target.KnownObjectList = model.NewKnownObjectList(target)
+	var scheduled func()
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: &combatWorldFake{player: player}, now: func() time.Time { return now }, rollPercent: func(int) bool { return true },
+		schedule:  func(_ time.Duration, callback func()) { scheduled = callback },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	imbue := model.RefSkill{ID: imbueID, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusBurn, Power: 240, Chance: 25, DurationMS: 10800}}}
+	handler.applyImbueStatuses(session, player, target, imbue, now)
+	if scheduled == nil {
+		t.Fatal("burn did not schedule its first tick")
+	}
+	scheduled()
+	if got, want := target.CurrentHitPoints(), 760; got != want {
+		t.Fatalf("burned HP = %d, want %d", got, want)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.EntitySkillCastBegin {
+		t.Fatalf("burn packets = %04X", packetOpcodesForCombat(sent))
+	}
+}
+
 func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	const skillID = uint32(315)
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
@@ -509,7 +605,7 @@ func TestCombatSelfHealingPersistsVitalsAndPublishesCast(t *testing.T) {
 		world:  &combatWorldFake{player: player},
 		vitals: vitals,
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-			skillID: {ID: skillID, BasicActivity: 2, TargetSelf: true, HealHP: 50, HealMP: 20, ConsumeMP: 10, ReuseDelay: 1000},
+			skillID: {ID: skillID, BasicActivity: 2, TargetRequired: false, TargetSelf: false, HealHP: 50, HealMP: 20, ConsumeMP: 10, ReuseDelay: 1000},
 		}}),
 		nextSkill: make(map[skillCooldownKey]time.Time),
 		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
@@ -531,6 +627,31 @@ func TestCombatSelfHealingPersistsVitalsAndPublishesCast(t *testing.T) {
 	want := []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse, opcode.EntityUpdateStatus}
 	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, want) {
 		t.Fatalf("healing packets = %04X, want %04X", got, want)
+	}
+}
+
+func TestCombatRightClickCancelsOwnedActiveBuff(t *testing.T) {
+	const skillID = uint32(1377)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session, Skills: map[uint32]byte{skillID: 1}}
+	player.SetLifeState(model.Alive)
+	if _, ok := player.CommitActiveBuff(skillID, 900, time.Minute, model.BuffModifiers{DamagePercent: 5}); !ok {
+		t.Fatal("failed to arrange active buff")
+	}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:     &combatWorldFake{player: player},
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatCancelBuffPacket(skillID)); err != nil {
+		t.Fatalf("cancel buff: %v", err)
+	}
+	if len(player.ActiveBuffs) != 0 || player.BonusAttackStats.PhyAttackPercent != 0 {
+		t.Fatalf("active buff was not rolled back: %#v", player.ActiveBuffs)
+	}
+	if got, want := packetOpcodesForCombat(sent), []uint16{opcode.EntityBuffRemove, opcode.EntityUpdateStats}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("cancel packets = %04X, want %04X", got, want)
 	}
 }
 
@@ -1030,6 +1151,15 @@ func combatSelfSkillPacket(skillID uint32) network.Packet {
 	packet := network.EmptyClientPacket()
 	packet.WriteByte(actionPhaseStart)
 	packet.WriteByte(actionTypeAttack)
+	packet.WriteUInt32(skillID)
+	packet.WriteByte(0)
+	return packet
+}
+
+func combatCancelBuffPacket(skillID uint32) network.Packet {
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(actionPhaseStart)
+	packet.WriteByte(actionTypeDispel)
 	packet.WriteUInt32(skillID)
 	packet.WriteByte(0)
 	return packet

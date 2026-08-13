@@ -25,6 +25,53 @@ func TestNPCApplyDamageIsAtomicAndAwardsOneDeath(t *testing.T) {
 	}
 }
 
+func TestNPCCombatStatusMovesAndRestoresFrostbite(t *testing.T) {
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.SetLifeState(Alive)
+	npc.ConfigureCombat(100, 10)
+	npc.SetWalkSpeed(8)
+	npc.SetRunSpeed(22)
+	now := time.Unix(1000, 0)
+	if !npc.ApplyCombatStatus(CombatStatus{Kind: CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 50, ExpiresAt: now.Add(time.Second)}) {
+		t.Fatal("frostbite was not applied")
+	}
+	if got := npc.GetRunSpeed(); got != 11 {
+		t.Fatalf("frostbite speed = %g, want 11", got)
+	}
+	if _, exists := npc.CombatStatus(CombatStatusFrostbite, now.Add(2*time.Second)); exists {
+		t.Fatal("expired frostbite remained active")
+	}
+	if got := npc.GetRunSpeed(); got != 22 {
+		t.Fatalf("restored speed = %g, want 22", got)
+	}
+}
+
+func TestNPCFreezeStopsAndRestoresMovement(t *testing.T) {
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.SetLifeState(Alive)
+	npc.ConfigureCombat(100, 10)
+	npc.SetWalkSpeed(8)
+	npc.SetRunSpeed(22)
+	now := time.Unix(1000, 0)
+	frozenSpeed := npc.GetRunSpeed()
+	if frozenSpeed != 22 {
+		t.Fatalf("arranged speed = %g, want 22", frozenSpeed)
+	}
+	if !npc.ApplyCombatStatus(CombatStatus{Kind: CombatStatusFreeze, Token: 1, SkillID: 7972, Power: 240, ExpiresAt: now.Add(time.Second)}) {
+		t.Fatal("freeze was not applied")
+	}
+	npc.applyStatusMovementEffect(CombatStatusFreeze, 240, now)
+	if npc.WalkSpeed != 0 || npc.RunSpeed != 0 {
+		t.Fatalf("freeze speed = %g/%g, want 0/0", npc.WalkSpeed, npc.RunSpeed)
+	}
+	if _, exists := npc.CombatStatus(CombatStatusFreeze, now.Add(2*time.Second)); exists {
+		t.Fatal("expired freeze remained active")
+	}
+	if got := npc.GetRunSpeed(); got != 22 {
+		t.Fatalf("restored speed = %g, want 22", got)
+	}
+}
+
 func TestNPCDeathQueuesOneReplacement(t *testing.T) {
 	area := &SpawnArea{
 		Spawn:       Spawn{DelayTimeMin: 1, DelayTimeMax: 1},

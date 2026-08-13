@@ -131,11 +131,11 @@ func TestMobAIAttackDamagesPlayerOnCooldown(t *testing.T) {
 	if got := player.CurrentHP(); got != 100 {
 		t.Fatalf("HP at cast start = %d, want 100 before the reference delay", got)
 	}
-	manager.tick(world, now.Add(2*time.Second))
+	manager.tick(world, now.Add(799*time.Millisecond))
 	if got := player.CurrentHP(); got != 100 {
 		t.Fatalf("HP before delayed hit = %d, want 100", got)
 	}
-	manager.tick(world, now.Add(2400*time.Millisecond))
+	manager.tick(world, now.Add(800*time.Millisecond))
 	if got := player.CurrentHP(); got != 90 {
 		t.Fatalf("HP after delayed hit = %d, want 90", got)
 	}
@@ -212,7 +212,13 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 		t.Fatalf("HP before reference delay = %d, want 100", got)
 	}
 
-	manager.tick(world, now.Add(2400*time.Millisecond))
+	manager.tick(world, now.Add(799*time.Millisecond))
+	packets = readCapturedPackets(t, conn, 1)
+	if len(packets) != 1 {
+		t.Fatalf("mob packets before cast impact = %#v, want one B070", packetOpcodes(packets))
+	}
+
+	manager.tick(world, now.Add(800*time.Millisecond))
 	packets = readCapturedPackets(t, conn, 3)
 	if len(packets) != 3 || packets[1].MessageID != opcode.EntitySkillCastEnd || packets[2].MessageID != opcode.EntityUpdateStatus {
 		t.Fatalf("completed mob attack sequence = %#v, want B070, B071, then 3057", packetOpcodes(packets))
@@ -233,6 +239,43 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	}
 	if got := player.CurrentHP(); got != 90 {
 		t.Fatalf("HP at B071 = %d, want 90", got)
+	}
+}
+
+func TestMobAIShockSuppressesMovementAndAttack(t *testing.T) {
+	now := time.Now()
+	npc, _ := mobAIFixture(100)
+	npc.ConfigureAI(5, true, 150)
+	npc.SetWalkSpeed(8)
+	npc.SetRunSpeed(22)
+	npc.SetMotionState(model.Running)
+	npc.ConfigureCombat(100, 10)
+	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusShock, Token: 1, SkillID: 8129, Power: 240, ExpiresAt: now.Add(time.Second)})
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	mobAIManagerForTest().tick(world, now)
+	if npc.GetMotionState() != model.NoMotion || world.stops != 1 {
+		t.Fatalf("shocked state = %d stops=%d, want stopped once", npc.GetMotionState(), world.stops)
+	}
+	if world.moves != 0 || world.lastMovement.HasDestination {
+		t.Fatalf("shocked mob moved: %#v", world.lastMovement)
+	}
+}
+
+func TestMobAIZeroImpactTimingWaitsForClientActionRegistration(t *testing.T) {
+	npc, player := mobAIFixture(10)
+	manager := &MobAIManager{pending: make(map[uint32]mobPendingAttack)}
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			160: {ID: 160, ActionRange: 10},
+		},
+	}))
+
+	profile, ok := manager.attackProfile(npc, player, 160)
+	if !ok {
+		t.Fatal("zero-timing attack profile was not found")
+	}
+	if profile.delay != mobClientActionRegistrationDelay {
+		t.Fatalf("zero-timing impact delay = %s, want %s", profile.delay, mobClientActionRegistrationDelay)
 	}
 }
 
@@ -468,7 +511,7 @@ func mobAIManagerForTest() *MobAIManager {
 			1933: {RefObject: model.RefObject{ID: 1933, BCRadius: 6}},
 		},
 		Skills: map[uint32]model.RefSkill{
-			160: {ID: 160, ActionDuration: 2400, ReuseDelay: 3000, CoolTime: 3000, ActionRange: 10, AttackMin: 17, AttackMax: 19},
+			160: {ID: 160, ActionPreparingTime: 200, ActionCastingTime: 600, ActionDuration: 2400, ReuseDelay: 3000, CoolTime: 3000, ActionRange: 10, AttackMin: 17, AttackMax: 19},
 		},
 	}))
 	return manager

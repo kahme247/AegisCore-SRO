@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ const (
 	// `01 | 04 | targetUID:uint32 | 00` on 0x7074.
 	actionTypeAttack       = byte(4)
 	actionTypeAttackLegacy = byte(1)
+	actionTypeDispel       = byte(5)
 	maximumWireDamage      = 0xFFFFFF
 
 	attackPursuitPollInterval  = 25 * time.Millisecond
@@ -81,6 +84,7 @@ type CombatHandler struct {
 	nextAttack    map[uint32]time.Time
 	nextSkill     map[skillCooldownKey]time.Time
 	now           func() time.Time
+	rollPercent   func(int) bool
 }
 
 func RegisterCombatHandler(target *server.Server, progress model.CharacterProgressRepository, levels *model.LevelTable, rates combatRateProvider, quests ...model.QuestRuntimeRepository) *CombatHandler {
@@ -108,6 +112,9 @@ func RegisterCombatHandler(target *server.Server, progress model.CharacterProgre
 		nextAttack: make(map[uint32]time.Time),
 		nextSkill:  make(map[skillCooldownKey]time.Time),
 		now:        time.Now,
+		rollPercent: func(chance int) bool {
+			return chance >= 100 || chance > 0 && rand.Intn(100) < chance
+		},
 	}
 	if len(quests) != 0 {
 		handler.quests = quests[0]
@@ -183,6 +190,23 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	isSelfHealing := false
 	var player *model.Player
 	switch actionType {
+	case actionTypeDispel:
+		if packet.Remaining() != 5 {
+			return fmt.Errorf("buff cancellation payload has %d trailing bytes, want 5", packet.Remaining())
+		}
+		skillID, readErr := packet.ReadUInt32()
+		if readErr != nil {
+			return readErr
+		}
+		terminator, readErr := packet.ReadByte()
+		if readErr != nil {
+			return readErr
+		}
+		player, readErr = h.resolveCombatPlayer(session)
+		if readErr != nil || terminator != 0 {
+			return h.sendActionState(session, false)
+		}
+		return h.cancelSelfBuff(session, player, skillID)
 	case actionTypeAttack:
 		switch packet.Remaining() {
 		case 5:
@@ -197,7 +221,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 			}
 			candidate, exists := h.referenceSkill(candidateID)
 			kind := candidate.ExecutionKind()
-			if terminator == 0 && exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionHealing && candidate.TargetSelf) {
+			if terminator == 0 && exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionHealing && (candidate.TargetSelf || !candidate.TargetRequired)) {
 				player, err = h.resolveCombatPlayer(session)
 				if err == nil && playerOwnsSkill(player, candidateID) {
 					skill, isSkillCast = candidate, true
@@ -314,6 +338,21 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		h.startRepeatingAttack(player, session, target)
 	}
 	return nil
+}
+
+func (h *CombatHandler) cancelSelfBuff(session *server.Session, player *model.Player, skillID uint32) error {
+	if player == nil || !playerOwnsSkill(player, skillID) {
+		return h.sendActionState(session, false)
+	}
+	token, removed := player.RemoveActiveBuffBySkill(skillID)
+	if !removed {
+		return h.sendActionState(session, false)
+	}
+	packet := model.BuildBuffRemove(token)
+	if err := h.emitAttack(player, &packet); err != nil {
+		return err
+	}
+	return h.sendPlayerPacket(session, player.BuildStatsUpdatePacket())
 }
 
 func validHealingTarget(caster, target *model.Player, skill model.RefSkill) bool {
@@ -504,6 +543,16 @@ func (h *CombatHandler) executeSelfBuff(ctx context.Context, session *server.Ses
 	}
 	duration := time.Duration(skill.BuffDuration) * time.Millisecond
 	token := model.NextActionUID()
+	if skill.IsWeaponImbue() {
+		if old, active := h.activeWeaponImbue(player); active && old.ID != skill.ID {
+			if oldToken, removed := player.RemoveActiveBuffBySkill(old.ID); removed {
+				remove := model.BuildBuffRemove(oldToken)
+				if err := h.emitAttack(player, &remove); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	replacedToken, committed := player.CommitActiveBuff(skill.ID, token, duration, skill.BuffModifiers)
 	if !committed {
 		return h.sendActionState(session, false)
@@ -593,6 +642,10 @@ func (h *CombatHandler) executeAttack(ctx context.Context, session *server.Sessi
 	}
 	targetUID := target.GetUniqueID()
 	damage := player.AverageAttackPower(false)
+	imbue, hasImbue := h.activeWeaponImbue(player)
+	if hasImbue {
+		damage += weaponImbueDamage(player, imbue)
+	}
 	if damage < 1 {
 		damage = 1
 	}
@@ -609,6 +662,9 @@ func (h *CombatHandler) executeAttack(ctx context.Context, session *server.Sessi
 	applied, killed := h.applyPlayerDamage(player, target, damage)
 	if applied == 0 {
 		return h.sendActionState(session, false)
+	}
+	if hasImbue {
+		h.applyImbueStatuses(session, player, target, imbue, now)
 	}
 	if err := h.sendActionState(session, true); err != nil {
 		return err
@@ -629,6 +685,11 @@ func (h *CombatHandler) executeAttack(ctx context.Context, session *server.Sessi
 	}
 	if emitErr != nil {
 		return emitErr
+	}
+	if hasImbue {
+		if err := h.applyImbueTransfers(ctx, session, player, target, imbue, now); err != nil {
+			return err
+		}
 	}
 	if !killed {
 		return nil
@@ -677,8 +738,13 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 	}
 	damageHits := make([]uint32, 0, 3)
 	killed := false
+	imbue, hasImbue := h.activeWeaponImbue(player)
 	for _, strike := range h.skillStrikes(skill) {
-		applied, strikeKilled := h.applyPlayerDamage(player, target, skillStrikeDamage(player, strike))
+		damage := skillStrikeDamage(player, strike)
+		if hasImbue {
+			damage = min(damage+weaponImbueDamage(player, imbue), maximumWireDamage)
+		}
+		applied, strikeKilled := h.applyPlayerDamage(player, target, damage)
 		if applied == 0 {
 			break
 		}
@@ -687,6 +753,9 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 			killed = true
 			break
 		}
+	}
+	if hasImbue {
+		h.applyImbueStatuses(session, player, target, imbue, now)
 	}
 	if len(damageHits) == 0 {
 		return h.sendActionState(session, false)
@@ -698,6 +767,11 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 	begin := model.BuildAttackBeginWithSkillHits(skill.ID, playerUID, target.GetUniqueID(), castUID, damageHits, killed)
 	if err := h.emitAttackAndEnd(session, player, &begin); err != nil {
 		return err
+	}
+	if hasImbue {
+		if err := h.applyImbueTransfers(ctx, session, player, target, imbue, now); err != nil {
+			return err
+		}
 	}
 	if !killed {
 		return nil
@@ -737,6 +811,151 @@ func skillStrikeDamage(player *model.Player, skill model.RefSkill) int {
 		return maximumWireDamage
 	}
 	return damage
+}
+
+func weaponImbueDamage(player *model.Player, imbue model.RefSkill) int {
+	if player == nil || !imbue.IsWeaponImbue() {
+		return 0
+	}
+	return skillStrikeDamage(player, imbue)
+}
+
+func (h *CombatHandler) activeWeaponImbue(player *model.Player) (model.RefSkill, bool) {
+	if h == nil || player == nil {
+		return model.RefSkill{}, false
+	}
+	var selected model.ActiveBuff
+	for _, buff := range player.ActiveBuffSnapshot() {
+		skill, exists := h.referenceSkill(buff.SkillID)
+		if !exists || !skill.IsWeaponImbue() || buff.Token <= selected.Token {
+			continue
+		}
+		selected = buff
+	}
+	if selected.SkillID == 0 {
+		return model.RefSkill{}, false
+	}
+	return h.referenceSkill(selected.SkillID)
+}
+
+func (h *CombatHandler) applyImbueStatuses(session *server.Session, player *model.Player, target *model.NPC, imbue model.RefSkill, now time.Time) {
+	if h == nil || player == nil || target == nil {
+		return
+	}
+	effects := imbue.StatusEffects
+	if len(effects) == 0 && imbue.ShockPower > 0 {
+		effects = []model.SkillStatusEffect{{Kind: model.CombatStatusShock, Power: imbue.ShockPower, Chance: imbue.ShockChance, DurationMS: imbue.ShockDuration}}
+	}
+	roll := h.rollPercent
+	if roll == nil {
+		roll = func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance }
+	}
+	for _, effect := range effects {
+		if effect.Kind == 0 || effect.Power <= 0 || effect.Chance <= 0 || effect.DurationMS <= 0 || !roll(effect.Chance) {
+			continue
+		}
+		status := model.CombatStatus{
+			Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: player.GetUniqueID(), SkillID: imbue.ID,
+			Power: effect.Power, ExpiresAt: now.Add(time.Duration(effect.DurationMS) * time.Millisecond),
+		}
+		if !target.ApplyCombatStatus(status) {
+			continue
+		}
+		if effect.Kind == model.CombatStatusBurn {
+			h.scheduleBurnTick(session, player, target, status, now.Add(time.Second))
+		}
+	}
+}
+
+func (h *CombatHandler) scheduleBurnTick(session *server.Session, player *model.Player, target *model.NPC, expected model.CombatStatus, tickAt time.Time) {
+	if h == nil || h.schedule == nil || player == nil || target == nil || !tickAt.Before(expected.ExpiresAt) {
+		return
+	}
+	delay := time.Until(tickAt)
+	if h.now != nil {
+		delay = tickAt.Sub(h.now())
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	h.schedule(delay, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		current := time.Now()
+		if h.now != nil {
+			current = h.now()
+		}
+		status, active := target.CombatStatus(model.CombatStatusBurn, current)
+		if !active || status.Token != expected.Token || target.GetLifeState() != model.Alive {
+			return
+		}
+		applied, killed := h.applyPlayerDamage(player, target, max(1, status.Power))
+		if applied == 0 {
+			return
+		}
+		castUID := model.NextActionUID()
+		packet := model.BuildAttackBeginWithSkillHits(status.SkillID, player.GetUniqueID(), target.GetUniqueID(), castUID, []uint32{uint32(applied)}, killed)
+		_ = h.emitAttack(player, &packet)
+		if killed {
+			_ = h.awardPlayerKill(context.Background(), session, player, target, target.GetUniqueID())
+			return
+		}
+		h.scheduleBurnTick(session, player, target, status, current.Add(time.Second))
+	})
+}
+
+func (h *CombatHandler) applyImbueTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, imbue model.RefSkill, now time.Time) error {
+	if h == nil || player == nil || primary == nil || imbue.TransferCount <= 0 || imbue.TransferRange <= 0 {
+		return nil
+	}
+	type candidate struct {
+		npc      *model.NPC
+		distance float32
+	}
+	known := player.GetKnownObjectList()
+	if known == nil {
+		return nil
+	}
+	radius := float32(imbue.TransferRange) / 10
+	candidates := make([]candidate, 0, imbue.TransferCount)
+	for _, object := range known.GetKnownObjects() {
+		npc, ok := object.(*model.NPC)
+		if !ok || npc == nil || npc == primary || npc.GetLifeState() != model.Alive || !npc.GetTypeInfo().IsNPCMob() {
+			continue
+		}
+		distance := navmeshv2.HorizontalDistance(primary.GetNavmeshPosition(), npc.GetNavmeshPosition())
+		if distance <= radius {
+			candidates = append(candidates, candidate{npc: npc, distance: distance})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].distance == candidates[j].distance {
+			return candidates[i].npc.GetUniqueID() < candidates[j].npc.GetUniqueID()
+		}
+		return candidates[i].distance < candidates[j].distance
+	})
+	if len(candidates) > imbue.TransferCount {
+		candidates = candidates[:imbue.TransferCount]
+	}
+	damage := weaponImbueDamage(player, imbue)
+	for _, candidate := range candidates {
+		applied, killed := h.applyPlayerDamage(player, candidate.npc, damage)
+		if applied == 0 {
+			continue
+		}
+		h.applyImbueStatuses(session, player, candidate.npc, imbue, now)
+		castUID := model.NextActionUID()
+		packet := model.BuildAttackBeginWithSkillHits(imbue.ID, player.GetUniqueID(), candidate.npc.GetUniqueID(), castUID, []uint32{uint32(applied)}, killed)
+		if err := h.emitAttack(player, &packet); err != nil {
+			return err
+		}
+		if killed {
+			if err := h.awardPlayerKill(ctx, session, player, candidate.npc, candidate.npc.GetUniqueID()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (h *CombatHandler) sendPlayerPacket(session *server.Session, packet network.Packet) error {

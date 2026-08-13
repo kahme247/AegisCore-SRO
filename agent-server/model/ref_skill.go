@@ -26,7 +26,19 @@ const (
 	skillParameterDefense      = 1684366960
 	skillParameterIntellect    = 1768846441
 	skillParameterStrength     = 1937011305
+	skillParameterShock        = 25971
+	skillParameterTransfer     = 6645362
+	skillParameterBurn         = 25205
+	skillParameterFreeze       = 26234
+	skillParameterFrostbite    = 26210
 )
+
+type SkillStatusEffect struct {
+	Kind       CombatStatusKind
+	Power      int
+	Chance     int
+	DurationMS int
+}
 
 type BuffModifiers struct {
 	HP               int
@@ -50,54 +62,62 @@ type BuffModifiers struct {
 // the client-matched REF_SKILL catalog and are expressed in vSRO world units
 // and milliseconds.
 type RefSkill struct {
-	ID              uint32
-	GroupID         uint32
-	BasicGroup      string
-	BasicOriginal   uint32
-	BasicLevel      byte
-	BasicActivity   byte
-	BasicChainCode  uint32
-	Mastery1        uint32
-	Mastery2        uint32
-	MasteryLevel1   byte
-	MasteryLevel2   byte
-	RequiredStr     int
-	RequiredInt     int
-	RequiredSkill1  uint32
-	RequiredSkill2  uint32
-	RequiredSkill3  uint32
-	RequiredLevel1  byte
-	RequiredLevel2  byte
-	RequiredLevel3  byte
-	RequiredSP      uint32
-	RequiredRace    byte
-	TargetRequired  bool
-	TargetSelf      bool
-	TargetAlly      bool
-	TargetParty     bool
-	TargetEnemyMob  bool
-	TargetEnemyPVP  bool
-	TargetDeadBody  bool
-	RequiredWeapon1 byte
-	RequiredWeapon2 byte
-	ConsumeHP       int
-	ConsumeMP       int
-	ConsumeHPRatio  int
-	ConsumeMPRatio  int
-	ActionDuration  int
-	ReuseDelay      int
-	CoolTime        int
-	ActionRange     int
-	AttackType      int
-	AttackPercent   int
-	AttackMin       int
-	AttackMax       int
-	BuffDuration    int
-	HealHP          int
-	HealMP          int
-	ResurrectLevel  int
-	BuffModifiers   BuffModifiers
-	Params          [50]int
+	ID                  uint32
+	GroupID             uint32
+	BasicGroup          string
+	BasicOriginal       uint32
+	BasicLevel          byte
+	BasicActivity       byte
+	BasicChainCode      uint32
+	Mastery1            uint32
+	Mastery2            uint32
+	MasteryLevel1       byte
+	MasteryLevel2       byte
+	RequiredStr         int
+	RequiredInt         int
+	RequiredSkill1      uint32
+	RequiredSkill2      uint32
+	RequiredSkill3      uint32
+	RequiredLevel1      byte
+	RequiredLevel2      byte
+	RequiredLevel3      byte
+	RequiredSP          uint32
+	RequiredRace        byte
+	TargetRequired      bool
+	TargetSelf          bool
+	TargetAlly          bool
+	TargetParty         bool
+	TargetEnemyMob      bool
+	TargetEnemyPVP      bool
+	TargetDeadBody      bool
+	RequiredWeapon1     byte
+	RequiredWeapon2     byte
+	ConsumeHP           int
+	ConsumeMP           int
+	ConsumeHPRatio      int
+	ConsumeMPRatio      int
+	ActionPreparingTime int
+	ActionCastingTime   int
+	ActionDuration      int
+	ReuseDelay          int
+	CoolTime            int
+	ActionRange         int
+	AttackType          int
+	AttackPercent       int
+	AttackMin           int
+	AttackMax           int
+	BuffDuration        int
+	HealHP              int
+	HealMP              int
+	ResurrectLevel      int
+	ShockPower          int
+	ShockChance         int
+	ShockDuration       int
+	TransferRange       int
+	TransferCount       int
+	StatusEffects       []SkillStatusEffect
+	BuffModifiers       BuffModifiers
+	Params              [50]int
 }
 
 func (s RefSkill) IsPassive() bool { return s.BasicActivity == 0 }
@@ -110,10 +130,18 @@ func (s RefSkill) IsPhysicalAttack() bool {
 	return s.AttackType == 5 || s.AttackType == 6
 }
 
+func (s RefSkill) IsWeaponImbue() bool {
+	return s.BasicActivity != 0 && s.BuffDuration > 0 && !s.TargetRequired && s.ActionRange == 0 && s.IsMagicalAttack() && s.AttackPercent > 0
+}
+
 func (s RefSkill) ExecutionKind() SkillExecutionKind {
 	switch {
 	case s.IsPassive():
 		return SkillExecutionPassive
+	case s.IsWeaponImbue():
+		// Chinese weapon imbues carry attack parameters but are no-target,
+		// short-lived self effects rather than immediate attacks.
+		return SkillExecutionBuff
 	case s.IsPhysicalAttack():
 		return SkillExecutionPhysicalAttack
 	case s.IsMagicalAttack():
@@ -132,6 +160,8 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 func (s *RefSkill) parseParameters() {
 	s.AttackType, s.AttackPercent, s.AttackMin, s.AttackMax = 0, 0, 0, 0
 	s.BuffDuration, s.HealHP, s.HealMP, s.ResurrectLevel = 0, 0, 0, 0
+	s.ShockPower, s.ShockChance, s.ShockDuration, s.TransferRange, s.TransferCount = 0, 0, 0, 0, 0
+	s.StatusEffects = nil
 	s.BuffModifiers = BuffModifiers{}
 	for index, parameter := range s.Params {
 		switch parameter {
@@ -191,6 +221,30 @@ func (s *RefSkill) parseParameters() {
 		case skillParameterBlock:
 			if index+2 < len(s.Params) {
 				s.BuffModifiers.BlockRate = s.Params[index+2]
+			}
+		case skillParameterShock:
+			if index+3 < len(s.Params) {
+				s.ShockPower = s.Params[index+1]
+				s.ShockChance = s.Params[index+2]
+				s.ShockDuration = s.Params[index+3] * 100
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusShock, Power: s.ShockPower, Chance: s.ShockChance, DurationMS: s.ShockDuration})
+			}
+		case skillParameterBurn:
+			if index+3 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusBurn, Power: s.Params[index+1], Chance: s.Params[index+2], DurationMS: s.Params[index+3] * 100})
+			}
+		case skillParameterFreeze:
+			if index+2 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusFreeze, Power: s.Params[index+1], Chance: s.Params[index+2], DurationMS: 5000})
+			}
+		case skillParameterFrostbite:
+			if index+2 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusFrostbite, Power: s.Params[index+1], Chance: s.Params[index+2], DurationMS: 5000})
+			}
+		case skillParameterTransfer:
+			if index+4 < len(s.Params) {
+				s.TransferRange = s.Params[index+3]
+				s.TransferCount = s.Params[index+4]
 			}
 		}
 	}

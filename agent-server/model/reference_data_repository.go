@@ -53,7 +53,7 @@ type ReferenceDataSnapshot struct {
 	Skills     map[uint32]RefSkill
 }
 
-var SelectAllRefSkills = "SELECT `ID`,`GROUP_ID`,`BASIC_GROUP`,`BASIC_ORIGINAL`,`BASIC_LEVEL`,`BASIC_ACTIVITY`,`BASIC_CHAINCODE`,`REQCOMMON_MASTERY1`,`REQCOMMON_MASTERY2`,`REQCOMMON_MASTERYLEVEL1`,`REQCOMMON_MASTERYLEVEL2`,`REQCOMMON_STR`,`REQCOMMON_INT`,`REQLEARN_SKILL1`,`REQLEARN_SKILL2`,`REQLEARN_SKILL3`,`REQLEARN_SKILLLEVEL1`,`REQLEARN_SKILLLEVEL2`,`REQLEARN_SKILLLEVEL3`,`REQLEARN_SP`,`REQLEARN_RACE`,`TARGET_REQUIRED`,`TARGETGROUP_SELF`,`TARGETGROUP_ALLY`,`TARGETGROUP_PARTY`,`TARGETGROUP_ENEMY_M`,`TARGETGROUP_ENEMY_P`,`TARGETETC_SELECTDEADBODY`,`REQCAST_WEAPON1`,`REQCAST_WEAPON2`,`CONSUME_HP`,`CONSUME_MP`,`CONSUME_HPRATIO`,`CONSUME_MPRATIO`,`ACTION_ACTIONDURATION`,`ACTION_REUSEDELAY`,`ACTION_COOLTIME`,`ACTION_RANGE`," + refSkillParameterProjection() + " FROM `SRO_SHARD`.`REF_SKILL` WHERE `SERVICE` = 1"
+var SelectAllRefSkills = "SELECT `ID`,`GROUP_ID`,`BASIC_GROUP`,`BASIC_ORIGINAL`,`BASIC_LEVEL`,`BASIC_ACTIVITY`,`BASIC_CHAINCODE`,`REQCOMMON_MASTERY1`,`REQCOMMON_MASTERY2`,`REQCOMMON_MASTERYLEVEL1`,`REQCOMMON_MASTERYLEVEL2`,`REQCOMMON_STR`,`REQCOMMON_INT`,`REQLEARN_SKILL1`,`REQLEARN_SKILL2`,`REQLEARN_SKILL3`,`REQLEARN_SKILLLEVEL1`,`REQLEARN_SKILLLEVEL2`,`REQLEARN_SKILLLEVEL3`,`REQLEARN_SP`,`REQLEARN_RACE`,`TARGET_REQUIRED`,`TARGETGROUP_SELF`,`TARGETGROUP_ALLY`,`TARGETGROUP_PARTY`,`TARGETGROUP_ENEMY_M`,`TARGETGROUP_ENEMY_P`,`TARGETETC_SELECTDEADBODY`,`REQCAST_WEAPON1`,`REQCAST_WEAPON2`,`CONSUME_HP`,`CONSUME_MP`,`CONSUME_HPRATIO`,`CONSUME_MPRATIO`,`ACTION_PREPARINGTIME`,`ACTION_CASTINGTIME`,`ACTION_ACTIONDURATION`,`ACTION_REUSEDELAY`,`ACTION_COOLTIME`,`ACTION_RANGE`," + refSkillParameterProjection() + " FROM `SRO_SHARD`.`REF_SKILL` WHERE `SERVICE` = 1"
 
 func refSkillParameterProjection() string {
 	columns := make([]string, len(RefSkill{}.Params))
@@ -133,7 +133,7 @@ func (r *SQLReferenceDataRepository) loadSkills(ctx context.Context) (map[uint32
 			&skill.RequiredLevel3, &skill.RequiredSP, &skill.RequiredRace, &skill.TargetRequired, &skill.TargetSelf, &skill.TargetAlly,
 			&skill.TargetParty, &skill.TargetEnemyMob, &skill.TargetEnemyPVP, &skill.TargetDeadBody, &skill.RequiredWeapon1,
 			&skill.RequiredWeapon2, &skill.ConsumeHP, &skill.ConsumeMP, &skill.ConsumeHPRatio, &skill.ConsumeMPRatio,
-			&skill.ActionDuration, &skill.ReuseDelay, &skill.CoolTime, &skill.ActionRange,
+			&skill.ActionPreparingTime, &skill.ActionCastingTime, &skill.ActionDuration, &skill.ReuseDelay, &skill.CoolTime, &skill.ActionRange,
 		}
 		for index := range skill.Params {
 			destinations = append(destinations, &skill.Params[index])
