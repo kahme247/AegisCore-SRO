@@ -489,7 +489,14 @@ func (h *InventoryHandler) handleSell(ctx context.Context, session *server.Sessi
 		return h.handleEconomyError(session, err)
 	}
 	player.CommitEconomy(result.Gold, result.Inventory)
-	return h.sendPacket(session, buildSellSuccess(source, amount, npcUID))
+	// Buy-back cannot be advertised until the server retains the sold item and
+	// implements the restore operation. Pointing the client at a slot without
+	// that state leaves it with an invalid item reference and crashes the stock
+	// client while it refreshes the sold-item pane.
+	if err = h.sendPacket(session, buildSellSuccess(source, amount, npcUID, 0xFF)); err != nil {
+		return err
+	}
+	return h.sendPacket(session, buildGoldUpdate(result.Gold))
 }
 
 func (h *InventoryHandler) handleStorageMutation(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
@@ -602,7 +609,7 @@ func buildBuySuccess(tab, slot byte, amount uint16, destinations []byte, item mo
 	model.WriteRentInfo(&p, item)
 	return p
 }
-func buildSellSuccess(source byte, amount uint16, npcUID uint32) network.Packet {
+func buildSellSuccess(source byte, amount uint16, npcUID uint32, buybackSlot byte) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.ItemOperationResponse
 	p.WriteByte(1)
@@ -610,7 +617,15 @@ func buildSellSuccess(source byte, amount uint16, npcUID uint32) network.Packet 
 	p.WriteByte(source)
 	p.WriteUInt16(amount)
 	p.WriteUInt32(npcUID)
-	p.WriteByte(0xFF)
+	p.WriteByte(buybackSlot)
+	return p
+}
+
+func buildGoldUpdate(gold uint64) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntityUpdatePoints
+	p.WriteByte(1)
+	p.WriteUInt64(gold)
 	return p
 }
 func buildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {

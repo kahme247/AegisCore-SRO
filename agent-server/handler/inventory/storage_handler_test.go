@@ -33,7 +33,7 @@ func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 		want   string
 	}{
 		{name: "buy", packet: buildBuySuccess(2, 3, 1, []byte{13}, model.Item{}), want: "01080203010d010000000000"},
-		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344), want: "01090d010044332211ff"},
+		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344, 0xFF), want: "01090d010044332211ff"},
 		{name: "deposit", packet: buildStorageTransferSuccess(PutItemIntoStorageOperation, 13, 0), want: "01020d00"},
 		{name: "withdraw", packet: buildStorageTransferSuccess(TakeItemFromStorageOperation, 0, 13), want: "0103000d"},
 	}
@@ -43,6 +43,16 @@ func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 				t.Fatalf("payload = %s, want %s", got, test.want)
 			}
 		})
+	}
+}
+
+func TestBuildGoldUpdateUsesCurrentBalance(t *testing.T) {
+	packet := buildGoldUpdate(0x1122334455667788)
+	if packet.MessageID != opcode.EntityUpdatePoints {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntityUpdatePoints)
+	}
+	if got, want := hex.EncodeToString(packet.Payload()), "018877665544332211"; got != want {
+		t.Fatalf("payload = %s, want %s", got, want)
 	}
 }
 
