@@ -523,6 +523,9 @@ func (s *Session) SendMassive(packet network.Packet) error {
 	}
 	packet.ServerPacket = true
 	err := s.Sender.SendMassive(packet)
+	if sessionTraceEnabled() {
+		log.Infof("SESSION_TRACE sent-massive module=%s remote=%s opcode=0x%04X size=%d", s.ServerModuleID, s.Conn.RemoteAddr(), packet.MessageID, packet.DataSize)
+	}
 	if err != nil {
 		log.Errorf("failed to send massive packet 0x%04X for session %s: %v", packet.MessageID, s.ID, err)
 	}

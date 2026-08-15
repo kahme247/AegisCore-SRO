@@ -110,7 +110,7 @@ services:
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
       AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
-      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
+      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-1}
       # Modes: 0/off, players/characters, mobs, or all/everything/1.
       # Prefer players for client-crash diagnostics; all can emit substantial
       # output in a populated world.
