@@ -552,9 +552,6 @@ func writeCharacterQuickSlotConfig(packet *network.Packet, player *model.Player)
 func writeCharacterSkillSection(packet *network.Packet, player *model.Player) {
 	packet.WriteByte(0) // Unknown byte between mastery and skill lists.
 	for _, skill := range player.SkillSnapshot() {
-		// Base attacks are implicit client skills. They are persisted so combat can
-		// resolve the equipped weapon, but serializing them as learned UI skills
-		// makes the stock vSRO 1.88 client abort while parsing 0x3013.
 		if isImplicitBaseAttackSkill(skill.ID) {
 			continue
 		}
