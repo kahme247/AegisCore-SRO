@@ -2,11 +2,13 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
+	patchcatalog "github.com/Harvi8/AegisCore/patching/catalog"
 )
 
 func gatewayTestProtocolProfile() config.ProtocolProfile {
@@ -15,6 +17,110 @@ func gatewayTestProtocolProfile() config.ProtocolProfile {
 		ContentID:  122,
 		ModuleName: "SR_Client",
 		Version:    188,
+	}
+}
+
+func TestBuildPatchAvailableResponseMatchesLauncherLayout(t *testing.T) {
+	plan := patchcatalog.PatchPlan{
+		TargetVersion: 189,
+		Server:        patchcatalog.DownloadServer{Host: "patch.example.test", Port: 15880},
+		Files: []patchcatalog.File{{
+			ID: 17, Filename: "itemdata_45000.txt", Path: `media\server_dep\silkroad\textdata`,
+			PreparedSize: 1234, ImportToPK2: true,
+		}},
+	}
+	response, err := buildPatchAvailableResponse(plan)
+	if err != nil {
+		t.Fatalf("buildPatchAvailableResponse() error = %v", err)
+	}
+	result, _ := response.ReadByte()
+	reason, _ := response.ReadByte()
+	host, _ := response.ReadString()
+	port, _ := response.ReadUInt16()
+	version, _ := response.ReadUInt32()
+	hasFile, _ := response.ReadByte()
+	fileID, _ := response.ReadUInt32()
+	filename, _ := response.ReadString()
+	path, _ := response.ReadString()
+	size, _ := response.ReadUInt32()
+	packing, _ := response.ReadByte()
+	terminator, _ := response.ReadByte()
+	if response.Remaining() != 0 || result != 2 || reason != 2 || host != plan.Server.Host || port != 15880 || version != 189 ||
+		hasFile != 1 || fileID != 17 || filename != plan.Files[0].Filename || path != plan.Files[0].Path || size != 1234 || packing != 1 || terminator != 0 {
+		t.Fatalf("unexpected patch response fields: result=%d reason=%d host=%q port=%d version=%d file=%d/%d %q %q size=%d packing=%d end=%d remaining=%d",
+			result, reason, host, port, version, hasFile, fileID, filename, path, size, packing, terminator, response.Remaining())
+	}
+}
+
+func TestBuildPatchAvailableResponsePreservesMultiReleaseFileOrder(t *testing.T) {
+	plan := patchcatalog.PatchPlan{
+		TargetVersion: 190,
+		Server:        patchcatalog.DownloadServer{Host: "patch.example.test", Port: 15880},
+		Files: []patchcatalog.File{
+			{ID: 18901, Filename: "from-189.txt", Path: "media", PreparedSize: 11, ImportToPK2: true},
+			{ID: 19001, Filename: "from-190.txt", Path: "media", PreparedSize: 22, ImportToPK2: true},
+		},
+	}
+	response, err := buildPatchAvailableResponse(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = response.ReadByte()
+	_, _ = response.ReadByte()
+	_, _ = response.ReadString()
+	_, _ = response.ReadUInt16()
+	version, _ := response.ReadUInt32()
+	if version != 190 {
+		t.Fatalf("target version = %d", version)
+	}
+	for index, want := range plan.Files {
+		hasFile, _ := response.ReadByte()
+		id, _ := response.ReadUInt32()
+		name, _ := response.ReadString()
+		path, _ := response.ReadString()
+		size, _ := response.ReadUInt32()
+		packing, _ := response.ReadByte()
+		if hasFile != 1 || id != want.ID || name != want.Filename || path != want.Path || uint64(size) != want.PreparedSize || packing != 1 {
+			t.Fatalf("file %d decoded as marker=%d id=%d name=%q path=%q size=%d packing=%d", index, hasFile, id, name, path, size, packing)
+		}
+	}
+	terminator, _ := response.ReadByte()
+	if terminator != 0 || response.Remaining() != 0 {
+		t.Fatalf("terminator=%d remaining=%d", terminator, response.Remaining())
+	}
+}
+
+func TestCatalogPatchResponseUsesPublishedPlanAndFailureReasons(t *testing.T) {
+	profile := gatewayTestProtocolProfile()
+	handler := NewPatchRequestHandler(func() (config.ProtocolProfile, error) { return profile, nil })
+	handler.Channel = patchcatalog.StatusPublished
+	handler.Catalog = patchcatalog.ReaderFunc(func(_ context.Context, _ uint8, _ string, requested uint32, channel string) (patchcatalog.PatchPlan, error) {
+		if channel != patchcatalog.StatusPublished {
+			t.Fatalf("channel = %q", channel)
+		}
+		switch requested {
+		case 188:
+			return patchcatalog.PatchPlan{TargetVersion: 189, Server: patchcatalog.DownloadServer{Host: "127.0.0.1", Port: 15880}, Files: []patchcatalog.File{{ID: 1, Filename: "x", PreparedSize: 9}}}, nil
+		case 187:
+			return patchcatalog.PatchPlan{}, patchcatalog.ErrClientTooOld
+		default:
+			return patchcatalog.PatchPlan{}, patchcatalog.ErrClientNewer
+		}
+	})
+	response, _, selected, err := handler.buildResponse(context.Background(), PatchRequest{ContentID: profile.ContentID, ModuleName: profile.ModuleName, Version: 188}, []config.ProtocolProfile{profile})
+	if err != nil || selected == nil || !bytes.Equal(response.Payload()[:2], []byte{2, 2}) {
+		t.Fatalf("patch plan response = % X selected=%v err=%v", response.Payload(), selected, err)
+	}
+	response, _, _, err = handler.buildResponse(context.Background(), PatchRequest{ContentID: profile.ContentID, ModuleName: profile.ModuleName, Version: 187}, []config.ProtocolProfile{profile})
+	if err != nil || !bytes.Equal(response.Payload(), []byte{2, 5}) {
+		t.Fatalf("too-old response = % X err=%v", response.Payload(), err)
+	}
+	handler.Catalog = patchcatalog.ReaderFunc(func(context.Context, uint8, string, uint32, string) (patchcatalog.PatchPlan, error) {
+		return patchcatalog.PatchPlan{}, patchcatalog.ErrNoDownloadHost
+	})
+	response, _, _, err = handler.buildResponse(context.Background(), PatchRequest{ContentID: profile.ContentID, ModuleName: profile.ModuleName, Version: 188}, []config.ProtocolProfile{profile})
+	if err != nil || !bytes.Equal(response.Payload(), []byte{2, 4}) {
+		t.Fatalf("unavailable response = % X err=%v", response.Payload(), err)
 	}
 }
 

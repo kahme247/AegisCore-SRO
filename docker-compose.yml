@@ -160,6 +160,7 @@ services:
       GATEWAY_PROTOCOL_CONTENT_ID: "${GATEWAY_PROTOCOL_CONTENT_ID:?Set GATEWAY_PROTOCOL_CONTENT_ID from an approved client capture}"
       GATEWAY_PROTOCOL_MODULE_NAME: "${GATEWAY_PROTOCOL_MODULE_NAME:?Set GATEWAY_PROTOCOL_MODULE_NAME from an approved client capture}"
       GATEWAY_PROTOCOL_VERSION: "${GATEWAY_PROTOCOL_VERSION:?Set GATEWAY_PROTOCOL_VERSION from an approved client capture}"
+      GATEWAY_PATCH_CHANNEL: "${GATEWAY_PATCH_CHANNEL:-published}"
       GATEWAY_FARM_NAME: "${GATEWAY_FARM_NAME:-AegisCore}"
       AGENT_ADMISSION_PORT: "15883"
       AGENT_ADMISSION_TIMEOUT_SECONDS: ${AGENT_ADMISSION_TIMEOUT_SECONDS:-5}
@@ -169,6 +170,64 @@ services:
       GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/gateway-key.pem
     volumes:
     - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/aegiscore:ro"
+
+  # Opt-in until Gateway catalog negotiation is connected. Keeping this behind
+  # a profile means a missing operator-built patch catalog cannot break the
+  # existing Gateway/Agent runtime.
+  download-server:
+    profiles: ["patching"]
+    build:
+      context: .
+      dockerfile: download-server/Dockerfile
+    image: aegiscore-download-server:local
+    restart: always
+    container_name: aegiscore-download-server
+    networks:
+      - aegiscore
+    ports:
+      - "${DOWNLOAD_PUBLIC_PORT:-15880}:15880"
+    environment:
+      DOWNLOAD_HOST: "0.0.0.0"
+      DOWNLOAD_PORT: "15880"
+      DOWNLOAD_MODULE_ID: "${DOWNLOAD_MODULE_ID:-DownloadServer}"
+      DOWNLOAD_MANIFEST_PATH: "/etc/aegiscore/patches/manifest.json"
+      DOWNLOAD_STORAGE_ROOT: "/etc/aegiscore/patches/files"
+      DOWNLOAD_CHUNK_SIZE: "${DOWNLOAD_CHUNK_SIZE:-16384}"
+      DOWNLOAD_SESSION_IDLE_SECONDS: "${DOWNLOAD_SESSION_IDLE_SECONDS:-1800}"
+      DOWNLOAD_MAX_TRANSFERS: "${DOWNLOAD_MAX_TRANSFERS:-32}"
+      DOWNLOAD_MAX_TRANSFERS_PER_IP: "${DOWNLOAD_MAX_TRANSFERS_PER_IP:-4}"
+      DOWNLOAD_HEALTH_HOST: "0.0.0.0"
+      DOWNLOAD_HEALTH_PORT: "15881"
+      SRO_SESSION_TRACE: "${DOWNLOAD_SESSION_TRACE:-0}"
+    volumes:
+      - "${SRO_PATCH_DIR:-./Patch}:/etc/aegiscore/patches:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:15881/readyz >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  patch-admin:
+    profiles: ["patch-admin"]
+    build:
+      context: .
+      dockerfile: cmd/patch-admin/Dockerfile
+    image: aegiscore-patch-admin:local
+    networks:
+      - aegiscore
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_ACCOUNT_HOST: db
+      DB_ACCOUNT_DATABASE: SRO_ACCOUNT
+      DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
+    volumes:
+      - "${SRO_PATCH_DIR:-./Patch}:/etc/aegiscore/Patch"
+      - "${SRO_PATCH_SOURCE_DIR:-./PatchSource}:/source:ro"
+      - "${SRO_PATCH_SPEC_FILE:-./cmd/patch-admin/example-188-to-189.json}:/etc/aegiscore/spec.json:ro"
+    working_dir: /etc/aegiscore
 
 networks:
   aegiscore:

@@ -3,7 +3,7 @@
 AegisCore is a Go implementation of a Silkroad Online server stack focused on
 one compatibility boundary: **vSRO 1.188** (Gateway version `188`, profile
 `vsro188`). The current deployable
-topology is MySQL + Gateway + Agent; game, world, chat, and shard behavior still
+topology is MySQL + Gateway + Agent, with an opt-in DownloadServer; game, world, chat, and shard behavior still
 lives inside those processes until the protocol and ownership boundaries are
 stable enough to justify extracting more services.
 
@@ -24,6 +24,7 @@ slug. Original Ferdoran identifiers remain only where required for attribution.
 | Gateway | `15779` | patch/profile reply, notices, shard list, login policy, Agent handoff | Implemented and unit-tested |
 | Agent | `15882` | character lobby, world, movement, visibility, gameplay handlers | Implemented in stages; stock-client validation is incomplete |
 | Admission API | `15883` internal only | one-time Gateway-to-Agent tickets over mTLS | Implemented; intentionally not host-published |
+| DownloadServer | `15880` | streams trusted, prepared legacy patch payloads by numeric file ID | Implemented; end-to-end clean-client 188→189 validation remains |
 
 The older six-service diagram under `_docs/architecture.puml` describes a
 possible long-term decomposition. It is not the current runtime topology.
@@ -126,7 +127,9 @@ docker compose --profile maintenance up --build migrate-shard
 
 See [database operations](db/README.md), [migration safety](db/migrations/README.md),
 [Gateway configuration](gateway-server/README.md), and
-[Agent behavior](agent-server/README.md). Shared runtime details are in the
+[Agent behavior](agent-server/README.md). The opt-in patch service is covered by
+[DownloadServer](download-server/README.md), with release operations in
+[patch administration](cmd/patch-admin/README.md). Shared runtime details are in the
 [framework guide](framework/README.md), while the maintenance CLIs are covered
 by [migrate](cmd/migrate/README.md) and [sro-data](cmd/sro-data/README.md).
 

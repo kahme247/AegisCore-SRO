@@ -17,10 +17,17 @@ After the Silkroad core handshake and module identification, Gateway admits:
 | `0x6104` | Notices |
 | `0x6106` | Shard ping |
 
-Patch negotiation compares one configured Content ID/module/version tuple.
-Exact clients receive massive `0xA100 [1]`; unknown or newer clients receive
-`[2,1]`; older clients receive `[2,3]`. No patch manifest or patch service is
-implemented.
+Patch negotiation first validates the configured Content ID/module identity.
+When account migration `000004` has a complete published incremental chain,
+Gateway returns the launcher-compatible massive `0xA100 [2,2]` DownloadServer
+catalog for older clients. A broken chain returns reason `5`; a catalog without
+an enabled DownloadServer returns launcher-supported reason `4`. With no release
+rows, the evidence-preserving fallback remains exact-version `[1]`, unknown or
+newer `[2,1]`, and older `[2,3]`.
+
+`GATEWAY_PATCH_CHANNEL` defaults to `published`. Use `testing` only on a
+separate admin-controlled Gateway while validating a testing release; never set
+the production Gateway to that channel.
 
 Notices and shards are read from `SRO_ACCOUNT` for each request. Notices are
 capped at 255. Shards are filtered by the configured Content ID, validated and

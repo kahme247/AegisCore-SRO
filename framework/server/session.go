@@ -51,6 +51,7 @@ type Session struct {
 	lifetime            *sessionLifetime
 	onClose             func(*Session)
 	onDrained           func(*Session)
+	onModuleIdentified  func(context.Context, *Session) error
 	handlers            *HandlerRegistry
 	admissionPolicy     PacketAdmissionPolicy
 	trafficFilter       *sessionTrafficFilter

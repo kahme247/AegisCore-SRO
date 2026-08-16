@@ -27,9 +27,13 @@ type Server struct {
 	trafficFilter     TrafficFilterOptions
 	closeHandlerMu    sync.RWMutex
 	sessionClosedHook func(*Session)
-	listenerMu        sync.Mutex
-	listener          net.Listener
-	serving           bool
+
+	moduleIdentifiedMu   sync.RWMutex
+	moduleIdentifiedHook func(context.Context, *Session) error
+
+	listenerMu sync.Mutex
+	listener   net.Listener
+	serving    bool
 	// sessionGate serializes the handoff from Accept to the session registry
 	// with StopAccepting/DrainSessions. Without it, a connection returned by
 	// Accept just before listener close could be added after shutdown had
@@ -120,6 +124,25 @@ func (e *Server) SetSessionClosedHandler(handler func(*Session)) {
 	e.closeHandlerMu.Lock()
 	e.sessionClosedHook = handler
 	e.closeHandlerMu.Unlock()
+}
+
+// SetModuleIdentifiedHandler installs a listener-specific hook that runs after
+// the normal 0x2001 module-identification response has been written. Services
+// such as DownloadServer use it for protocol messages that are valid only once
+// the Silkroad handshake is complete.
+func (e *Server) SetModuleIdentifiedHandler(handler func(context.Context, *Session) error) {
+	if e == nil {
+		return
+	}
+	e.moduleIdentifiedMu.Lock()
+	e.moduleIdentifiedHook = handler
+	e.moduleIdentifiedMu.Unlock()
+}
+
+func (e *Server) sessionModuleIdentifiedHandler() func(context.Context, *Session) error {
+	e.moduleIdentifiedMu.RLock()
+	defer e.moduleIdentifiedMu.RUnlock()
+	return e.moduleIdentifiedHook
 }
 
 func (e *Server) closeSession(session *Session) {
@@ -323,6 +346,7 @@ func (e *Server) Serve(listener net.Listener) error {
 		)
 		session.onClose = e.closeSession
 		session.onDrained = e.sessionDrained
+		session.onModuleIdentified = e.sessionModuleIdentifiedHandler()
 		session.handlers = e.handlers
 		session.admissionPolicy = e.sessionAdmissionPolicy()
 		session.trafficFilter = newSessionTrafficFilter(e.sessionTrafficFilterOptions())

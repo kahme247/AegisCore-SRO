@@ -131,6 +131,55 @@ func TestModuleIdentificationRequiresEstablishedHandshakeAndExactPayload(t *test
 	}
 }
 
+func TestModuleIdentificationHookRunsAfterResponse(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	session := NewSession(serverConn, network.EncodingOptions{}, nil, nil, "DownloadServer")
+	defer session.Close()
+	session.securityMu.Lock()
+	session.setHandshakePhaseLocked(HandshakeEstablished)
+	session.securityMu.Unlock()
+	session.onModuleIdentified = func(_ context.Context, session *Session) error {
+		ready := network.EmptyPacket()
+		ready.MessageID = 0x6005
+		return session.Send(ready)
+	}
+
+	request := network.EmptyClientPacket()
+	request.MessageID = 0x2001
+	if err := request.WriteString("SR_Client"); err != nil {
+		t.Fatal(err)
+	}
+	if err := request.WriteByte(0); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- handleModuleIdentificationPacket(context.Background(), session, request)
+	}()
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := network.NewPacketReader(clientConn)
+	var opcodes []uint16
+	for len(opcodes) < 2 {
+		packets, err := reader.ReadPackets()
+		if err != nil {
+			t.Fatalf("ReadPackets() error = %v", err)
+		}
+		for _, packet := range packets {
+			opcodes = append(opcodes, packet.MessageID)
+		}
+	}
+	if opcodes[0] != 0x2001 || opcodes[1] != 0x6005 {
+		t.Fatalf("response opcodes = %#v, want [0x2001 0x6005]", opcodes)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("handleModuleIdentificationPacket() error = %v", err)
+	}
+}
+
 func TestSessionRejectsApplicationTrafficUntilModuleIdentification(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()

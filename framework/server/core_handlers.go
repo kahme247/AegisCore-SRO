@@ -158,7 +158,13 @@ func handleModuleIdentificationPacket(_ context.Context, session *Session, packe
 	}
 	session.moduleIdentified.Store(true)
 	session.securityMu.Unlock()
-	return session.Send(response)
+	if err := session.Send(response); err != nil {
+		return err
+	}
+	if session.onModuleIdentified != nil {
+		return session.onModuleIdentified(session.LifetimeContext(), session)
+	}
+	return nil
 }
 
 func handleKeepAlivePacket(_ context.Context, session *Session, packet network.Packet) error {

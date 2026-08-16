@@ -7,6 +7,7 @@ RUN go mod download
 COPY framework ./framework
 COPY db/migrations ./db/migrations
 COPY gateway-server ./gateway-server
+COPY patching ./patching
 COPY protocol ./protocol
 
 RUN go test ./...

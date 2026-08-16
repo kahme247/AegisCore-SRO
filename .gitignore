@@ -18,6 +18,8 @@
 /.env
 /VSRO_Client/
 /VSRO_274/
+/Patch/
+/PatchSource/
 
 
 # Test binary, build with `go test -c`

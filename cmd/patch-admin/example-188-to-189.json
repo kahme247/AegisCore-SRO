@@ -1,0 +1,20 @@
+{
+  "release": {
+    "division_id": 22,
+    "content_id": 22,
+    "module_id": 9,
+    "module_name": "SR_Client",
+    "base_version": 188,
+    "target_version": 189,
+    "display_version": "1.189",
+    "description": "Reviewed 188 to 189 Media update"
+  },
+  "files": [
+    {
+      "source": "media/server_dep/silkroad/textdata/itemdata_45000.txt",
+      "filename": "itemdata_45000.txt",
+      "path": "media\\server_dep\\silkroad\\textdata",
+      "import_to_pk2": true
+    }
+  ]
+}

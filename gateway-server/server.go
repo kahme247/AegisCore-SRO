@@ -22,6 +22,7 @@ import (
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	gatewaydb "github.com/Harvi8/AegisCore/gateway-server/db"
 	"github.com/Harvi8/AegisCore/gateway-server/handler"
+	patchcatalog "github.com/Harvi8/AegisCore/patching/catalog"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -93,6 +94,10 @@ func NewGatewayServer() (GatewayServer, error) {
 	if err != nil {
 		return GatewayServer{}, fmt.Errorf("configure Gateway shard repository: %w", err)
 	}
+	patches, err := patchcatalog.NewRepository(accountPool)
+	if err != nil {
+		return GatewayServer{}, fmt.Errorf("configure Gateway patch catalog repository: %w", err)
+	}
 	admissionStore, err := handler.NewAccountPoolGatewayAdmissionStore(accountPool)
 	if err != nil {
 		return GatewayServer{}, fmt.Errorf("configure Gateway admission repository: %w", err)
@@ -122,7 +127,7 @@ func NewGatewayServer() (GatewayServer, error) {
 		opcode.NoticeRequest,
 		opcode.ShardlistPing,
 	))
-	handler.RegisterPatchRequestHandler(&s)
+	handler.RegisterPatchRequestHandlerWithCatalog(&s, patches, viper.GetString(config.GatewayPatchChannel))
 	handler.RegisterShardlistRequestHandlerWithReadiness(&s, shards, installer)
 	handler.RegisterShardlistPingHandler(&s)
 	handler.RegisterNoticeRequestHandlerWithRepository(&s, notices)

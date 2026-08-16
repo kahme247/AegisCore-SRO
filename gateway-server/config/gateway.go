@@ -56,6 +56,7 @@ const (
 	GatewayProtocolContentID   = "gateway.protocol.content_id"
 	GatewayProtocolModuleName  = "gateway.protocol.module_name"
 	GatewayProtocolVersion     = "gateway.protocol.version"
+	GatewayPatchChannel        = "gateway.patch.channel"
 
 	// GatewayFarm* controls the documented farm section at the start of the
 	// shard-list response. Keeping it configurable avoids silently advertising
@@ -130,6 +131,7 @@ func bindEnvAliases() {
 	viper.BindEnv(GatewayProtocolContentID, "GATEWAY_PROTOCOL_CONTENT_ID")
 	viper.BindEnv(GatewayProtocolModuleName, "GATEWAY_PROTOCOL_MODULE_NAME")
 	viper.BindEnv(GatewayProtocolVersion, "GATEWAY_PROTOCOL_VERSION")
+	viper.BindEnv(GatewayPatchChannel, "GATEWAY_PATCH_CHANNEL")
 	viper.BindEnv(GatewayFarmID, "GATEWAY_FARM_ID")
 	viper.BindEnv(GatewayFarmName, "GATEWAY_FARM_NAME")
 }
@@ -153,6 +155,7 @@ func setDefaultValues() {
 	viper.SetDefault(GatewayTrafficWindowMS, 1000)
 	viper.SetDefault(GatewayEnvironment, EnvironmentProduction)
 	viper.SetDefault(GatewayProtocolProfileName, VSRO188Profile)
+	viper.SetDefault(GatewayPatchChannel, "published")
 	viper.SetDefault(GatewayFarmID, 1)
 	viper.SetDefault(GatewayFarmName, "AegisCore")
 }
@@ -333,6 +336,13 @@ func ValidateGatewayRuntime() error {
 	}
 	if _, err := LoadAgentEndpoint(); err != nil {
 		return err
+	}
+	channel := strings.ToLower(strings.TrimSpace(viper.GetString(GatewayPatchChannel)))
+	if channel == "" {
+		channel = "published"
+	}
+	if channel != "published" && channel != "testing" {
+		return fmt.Errorf("gateway patch channel must be published or testing")
 	}
 	return nil
 }

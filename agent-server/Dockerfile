@@ -8,6 +8,7 @@ COPY framework ./framework
 COPY db ./db
 COPY gateway-server ./gateway-server
 COPY agent-server ./agent-server
+COPY patching ./patching
 COPY protocol ./protocol
 
 RUN go test ./...
