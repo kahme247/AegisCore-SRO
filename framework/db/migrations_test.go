@@ -382,8 +382,8 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		t.Fatalf("LoadMigrationCatalog: %v", err)
 	}
 	migrations := catalog.Migrations()
-	if len(migrations) != 3 {
-		t.Fatalf("account migration count = %d, want 3", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("account migration count = %d, want 4", len(migrations))
 	}
 	if catalog.Target() != MigrationTargetAccount {
 		t.Fatalf("account catalog target = %q, want %q", catalog.Target(), MigrationTargetAccount)
@@ -409,6 +409,11 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(balanceMigration.UpSQL, "GIFT_SILK") || !strings.Contains(balanceMigration.DownSQL, "DROP COLUMN") {
 		t.Fatalf("balance migration = %#v, want reversible version 2 item_mall_balances", balanceMigration)
 	}
+	patchMigration := migrations[3]
+	if patchMigration.Version != 4 || patchMigration.Name != "patch_release_catalog" ||
+		!strings.Contains(patchMigration.UpSQL, "PATCH_RELEASE_FILE") || !strings.Contains(patchMigration.DownSQL, "DROP TABLE `PATCH_RELEASE`") {
+		t.Fatalf("patch migration = %#v, want reversible version 4 patch_release_catalog", patchMigration)
+	}
 	characterLimitMigration := migrations[2]
 	if characterLimitMigration.Version != 3 || characterLimitMigration.Name != "shard_character_limit" ||
 		!strings.Contains(characterLimitMigration.UpSQL, "SHARD_CHARACTER_LIMIT") ||
@@ -424,12 +429,18 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 36 {
-		t.Fatalf("shard migration count = %d, want 36", len(shardMigrations))
+	if len(shardMigrations) != 37 {
+		t.Fatalf("shard migration count = %d, want 37", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
 		shardMigrationByVersion[migration.Version] = migration
+	}
+	buybackMigration := shardMigrationByVersion[38]
+	if buybackMigration.Version != 38 || buybackMigration.Name != "character_buyback" ||
+		!strings.Contains(buybackMigration.UpSQL, "CREATE TABLE `CHAR_BUYBACK`") ||
+		!strings.Contains(buybackMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("buy-back migration = %#v, want reversible version 38 character_buyback", buybackMigration)
 	}
 	returnCityMigration := shardMigrationByVersion[23]
 	if returnCityMigration.Version != 23 || returnCityMigration.Name != "character_return_city" ||

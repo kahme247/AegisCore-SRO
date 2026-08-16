@@ -67,6 +67,26 @@ func TestFreshInstallSnapshotsContainNoLoginOrCharacterFixtures(t *testing.T) {
 	}
 }
 
+func TestFreshAccountSnapshotContainsControlledPatchCatalog(t *testing.T) {
+	account, err := os.ReadFile("create_sro_account.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(account)
+	for _, required := range []string{
+		"CREATE TABLE `PATCH_MODULE_STATE`",
+		"`ACTIVE_VERSION` int unsigned NOT NULL",
+		"CREATE TABLE `PATCH_RELEASE`",
+		"CREATE TABLE `PATCH_RELEASE_FILE`",
+		"`PREPARED_SHA256` char(64)",
+		"CREATE TABLE `PATCH_DOWNLOAD_SERVER`",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("account snapshot lacks patch catalog contract %q", required)
+		}
+	}
+}
+
 func TestFreshShardSnapshotEnablesChineseAndEuropeanCharacterCreation(t *testing.T) {
 	shard, err := os.ReadFile("create_sro_shard.sql")
 	if err != nil {
@@ -112,6 +132,26 @@ func TestFreshShardSnapshotContainsAlexandriaTravelCatalog(t *testing.T) {
 	} {
 		if !strings.Contains(contents, required) {
 			t.Fatalf("shard snapshot lacks Alexandria travel data %q", required)
+		}
+	}
+}
+
+func TestFreshShardSnapshotContainsCharacterBuyback(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"CREATE TABLE `CHAR_BUYBACK`",
+		"PRIMARY KEY (`FK_CHAR`,`SLOT`)",
+		"UNIQUE KEY `UX_CHAR_BUYBACK_ITEM` (`FK_ITEM`)",
+		"CONSTRAINT `CK_CHAR_BUYBACK_SLOT` CHECK ((`SLOT` < 5))",
+		"CONSTRAINT `FK_CHAR_BUYBACK_CHAR`",
+		"CONSTRAINT `FK_CHAR_BUYBACK_ITEM`",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks buy-back contract %q", required)
 		}
 	}
 }

@@ -16,8 +16,8 @@ remove that host binding and keep database traffic on the private network.
 
 - `create_sro_account.sql` and `create_sro_shard.sql` are destructive fresh-install
   snapshots. They include the final schema, migration-owned reference/backfill
-  data, and applied migration ledgers through account `000003` and shard
-  `000032` (with the intentional `000007` gap).
+  data, and applied migration ledgers through account `000004` and shard
+  `000038` (with the intentional `000007` gap).
 - The snapshots are not consumed by `cmd/migrate`; they must be loaded by a
   MySQL-capable client. Their pre-seeded ledgers let `cmd/migrate` verify the
   embedded catalog and apply only migrations added after the snapshot.
@@ -31,8 +31,8 @@ fixtures. Changing `MYSQL_PASSWORD` or these snapshots does not update an
 existing `mysql-data` volume; rotate the MySQL user and remove legacy test
 accounts explicitly in an operator-reviewed maintenance window.
 
-The account catalog currently ends at `000003`. The shard catalog reaches
-`000033` and covers normalized identity, character limits and creation policy,
+The account catalog currently ends at `000004`, including the controlled patch
+release catalog. The shard catalog reaches `000038` and covers normalized identity, character limits and creation policy,
 Item Mall balances, purchases and timed services,
 inventory constraints, quests,
 economy/storage, shops, teleports, mastery/skills, guild storage, reference
