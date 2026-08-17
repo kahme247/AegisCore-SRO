@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
@@ -19,6 +20,7 @@ var (
 	ErrInventoryHandlerPlayerLookupUnavailable = errors.New("inventory player lookup is unavailable")
 	ErrInventoryHandlerSessionIdentityInvalid  = errors.New("inventory session character identity is invalid")
 	ErrInventoryHandlerSessionPlayerMismatch   = errors.New("inventory session does not own the resolved player")
+	ErrEconomyPacketInvalid                    = errors.New("economy packet is invalid")
 )
 
 // PlayerLookup is the narrow world-facing dependency needed to resolve a
@@ -34,12 +36,15 @@ type InventoryHandler struct {
 	objects interface {
 		GetObjectByUniqueId(uint32) (model.ISRObject, error)
 	}
-	relocator model.InventoryRelocator
-	economy   model.EconomyRepository
-	mall      model.ItemMallRepository
-	guild     model.GuildStorageRepository
-	exchange  ExchangeOperations
-	send      func(*server.Session, network.Packet) error
+	relocator  model.InventoryRelocator
+	economy    model.EconomyRepository
+	mall       model.ItemMallRepository
+	guild      model.GuildStorageRepository
+	exchange   ExchangeOperations
+	send       func(*server.Session, network.Packet) error
+	buybackMu  sync.Mutex
+	buyback    map[int]string
+	buybackLog sync.Once
 }
 
 type ExchangeOperations interface {
@@ -63,8 +68,9 @@ const (
 	BuyItemFromModernMallOperation      ItemInventoryOperation = 0x18
 	BuySpecialtyGoodsOperation          ItemInventoryOperation = 0x2B
 	SellSpecialtyGoodsOperation         ItemInventoryOperation = 0x2C
-	EquipAvatarItemOperation            ItemInventoryOperation = 0x22
+	BuyBackItemOperation                ItemInventoryOperation = 0x22
 	UnequipAvatarItemOperation          ItemInventoryOperation = 0x23
+	EquipAvatarItemOperation            ItemInventoryOperation = 0x24
 	PutItemIntoPetInventoryOperation    ItemInventoryOperation = 0x1A
 	TakeItemFromPetInventoryOperation   ItemInventoryOperation = 0x1B
 	GuildStorageMoveOperation           ItemInventoryOperation = 0x1D
@@ -115,9 +121,14 @@ func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator m
 		handler.mall = mall[0]
 	}
 	target.RegisterHandler(opcode.ItemOperationRequest, handler.handlePacket)
+	target.RegisterHandler(opcode.NPCBuyBackRequest, handler.handleNPCBuyBackPacket)
 	handler.registerRepairHandler(target)
 	RegisterStorageHandler(target, economy)
 	RegisterGuildStorageHandler(target, guild)
+}
+
+func (h *InventoryHandler) handleNPCBuyBackPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
+	return h.handleBuyBack(ctx, session, &packet)
 }
 
 // RegisterInventoryHandler remains only for integrations that have not yet
@@ -164,6 +175,8 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		return h.handleMallBuy(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case SellItemOperation:
 		return h.handleSell(ctx, session, &packet)
+	case BuyBackItemOperation:
+		return h.handleBuyBack(ctx, session, &packet)
 	case PutItemIntoStorageOperation, TakeItemFromStorageOperation, 1:
 		return h.handleStorageMutation(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case GuildStorageMoveOperation, GuildStorageDepositItemOperation, GuildStorageWithdrawItemOperation,
@@ -484,19 +497,122 @@ func (h *InventoryHandler) handleSell(ctx context.Context, session *server.Sessi
 	if _, err = h.validateInteractionNPC(player, npcUID, false); err != nil {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
-	result, err := h.economy.Sell(ctx, int64(player.ID), session.UserContext.UserID, source, amount)
+	sessionID := buybackSessionID(session)
+	resetBuyback := h.buybackSession(player.ID) != sessionID
+	result, err := h.economy.Sell(ctx, int64(player.ID), session.UserContext.UserID, source, amount, resetBuyback)
 	if err != nil {
 		return h.handleEconomyError(session, err)
 	}
+	h.setBuybackSession(player.ID, sessionID)
 	player.CommitEconomy(result.Gold, result.Inventory)
-	// Buy-back cannot be advertised until the server retains the sold item and
-	// implements the restore operation. Pointing the client at a slot without
-	// that state leaves it with an invalid item reference and crashes the stock
-	// client while it refreshes the sold-item pane.
-	if err = h.sendPacket(session, buildSellSuccess(source, amount, npcUID, 0xFF)); err != nil {
+	if err = h.sendPacket(session, buildSellSuccess(source, amount, npcUID, result.BuybackSlot)); err != nil {
 		return err
 	}
 	return h.sendPacket(session, buildGoldUpdate(result.Gold))
+}
+
+func buybackSessionID(session *server.Session) string {
+	if session == nil {
+		return ""
+	}
+	if session.ID != "" {
+		return session.ID
+	}
+	return fmt.Sprintf("%p", session)
+}
+
+func (h *InventoryHandler) buybackSession(characterID int) string {
+	h.buybackMu.Lock()
+	defer h.buybackMu.Unlock()
+	return h.buyback[characterID]
+}
+
+func (h *InventoryHandler) setBuybackSession(characterID int, sessionID string) {
+	h.buybackMu.Lock()
+	defer h.buybackMu.Unlock()
+	if h.buyback == nil {
+		h.buyback = make(map[int]string)
+	}
+	h.buyback[characterID] = sessionID
+}
+
+func (h *InventoryHandler) handleBuyBack(ctx context.Context, session *server.Session, packet *network.Packet) error {
+	if h.economy == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	h.buybackLog.Do(func() {
+		if packet == nil {
+			logrus.Info("observed first NPC buy-back request with nil packet")
+			return
+		}
+		logrus.WithFields(logrus.Fields{
+			"opcode":    fmt.Sprintf("0x%04X", opcode.NPCBuyBackRequest),
+			"payload":   fmt.Sprintf("%X", packet.Payload()),
+			"remaining": packet.Remaining(),
+		}).Info("observed first NPC buy-back request")
+	})
+	request, parseErr := parseBuyBackRequest(packet)
+	if parseErr != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if h.exchange != nil && h.exchange.Busy(player.ID) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	if _, err = h.validateInteractionNPC(player, request.npcUID, false); err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	result, err := h.economy.BuyBack(ctx, int64(player.ID), session.UserContext.UserID, request.source)
+	if err != nil {
+		return h.handleEconomyError(session, err)
+	}
+	if len(result.DestinationSlots) != 1 {
+		return model.ErrEconomyOutcomeUnknown
+	}
+	player.CommitEconomy(result.Gold, result.Inventory)
+	if err = h.sendPacket(session, buildNPCBuyBackResponse(true)); err != nil {
+		return err
+	}
+	if err = h.sendPacket(session, buildBuyBackSuccess(result.DestinationSlots[0], request.source, result.Amount)); err != nil {
+		return err
+	}
+	return h.sendPacket(session, buildGoldUpdate(result.Gold))
+}
+
+func buildNPCBuyBackResponse(success bool) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.NPCBuyBackResponse
+	if success {
+		p.WriteByte(1)
+	} else {
+		p.WriteByte(2)
+	}
+	return p
+}
+
+type buyBackRequest struct {
+	npcUID uint32
+	source byte
+}
+
+func parseBuyBackRequest(packet *network.Packet) (buyBackRequest, error) {
+	if packet == nil || packet.Remaining() != 5 {
+		return buyBackRequest{}, ErrEconomyPacketInvalid
+	}
+	npcUID, e1 := packet.ReadUInt32()
+	source, e2 := packet.ReadByte()
+	if err := errors.Join(e1, e2); err != nil {
+		return buyBackRequest{}, err
+	}
+	if npcUID == 0 || source >= 5 {
+		return buyBackRequest{}, ErrEconomyPacketInvalid
+	}
+	return buyBackRequest{npcUID: npcUID, source: source}, nil
 }
 
 func (h *InventoryHandler) handleStorageMutation(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
@@ -626,6 +742,20 @@ func buildGoldUpdate(gold uint64) network.Packet {
 	p.MessageID = opcode.EntityUpdatePoints
 	p.WriteByte(1)
 	p.WriteUInt64(gold)
+	// vSRO 1.188 terminates point updates with a notification flag. Omitting
+	// it makes MsgStreamBuffer read one byte past the packet and assert.
+	p.WriteByte(0)
+	return p
+}
+
+func buildBuyBackSuccess(destination, source byte, amount uint16) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.ItemOperationResponse
+	p.WriteByte(1)
+	p.WriteByte(byte(BuyBackItemOperation))
+	p.WriteByte(destination)
+	p.WriteByte(source)
+	p.WriteUInt16(amount)
 	return p
 }
 func buildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {

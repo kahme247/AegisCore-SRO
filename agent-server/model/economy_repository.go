@@ -37,6 +37,7 @@ type EconomyResult struct {
 	Inventory        Inventory
 	Item             Item
 	SourceSlot       byte
+	BuybackSlot      byte
 	DestinationSlots []byte
 	Amount           uint16
 }
@@ -49,7 +50,8 @@ type StorageSnapshot struct {
 
 type EconomyRepository interface {
 	Buy(context.Context, int64, uint32, string, byte, byte, uint16) (EconomyResult, error)
-	Sell(context.Context, int64, uint32, byte, uint16) (EconomyResult, error)
+	Sell(context.Context, int64, uint32, byte, uint16, bool) (EconomyResult, error)
+	BuyBack(context.Context, int64, uint32, byte) (EconomyResult, error)
 	LoadStorage(context.Context, uint32) (StorageSnapshot, error)
 	Deposit(context.Context, int64, uint32, byte, byte) (EconomyResult, error)
 	Withdraw(context.Context, int64, uint32, byte, byte) (EconomyResult, error)
@@ -146,7 +148,7 @@ func (r *SQLEconomyRepository) Buy(ctx context.Context, characterID int64, userI
 	return EconomyResult{Gold: gold, Inventory: inventory, Item: first, DestinationSlots: free, Amount: quantity}, err
 }
 
-func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, userID uint32, source byte, amount uint16) (EconomyResult, error) {
+func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, userID uint32, source byte, amount uint16, resetBuyback bool) (EconomyResult, error) {
 	ctx = normalizeEconomyContext(ctx)
 	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || amount == 0 {
 		return EconomyResult{}, ErrEconomyConflict
@@ -165,25 +167,45 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	if resetBuyback {
+		if err = clearBuybackItems(ctx, tx, characterID); err != nil {
+			return EconomyResult{}, err
+		}
+	}
 	var itemID int64
 	var refID uint32
 	var stack int
 	var sellPrice uint64
-	err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,d.`SellPrice` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? AND d.`CanSell`<>0 FOR UPDATE", characterID, source).Scan(&itemID, &refID, &stack, &sellPrice)
+	var variance uint64
+	var opt byte
+	var data uint32
+	var rent RentInfo
+	err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,d.`SellPrice`,it.`VARIANCE`,it.`OPT_LEVEL`,it.`DATA`,it.`RENT_TYPE`,it.`RENT_CAN_DELETE`,it.`RENT_CAN_RECHARGE`,it.`RENT_PERIOD_BEGIN_TIME`,it.`RENT_PERIOD_END_TIME`,it.`RENT_METER_RATE_TIME`,it.`RENT_PACKING_TIME` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? AND d.`CanSell`<>0 FOR UPDATE", characterID, source).Scan(&itemID, &refID, &stack, &sellPrice, &variance, &opt, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime)
 	if err != nil || stack < int(amount) {
 		return EconomyResult{}, ErrEconomyConflict
 	}
 	if sellPrice > math.MaxUint64/uint64(amount) || gold > math.MaxUint64-sellPrice*uint64(amount) {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	soldItemID := itemID
 	if stack == int(amount) {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, source, itemID); err != nil {
 			return EconomyResult{}, err
 		}
-		if _, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", itemID); err != nil {
+	} else {
+		inserted, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) SELECT `VARIANCE`,`FK_REF_ITEM`,?,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME` FROM `ITEM` WHERE `id`=?", amount, itemID)
+		if insertErr != nil {
+			return EconomyResult{}, insertErr
+		}
+		if soldItemID, err = inserted.LastInsertId(); err != nil {
 			return EconomyResult{}, err
 		}
-	} else if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-? WHERE `id`=?", amount, itemID); err != nil {
+		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-? WHERE `id`=?", amount, itemID); err != nil {
+			return EconomyResult{}, err
+		}
+	}
+	buybackSlot, err := appendBuybackItem(ctx, tx, characterID, soldItemID, sellPrice*uint64(amount))
+	if err != nil {
 		return EconomyResult{}, err
 	}
 	gold += sellPrice * uint64(amount)
@@ -198,7 +220,183 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	if err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
-	return EconomyResult{Gold: gold, Inventory: inventory, SourceSlot: source, Amount: amount}, err
+	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	return EconomyResult{Gold: gold, Inventory: inventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount}, nil
+}
+
+func clearBuybackItems(ctx context.Context, tx *sql.Tx, characterID int64) error {
+	rows, err := tx.QueryContext(ctx, "SELECT `FK_ITEM` FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=? ORDER BY `SLOT` FOR UPDATE", characterID)
+	if err != nil {
+		return err
+	}
+	itemIDs := make([]int64, 0, 5)
+	for rows.Next() {
+		var itemID int64
+		if err = rows.Scan(&itemID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		itemIDs = append(itemIDs, itemID)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=?", characterID); err != nil {
+		return err
+	}
+	for _, itemID := range itemIDs {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", itemID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *SQLEconomyRepository) BuyBack(ctx context.Context, characterID int64, userID uint32, source byte) (EconomyResult, error) {
+	ctx = normalizeEconomyContext(ctx)
+	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || source >= 5 {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	owner, gold, err := lockEconomyCharacter(ctx, tx, characterID)
+	if err != nil || owner != userID {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	var itemID int64
+	var refID uint32
+	var stack int
+	var price uint64
+	var variance uint64
+	var opt byte
+	var data uint32
+	var rent RentInfo
+	err = tx.QueryRowContext(ctx, "SELECT b.`FK_ITEM`,i.`FK_REF_ITEM`,i.`STACK_COUNT`,b.`PRICE`,i.`VARIANCE`,i.`OPT_LEVEL`,i.`DATA`,i.`RENT_TYPE`,i.`RENT_CAN_DELETE`,i.`RENT_CAN_RECHARGE`,i.`RENT_PERIOD_BEGIN_TIME`,i.`RENT_PERIOD_END_TIME`,i.`RENT_METER_RATE_TIME`,i.`RENT_PACKING_TIME` FROM `CHAR_BUYBACK` b JOIN `ITEM` i ON i.`id`=b.`FK_ITEM` WHERE b.`FK_CHAR`=? AND b.`SLOT`=? FOR UPDATE", characterID, source).Scan(&itemID, &refID, &stack, &price, &variance, &opt, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime)
+	if err != nil || stack < 1 || gold < price {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	items, err := lockCharacterInventoryEconomy(ctx, tx, characterID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	free := freeInventorySlots(items, 1)
+	if len(free) != 1 {
+		return EconomyResult{}, ErrEconomyInventoryFull
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `INVENTORY` (`FK_CHAR`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", characterID, free[0], itemID); err != nil {
+		return EconomyResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, source, itemID); err != nil {
+		return EconomyResult{}, err
+	}
+	if err = compactBuybackSlots(ctx, tx, characterID, source); err != nil {
+		return EconomyResult{}, err
+	}
+	gold -= price
+	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
+		return EconomyResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	committed = true
+	inventory, err := r.loadInventory(ctx, characterID)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	item, err := economyItem(itemID, refID, variance, stack, opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	return EconomyResult{Gold: gold, Inventory: inventory, Item: item, SourceSlot: source, DestinationSlots: free, Amount: uint16(stack)}, nil
+}
+
+func appendBuybackItem(ctx context.Context, tx *sql.Tx, characterID, itemID int64, price uint64) (byte, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT `SLOT`,`FK_ITEM` FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=? ORDER BY `SLOT` FOR UPDATE", characterID)
+	if err != nil {
+		return 0, err
+	}
+	type entry struct {
+		slot   byte
+		itemID int64
+	}
+	entries := make([]entry, 0, 5)
+	for rows.Next() {
+		var value entry
+		if err = rows.Scan(&value.slot, &value.itemID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		entries = append(entries, value)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(entries) > 5 {
+		return 0, ErrEconomyConflict
+	}
+	for index, value := range entries {
+		if value.slot != byte(index) {
+			return 0, ErrEconomyConflict
+		}
+	}
+	if len(entries) == 5 {
+		oldest := entries[0]
+		if oldest.slot != 0 {
+			return 0, ErrEconomyConflict
+		}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=? AND `SLOT`=0 AND `FK_ITEM`=?", characterID, oldest.itemID); err != nil {
+			return 0, err
+		}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", oldest.itemID); err != nil {
+			return 0, err
+		}
+		if err = compactBuybackSlots(ctx, tx, characterID, 0); err != nil {
+			return 0, err
+		}
+		entries = entries[1:]
+	}
+	slot := byte(len(entries))
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_BUYBACK` (`FK_CHAR`,`SLOT`,`FK_ITEM`,`PRICE`) VALUES (?,?,?,?)", characterID, slot, itemID, price); err != nil {
+		return 0, err
+	}
+	return slot + 1, nil
+}
+
+func compactBuybackSlots(ctx context.Context, tx *sql.Tx, characterID int64, removed byte) error {
+	rows, err := tx.QueryContext(ctx, "SELECT `SLOT` FROM `CHAR_BUYBACK` WHERE `FK_CHAR`=? AND `SLOT`>? ORDER BY `SLOT` FOR UPDATE", characterID, removed)
+	if err != nil {
+		return err
+	}
+	slots := make([]byte, 0, 4)
+	for rows.Next() {
+		var slot byte
+		if err = rows.Scan(&slot); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		slots = append(slots, slot)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, slot := range slots {
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR_BUYBACK` SET `SLOT`=? WHERE `FK_CHAR`=? AND `SLOT`=?", slot-1, characterID, slot); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *SQLEconomyRepository) LoadStorage(ctx context.Context, userID uint32) (StorageSnapshot, error) {

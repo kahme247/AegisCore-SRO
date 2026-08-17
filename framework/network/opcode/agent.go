@@ -22,6 +22,8 @@ const (
 
 	ItemOperationRequest     uint16 = 0x7034
 	ItemOperationResponse    uint16 = 0xB034
+	NPCBuyBackRequest        uint16 = 0x7168
+	NPCBuyBackResponse       uint16 = 0xB168
 	ItemRepairRequest        uint16 = 0x703E
 	ItemRepairResponse       uint16 = 0xB03E
 	ItemDurabilityUpdate     uint16 = 0x3052

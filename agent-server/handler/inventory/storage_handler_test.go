@@ -33,7 +33,9 @@ func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 		want   string
 	}{
 		{name: "buy", packet: buildBuySuccess(2, 3, 1, []byte{13}, model.Item{}), want: "01080203010d010000000000"},
-		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344, 0xFF), want: "01090d010044332211ff"},
+		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344, 1), want: "01090d01004433221101"},
+		{name: "buy back", packet: buildBuyBackSuccess(14, 0, 1), want: "01220e000100"},
+		{name: "buy back acknowledgement", packet: buildNPCBuyBackResponse(true), want: "01"},
 		{name: "deposit", packet: buildStorageTransferSuccess(PutItemIntoStorageOperation, 13, 0), want: "01020d00"},
 		{name: "withdraw", packet: buildStorageTransferSuccess(TakeItemFromStorageOperation, 0, 13), want: "0103000d"},
 	}
@@ -51,8 +53,30 @@ func TestBuildGoldUpdateUsesCurrentBalance(t *testing.T) {
 	if packet.MessageID != opcode.EntityUpdatePoints {
 		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntityUpdatePoints)
 	}
-	if got, want := hex.EncodeToString(packet.Payload()), "018877665544332211"; got != want {
+	if got, want := hex.EncodeToString(packet.Payload()), "01887766554433221100"; got != want {
 		t.Fatalf("payload = %s, want %s", got, want)
+	}
+}
+
+func TestParseBuyBackRequestUsesNPCThenZeroBasedSoldSlot(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	packet.WriteUInt32(0x11223344)
+	packet.WriteByte(4)
+	request, err := parseBuyBackRequest(&packet)
+	if err != nil {
+		t.Fatalf("parseBuyBackRequest() error = %v", err)
+	}
+	if request.npcUID != 0x11223344 || request.source != 4 {
+		t.Fatalf("request = %+v, want npc 0x11223344 and slot 4", request)
+	}
+}
+
+func TestParseBuyBackRequestRejectsOutOfRangeSoldSlot(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	packet.WriteUInt32(0x11223344)
+	packet.WriteByte(5)
+	if _, err := parseBuyBackRequest(&packet); err == nil {
+		t.Fatal("parseBuyBackRequest() accepted slot 5")
 	}
 }
 
