@@ -82,7 +82,7 @@ func setDefaultValues() {
 	viper.SetDefault(AgentAdmissionHost, "127.0.0.1")
 	viper.SetDefault(AgentAdmissionPort, 15883)
 
-	viper.SetDefault(GameTimeTicksPerSecond, 10)
+	viper.SetDefault(GameTimeTicksPerSecond, 20)
 	viper.SetDefault(GameTimeDaySpeed, 1.0)
 	viper.SetDefault(PositionCheckpointSeconds, 30)
 }

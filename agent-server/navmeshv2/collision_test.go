@@ -173,8 +173,8 @@ func TestCrossRegionTerrainChecksDestinationCellEdges(t *testing.T) {
 	next := RtNavmeshPosition{Region: nextRegion, Offset: math32.NewVector3(5, 0, 10)}
 	blockedEdge := &RtNavmeshEdgeBase{
 		Line: LineSegment{A: math32.NewVector3(0, 0, 5), B: math32.NewVector3(10, 0, 5)},
-		// Crossing from destination-cell 2 back into cell 1 is prohibited.
-		Flag:         RtNavmeshEdgeFlag(1),
+		// Entering destination cell 2 from source cell 1 is prohibited.
+		Flag:         RtNavmeshEdgeFlag(1 << 1),
 		SrcCellIndex: 1,
 		DstCellIndex: 2,
 	}
@@ -190,6 +190,30 @@ func TestCrossRegionTerrainChecksDestinationCellEdges(t *testing.T) {
 	}
 	if collision.Region.ID != nextRegion.ID || math32.Abs(collision.VectorLocal.Z-5) > 0.001 {
 		t.Fatalf("unexpected terrain collision: region=%d local=%+v", collision.Region.ID, collision.VectorLocal)
+	}
+}
+
+func TestCrossRegionTerrainOneWayBoundaryAllowsCityExit(t *testing.T) {
+	currentRegion := NewRegionFromXAndY(100, 100)
+	nextRegion := NewRegionFromXAndY(100, 101)
+	current := RtNavmeshPosition{Region: currentRegion, Offset: math32.NewVector3(5, 0, 1910)}
+	next := RtNavmeshPosition{Region: nextRegion, Offset: math32.NewVector3(5, 0, 10)}
+	edge := &RtNavmeshEdgeBase{
+		Line: LineSegment{A: math32.NewVector3(0, 0, 1915), B: math32.NewVector3(10, 0, 1915)},
+		// Destination-to-source is blocked, but leaving the source-side city
+		// cell toward the neighboring outer region is permitted.
+		Flag:         RtNavmeshEdgeFlag(1),
+		SrcCellIndex: 1,
+		DstCellIndex: 2,
+	}
+	currentCell := RtNavmeshCellQuad{
+		RtNavmeshCellBase: RtNavmeshCellBase{Index: 1},
+		Edges:             []RtNavmeshEdge{edge},
+	}
+	nextCell := RtNavmeshCellQuad{RtNavmeshCellBase: RtNavmeshCellBase{Index: 2}}
+
+	if collides, _ := FindTerrainCollisions(current, next, currentCell, nextCell); collides {
+		t.Fatal("permitted city-exit crossing was treated as a wall at the region seam")
 	}
 }
 

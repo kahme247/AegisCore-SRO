@@ -71,6 +71,10 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 		logrus.Warnf("movement request for unknown player %d: %v", data.UserContext.UniqueID, err)
 		return
 	}
+	if player.IsBarrierRooted() {
+		movementService.Stop(player, "wall-skill-root")
+		return
+	}
 	hasDestination, err := data.ReadBool()
 	if err != nil {
 		mh.rejectMalformed(player, "movement type", err)
@@ -97,24 +101,34 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 		mh.rejectMalformed(player, "destination movement", err)
 		return
 	}
-	region, err := world.GetRegion(regionID)
+	targetPosition, err := resolveDestinationPosition(world, regionID, offset)
 	if err != nil {
-		mh.rejectMalformed(player, "destination region lookup", err)
+		mh.rejectMalformed(player, "destination position", err)
 		return
 	}
-	targetCell, err := region.ResolveCell(offset)
-	if err != nil {
-		mh.rejectMalformed(player, "destination cell", err)
-		return
-	}
-	// The client and character record use the calibrated world Y coordinate.
-	// Navmesh height samples are useful for topology/collision, but their scale
-	// is not interchangeable with the client protocol's vertical coordinate.
-	// Replacing this value makes a moving character sink below the rendered map.
-	targetPosition := navmeshv2.RtNavmeshPosition{Offset: offset, Region: region.Region, Cell: &targetCell}
 	mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 	movementService.MoveToPosition(player, targetPosition)
-	logrus.Tracef("moving %s to position %d (%g|%g|%g)", player.CharName, regionID, offset.X, offset.Y, offset.Z)
+	logrus.Tracef("moving %s to position %d (%g|%g|%g)", player.CharName, targetPosition.Region.ID, targetPosition.Offset.X, targetPosition.Offset.Y, targetPosition.Offset.Z)
+}
+
+type destinationPositionResolver interface {
+	NewPosFromGlobalCoordinates(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
+}
+
+// resolveDestinationPosition normalizes the coordinates carried by the stock
+// client before looking up the authoritative terrain cell. Near region seams,
+// the client can retain the source region in 0x7021 and send X/Z outside the
+// local 0..1920 range. This is common for long bridge clicks. Treating those
+// coordinates as local to the packet region rejects a valid destination.
+func resolveDestinationPosition(world destinationPositionResolver, regionID int16, offset *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	if world == nil || offset == nil {
+		return navmeshv2.RtNavmeshPosition{}, fmt.Errorf("missing destination position")
+	}
+	packetPosition := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(regionID),
+		Offset: offset,
+	}
+	return world.NewPosFromGlobalCoordinates(packetPosition.GetGlobalCoordinates())
 }
 
 // parseDestinationMovementPacket reads the binary-confirmed normal-world
@@ -181,6 +195,12 @@ func (mh *MovementHandler) handleForward(data server.PacketChannelData) {
 	action, heading, err := parseForwardPacket(&data.Packet, uint16(player.GetNavmeshPosition().Heading))
 	if err != nil {
 		mh.rejectMalformed(player, "forward action", err)
+		return
+	}
+	if player.IsBarrierRooted() {
+		if action == 0 {
+			movementService.Stop(player, "wall-skill-root")
+		}
 		return
 	}
 	if action == 0 {

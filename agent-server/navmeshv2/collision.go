@@ -42,7 +42,7 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 
 		for _, edge := range currentCell.Edges {
 			if intersects, vIntersection := line1.Intersects(edge.GetLine()); intersects {
-				if edgeBlocksMovementFrom(edge, currentCell, false) {
+				if edgeBlocksMovementFrom(edge, currentCell) {
 					collisions = append(collisions, Collision{
 						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
 						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
@@ -56,7 +56,7 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 
 		for _, edge := range nextCell.Edges {
 			if intersects, vIntersection := line1.Intersects(edge.GetLine()); intersects {
-				if edgeBlocksMovementFrom(edge, currentCell, false) {
+				if edgeBlocksMovementFrom(edge, currentCell) {
 					collisions = append(collisions, Collision{
 						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
 						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
@@ -95,7 +95,7 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 				B: b.GetGlobalCoordinates(),
 			}
 			if intersects, vIntersection := line1.Intersects(line2); intersects {
-				if edge.GetFlag().IsBlocked() {
+				if edgeBlocksCrossRegionMovement(edge, currentCell, false) {
 					collisions = append(collisions, Collision{
 						VectorLocal:  global2DToRegionLocal(vIntersection, currentPosition.Region),
 						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
@@ -126,7 +126,7 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 				B: b.GetGlobalCoordinates(),
 			}
 			if intersects, vIntersection := line1.Intersects(line2); intersects {
-				if edge.GetFlag().IsBlocked() {
+				if edgeBlocksCrossRegionMovement(edge, nextCell, true) {
 					collisions = append(collisions, Collision{
 						VectorLocal:  global2DToRegionLocal(vIntersection, nextPosition.Region),
 						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
@@ -157,14 +157,8 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 // bits in a terrain edge. A one-way portal (common at town gates) must block
 // only the prohibited direction; treating either bit as a solid wall traps a
 // player on the permitted side.
-func edgeBlocksMovementFrom(edge RtNavmeshEdge, currentCell RtNavmeshCellQuad, crossRegion bool) bool {
+func edgeBlocksMovementFrom(edge RtNavmeshEdge, currentCell RtNavmeshCellQuad) bool {
 	flag := edge.GetFlag()
-	// A fully linked terrain edge carries concrete cell references. Synthetic
-	// test data and malformed/unlinked edges only carry numeric indexes, whose
-	// values are not meaningful across regions; retain the safe wall behavior.
-	if crossRegion && (edge.GetSrcCell() == nil || edge.GetDstCell() == nil) {
-		return flag.IsBlocked()
-	}
 	if currentCell.Index == edge.GetSrcCellIndex() {
 		return flag.IsBlockedSrcToDst()
 	}
@@ -176,6 +170,44 @@ func edgeBlocksMovementFrom(edge RtNavmeshEdge, currentCell RtNavmeshCellQuad, c
 	// outer boundaries. Retain the conservative behaviour for malformed or
 	// synthetic edges that do not identify either endpoint.
 	return flag.IsBlocked()
+}
+
+// edgeBlocksCrossRegionMovement applies directional flags from the side of
+// the region seam where the edge is stored. A blocked global edge is linked
+// only to its source cell, so its destination pointer is normally unavailable.
+// The current-region scan leaves its attached cell; the destination-region
+// scan enters its attached cell from the opposite side.
+func edgeBlocksCrossRegionMovement(edge RtNavmeshEdge, attachedCell RtNavmeshCellQuad, entering bool) bool {
+	flag := edge.GetFlag()
+	isSource := edgeCellMatches(edge.GetSrcCell(), attachedCell)
+	isDestination := edgeCellMatches(edge.GetDstCell(), attachedCell)
+	if !isSource && !isDestination {
+		// Blocked global edges do not link their destination cell. Recover the
+		// attached side from the authored indexes when they are unambiguous.
+		isSource = edge.GetSrcCellIndex() == attachedCell.Index && edge.GetDstCellIndex() != attachedCell.Index
+		isDestination = edge.GetDstCellIndex() == attachedCell.Index && edge.GetSrcCellIndex() != attachedCell.Index
+	}
+
+	if isSource {
+		if entering {
+			return flag.IsBlockedDstToSrc()
+		}
+		return flag.IsBlockedSrcToDst()
+	}
+	if isDestination {
+		if entering {
+			return flag.IsBlockedSrcToDst()
+		}
+		return flag.IsBlockedDstToSrc()
+	}
+	return flag.IsBlocked()
+}
+
+func edgeCellMatches(candidate RtNavmeshCell, cell RtNavmeshCellQuad) bool {
+	if candidate == nil || candidate.GetIndex() != cell.Index {
+		return false
+	}
+	return candidate.GetMesh() == cell.GetMesh()
 }
 
 func FindObjectCollisions(currentPosition, nextPosition RtNavmeshPosition,

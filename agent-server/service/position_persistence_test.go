@@ -426,7 +426,7 @@ func TestModelCharacterPositionRepositoryAdapterUsesDrainContext(t *testing.T) {
 	}
 }
 
-func TestCompletedRegionCrossingMovesRegionMembership(t *testing.T) {
+func TestCompletedRegionCrossingMovesMembershipAndQueuesPersistence(t *testing.T) {
 	repository := &fakePositionRepository{}
 	persistence := NewPositionPersistenceService(repository, 30*time.Second)
 	oldPosition := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(1919, 5, 10)}
@@ -448,7 +448,16 @@ func TestCompletedRegionCrossingMovesRegionMembership(t *testing.T) {
 	if _, moving := world.movingObjects[10]; moving {
 		t.Fatal("completed player remained in moving-object index")
 	}
+	if repository.calls != 0 {
+		t.Fatalf("region transition blocked movement on %d synchronous writes", repository.calls)
+	}
+	if stats := persistence.Stats(); stats.Pending != 1 {
+		t.Fatalf("region transition pending persistence = %d, want 1", stats.Pending)
+	}
+	if err := persistence.FlushPlayer(player.GetUniqueID()); err != nil {
+		t.Fatalf("flush queued region transition: %v", err)
+	}
 	if repository.calls != 1 {
-		t.Fatalf("region transition was not persisted immediately: %d writes", repository.calls)
+		t.Fatalf("queued region transition writes = %d, want 1", repository.calls)
 	}
 }

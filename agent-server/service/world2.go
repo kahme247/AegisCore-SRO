@@ -1000,7 +1000,9 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 		targetWorldVec := movementData.TargetPosition.GetGlobalCoordinates()
 		walkVector = targetWorldVec.Clone().Sub(curWorldVec.Clone())
 		if walkVector.LengthSq() <= 0.0001 {
-			return w.commitMovementStep(p, movementData.Generation, movementData.TargetPosition, currentTime, true, "arrived", true)
+			// The initiating client already owns the exact B021 destination.
+			// Sending B023 on normal arrival can rewind it across a region seam.
+			return w.commitMovementStep(p, movementData.Generation, movementData.TargetPosition, currentTime, true, "arrived", false)
 		}
 		walkVector.Normalize()
 	} else {
@@ -1073,12 +1075,17 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 
 	// Check terrain collisions
 
-	return w.commitMovementStep(p, movementData.Generation, newPos, currentTime, nextPosIsTarget, map[bool]string{true: "arrived", false: "moving"}[nextPosIsTarget], nextPosIsTarget)
+	// Reaching an accepted destination is not a correction. Reserve B023 for
+	// collision/invalid-position stops so normal arrival cannot visibly snap
+	// the stock client back to the server's last 20 Hz sample.
+	return w.commitMovementStep(p, movementData.Generation, newPos, currentTime, nextPosIsTarget, map[bool]string{true: "arrived", false: "moving"}[nextPosIsTarget], false)
 }
 
 func (w *WorldService) commitMovementStep(p model.ICharacter, generation uint64, newPosition navmeshv2.RtNavmeshPosition, updateTime time.Time, completed bool, reason string, correction bool) bool {
 	oldPosition := p.GetNavmeshPosition()
 	regionChanged := oldPosition.Region.ID != newPosition.Region.ID
+	activeMovement := p.GetMovementData()
+	hasDestination := activeMovement != nil && activeMovement.Generation == generation && activeMovement.HasDestination
 	w.mutex.Lock()
 	committed := false
 	if completed {
@@ -1102,18 +1109,13 @@ func (w *WorldService) commitMovementStep(p model.ICharacter, generation uint64,
 	w.mutex.Unlock()
 	if player, ok := p.(*model.Player); ok {
 		w.positionPersistence.MarkDirty(player)
-		if regionChanged {
-			if err := w.positionPersistence.FlushPlayer(player.GetUniqueID()); err != nil {
-				log.Warnf("region-change position remains queued for player %d: %v", player.GetUniqueID(), err)
-			}
-		}
 	}
 	traceMovementFor(p, "commit uid=%d generation=%d completed=%t reason=%s position=%s", p.GetUniqueID(), generation, completed, reason, newPosition.String())
 	// A directional movement response has no destination region. When a player
 	// crosses a region seam, send the authoritative position packet even though
 	// this was not otherwise a correction, so the client updates its active map
 	// region before it receives visibility changes for the new area.
-	if correction || regionChanged {
+	if correction || (regionChanged && !hasDestination) {
 		p.SendPositionUpdate()
 	}
 	// Visibility is reconciled from the committed authoritative position, not

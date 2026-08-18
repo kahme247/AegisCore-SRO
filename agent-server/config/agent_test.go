@@ -23,7 +23,7 @@ func TestAgentDefaults(t *testing.T) {
 	assertConfigValue(t, AgentDiagnosticsPort, 6060)
 	assertConfigValue(t, AgentAdmissionHost, "127.0.0.1")
 	assertConfigValue(t, AgentAdmissionPort, 15883)
-	assertConfigValue(t, GameTimeTicksPerSecond, 10)
+	assertConfigValue(t, GameTimeTicksPerSecond, 20)
 	assertConfigValue(t, GameTimeDaySpeed, 1.0)
 	assertConfigValue(t, PositionCheckpointSeconds, 30)
 
