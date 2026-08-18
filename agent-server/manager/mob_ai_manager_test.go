@@ -35,6 +35,52 @@ func TestMobAIAggressiveMobPursuesNearestKnownPlayer(t *testing.T) {
 	}
 }
 
+func TestSourceTherapyPreventsPreemptiveAggro(t *testing.T) {
+	npc, player := mobAIFixture(50)
+	npc.ConfigureAI(5, true, 150)
+	if _, ok := player.CommitActiveBuff(8390, 77, time.Minute, model.BuffModifiers{}); !ok {
+		t.Fatal("commit source therapy")
+	}
+	manager := mobAIManagerForTest()
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		8390: {ID: 8390, AggroSuppression: true},
+	}}))
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	manager.tick(world, time.Now())
+	_, _, _, targetUID := npc.AIProfile()
+	if targetUID != 0 {
+		t.Fatalf("source therapy target UID = %d, want none", targetUID)
+	}
+}
+
+func TestMobAIStationaryPlantDoesNotPursueOrWander(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(100)
+	npc.ConfigureMovementSpeeds(0, 0)
+	npc.ConfigureAI(46, true, 150)
+	npc.BindSpawnArea(&model.SpawnArea{Spawn: model.Spawn{
+		Position:       npc.GetNavmeshPosition(),
+		GenerateRadius: 50,
+	}})
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	manager := mobAIManagerForTest()
+
+	manager.tick(world, now.Add(20*time.Second))
+	if world.moves != 0 {
+		t.Fatalf("stationary plant registered %d pursuit movements, want 0", world.moves)
+	}
+	if npc.GetMotionState() != model.NoMotion || npc.GetMovementData() != nil {
+		t.Fatal("stationary plant entered a moving state while pursuing")
+	}
+
+	npc.ClearAggroTarget(player.GetUniqueID())
+	npc.ConfigureAI(46, false, 150)
+	manager.tick(world, now.Add(40*time.Second))
+	if world.moves != 0 {
+		t.Fatalf("stationary plant registered %d movements after wander tick, want 0", world.moves)
+	}
+}
+
 func TestMobAIRejectsObstructedPursuitBeforeMovement(t *testing.T) {
 	now := time.Now()
 	npc, _ := mobAIFixture(100)
@@ -242,7 +288,7 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	}
 }
 
-func TestMobAIShockSuppressesMovementAndAttack(t *testing.T) {
+func TestMobAIShockDoesNotBehaveLikeStun(t *testing.T) {
 	now := time.Now()
 	npc, _ := mobAIFixture(100)
 	npc.ConfigureAI(5, true, 150)
@@ -253,11 +299,56 @@ func TestMobAIShockSuppressesMovementAndAttack(t *testing.T) {
 	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusShock, Token: 1, SkillID: 8129, Power: 240, ExpiresAt: now.Add(time.Second)})
 	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
 	mobAIManagerForTest().tick(world, now)
-	if npc.GetMotionState() != model.NoMotion || world.stops != 1 {
-		t.Fatalf("shocked state = %d stops=%d, want stopped once", npc.GetMotionState(), world.stops)
+	if world.stops != 0 {
+		t.Fatalf("Shock stopped movement %d times; Shock must impair parry rather than stun", world.stops)
 	}
-	if world.moves != 0 || world.lastMovement.HasDestination {
-		t.Fatalf("shocked mob moved: %#v", world.lastMovement)
+}
+
+func TestMobAIStunStopsMovementAndAttack(t *testing.T) {
+	now := time.Now()
+	npc, _ := mobAIFixture(100)
+	npc.ConfigureAI(5, true, 150)
+	npc.SetMotionState(model.Running)
+	npc.ConfigureCombat(100, 10)
+	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusStun, Token: 1, SkillID: 8416, Power: 1, ExpiresAt: now.Add(5 * time.Second)})
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	mobAIManagerForTest().tick(world, now)
+	if npc.GetMotionState() != model.NoMotion || world.stops != 1 || world.moves != 0 {
+		t.Fatalf("stunned state=%d stops=%d moves=%d", npc.GetMotionState(), world.stops, world.moves)
+	}
+}
+
+func TestVitalSpotHitDownChangesMonsterHitChance(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(100)
+	npc.SRObject.RefObjectID = 9000
+	npc.ConfigureCombat(100, 1)
+	var chances []int
+	manager := &MobAIManager{
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+			9000: {RefObject: model.RefObject{ID: 9000}, HitRate: 99},
+		}}),
+		hitRollPercent: func(chance int) bool { chances = append(chances, chance); return true },
+	}
+	if !manager.mobAttackLands(npc, player, now) {
+		t.Fatal("baseline monster hit rejected")
+	}
+	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusHitDown, Token: 1, SkillID: 1617, Power: 88, ExpiresAt: now.Add(time.Minute)})
+	if !manager.mobAttackLands(npc, player, now) {
+		t.Fatal("hit-down monster hit rejected")
+	}
+	if len(chances) != 2 || chances[0] != 90 || chances[1] != 50 {
+		t.Fatalf("monster hit chances = %v, want [90 50]", chances)
+	}
+}
+
+func TestVitalSpotAttackDownReducesMonsterDamage(t *testing.T) {
+	now := time.Now()
+	npc, _ := mobAIFixture(100)
+	npc.ConfigureCombat(100, 1)
+	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusAttackDown, Token: 1, SkillID: 8410, Power: 35, ExpiresAt: now.Add(time.Minute)})
+	if got := mobDamageAfterAttackDown(npc, 200, now); got != 130 {
+		t.Fatalf("attack-down damage = %d, want 130", got)
 	}
 }
 

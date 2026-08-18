@@ -66,6 +66,11 @@ func (h *AlchemyHandler) handlePacket(ctx context.Context, session *server.Sessi
 	if err = h.sendPacket(session, buildAlchemySuccess(result)); err != nil {
 		return err
 	}
+	if request.targetSlot <= model.SlotRightRing {
+		if err = h.sendPacket(session, player.BuildStatsUpdatePacket()); err != nil {
+			return err
+		}
+	}
 	for _, material := range result.Materials {
 		if material.Remaining == 0 {
 			err = h.sendPacket(session, buildAlchemyMaterialRemoved(material.Slot))

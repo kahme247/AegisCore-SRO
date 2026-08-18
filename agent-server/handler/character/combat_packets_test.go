@@ -128,6 +128,129 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 	if got, want := handler.baseAttackReach(player, target), float32(33); got != want {
 		t.Fatalf("glaive attack reach = %g, want %g", got, want)
 	}
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 150}), float32(150); got != want {
+		t.Fatalf("15m skill reach = %g, want %g independent of weapon", got, want)
+	}
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{TransferRange: 100}), float32(100); got != want {
+		t.Fatalf("transfer-authored skill reach = %g, want %g independent of weapon", got, want)
+	}
+}
+
+func TestCombatGhostWalkMovesForwardByReferenceDistance(t *testing.T) {
+	const skillID = uint32(8142)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{
+		UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100),
+	}, ID: 42, Session: session, Skills: map[uint32]byte{skillID: 1}}
+	player.SetLifeState(model.Alive)
+	world := &combatWorldFake{player: player}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: world, nextSkill: make(map[skillCooldownKey]time.Time),
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, MovementDistance: 245},
+		}}),
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	// The stock client sends Ghost Walk as the seven-byte no-target form even
+	// though REF_SKILL marks the row as target-required.
+	if err := handler.handlePacket(context.Background(), session, combatSelfSkillPacket(skillID)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := player.GetNavmeshPosition().Offset.X, float32(345); got != want {
+		t.Fatalf("ghost walk X = %g, want %g", got, want)
+	}
+	if world.stops != 1 {
+		t.Fatalf("ghost walk stops = %d, want 1", world.stops)
+	}
+	for _, packet := range sent {
+		if packet.MessageID == opcode.EntityMovementResponse {
+			t.Fatalf("ghost walk emitted ordinary movement packet: % X", packet.Payload())
+		}
+	}
+	var completion *network.Packet
+	for index := range sent {
+		if sent[index].MessageID == opcode.EntitySkillCastEnd {
+			completion = &sent[index]
+			break
+		}
+	}
+	if completion == nil || completion.DataSize != 24 || completion.Payload()[9] != 0x08 {
+		t.Fatalf("ghost walk completion = %#v, want 24-byte B071 teleport state", completion)
+	}
+}
+
+func TestCombatGhostWalkAcceptsStockAreaTargetPacket(t *testing.T) {
+	const skillID = uint32(8142)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{
+		UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100),
+	}, ID: 42, Session: session, Skills: map[uint32]byte{skillID: 1}}
+	player.SetLifeState(model.Alive)
+	var completion func()
+	var completionDelay time.Duration
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: &combatWorldFake{player: player}, nextSkill: make(map[skillCooldownKey]time.Time),
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, MovementDurationMS: 500, MovementDistance: 245},
+		}}),
+		schedule:  func(delay time.Duration, callback func()) { completionDelay, completion = delay, callback },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(actionPhaseStart)
+	packet.WriteByte(actionTypeAttack)
+	packet.WriteUInt32(skillID)
+	packet.WriteByte(2)
+	packet.WriteUInt16(24231)
+	packet.WriteUInt32(200)
+	packet.WriteUInt32(100)
+	packet.WriteUInt32(0)
+	if err := handler.handlePacket(context.Background(), session, packet); err != nil {
+		t.Fatalf("stock area-target Ghost Walk disconnected session: %v", err)
+	}
+	if got, want := player.GetNavmeshPosition().Offset.X, float32(100); got != want {
+		t.Fatalf("Ghost Walk moved before animation completed: X=%g, want %g", got, want)
+	}
+	if completion == nil || completionDelay != 500*time.Millisecond {
+		t.Fatalf("Ghost Walk completion = callback:%t delay:%s", completion != nil, completionDelay)
+	}
+	if got := packetOpcodesForCombat(sent); reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd}) {
+		t.Fatalf("Ghost Walk emitted B071 before movement phase: %04X", got)
+	}
+	completion()
+	if got, want := player.GetNavmeshPosition().Offset.X, float32(200); got != want {
+		t.Fatalf("Ghost Walk endpoint X = %g, want %g", got, want)
+	}
+}
+
+func TestCombatIcebergWallCreatesPhysicalBarrier(t *testing.T) {
+	const skillID = uint32(8010)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session, Skills: map[uint32]byte{skillID: 1}}
+	player.SetLifeState(model.Alive)
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: &combatWorldFake{player: player}, nextSkill: make(map[skillCooldownKey]time.Time),
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, BarrierHitPoints: 21334, BarrierAbsorption: 98, BarrierPhysical: true},
+		}}),
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSelfSkillPacket(skillID)); err != nil {
+		t.Fatal(err)
+	}
+	barrier := player.BarrierSnapshot()
+	if barrier.SkillID != skillID || barrier.HitPoints != 21334 || !barrier.Physical {
+		t.Fatalf("iceberg barrier = %+v", barrier)
+	}
+	if !player.IsBarrierRooted() {
+		t.Fatal("iceberg wall did not root its caster")
+	}
 }
 
 func TestCombatResolvedHitBroadcastsDamageThenEndsAction(t *testing.T) {
@@ -283,7 +406,7 @@ func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
 	if got, want := primary.CurrentHitPoints(), 8601; got != want {
 		t.Fatalf("primary HP = %d, want %d", got, want)
 	}
-	for _, mob := range []*model.NPC{secondary1, secondary2} {
+	for _, mob := range []*model.NPC{secondary1} {
 		if got, want := mob.CurrentHitPoints(), 8612; got != want {
 			t.Fatalf("secondary %d HP = %d, want %d", mob.GetUniqueID(), got, want)
 		}
@@ -292,11 +415,69 @@ func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
 			t.Fatalf("secondary %d shock = %+v exists=%t", mob.GetUniqueID(), status, exists)
 		}
 	}
+	if secondary2.CurrentHitPoints() != 10000 {
+		t.Fatalf("third simultaneous target HP = %d, want untouched", secondary2.CurrentHitPoints())
+	}
 	if outside.CurrentHitPoints() != 10000 {
 		t.Fatalf("outside target HP = %d, want untouched", outside.CurrentHitPoints())
 	}
 	if status, exists := primary.CombatStatus(model.CombatStatusShock, now); !exists || status.Power != 240 {
 		t.Fatalf("primary shock = %+v exists=%t", status, exists)
+	}
+}
+
+func TestCombatElementalSkillAppliesStatusesAndSimultaneousTargets(t *testing.T) {
+	const skillID = uint32(8304)
+	now := time.Unix(1000, 0)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, BaseStats: model.BaseStats{Str: 20, Int: 20}, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	newMob := func(uid uint32, x float32) *model.NPC {
+		mob := &model.NPC{SRObject: model.SRObject{
+			UniqueID: uid, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+			RtNavmeshPosition: combatTestPosition(24231, x, 0, 100),
+		}, Type: "NPC", Mutex: &sync.Mutex{}}
+		mob.ConfigureCombat(100000, 10)
+		mob.SetLifeState(model.Alive)
+		mob.KnownObjectList = model.NewKnownObjectList(mob)
+		player.GetKnownObjectList().AddObject(mob)
+		return mob
+	}
+	primary := newMob(200, 104)
+	secondary := []*model.NPC{
+		newMob(201, 105), newMob(202, 106), newMob(203, 107), newMob(204, 108), newMob(205, 109),
+	}
+	skill := model.RefSkill{
+		ID: skillID, BasicActivity: 2, AttackType: 10, AttackPercent: 330, AttackMin: 1899, AttackMax: 3166,
+		TransferRange: 70, TransferCount: 5,
+		StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusBurn, Power: 240, Chance: 25, DurationMS: 11000}},
+	}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:         &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{primary.GetUniqueID(): primary}},
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{skillID: skill}}),
+		nextAttack:    make(map[uint32]time.Time), now: func() time.Time { return now }, rollPercent: func(chance int) bool { return chance == 25 },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(skillID, primary.GetUniqueID())); err != nil {
+		t.Fatalf("elemental skill: %v", err)
+	}
+	for _, mob := range append([]*model.NPC{primary}, secondary[:4]...) {
+		if mob.CurrentHitPoints() >= 100000 {
+			t.Fatalf("simultaneous target %d was not damaged", mob.GetUniqueID())
+		}
+		status, exists := mob.CombatStatus(model.CombatStatusBurn, now)
+		if !exists || status.SkillID != skillID || status.Power != 240 {
+			t.Fatalf("target %d burn = %+v exists=%t", mob.GetUniqueID(), status, exists)
+		}
+	}
+	if got := secondary[4].CurrentHitPoints(); got != 100000 {
+		t.Fatalf("sixth target HP = %d, want untouched", got)
 	}
 }
 
@@ -328,7 +509,7 @@ func TestCombatFireImbueBurnTicksAuthoritativeDamage(t *testing.T) {
 	if got, want := target.CurrentHitPoints(), 760; got != want {
 		t.Fatalf("burned HP = %d, want %d", got, want)
 	}
-	if len(sent) != 1 || sent[0].MessageID != opcode.EntitySkillCastBegin {
+	if len(sent) != 2 || sent[0].MessageID != opcode.EntityBuffAdd || sent[1].MessageID != opcode.EntitySkillCastBegin {
 		t.Fatalf("burn packets = %04X", packetOpcodesForCombat(sent))
 	}
 }
@@ -407,6 +588,135 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	key := skillCooldownKey{playerUID: player.GetUniqueID(), skillID: skillID}
 	if next := handler.nextSkill[key]; !next.Equal(time.Unix(108, 0)) {
 		t.Fatalf("skill cooldown ends at %v, want %v", next, time.Unix(108, 0))
+	}
+}
+
+func TestCombatCastTimeSkillAppliesDamageAtAuthoredImpact(t *testing.T) {
+	const skillID = uint32(8084)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, BaseStats: model.BaseStats{Int: 100}, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	mob := &model.NPC{SRObject: model.SRObject{
+		UniqueID: 200, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+		RtNavmeshPosition: combatTestPosition(24231, 104, 0, 100),
+	}, Type: "NPC", Mutex: &sync.Mutex{}}
+	mob.ConfigureCombat(100000, 10)
+	mob.SetLifeState(model.Alive)
+	player.GetKnownObjectList().AddObject(mob)
+	var callback func()
+	var delay time.Duration
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{200: mob}},
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, AttackType: 10, AttackPercent: 300, AttackMin: 810, AttackMax: 1216, ActionPreparingTime: 1000, ActionCastingTime: 1000},
+		}}),
+		nextSkill: make(map[skillCooldownKey]time.Time),
+		schedule:  func(got time.Duration, fn func()) { delay, callback = got, fn },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(skillID, mob.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if mob.CurrentHitPoints() != 100000 || callback == nil || delay != 2*time.Second {
+		t.Fatalf("pre-impact state: hp=%d callback=%t delay=%s", mob.CurrentHitPoints(), callback != nil, delay)
+	}
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
+		t.Fatalf("cast start packets = %04X", got)
+	}
+	callback()
+	if mob.CurrentHitPoints() >= 100000 {
+		t.Fatal("cast-time impact did not damage mob")
+	}
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse}) {
+		t.Fatalf("completed cast packets = %04X", got)
+	}
+}
+
+func TestCombatStatusOnlyColdWaveAppliesFrostbite(t *testing.T) {
+	const skillID = uint32(7997)
+	now := time.Unix(1000, 0)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	mob := &model.NPC{SRObject: model.SRObject{
+		UniqueID: 200, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+		RtNavmeshPosition: combatTestPosition(24231, 104, 0, 100),
+	}, Type: "NPC", Mutex: &sync.Mutex{}}
+	mob.ConfigureCombat(1000, 10)
+	mob.SetLifeState(model.Alive)
+	player.GetKnownObjectList().AddObject(mob)
+	var sent []network.Packet
+	skill := model.RefSkill{
+		ID: skillID, BasicActivity: 2, TargetRequired: true, TargetEnemyMob: true, ActionRange: 150,
+		StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusFrostbite, Power: 238, Chance: 100, DurationMS: 5000}},
+	}
+	handler := &CombatHandler{
+		world:         &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{200: mob}},
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{skillID: skill}}),
+		nextSkill:     make(map[skillCooldownKey]time.Time), now: func() time.Time { return now }, rollPercent: func(int) bool { return true },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(skillID, mob.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	status, exists := mob.CombatStatus(model.CombatStatusFrostbite, now)
+	if !exists || status.Power != 238 {
+		t.Fatalf("cold wave frostbite = %+v exists=%t", status, exists)
+	}
+	if mob.CurrentHitPoints() != 1000 {
+		t.Fatalf("status-only skill dealt direct damage: hp=%d", mob.CurrentHitPoints())
+	}
+}
+
+func TestCombatFrostNovaAppliesAreaColdStatusesWithoutDirectDamage(t *testing.T) {
+	const skillID = uint32(8024)
+	now := time.Unix(1000, 0)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	mob := &model.NPC{SRObject: model.SRObject{
+		UniqueID: 200, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+		RtNavmeshPosition: combatTestPosition(24231, 104, 0, 100),
+	}, Type: "NPC", Mutex: &sync.Mutex{}}
+	mob.ConfigureCombat(10000, 10)
+	mob.SetLifeState(model.Alive)
+	player.GetKnownObjectList().AddObject(mob)
+	skill := model.RefSkill{
+		ID: skillID, BasicActivity: 2, TargetEnemyMob: true, TransferRange: 50, TransferCount: 5, ImpactDamage: 5065,
+		StatusEffects: []model.SkillStatusEffect{
+			{Kind: model.CombatStatusFreeze, Power: 240, Chance: 50, DurationMS: 5000},
+			{Kind: model.CombatStatusFrostbite, Power: 240, Chance: 100, DurationMS: 5000},
+		},
+	}
+	handler := &CombatHandler{
+		world:         &combatWorldFake{player: player},
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{skillID: skill}}),
+		nextSkill:     make(map[skillCooldownKey]time.Time), now: func() time.Time { return now }, rollPercent: func(int) bool { return true },
+		send: func(*server.Session, network.Packet) error { return nil }, broadcast: func(*model.Player, *network.Packet) {},
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSelfSkillPacket(skillID)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mob.CurrentHitPoints(), 10000; got != want {
+		t.Fatalf("frost nova HP = %d, want %d", got, want)
+	}
+	if _, exists := mob.CombatStatus(model.CombatStatusFreeze, now); !exists {
+		t.Fatal("frost nova did not freeze target")
 	}
 }
 
@@ -543,6 +853,7 @@ func TestCombatSelfBuffPublishesLifecycleAndExpires(t *testing.T) {
 		Inventory: model.NewInventory(nil),
 	}
 	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6}}}
+	player.Inventory.Items[model.SlotSecondaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 4, TypeID4: 1}}, StackSize: 20}
 	player.SetLifeState(model.Alive)
 	vitals := &combatVitalsFake{spent: true}
 	var sent []network.Packet
@@ -681,12 +992,16 @@ func TestPlayerMeetsSkillCastRequirements(t *testing.T) {
 		Inventory: model.NewInventory(nil),
 	}
 	equipWeapon := func(typeID4 int) {
+		delete(player.Inventory.Items, model.SlotSecondaryWeapon)
 		player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{
 			TypeID1: 3,
 			TypeID2: 1,
 			TypeID3: 6,
 			TypeID4: typeID4,
 		}}}
+		if typeID4 == 6 {
+			player.Inventory.Items[model.SlotSecondaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 4, TypeID4: 1}}, StackSize: 20}
+		}
 	}
 
 	tests := []struct {
@@ -717,6 +1032,19 @@ func TestPlayerMeetsSkillCastRequirements(t *testing.T) {
 	delete(player.Inventory.Items, model.SlotPrimaryWeapon)
 	if playerMeetsSkillCastRequirements(player, model.RefSkill{RequiredWeapon1: 6, RequiredWeapon2: 255}) {
 		t.Fatal("bow skill without an equipped bow was allowed")
+	}
+	equipWeapon(6)
+	delete(player.Inventory.Items, model.SlotSecondaryWeapon)
+	if playerMeetsSkillCastRequirements(player, model.RefSkill{RequiredWeapon1: 6, RequiredWeapon2: 255}) {
+		t.Fatal("bow skill without equipped arrows was allowed")
+	}
+	shieldSkill := model.RefSkill{RequiredWeapon1: 255, RequiredWeapon2: 255, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}}
+	if playerMeetsSkillCastRequirements(player, shieldSkill) {
+		t.Fatal("shield-required skill without an equipped shield was allowed")
+	}
+	player.Inventory.Items[model.SlotSecondaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 4, TypeID4: 1}}}
+	if !playerMeetsSkillCastRequirements(player, shieldSkill) {
+		t.Fatal("shield-required skill rejected an equipped Chinese shield")
 	}
 }
 

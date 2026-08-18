@@ -3,6 +3,7 @@ package model
 import (
 	"sync/atomic"
 
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
@@ -61,6 +62,23 @@ func BuildBuffCastEnd(targetUID, castUID uint32) network.Packet {
 	p.WriteUInt32(castUID)
 	p.WriteUInt32(targetUID)
 	p.WriteBool(false)
+	return p
+}
+
+// BuildTeleportCastEnd completes a movement skill with ActionStateFlag.Teleport
+// and the authoritative endpoint. The stock client remains locked in the
+// Ghost Walk animation if B071 carries flag 0 or omits this position.
+func BuildTeleportCastEnd(targetUID, castUID uint32, position navmeshv2.RtNavmeshPosition) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntitySkillCastEnd
+	p.WriteByte(1)
+	p.WriteUInt32(castUID)
+	p.WriteUInt32(targetUID)
+	p.WriteByte(0x08)
+	p.WriteUInt16(uint16(position.Region.ID))
+	p.WriteUInt32(uint32(int32(position.Offset.X)))
+	p.WriteUInt32(uint32(int32(position.Offset.Z)))
+	p.WriteUInt32(uint32(int32(position.Offset.Y)))
 	return p
 }
 

@@ -13,7 +13,6 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
 	log "github.com/sirupsen/logrus"
 )
@@ -43,11 +42,12 @@ type mobAIWorld interface {
 
 type MobAIManager struct {
 	Manager
-	stateMu       sync.Mutex
-	referenceData *model.ReferenceDataCatalog
-	vitals        model.CharacterVitalsRepository
-	pending       map[uint32]mobPendingAttack
-	nextTrace     time.Time
+	stateMu        sync.Mutex
+	referenceData  *model.ReferenceDataCatalog
+	vitals         model.CharacterVitalsRepository
+	pending        map[uint32]mobPendingAttack
+	nextTrace      time.Time
+	hitRollPercent func(int) bool
 }
 
 func (m *MobAIManager) ConfigureVitals(repository model.CharacterVitalsRepository) {
@@ -65,6 +65,7 @@ type mobAttackProfile struct {
 	cooldown  time.Duration
 	attackMin int
 	attackMax int
+	magical   bool
 }
 
 type mobPendingAttack struct {
@@ -72,6 +73,7 @@ type mobPendingAttack struct {
 	targetUID uint32
 	castUID   uint32
 	damage    int
+	magical   bool
 	readyAt   time.Time
 }
 
@@ -80,7 +82,10 @@ var mobAIManagerOnce sync.Once
 
 func GetMobAIManagerInstance() *MobAIManager {
 	mobAIManagerOnce.Do(func() {
-		mobAIManagerInstance = &MobAIManager{pending: make(map[uint32]mobPendingAttack)}
+		mobAIManagerInstance = &MobAIManager{
+			pending:        make(map[uint32]mobPendingAttack),
+			hitRollPercent: func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
+		}
 		mobAIManagerInstance.Name = "MobAIManager"
 		mobAIManagerInstance.initialDelay = time.Second
 		mobAIManagerInstance.rate = mobAITickRate
@@ -188,11 +193,14 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		return
 	}
 	_, frozen := npc.CombatStatus(model.CombatStatusFreeze, now)
-	_, shocked := npc.CombatStatus(model.CombatStatusShock, now)
-	if frozen || shocked {
+	// Frostbite changes movement immediately and restores it through lazy
+	// status expiry, so the AI must observe it even on ticks without attacks.
+	_, _ = npc.CombatStatus(model.CombatStatusFrostbite, now)
+	_, stunned := npc.CombatStatus(model.CombatStatusStun, now)
+	if frozen || stunned {
 		m.clearPendingAttack(npc.GetUniqueID())
 		if npc.GetMotionState() != model.NoMotion {
-			reason := "mob-shocked"
+			reason := "mob-stunned"
 			if frozen {
 				reason = "mob-frozen"
 			}
@@ -266,11 +274,16 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	}
 	damage := level * 2
 	if profile.attackMin > 0 && profile.attackMax >= profile.attackMin {
-		damage = (profile.attackMin+profile.attackMax)/2 - utils.BaseDef(target.BaseStats.Str)
+		defense := target.DerivedStats().PhyDef
+		if profile.magical {
+			defense = target.DerivedStats().MagDef
+		}
+		damage = (profile.attackMin+profile.attackMax)/2 - defense
 	}
 	if damage < 1 {
 		damage = 1
 	}
+	damage = mobDamageAfterAttackDown(npc, damage, now)
 	if damage > maximumMobWireDamage {
 		damage = maximumMobWireDamage
 	}
@@ -284,13 +297,25 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 			targetUID: target.GetUniqueID(),
 			castUID:   castUID,
 			damage:    damage,
+			magical:   profile.magical,
 			readyAt:   now.Add(profile.delay),
 		})
 		begin := model.BuildDelayedAttackBegin(skillID, npc.GetUniqueID(), target.GetUniqueID(), castUID)
 		npc.SendToKnown(&begin)
 		return
 	}
-	m.applyAttackDamage(world, npc, target, castUID, damage, false)
+	m.applyAttackDamage(world, npc, target, castUID, damage, false, profile.magical)
+}
+
+func mobDamageAfterAttackDown(npc *model.NPC, damage int, now time.Time) int {
+	if damage < 1 {
+		return 1
+	}
+	if status, active := npc.CombatStatus(model.CombatStatusAttackDown, now); active {
+		reduction := min(max(status.Power, 0), 100)
+		return max(1, damage*(100-reduction)/100)
+	}
+	return damage
 }
 
 func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skillID uint32) (mobAttackProfile, bool) {
@@ -337,7 +362,7 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 	}
 	return mobAttackProfile{
 		reach: attackRange, delay: delay, cooldown: cooldown,
-		attackMin: skill.AttackMin, attackMax: skill.AttackMax,
+		attackMin: skill.AttackMin, attackMax: skill.AttackMax, magical: skill.IsMagicalAttack(),
 	}, true
 }
 
@@ -437,7 +462,7 @@ func (m *MobAIManager) resolvePendingAttack(world mobAIWorld, npc *model.NPC, no
 		npc.ClearAggroTarget(pending.targetUID)
 		return true
 	}
-	m.applyAttackDamage(world, npc, target, pending.castUID, pending.damage, true)
+	m.applyAttackDamage(world, npc, target, pending.castUID, pending.damage, true, pending.magical)
 	return true
 }
 
@@ -449,19 +474,24 @@ func (m *MobAIManager) knownPlayer(npc *model.NPC, targetUID uint32) *model.Play
 	return target
 }
 
-func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool) {
-	applied, killed := target.ApplyDamage(damage)
+func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool, magical ...bool) {
+	var applied int
+	var killed bool
+	landed := m.mobAttackLands(npc, target, time.Now())
+	if landed {
+		if len(magical) > 0 && magical[0] {
+			applied, killed = target.ApplyMagicalDamage(damage)
+		} else {
+			applied, killed = target.ApplyDamage(damage)
+		}
+	}
 	if mobAITraceEnabled() {
 		log.Infof("MOB_AI_TRACE damage npc=%d target=%d cast=%d requested=%d applied=%d killed=%t delayed=%t hp=%d", npc.GetUniqueID(), target.GetUniqueID(), castUID, damage, applied, killed, delayed, target.CurrentHP())
-	}
-	if applied == 0 {
-		npc.ClearAggroTarget(target.GetUniqueID())
-		return
 	}
 	m.stateMu.Lock()
 	vitals := m.vitals
 	m.stateMu.Unlock()
-	if vitals != nil {
+	if vitals != nil && applied > 0 {
 		hp, mp := target.CurrentVitals()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		err := vitals.SaveVitals(ctx, target.ID, hp, mp)
@@ -484,6 +514,32 @@ func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, targe
 		npc.ClearAggroTarget(target.GetUniqueID())
 		world.StopMovingCharacter(target, target.GetNavmeshPosition(), "mob-killed-player", true)
 	}
+}
+
+func (m *MobAIManager) mobAttackLands(npc *model.NPC, target *model.Player, now time.Time) bool {
+	if m == nil || npc == nil || target == nil {
+		return true
+	}
+	m.stateMu.Lock()
+	catalog := m.referenceData
+	roll := m.hitRollPercent
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return true
+	}
+	character, exists := catalog.Character(npc.GetRefObjectID())
+	if !exists {
+		return true
+	}
+	hit := character.HitRate
+	if status, active := npc.CombatStatus(model.CombatStatusHitDown, now); active {
+		hit = max(0, hit-status.Power)
+	}
+	chance := model.CombatHitChance(hit, target.DerivedStats().ParryRate)
+	if roll == nil {
+		return true
+	}
+	return roll(chance)
 }
 
 func (m *MobAIManager) resolveTarget(world mobAIWorld, npc *model.NPC, targetUID uint32, aggressive bool, sightRange float32) *model.Player {
@@ -509,6 +565,12 @@ func (m *MobAIManager) resolveTarget(world mobAIWorld, npc *model.NPC, targetUID
 		if !ok || player == nil || player.GetLifeState() != model.Alive {
 			continue
 		}
+		m.stateMu.Lock()
+		catalog := m.referenceData
+		m.stateMu.Unlock()
+		if player.HasAggroSuppression(catalog) {
+			continue
+		}
 		distance := navmeshv2.HorizontalDistance(npc.GetNavmeshPosition(), player.GetNavmeshPosition())
 		if distance <= nearestDistance {
 			nearest = player
@@ -519,6 +581,9 @@ func (m *MobAIManager) resolveTarget(world mobAIWorld, npc *model.NPC, targetUID
 }
 
 func (m *MobAIManager) moveTo(world mobAIWorld, npc *model.NPC, target navmeshv2.RtNavmeshPosition, now time.Time, replace bool) {
+	if npc == nil || npc.HasStationaryMovementProfile() {
+		return
+	}
 	if !replace && npc.GetMotionState() == model.Running {
 		return
 	}

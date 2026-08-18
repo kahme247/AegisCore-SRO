@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/g3n/engine/math32"
 )
 
 func TestCombatPacketGoldenFixtures(t *testing.T) {
@@ -81,6 +83,24 @@ func TestBuildDelayedAttackBeginCarriesNoDamageUntilB071(t *testing.T) {
 	}
 	if packet.Remaining() != 0 {
 		t.Fatalf("trailing bytes = %d, want 0", packet.Remaining())
+	}
+}
+
+func TestBuildTeleportCastEndCarriesTeleportFlagAndEndpoint(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(0x5C89),
+		Offset: math32.NewVector3(464, 508, 11),
+	}
+	packet := BuildTeleportCastEnd(0x11223344, 0x55667788, position)
+	want := []byte{
+		0x01, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x08,
+		0x89, 0x5C,
+		0xD0, 0x01, 0x00, 0x00,
+		0x0B, 0x00, 0x00, 0x00,
+		0xFC, 0x01, 0x00, 0x00,
+	}
+	if packet.MessageID != opcode.EntitySkillCastEnd || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("teleport end = opcode %04X payload % X, want B071 % X", packet.MessageID, packet.Payload(), want)
 	}
 }
 

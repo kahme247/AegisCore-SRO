@@ -10,6 +10,9 @@ const (
 	SkillExecutionBuff
 	SkillExecutionHealing
 	SkillExecutionResurrection
+	SkillExecutionStatusAttack
+	SkillExecutionBarrier
+	SkillExecutionMovement
 )
 
 const (
@@ -31,7 +34,25 @@ const (
 	skillParameterBurn         = 25205
 	skillParameterFreeze       = 26234
 	skillParameterFrostbite    = 26210
+	skillParameterImpact       = 1952542324
+	skillParameterBarrier      = 1869506150
+	skillParameterTeleport     = 1952803941
+	skillParameterParryDown    = 1952805476
+	skillParameterHitDown      = 1953002084
+	skillParameterPhyDefDown   = 1668509796
+	skillParameterMagDefDown   = 1668509028
+	skillParameterAttackDown   = 1668510578
+	skillParameterDamageTaken  = 1668508020
+	skillParameterStun         = 29556
+	skillParameterAggroBlock   = 1886350433
+	skillParameterRecovery     = 1769105251
+	skillParameterRequiredItem = 1919250793
 )
+
+type SkillRequiredItem struct {
+	TypeID3 int
+	TypeID4 int
+}
 
 type SkillStatusEffect struct {
 	Kind       CombatStatusKind
@@ -116,6 +137,18 @@ type RefSkill struct {
 	TransferRange       int
 	TransferCount       int
 	StatusEffects       []SkillStatusEffect
+	ImpactDamage        int
+	BarrierDrainMS      int
+	BarrierMPCost       int
+	BarrierHitPoints    int
+	BarrierAbsorption   int
+	BarrierPhysical     bool
+	MovementDistance    int
+	MovementDurationMS  int
+	AggroSuppression    bool
+	RecoveryHP          int
+	RecoveryMP          int
+	RequiredItems       []SkillRequiredItem
 	BuffModifiers       BuffModifiers
 	Params              [50]int
 }
@@ -150,6 +183,12 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 		return SkillExecutionHealing
 	case s.ResurrectLevel > 0:
 		return SkillExecutionResurrection
+	case len(s.StatusEffects) > 0 && s.TargetEnemyMob:
+		return SkillExecutionStatusAttack
+	case s.BarrierHitPoints > 0:
+		return SkillExecutionBarrier
+	case s.MovementDistance > 0:
+		return SkillExecutionMovement
 	case s.BuffDuration > 0:
 		return SkillExecutionBuff
 	default:
@@ -161,7 +200,11 @@ func (s *RefSkill) parseParameters() {
 	s.AttackType, s.AttackPercent, s.AttackMin, s.AttackMax = 0, 0, 0, 0
 	s.BuffDuration, s.HealHP, s.HealMP, s.ResurrectLevel = 0, 0, 0, 0
 	s.ShockPower, s.ShockChance, s.ShockDuration, s.TransferRange, s.TransferCount = 0, 0, 0, 0, 0
+	s.ImpactDamage, s.BarrierDrainMS, s.BarrierMPCost, s.BarrierHitPoints, s.BarrierAbsorption = 0, 0, 0, 0, 0
+	s.MovementDistance, s.MovementDurationMS, s.RecoveryHP, s.RecoveryMP = 0, 0, 0, 0
+	s.AggroSuppression, s.BarrierPhysical = false, false
 	s.StatusEffects = nil
+	s.RequiredItems = nil
 	s.BuffModifiers = BuffModifiers{}
 	for index, parameter := range s.Params {
 		switch parameter {
@@ -210,8 +253,10 @@ func (s *RefSkill) parseParameters() {
 				s.BuffModifiers.ParryRate, s.BuffModifiers.ParryRatePercent = s.Params[index+1], s.Params[index+2]
 			}
 		case skillParameterDamage:
-			if index+1 < len(s.Params) {
-				s.BuffModifiers.DamagePercent = s.Params[index+1]
+			if index+2 < len(s.Params) {
+				// "urd" stores a reserved value followed by the actual
+				// physical/magical attack percentage.
+				s.BuffModifiers.DamagePercent = s.Params[index+2]
 			}
 		case skillParameterDefense:
 			if index+3 < len(s.Params) {
@@ -245,6 +290,58 @@ func (s *RefSkill) parseParameters() {
 			if index+4 < len(s.Params) {
 				s.TransferRange = s.Params[index+3]
 				s.TransferCount = s.Params[index+4]
+			}
+		case skillParameterImpact:
+			if index+1 < len(s.Params) {
+				s.ImpactDamage = s.Params[index+1]
+			}
+		case skillParameterBarrier:
+			if index+7 < len(s.Params) {
+				s.BarrierDrainMS = s.Params[index+1]
+				s.BarrierMPCost = s.Params[index+2]
+				s.BarrierPhysical = s.Params[index+3] == 28791
+				s.BarrierHitPoints = s.Params[index+5]
+				s.BarrierAbsorption = s.Params[index+7]
+			}
+		case skillParameterTeleport:
+			if index+2 < len(s.Params) {
+				s.MovementDurationMS = s.Params[index+1]
+				s.MovementDistance = s.Params[index+2]
+			}
+		case skillParameterParryDown:
+			if index+1 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusParryDown, Power: s.Params[index+1], Chance: 100, DurationMS: s.BuffDuration})
+			}
+		case skillParameterHitDown:
+			if index+1 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusHitDown, Power: s.Params[index+1], Chance: 100, DurationMS: s.BuffDuration})
+			}
+		case skillParameterPhyDefDown, skillParameterMagDefDown, skillParameterAttackDown, skillParameterDamageTaken:
+			if index+4 < len(s.Params) {
+				kind := CombatStatusPhysicalDefenseDown
+				switch parameter {
+				case skillParameterMagDefDown:
+					kind = CombatStatusMagicalDefenseDown
+				case skillParameterAttackDown:
+					kind = CombatStatusAttackDown
+				case skillParameterDamageTaken:
+					kind = CombatStatusDamageTakenUp
+				}
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: kind, Power: s.Params[index+4], Chance: s.Params[index+2], DurationMS: s.Params[index+1]})
+			}
+		case skillParameterStun:
+			if index+3 < len(s.Params) {
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusStun, Power: 1, Chance: s.Params[index+2], DurationMS: s.Params[index+1]})
+			}
+		case skillParameterAggroBlock:
+			s.AggroSuppression = true
+		case skillParameterRecovery:
+			if index+2 < len(s.Params) {
+				s.RecoveryHP, s.RecoveryMP = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterRequiredItem:
+			if index+2 < len(s.Params) && s.Params[index+1] > 0 && s.Params[index+2] > 0 {
+				s.RequiredItems = append(s.RequiredItems, SkillRequiredItem{TypeID3: s.Params[index+1], TypeID4: s.Params[index+2]})
 			}
 		}
 	}

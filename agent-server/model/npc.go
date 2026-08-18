@@ -19,9 +19,13 @@ type NPC struct {
 	WalkSpeed float32
 	RunSpeed  float32
 	HwanSpeed float32
-	combat    npcCombatState
-	ai        npcAIState
-	spawnArea *SpawnArea
+	// The configured flags distinguish authored zero speeds (stationary
+	// creatures) from legacy NPCs whose reference speeds were never loaded.
+	walkSpeedConfigured bool
+	runSpeedConfigured  bool
+	combat              npcCombatState
+	ai                  npcAIState
+	spawnArea           *SpawnArea
 }
 
 func (n *NPC) SetRarity(rarity byte) {
@@ -89,6 +93,13 @@ const (
 	CombatStatusBurn
 	CombatStatusFreeze
 	CombatStatusFrostbite
+	CombatStatusParryDown
+	CombatStatusHitDown
+	CombatStatusPhysicalDefenseDown
+	CombatStatusMagicalDefenseDown
+	CombatStatusAttackDown
+	CombatStatusDamageTakenUp
+	CombatStatusStun
 )
 
 type CombatStatus struct {
@@ -153,13 +164,9 @@ func (n *NPC) applyStatusMovementEffect(kind CombatStatusKind, power int, now ti
 		n.RunSpeed = 0
 		return
 	}
-	reduction := power
-	if reduction > 100 {
-		reduction = 100
-	}
-	if reduction < 0 {
-		reduction = 0
-	}
+	// Frostbite's first parameter is the abnormal-state level used for
+	// resistance, not a speed percentage. The vSRO state itself halves speed.
+	reduction := 50
 	factor := float32(100-reduction) / 100
 	n.WalkSpeed = base.walk * factor
 	n.RunSpeed = base.run * factor
@@ -463,14 +470,14 @@ func (n *NPC) GetMotionState() MotionState {
 
 func (n *NPC) GetWalkSpeed() float32 {
 	if n.Mutex == nil {
-		if n.WalkSpeed > 0 {
+		if n.walkSpeedConfigured || n.WalkSpeed > 0 {
 			return n.WalkSpeed
 		}
 		return 16
 	}
 	n.Mutex.Lock()
 	defer n.Mutex.Unlock()
-	if n.WalkSpeed > 0 {
+	if n.walkSpeedConfigured || n.WalkSpeed > 0 {
 		return n.WalkSpeed
 	}
 	return 16
@@ -478,14 +485,14 @@ func (n *NPC) GetWalkSpeed() float32 {
 
 func (n *NPC) GetRunSpeed() float32 {
 	if n.Mutex == nil {
-		if n.RunSpeed > 0 {
+		if n.runSpeedConfigured || n.RunSpeed > 0 {
 			return n.RunSpeed
 		}
 		return 50
 	}
 	n.Mutex.Lock()
 	defer n.Mutex.Unlock()
-	if n.RunSpeed > 0 {
+	if n.runSpeedConfigured || n.RunSpeed > 0 {
 		return n.RunSpeed
 	}
 	return 50
@@ -543,12 +550,48 @@ func (n *NPC) SetWalkSpeed(speed float32) {
 	n.Mutex.Lock()
 	defer n.Mutex.Unlock()
 	n.WalkSpeed = speed
+	n.walkSpeedConfigured = true
 }
 
 func (n *NPC) SetRunSpeed(speed float32) {
 	n.Mutex.Lock()
 	defer n.Mutex.Unlock()
 	n.RunSpeed = speed
+	n.runSpeedConfigured = true
+}
+
+// ConfigureMovementSpeeds applies the pair authored by the character
+// reference. A zero/zero pair is meaningful: plant-like monsters use it to
+// declare that they must remain rooted in place.
+func (n *NPC) ConfigureMovementSpeeds(walk, run float32) {
+	if n == nil {
+		return
+	}
+	if n.Mutex == nil {
+		n.WalkSpeed = walk
+		n.RunSpeed = run
+		n.walkSpeedConfigured = true
+		n.runSpeedConfigured = true
+		return
+	}
+	n.Mutex.Lock()
+	n.WalkSpeed = walk
+	n.RunSpeed = run
+	n.walkSpeedConfigured = true
+	n.runSpeedConfigured = true
+	n.Mutex.Unlock()
+}
+
+func (n *NPC) HasStationaryMovementProfile() bool {
+	if n == nil {
+		return false
+	}
+	if n.Mutex == nil {
+		return n.walkSpeedConfigured && n.runSpeedConfigured && n.WalkSpeed <= 0 && n.RunSpeed <= 0
+	}
+	n.Mutex.Lock()
+	defer n.Mutex.Unlock()
+	return n.walkSpeedConfigured && n.runSpeedConfigured && n.WalkSpeed <= 0 && n.RunSpeed <= 0
 }
 
 func (n *NPC) SetHwanSpeed(speed float32) {

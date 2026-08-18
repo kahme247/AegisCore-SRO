@@ -49,8 +49,12 @@ func TestRespawnManagerBuildsNPCFromConfiguredReferenceCatalog(t *testing.T) {
 			4001: {
 				RefObject: model.RefObject{
 					ID:       4001,
-					CodeName: "MOB_REFERENCE",
+					CodeName: "MOB_KT_DESERTTRUNKZ_CLON",
 					TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 9},
+					// Ultra Blood Devil and similar rooted monsters author both
+					// reference speeds as zero.
+					Speed1: 0,
+					Speed2: 0,
 				},
 				DefaultSkill1: 160,
 			},
@@ -83,6 +87,9 @@ func TestRespawnManagerBuildsNPCFromConfiguredReferenceCatalog(t *testing.T) {
 	}
 	if got := npc.AttackSkillID(); got != 160 {
 		t.Fatalf("npc attack skill = %d; want reference default 160", got)
+	}
+	if !npc.HasStationaryMovementProfile() || npc.GetWalkSpeed() != 0 || npc.GetRunSpeed() != 0 {
+		t.Fatalf("authored zero-speed NPC profile = stationary:%t walk:%.1f run:%.1f; want true/0/0", npc.HasStationaryMovementProfile(), npc.GetWalkSpeed(), npc.GetRunSpeed())
 	}
 	if _, aggressive, _, _ := npc.AIProfile(); !aggressive {
 		t.Fatal("AggressType=1 spawn was not configured as aggressive")

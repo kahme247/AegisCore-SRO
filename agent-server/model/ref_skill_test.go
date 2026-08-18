@@ -98,7 +98,7 @@ func TestRefSkillParsesVerifiedBuffModifiers(t *testing.T) {
 		skillParameterIntellect, 13, 0,
 		skillParameterHit, 9, 2,
 		skillParameterParry, 11, 3,
-		skillParameterDamage, 4,
+		skillParameterDamage, 0, 4,
 		skillParameterDefense, 37, 41, 0,
 		skillParameterBlock, 15, 3,
 	})
@@ -107,5 +107,72 @@ func TestRefSkillParsesVerifiedBuffModifiers(t *testing.T) {
 	want := BuffModifiers{HP: 102, HPPercent: 5, MP: 80, MPPercent: 4, Strength: 12, Intellect: 13, HitRate: 9, HitRatePercent: 2, DamagePercent: 4, PhysicalDefense: 37, MagicalDefense: 41, BlockRate: 3, ParryRate: 11, ParryRatePercent: 3}
 	if skill.BuffModifiers != want {
 		t.Fatalf("buff modifiers = %+v, want %+v", skill.BuffModifiers, want)
+	}
+}
+
+func TestRefSkillParsesPiercingForceDamageAfterReservedValue(t *testing.T) {
+	skill := RefSkill{BasicActivity: 2}
+	copy(skill.Params[:], []int{
+		3, skillParameterDuration, 809244,
+		skillParameterDamage, 0, 19,
+	})
+	skill.parseParameters()
+	if skill.ExecutionKind() != SkillExecutionBuff || skill.BuffDuration != 809244 || skill.BuffModifiers.DamagePercent != 19 {
+		t.Fatalf("piercing force = %+v", skill)
+	}
+}
+
+func TestRefSkillClassifiesStatusOnlyEnemySkills(t *testing.T) {
+	skill := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
+	skill.Params[0] = skillParameterFrostbite
+	skill.Params[1] = 238
+	skill.Params[2] = 100
+	skill.parseParameters()
+	if skill.ExecutionKind() != SkillExecutionStatusAttack {
+		t.Fatalf("status-only execution kind = %d", skill.ExecutionKind())
+	}
+}
+
+func TestRefSkillParsesDedicatedChineseSkillMechanics(t *testing.T) {
+	frostNova := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
+	copy(frostNova.Params[:], []int{0, skillParameterFreeze, 240, 50, skillParameterFrostbite, 240, 100, skillParameterTransfer, 1, 1, 50, 5, 0, 24, skillParameterImpact, 5065})
+	frostNova.parseParameters()
+	if frostNova.ExecutionKind() != SkillExecutionStatusAttack || frostNova.ImpactDamage != 5065 || frostNova.TransferRange != 50 || frostNova.TransferCount != 5 {
+		t.Fatalf("frost nova = %+v", frostNova)
+	}
+
+	barrier := RefSkill{BasicActivity: 2}
+	copy(barrier.Params[:], []int{3, skillParameterBarrier, 5000, 1067, 28791, 7, 21334, 0, 98})
+	barrier.parseParameters()
+	if barrier.ExecutionKind() != SkillExecutionBarrier || barrier.BarrierDrainMS != 5000 || barrier.BarrierMPCost != 1067 || barrier.BarrierHitPoints != 21334 || barrier.BarrierAbsorption != 98 || !barrier.BarrierPhysical {
+		t.Fatalf("barrier = %+v", barrier)
+	}
+	requiredShield := RefSkill{BasicActivity: 2}
+	copy(requiredShield.Params[:], []int{3, skillParameterDuration, 637815, skillParameterRequiredItem, 4, 1})
+	requiredShield.parseParameters()
+	if len(requiredShield.RequiredItems) != 1 || requiredShield.RequiredItems[0] != (SkillRequiredItem{TypeID3: 4, TypeID4: 1}) {
+		t.Fatalf("required shield = %+v", requiredShield.RequiredItems)
+	}
+
+	movement := RefSkill{BasicActivity: 2}
+	copy(movement.Params[:], []int{0, skillParameterTeleport, 500, 245})
+	movement.parseParameters()
+	if movement.ExecutionKind() != SkillExecutionMovement || movement.MovementDurationMS != 500 || movement.MovementDistance != 245 {
+		t.Fatalf("movement = %+v", movement)
+	}
+
+	therapy := RefSkill{BasicActivity: 2}
+	copy(therapy.Params[:], []int{3, skillParameterDuration, 300000, skillParameterAggroBlock, 3, 113, skillParameterRecovery, 285, 285})
+	therapy.parseParameters()
+	if therapy.ExecutionKind() != SkillExecutionBuff || !therapy.AggroSuppression || therapy.RecoveryHP != 285 || therapy.RecoveryMP != 285 {
+		t.Fatalf("source therapy = %+v", therapy)
+	}
+
+	vital := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
+	copy(vital.Params[:], []int{0, skillParameterPhyDefDown, 30000, 80, 11, 712})
+	vital.parseParameters()
+	want := SkillStatusEffect{Kind: CombatStatusPhysicalDefenseDown, Power: 712, Chance: 80, DurationMS: 30000}
+	if vital.ExecutionKind() != SkillExecutionStatusAttack || len(vital.StatusEffects) != 1 || vital.StatusEffects[0] != want {
+		t.Fatalf("vital spot = %+v", vital)
 	}
 }

@@ -481,6 +481,7 @@ func buildQuestGoldUpdate(gold uint64) network.Packet {
 	packet.MessageID = opcode.EntityUpdatePoints
 	packet.WriteByte(1)
 	packet.WriteUInt64(gold)
+	packet.WriteByte(0)
 	return packet
 }
 

@@ -90,6 +90,7 @@ type Player struct {
 	Masteries             map[uint32]byte
 	Skills                map[uint32]byte
 	ActiveBuffs           map[uint32]ActiveBuff
+	activeBarrier         ActiveBarrier
 	QuickSlots            map[byte]CharacterQuickSlot
 	Quests                []CharacterQuest
 	Level                 int
@@ -489,19 +490,12 @@ func (p *Player) AverageAttackPower(magical bool) int {
 	if p == nil {
 		return 0
 	}
-	p.Mutex.Lock()
-	defer p.Mutex.Unlock()
-	attribute := p.BaseStats.Str + p.BonusStats.Str
-	minimumBonus, maximumBonus := p.BonusAttackStats.PhyAttackMin, p.BonusAttackStats.PhyAttackMax
-	percent := p.BonusAttackStats.PhyAttackPercent
+	stats := p.DerivedStats()
+	minimum, maximum := stats.PhyAttackMin, stats.PhyAttackMax
 	if magical {
-		attribute = p.BaseStats.Int + p.BonusStats.Int
-		minimumBonus, maximumBonus = p.BonusAttackStats.MagAttackMin, p.BonusAttackStats.MagAttackMax
-		percent = p.BonusAttackStats.MagAttackPercent
+		minimum, maximum = stats.MagAttackMin, stats.MagAttackMax
 	}
-	minimum := utils.BaseMinAttack(attribute) + minimumBonus
-	maximum := utils.BaseMaxAttack(attribute) + maximumBonus
-	return applyStatPercent((minimum+maximum)/2, percent)
+	return (minimum + maximum) / 2
 }
 
 func (p *Player) CurrentVitals() (int, int) {
@@ -603,42 +597,63 @@ func (p *Player) SendVitalsUpdate() {
 // Current HP/MP remain unchanged; only their calculated maxima change when a
 // base attribute or level changes.
 func (p *Player) BuildStatsUpdatePacket() network.Packet {
-	p.Mutex.Lock()
-	level := p.Level
-	stats := p.BaseStats
-	bonus := p.BonusStats
-	attackBonus := p.BonusAttackStats
-	defenseBonus := p.BonusDefenseStats
-	p.Mutex.Unlock()
-	effectiveStr, effectiveInt := stats.Str+bonus.Str, stats.Int+bonus.Int
-	phyMin := applyStatPercent(utils.BaseMinAttack(effectiveStr)+attackBonus.PhyAttackMin, attackBonus.PhyAttackPercent)
-	phyMax := applyStatPercent(utils.BaseMaxAttack(effectiveStr)+attackBonus.PhyAttackMax, attackBonus.PhyAttackPercent)
-	magMin := applyStatPercent(utils.BaseMinAttack(effectiveInt)+attackBonus.MagAttackMin, attackBonus.MagAttackPercent)
-	magMax := applyStatPercent(utils.BaseMaxAttack(effectiveInt)+attackBonus.MagAttackMax, attackBonus.MagAttackPercent)
-	phyDef := applyStatPercent(utils.BaseDef(effectiveStr)+defenseBonus.PhyDef, defenseBonus.PhyDefPercent)
-	magDef := applyStatPercent(utils.BaseDef(effectiveInt)+defenseBonus.MagDef, defenseBonus.MagDefPercent)
-	hitRate := applyStatPercent(11+attackBonus.HitRate, attackBonus.HitRatePercent)
-	parryRate := applyStatPercent(11+defenseBonus.ParryRate, defenseBonus.ParryRatePercent)
+	stats := p.DerivedStats()
 
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityUpdateStats
-	packet.WriteUInt32(uint32(phyMin))
-	packet.WriteUInt32(uint32(phyMax))
-	packet.WriteUInt32(uint32(magMin))
-	packet.WriteUInt32(uint32(magMax))
-	packet.WriteUInt16(uint16(phyDef))
-	packet.WriteUInt16(uint16(magDef))
-	packet.WriteUInt16(uint16(hitRate))
-	packet.WriteUInt16(uint16(parryRate))
+	packet.WriteUInt32(uint32(stats.PhyAttackMin))
+	packet.WriteUInt32(uint32(stats.PhyAttackMax))
+	packet.WriteUInt32(uint32(stats.MagAttackMin))
+	packet.WriteUInt32(uint32(stats.MagAttackMax))
+	packet.WriteUInt16(uint16(stats.PhyDef))
+	packet.WriteUInt16(uint16(stats.MagDef))
+	packet.WriteUInt16(uint16(stats.HitRate))
+	packet.WriteUInt16(uint16(stats.ParryRate))
+	packet.WriteUInt32(uint32(stats.MaxHP))
+	packet.WriteUInt32(uint32(stats.MaxMP))
+	packet.WriteUInt16(uint16(stats.Strength))
+	packet.WriteUInt16(uint16(stats.Intellect))
+	return packet
+}
+
+// DerivedStats combines base attributes, passive and active skill effects,
+// item effects already represented by the bonus accumulators, and every
+// equipped weapon/armor/shield stat from ITEMDATA and the item instance's
+// variance/enhancement level.
+func (p *Player) DerivedStats() DerivedCharacterStats {
+	if p == nil {
+		return DerivedCharacterStats{}
+	}
+	p.Mutex.Lock()
+	level := p.Level
+	stats := p.BaseStats
+	baseAttack := p.BaseAttackStats
+	baseDefense := p.BaseDefenseStats
+	bonus := p.BonusStats
+	attackBonus := p.BonusAttackStats
+	defenseBonus := p.BonusDefenseStats
+	inventory := p.Inventory.Snapshot()
+	p.Mutex.Unlock()
+	equipment := equippedItemStats(inventory)
+	effectiveStr, effectiveInt := stats.Str+bonus.Str, stats.Int+bonus.Int
 	maxHP := utils.BaseHPOrMP(level, effectiveStr) + bonus.HP
 	maxMP := utils.BaseHPOrMP(level, effectiveInt) + bonus.MP
 	maxHP += maxHP * bonus.HpPercent / 100
 	maxMP += maxMP * bonus.MpPercent / 100
-	packet.WriteUInt32(uint32(maxHP))
-	packet.WriteUInt32(uint32(maxMP))
-	packet.WriteUInt16(uint16(effectiveStr))
-	packet.WriteUInt16(uint16(effectiveInt))
-	return packet
+	return DerivedCharacterStats{
+		Strength:     effectiveStr,
+		Intellect:    effectiveInt,
+		PhyAttackMin: applyStatPercent(utils.BaseMinAttack(effectiveStr)+baseAttack.PhyAttackMin+equipment.PhyAttackMin+attackBonus.PhyAttackMin, attackBonus.PhyAttackPercent),
+		PhyAttackMax: applyStatPercent(utils.BaseMaxAttack(effectiveStr)+baseAttack.PhyAttackMax+equipment.PhyAttackMax+attackBonus.PhyAttackMax, attackBonus.PhyAttackPercent),
+		MagAttackMin: applyStatPercent(utils.BaseMinAttack(effectiveInt)+baseAttack.MagAttackMin+equipment.MagAttackMin+attackBonus.MagAttackMin, attackBonus.MagAttackPercent),
+		MagAttackMax: applyStatPercent(utils.BaseMaxAttack(effectiveInt)+baseAttack.MagAttackMax+equipment.MagAttackMax+attackBonus.MagAttackMax, attackBonus.MagAttackPercent),
+		PhyDef:       applyStatPercent(utils.BaseDef(effectiveStr)+baseDefense.PhyDef+equipment.PhyDef+defenseBonus.PhyDef, defenseBonus.PhyDefPercent),
+		MagDef:       applyStatPercent(utils.BaseDef(effectiveInt)+baseDefense.MagDef+equipment.MagDef+defenseBonus.MagDef, defenseBonus.MagDefPercent),
+		HitRate:      applyStatPercent(11+baseAttack.HitRate+equipment.HitRate+attackBonus.HitRate, attackBonus.HitRatePercent),
+		ParryRate:    applyStatPercent(11+baseDefense.ParryRate+equipment.ParryRate+defenseBonus.ParryRate, defenseBonus.ParryRatePercent),
+		MaxHP:        maxHP,
+		MaxMP:        maxMP,
+	}
 }
 
 func applyStatPercent(value, percent int) int {
@@ -707,12 +722,28 @@ func (p *Player) CommitStatPoint(attribute CharacterAttribute) bool {
 }
 
 func (p *Player) ApplyDamage(damage int) (applied int, killed bool) {
+	return p.applyTypedDamage(damage, false)
+}
+
+func (p *Player) ApplyMagicalDamage(damage int) (applied int, killed bool) {
+	return p.applyTypedDamage(damage, true)
+}
+
+func (p *Player) applyTypedDamage(damage int, magical bool) (applied int, killed bool) {
 	if p == nil || damage <= 0 {
 		return 0, false
 	}
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
+		return 0, false
+	}
+	if magical {
+		damage = p.absorbMagicalDamageLocked(damage)
+	} else {
+		damage = p.absorbPhysicalDamageLocked(damage)
+	}
+	if damage <= 0 {
 		return 0, false
 	}
 	if damage > p.BaseStats.HP {

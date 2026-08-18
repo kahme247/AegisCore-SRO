@@ -90,6 +90,7 @@ func (h *InventoryHandler) handleRepairPacket(ctx context.Context, session *serv
 	points.MessageID = opcode.EntityUpdatePoints
 	points.WriteByte(1)
 	points.WriteUInt64(result.Gold)
+	points.WriteByte(0)
 	return h.sendPacket(session, points)
 }
 

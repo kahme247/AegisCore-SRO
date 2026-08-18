@@ -165,8 +165,7 @@ func (s *RespawnManager) newNPCForSpawn(spawnArea *model.SpawnArea) (*model.NPC,
 	npc.Name = spawnArea.NpcCodeName
 	npc.RefObjectID = refObjectID
 	npc.TypeInfo = refChar.TypeInfo
-	npc.SetWalkSpeed(float32(refChar.Speed1))
-	npc.SetRunSpeed(float32(refChar.Speed2))
+	npc.ConfigureMovementSpeeds(float32(refChar.Speed1), float32(refChar.Speed2))
 	if refChar.Rarity > 0xff {
 		npc.SetRarity(0xff)
 	} else if refChar.Rarity > 0 {

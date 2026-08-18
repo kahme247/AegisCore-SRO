@@ -22,6 +22,19 @@ func (p *Player) ActiveBuffSnapshot() []ActiveBuff {
 	return buffs
 }
 
+func (p *Player) HasAggroSuppression(catalog *ReferenceDataCatalog) bool {
+	if p == nil || catalog == nil {
+		return false
+	}
+	for _, buff := range p.ActiveBuffSnapshot() {
+		skill, exists := catalog.Skill(buff.SkillID)
+		if exists && skill.AggroSuppression {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Player) CommitActiveBuff(skillID, token uint32, duration time.Duration, modifiers BuffModifiers) (replacedToken uint32, ok bool) {
 	if p == nil || skillID == 0 || token == 0 || duration <= 0 {
 		return 0, false
