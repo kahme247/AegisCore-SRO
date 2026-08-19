@@ -429,8 +429,8 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 37 {
-		t.Fatalf("shard migration count = %d, want 37", len(shardMigrations))
+	if len(shardMigrations) != 46 {
+		t.Fatalf("shard migration count = %d, want 46", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
@@ -441,6 +441,44 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(buybackMigration.UpSQL, "CREATE TABLE `CHAR_BUYBACK`") ||
 		!strings.Contains(buybackMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("buy-back migration = %#v, want reversible version 38 character_buyback", buybackMigration)
+	}
+	experienceScrollMigration := shardMigrationByVersion[39]
+	if experienceScrollMigration.Version != 39 || experienceScrollMigration.Name != "experience_scroll_services" ||
+		!strings.Contains(experienceScrollMigration.UpSQL, "SERVICE_KIND` IN (1, 2, 3, 4)") ||
+		!strings.Contains(experienceScrollMigration.DownSQL, "DELETE FROM `CHAR_ITEM_SERVICE`") {
+		t.Fatalf("experience-scroll migration = %#v, want reversible version 39 experience_scroll_services", experienceScrollMigration)
+	}
+	reverseReturnMigration := shardMigrationByVersion[40]
+	if reverseReturnMigration.Version != 40 || reverseReturnMigration.Name != "reverse_return_position" ||
+		!strings.Contains(reverseReturnMigration.UpSQL, "CREATE TABLE `CHAR_REVERSE_RETURN_POSITION`") ||
+		!strings.Contains(reverseReturnMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("reverse-return migration = %#v, want reversible version 40 reverse_return_position", reverseReturnMigration)
+	}
+	itemBuffMigration := shardMigrationByVersion[41]
+	if itemBuffMigration.Version != 41 || itemBuffMigration.Name != "character_item_buffs" ||
+		!strings.Contains(itemBuffMigration.UpSQL, "CREATE TABLE `CHAR_ITEM_BUFF`") ||
+		!strings.Contains(itemBuffMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("item-buff migration = %#v, want reversible version 41 character_item_buffs", itemBuffMigration)
+	}
+	equipmentMigration := shardMigrationByVersion[43]
+	if equipmentMigration.Version != 43 || equipmentMigration.Name != "equipment_systems" ||
+		!strings.Contains(equipmentMigration.UpSQL, "CREATE TABLE `AVATAR_INVENTORY`") ||
+		!strings.Contains(equipmentMigration.UpSQL, "CREATE TABLE `ITEM_MAGIC_OPTION`") ||
+		!strings.Contains(equipmentMigration.DownSQL, "DROP TABLE IF EXISTS `ITEM_MAGIC_OPTION`") {
+		t.Fatalf("equipment migration = %#v, want reversible version 43 equipment_systems", equipmentMigration)
+	}
+	threePageInventoryMigration := shardMigrationByVersion[46]
+	if threePageInventoryMigration.Version != 46 || threePageInventoryMigration.Name != "three_page_player_inventory" ||
+		!strings.Contains(threePageInventoryMigration.UpSQL, "INVENTORY_SIZE` = 109") ||
+		!strings.Contains(threePageInventoryMigration.DownSQL, "inv.`SLOT` >= 45") {
+		t.Fatalf("inventory migration = %#v, want reversible version 46 three_page_player_inventory", threePageInventoryMigration)
+	}
+	socialMigration := shardMigrationByVersion[47]
+	if socialMigration.Version != 47 || socialMigration.Name != "social_systems" ||
+		!strings.Contains(socialMigration.UpSQL, "CREATE TABLE `SRO_SHARD`.`ACADEMY`") ||
+		!strings.Contains(socialMigration.UpSQL, "CREATE TABLE `SRO_SHARD`.`CHARACTER_JOB`") ||
+		!strings.Contains(socialMigration.DownSQL, "DROP TABLE IF EXISTS `SRO_SHARD`.`CHARACTER_JOB`") {
+		t.Fatalf("social migration = %#v, want reversible version 47 social_systems", socialMigration)
 	}
 	returnCityMigration := shardMigrationByVersion[23]
 	if returnCityMigration.Version != 23 || returnCityMigration.Name != "character_return_city" ||

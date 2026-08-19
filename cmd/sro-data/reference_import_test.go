@@ -28,4 +28,11 @@ func TestLoadReferenceDataFromCheckedInMedia(t *testing.T) {
 	if skills[0].ID != 1 || skills[0].CodeName != "SKILL_PUNCH_01" || skills[0].MasteryID != 0 {
 		t.Fatalf("first skill row = %+v, want SKILL_PUNCH_01", skills[0])
 	}
+	magicOptions, err := loadMagicOptionReferenceData(filepath.Join(textData, "magicoption.txt"))
+	if err != nil {
+		t.Fatalf("loadMagicOptionReferenceData() error = %v", err)
+	}
+	if len(magicOptions) < 100 || magicOptions[0].ID == 0 || magicOptions[0].CodeName == "" {
+		t.Fatalf("magic option rows are not populated: first=%+v count=%d", magicOptions[0], len(magicOptions))
+	}
 }

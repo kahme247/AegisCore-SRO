@@ -43,6 +43,14 @@ type skillReferenceRow struct {
 	Effects, Raw                                                                     string
 }
 
+type magicOptionReferenceRow struct {
+	ID         uint64
+	CodeName   string
+	Level      uint64
+	ParamType  uint64
+	ParamValue uint64
+}
+
 func importReferenceData(ctx context.Context, arguments []string, output io.Writer) (runErr error) {
 	flags := flag.NewFlagSet("sro-data import-reference", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -60,6 +68,10 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err != nil {
 		return err
 	}
+	magicOptions, err := loadMagicOptionReferenceData(filepath.Join(textDataDirectory, "magicoption.txt"))
+	if err != nil {
+		return err
+	}
 
 	config.Initialize()
 	pool, err := frameworkdb.OpenPool(ctx, frameworkdb.ShardPool, frameworkdb.ShardPoolConfig())
@@ -67,11 +79,49 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 		return fmt.Errorf("open shard database: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, pool.Close()) }()
-	if err := importReferenceRows(ctx, pool, levels, skills); err != nil {
+	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d level rows and %d enabled skill rows\n", len(levels), len(skills))
+	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, and %d magic-option rows\n", len(levels), len(skills), len(magicOptions))
 	return err
+}
+
+func loadMagicOptionReferenceData(path string) ([]magicOptionReferenceRow, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open magic option data %q: %w", path, err)
+	}
+	defer file.Close()
+	buffered := bufio.NewReader(file)
+	reader := io.Reader(buffered)
+	if prefix, peekErr := buffered.Peek(4); peekErr == nil && (bytes.Contains(prefix, []byte{0}) || (prefix[0] == 0xFF && prefix[1] == 0xFE)) {
+		reader = transform.NewReader(buffered, unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder())
+	}
+	var rows []magicOptionReferenceRow
+	seen := make(map[uint64]bool)
+	scanner := bufio.NewScanner(reader)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 || fields[0] == "0" {
+			continue
+		}
+		if len(fields) < 9 {
+			return nil, fmt.Errorf("magic option line %d: want at least 9 fields, got %d", lineNumber, len(fields))
+		}
+		id, idErr := positiveUint(fields[1])
+		level, levelErr := positiveUint(fields[4])
+		paramType, typeErr := positiveUint(fields[7])
+		paramValue, valueErr := positiveUint(fields[8])
+		if err := errors.Join(idErr, levelErr, typeErr, valueErr); err != nil || id == 0 || level == 0 || seen[id] {
+			return nil, fmt.Errorf("magic option line %d has invalid or duplicate identity: %w", lineNumber, err)
+		}
+		seen[id] = true
+		rows = append(rows, magicOptionReferenceRow{ID: id, CodeName: fields[2], Level: level, ParamType: paramType, ParamValue: paramValue})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read magic option data %q: %w", path, err)
+	}
+	return rows, nil
 }
 
 func loadLevelReferenceData(path string) ([]levelReferenceRow, error) {
@@ -233,7 +283,7 @@ func positiveUint(value string) (uint64, error) {
 	return parsed, nil
 }
 
-func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow) error {
+func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow, magicOptions []magicOptionReferenceRow) error {
 	tx, err := pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin reference import: %w", err)
@@ -258,6 +308,16 @@ func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelRefere
 		_, err := skillStatement.ExecContext(ctx, r.ID, r.Service, r.GroupID, r.CodeName, r.Name, r.GroupCodeName, r.BaseSkillID, r.Level, r.Type, r.NextSkillID, r.InitTime, r.DelayTime, r.NextTime, r.Cooldown, r.MasteryID, r.RequiredMasteryLevel, r.RequiredSkill1ID, r.RequiredSkill2ID, r.RequiredSkill1Level, r.RequiredSkill2Level, r.RequiredSkillPoints, r.RequiredRace, r.RequiredWeapon1, r.RequiredWeapon2, r.RequiredMP, r.MinHPRatio, r.Icon, r.ResourceName, r.Description, r.StudyDescription, r.MaxHPRatio, r.Effects, r.Raw)
 		if err != nil {
 			return fmt.Errorf("import skill %d: %w", r.ID, err)
+		}
+	}
+	magicOptionStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_MAGIC_OPTION` (`ID`,`CODE_NAME`,`OPTION_LEVEL`,`PARAM_TYPE`,`PARAM_VALUE`) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`OPTION_LEVEL`=VALUES(`OPTION_LEVEL`),`PARAM_TYPE`=VALUES(`PARAM_TYPE`),`PARAM_VALUE`=VALUES(`PARAM_VALUE`)")
+	if err != nil {
+		return fmt.Errorf("prepare magic option import: %w", err)
+	}
+	defer magicOptionStatement.Close()
+	for _, option := range magicOptions {
+		if _, err := magicOptionStatement.ExecContext(ctx, option.ID, option.CodeName, option.Level, option.ParamType, option.ParamValue); err != nil {
+			return fmt.Errorf("import magic option %d: %w", option.ID, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
