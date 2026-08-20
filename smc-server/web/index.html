@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AegisCore SMC</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-shell">
+    <div class="brand-panel">
+      <div class="brand-mark" aria-hidden="true">A</div>
+      <p class="eyebrow">AEGISCORE CONTROL PLANE</p>
+      <h1>Operate the world<br>with confidence.</h1>
+      <p class="brand-copy">A dedicated, audited management surface for Gateway, Agent, shards, and players.</p>
+      <div class="signal-line"><span></span> SMC SERVER / SECURE ACCESS</div>
+    </div>
+    <form id="login-form" class="login-card">
+      <div>
+        <p class="eyebrow">OPERATOR SIGN IN</p>
+        <h2>Welcome back</h2>
+        <p>Use your SMC operator credentials.</p>
+      </div>
+      <label>Username<input id="username" name="username" autocomplete="username" required maxlength="64"></label>
+      <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="form-error" role="alert"></p>
+      <button type="submit">Enter SMC <span>→</span></button>
+    </form>
+  </section>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="wordmark"><span>A</span><div><strong>AegisCore</strong><small>SMC SERVER</small></div></div>
+      <nav id="module-nav" aria-label="SMC modules"></nav>
+      <div class="operator-card">
+        <span class="operator-avatar">OP</span>
+        <div><strong id="operator-name">Operator</strong><small>Administrator</small></div>
+        <button id="logout" title="Sign out" aria-label="Sign out">↗</button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">CONTROL CENTER</p><h1 id="page-title">Server overview</h1></div>
+        <div class="topbar-actions"><span id="clock"></span><button id="refresh">Refresh</button></div>
+      </header>
+
+      <div id="overview-view">
+      <section class="hero-status">
+        <div><span class="pulse"></span><strong id="platform-state">Checking platform</strong><p id="generated-at">Connecting to SMC Server…</p></div>
+        <div class="hero-metric"><small>SHARDS</small><strong id="shard-count">—</strong></div>
+        <div class="hero-metric"><small>ONLINE</small><strong id="online-count">—</strong></div>
+      </section>
+
+      <section id="summary-grid" class="summary-grid" aria-label="Catalog totals"></section>
+
+      <section class="content-grid">
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">RUNTIME</p><h2>Service topology</h2></div><span class="muted">TCP reachability</span></div>
+          <div id="service-list" class="service-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">CAPACITY</p><h2>Shards</h2></div><span class="muted">Gateway catalog</span></div>
+          <div id="shard-list" class="shard-list"></div>
+        </article>
+      </section>
+
+      <section class="panel module-panel">
+        <div class="panel-heading"><div><p class="eyebrow">ROADMAP</p><h2>Management modules</h2></div><span class="muted">Capability-gated</span></div>
+        <div id="module-grid" class="module-grid"></div>
+      </section>
+      <p id="dashboard-error" class="dashboard-error" role="alert"></p>
+      </div>
+
+      <section id="directory-view" class="directory-view" hidden>
+        <article class="directory-hero">
+          <div>
+            <p class="eyebrow">PERSISTED DIRECTORY</p>
+            <h2 id="directory-title">Player inspector</h2>
+            <p id="directory-copy">Search persisted character records by character or account name.</p>
+          </div>
+          <span class="data-badge">DATABASE STATE · NOT LIVE PRESENCE</span>
+        </article>
+        <article id="live-player-panel" class="panel live-player-panel">
+          <div class="panel-heading"><div><p class="eyebrow">AUTHORITATIVE AGENT STATE</p><h2>Online players</h2></div><span id="live-player-count" class="muted">Checking channel…</span></div>
+          <div id="live-player-results" class="live-player-results"><p class="empty-state">Connecting to the private Agent management channel.</p></div>
+        </article>
+        <form id="directory-form" class="directory-search">
+          <label for="directory-query">Search</label>
+          <div><input id="directory-query" autocomplete="off" maxlength="64" required placeholder="Enter a character or account name"><button type="submit">Search</button></div>
+        </form>
+        <article class="panel directory-results-panel">
+          <div class="panel-heading"><div><p class="eyebrow">RESULTS</p><h2 id="directory-result-title">Characters</h2></div><span id="directory-count" class="muted">Start a search</span></div>
+          <div id="directory-results" class="directory-results"><p class="empty-state">Searches use a case-insensitive name prefix and return at most 25 records.</p></div>
+        </article>
+        <p id="directory-error" class="dashboard-error" role="alert"></p>
+      </section>
+
+      <section id="game-control-view" class="directory-view" hidden>
+        <article class="directory-hero game-control-hero">
+          <div>
+            <p class="eyebrow">PRIVATE AGENT CHANNEL</p>
+            <h2>Game control</h2>
+            <p>Send validated live-world commands through the dedicated mTLS management service.</p>
+          </div>
+          <span class="data-badge live-command-badge">LIVE COMMAND · AUDITED</span>
+        </article>
+        <article class="panel broadcast-panel">
+          <div class="panel-heading"><div><p class="eyebrow">SERVER NOTICE</p><h2>Broadcast to online players</h2></div><span class="muted">vSRO notice channel</span></div>
+          <p class="command-copy">The notice is sent immediately to every player currently in the Agent world. An attempt and terminal outcome are written to the durable SMC audit log.</p>
+          <form id="broadcast-form">
+            <label for="broadcast-message">Message</label>
+            <textarea id="broadcast-message" minlength="1" maxlength="200" required placeholder="Type the server notice players should receive"></textarea>
+            <div class="broadcast-footer"><span id="broadcast-count">0 / 200</span><button type="submit">Review broadcast</button></div>
+          </form>
+          <p id="broadcast-status" class="command-status" role="status"></p>
+        </article>
+      </section>
+
+      <section id="administration-view" class="directory-view" hidden>
+        <article class="directory-hero administration-hero">
+          <div>
+            <p class="eyebrow">CONTROL PLANE EVIDENCE</p>
+            <h2>Administration</h2>
+            <p>Review recent operator authentication and live-world command outcomes.</p>
+          </div>
+          <span class="data-badge audit-badge">APPEND-ONLY AUDIT</span>
+        </article>
+        <article class="panel audit-panel">
+          <div class="panel-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Audit events</h2></div><span id="audit-count" class="muted">Loading records…</span></div>
+          <form id="audit-filter-form" class="audit-filters">
+            <label for="audit-action">Action</label>
+            <select id="audit-action">
+              <option value="">All actions</option>
+              <option value="operator.login">Operator login</option>
+              <option value="operator.logout">Operator logout</option>
+              <option value="player.disconnect">Player disconnect</option>
+              <option value="world.broadcast">World broadcast</option>
+            </select>
+            <label for="audit-limit">Records</label>
+            <select id="audit-limit"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>
+            <button type="submit">Apply filters</button>
+          </form>
+          <div id="audit-results" class="audit-results"><p class="empty-state">Loading durable audit records.</p></div>
+          <p id="audit-error" class="dashboard-error" role="alert"></p>
+        </article>
+      </section>
+
+      <div id="disconnect-modal" class="modal-backdrop" hidden>
+        <form id="disconnect-form" class="command-modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-title">
+          <p class="eyebrow">LIVE AGENT COMMAND</p>
+          <h2 id="disconnect-title">Disconnect player</h2>
+          <p id="disconnect-target" class="command-target"></p>
+          <label for="disconnect-reason">Reason</label>
+          <textarea id="disconnect-reason" minlength="3" maxlength="200" required placeholder="Required for the audit record"></textarea>
+          <p id="disconnect-error" class="form-error" role="alert"></p>
+          <div class="command-actions"><button id="disconnect-cancel" type="button">Cancel</button><button class="danger-button" type="submit">Confirm disconnect</button></div>
+        </form>
+      </div>
+
+      <div id="broadcast-modal" class="modal-backdrop" hidden>
+        <form id="broadcast-confirm-form" class="command-modal broadcast-modal" role="dialog" aria-modal="true" aria-labelledby="broadcast-title">
+          <p class="eyebrow">LIVE AGENT COMMAND</p>
+          <h2 id="broadcast-title">Confirm server broadcast</h2>
+          <p class="command-target">This notice will be sent immediately to all currently online players.</p>
+          <blockquote id="broadcast-preview"></blockquote>
+          <p id="broadcast-error" class="form-error" role="alert"></p>
+          <div class="command-actions"><button id="broadcast-cancel" type="button">Cancel</button><button class="broadcast-button" type="submit">Send broadcast</button></div>
+        </form>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
