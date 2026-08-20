@@ -12,6 +12,11 @@ import (
 type GameTimeManager struct {
 	Manager
 	referenceTime time.Time
+	cos           interface{ UpdateFollowers(time.Time) }
+}
+
+func (gtm *GameTimeManager) ConfigureCOS(runtime interface{ UpdateFollowers(time.Time) }) {
+	gtm.cos = runtime
 }
 
 var gameTimeManagerInstance *GameTimeManager
@@ -36,6 +41,10 @@ func (gtm *GameTimeManager) moveObjects() {
 	for gtm.started {
 		select {
 		case <-gtm.ticker.C:
+			now := time.Now()
+			if gtm.cos != nil {
+				gtm.cos.UpdateFollowers(now)
+			}
 			world.ForEachMovingObject(func(obj model.ICharacter) {
 				world.UpdatePosition(obj)
 				// WorldService reconciles the changed character immediately after a
@@ -43,7 +52,7 @@ func (gtm *GameTimeManager) moveObjects() {
 				// known-list walk here: it races disconnect cleanup and cannot
 				// provide deterministic reciprocal visibility deltas.
 			})
-			world.FlushDirtyPositionsIfDue(time.Now())
+			world.FlushDirtyPositionsIfDue(now)
 		}
 	}
 }
