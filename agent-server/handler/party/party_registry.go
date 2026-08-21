@@ -1,6 +1,7 @@
 package party
 
 import (
+	"context"
 	"sync"
 
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -14,13 +15,21 @@ import (
 // one worker per opcode; a single lock prevents the registry migration from
 // widening concurrent map and party-member mutations.
 type PartyHandler struct {
-	mu      sync.Mutex
-	service *service.PartyService
-	send    func(*server.Session, network.Packet) error
+	mu                 sync.Mutex
+	service            *service.PartyService
+	send               func(*server.Session, network.Packet) error
+	invitationFallback interface {
+		AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
+	}
 }
 
-func RegisterPartyHandlers(target *server.Server) {
+func RegisterPartyHandlers(target *server.Server, fallback ...interface {
+	AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
+}) {
 	handler := &PartyHandler{service: service.GetPartyServiceInstance()}
+	if len(fallback) > 0 {
+		handler.invitationFallback = fallback[0]
+	}
 	target.RegisterHandler(opcode.PartyCreateRequest, handler.handleCreateInvite)
 	target.RegisterHandler(opcode.PartyLeaveRequest, handler.handleLeave)
 	target.RegisterHandler(opcode.PartyInviteRequest, handler.handleExistingInvite)

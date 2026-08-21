@@ -46,7 +46,7 @@ func (h *PartyHandler) handleExistingInvite(_ context.Context, session *server.S
 	return h.sendPacket(target.GetSession(), buildInvitation(invite))
 }
 
-func (h *PartyHandler) handleInvitationAnswer(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || packet.Remaining() < 2 {
 		return fmt.Errorf("invalid party invitation answer")
 	}
@@ -73,6 +73,12 @@ func (h *PartyHandler) handleInvitationAnswer(_ context.Context, session *server
 
 	transition, err := h.core().AnswerInvitation(session.UserContext.UniqueID, accept)
 	if err != nil {
+		if errors.Is(err, service.ErrPartyInvitationMissing) && h.invitationFallback != nil {
+			handled, fallbackErr := h.invitationFallback.AnswerGuildInvitation(ctx, session, accept)
+			if handled || fallbackErr != nil {
+				return fallbackErr
+			}
+		}
 		return err
 	}
 	responseOpcode := opcode.PartyCreateResponse

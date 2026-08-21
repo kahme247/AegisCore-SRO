@@ -3,10 +3,13 @@ package lobby
 import (
 	"context"
 	"errors"
+	"strings"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -19,17 +22,32 @@ const (
 	CharSelectionGuildNameCheck  uint8 = 3
 
 	// Errors
-	RENAME_MSG_ERROR_ID                      uint8 = 6
-	RENAME_SMERR_NOT_ALLOWED_CHARNAME        uint8 = 7
-	RENAME_MSG_GUILDERR_SAME_GUILDNAME_EXIST uint8 = 6
-	RENAME_MSG_GUILD_NOT_CREATE              uint8 = 7
+	RENAME_MSG_ERROR_ID                      uint16 = 6
+	RENAME_SMERR_NOT_ALLOWED_CHARNAME        uint16 = 7
+	RENAME_MSG_GUILDERR_SAME_GUILDNAME_EXIST uint16 = 6
+	RENAME_MSG_GUILD_NOT_CREATE              uint16 = 7
 )
 
-func RegisterCharSelectionRenameRequestHandler(target *server.Server) {
-	target.RegisterHandler(opcode.LobbyRenameRequest, handleCharSelectionRenameRequest)
+type characterRenameHandler struct {
+	repository model.CharacterRenameRepository
 }
 
-func handleCharSelectionRenameRequest(_ context.Context, session *server.Session, packet network.Packet) error {
+func RegisterCharSelectionRenameRequestHandler(target *server.Server, repository ...model.CharacterRenameRepository) {
+	if target == nil {
+		return
+	}
+	handler := &characterRenameHandler{}
+	if len(repository) > 0 {
+		handler.repository = repository[0]
+	}
+	target.RegisterHandler(opcode.LobbyRenameRequest, handler.handlePacket)
+}
+
+func handleCharSelectionRenameRequest(ctx context.Context, session *server.Session, packet network.Packet) error {
+	return (&characterRenameHandler{}).handlePacket(ctx, session, packet)
+}
+
+func (h *characterRenameHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || !session.IsAuthenticated() {
 		return errors.New("rename request arrived before authentication")
 	}
@@ -42,22 +60,30 @@ func handleCharSelectionRenameRequest(_ context.Context, session *server.Session
 	}
 
 	if action == CharSelectionCharacterRename || action == CharSelectionGuildRename {
-		currentGuildName, err := packet.ReadString()
+		currentName, err := packet.ReadString()
 		if err != nil {
 			return err
 		}
 
-		newGuildName, err := packet.ReadString()
+		newName, err := packet.ReadString()
 		if err != nil {
 			return err
 		}
 
-		// Rename writes are deliberately unavailable until ownership-qualified
-		// persistence exists. Parse the complete request so malformed input is
-		// rejected by the session, but never acknowledge an unimplemented
-		// privileged mutation as successful.
-		_ = currentGuildName
-		_ = newGuildName
+		if packet.Remaining() != 0 {
+			return errors.New("rename request contains trailing data")
+		}
+		if action == CharSelectionCharacterRename && h.repository != nil &&
+			modelNameValid(newName) && !strings.EqualFold(strings.TrimSpace(currentName), strings.TrimSpace(newName)) {
+			err = h.repository.RenameCharacter(ctx, session.UserContext.UserID, session.UserContext.ShardID, currentName, newName)
+			if err == nil {
+				return sendRenameResult(session, action, ResultTrue, 0)
+			}
+			if errors.Is(err, model.ErrCharacterRenameDuplicate) {
+				return sendRenameResult(session, action, ResultFalse, RENAME_MSG_ERROR_ID)
+			}
+		}
+		return sendRenameResult(session, action, ResultFalse, RENAME_SMERR_NOT_ALLOWED_CHARNAME)
 	} else if action == CharSelectionGuildNameCheck {
 		guildName, err := packet.ReadString()
 		if err != nil {
@@ -70,10 +96,20 @@ func handleCharSelectionRenameRequest(_ context.Context, session *server.Session
 		return errors.New("rename request contains trailing data")
 	}
 
+	return sendRenameResult(session, action, ResultFalse, RENAME_MSG_ERROR_ID)
+}
+
+func modelNameValid(name string) bool {
+	return vsro188.ValidateText(name, characterNameRules()) == nil
+}
+
+func sendRenameResult(session *server.Session, action, result byte, code uint16) error {
 	p := network.EmptyPacket()
 	p.MessageID = OpcodeCharSelectionRenameResponse
-	if err := p.WriteByte(ResultFalse); err != nil {
-		return err
+	p.WriteByte(action)
+	p.WriteByte(result)
+	if result == ResultFalse {
+		p.WriteUInt16(code)
 	}
 	return session.Send(p)
 }
