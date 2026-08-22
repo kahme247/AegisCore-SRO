@@ -36,6 +36,8 @@ func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 		{name: "sell", packet: buildSellSuccess(13, 1, 0x11223344, 1), want: "01090d01004433221101"},
 		{name: "buy back", packet: buildBuyBackSuccess(14, 0, 1), want: "01220e000100"},
 		{name: "buy back acknowledgement", packet: buildNPCBuyBackResponse(true), want: "01"},
+		{name: "storage gold deposit", packet: buildStorageGoldSuccess(DepositStorageGoldOperation, 5, 95), want: "010b5f00000000000000"},
+		{name: "storage gold withdrawal", packet: buildStorageGoldSuccess(WithdrawStorageGoldOperation, 5, 105), want: "010c0500000000000000"},
 		{name: "deposit", packet: buildStorageTransferSuccess(PutItemIntoStorageOperation, 13, 0), want: "01020d00"},
 		{name: "withdraw", packet: buildStorageTransferSuccess(TakeItemFromStorageOperation, 0, 13), want: "0103000d"},
 	}

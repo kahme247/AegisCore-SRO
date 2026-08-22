@@ -7,11 +7,11 @@ import (
 	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
-// RecoveryItemUseCase is the gameplay boundary consumed by the packet handler.
+// ItemUseCase is the gameplay boundary consumed by the packet handler.
 // It owns lock ordering, repository execution, and publication of the committed
 // player snapshot; packet decoding and response encoding remain in the handler.
-type RecoveryItemUseCase interface {
-	UseRecoveryItem(context.Context, *model.Player, byte, uint16) (model.ItemUseResult, error)
+type ItemUseCase interface {
+	UseItem(context.Context, *model.Player, byte, uint16) (model.ItemUseResult, error)
 }
 
 type ItemUseService struct {
@@ -22,7 +22,7 @@ func NewItemUseService(repository model.ItemUseRepository) *ItemUseService {
 	return &ItemUseService{repository: repository}
 }
 
-func (s *ItemUseService) UseRecoveryItem(ctx context.Context, player *model.Player, slot byte, itemType uint16) (model.ItemUseResult, error) {
+func (s *ItemUseService) UseItem(ctx context.Context, player *model.Player, slot byte, itemType uint16) (model.ItemUseResult, error) {
 	if s == nil || s.repository == nil || player == nil || player.ID <= 0 {
 		return model.ItemUseResult{}, model.ErrItemUseInvalidRequest
 	}
@@ -42,7 +42,7 @@ func (s *ItemUseService) UseRecoveryItem(ctx context.Context, player *model.Play
 		MaxHP: maxHP,
 		MaxMP: maxMP,
 	}
-	result, err := s.repository.UseRecoveryItem(ctx, int64(player.ID), slot, itemType, vitals)
+	result, err := s.repository.UseItem(ctx, int64(player.ID), slot, itemType, vitals)
 	if err != nil {
 		player.Mutex.Unlock()
 		return model.ItemUseResult{}, err

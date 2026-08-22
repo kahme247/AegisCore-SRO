@@ -4,7 +4,12 @@ import (
 	"sync"
 )
 
-const BaseInventorySize byte = 45
+const (
+	InventoryEquipmentSlots byte = 13
+	InventoryPageSlots      byte = 32
+	InventoryPages          byte = 3
+	BaseInventorySize            = InventoryEquipmentSlots + InventoryPageSlots*InventoryPages
+)
 
 const (
 	SlotHelmet          byte = 0

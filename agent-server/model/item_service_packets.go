@@ -28,6 +28,20 @@ func BuildItemPerkRemove(characterUID, refItemID, token uint32) network.Packet {
 	return packet
 }
 
+func ItemServicePerkValue(effect ItemServiceEffect) time.Duration {
+	if effect.Kind != ItemServiceExperience && effect.Kind != ItemServiceSkillExperience {
+		return effect.DailyBudget
+	}
+	ref, exists := RefItems[effect.SourceRefItemID]
+	if !exists || ref.Param3 <= 0 {
+		return 0
+	}
+	// ItemPerkAdd's fourth field is an opaque uint32 whose meaning is selected
+	// by the source item. EXP/SP scrolls store their authored percentage here;
+	// premium packages use the daily service budget in milliseconds.
+	return time.Duration(ref.Param3) * time.Millisecond
+}
+
 func ItemServiceUsesItemPerk(effect ItemServiceEffect) bool {
 	switch effect.SourceRefItemID {
 	case 9277, 35567:

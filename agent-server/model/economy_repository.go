@@ -34,6 +34,7 @@ type ShopGood struct {
 
 type EconomyResult struct {
 	Gold             uint64
+	StorageGold      uint64
 	Inventory        Inventory
 	Item             Item
 	SourceSlot       byte
@@ -55,6 +56,8 @@ type EconomyRepository interface {
 	LoadStorage(context.Context, uint32) (StorageSnapshot, error)
 	Deposit(context.Context, int64, uint32, byte, byte) (EconomyResult, error)
 	Withdraw(context.Context, int64, uint32, byte, byte) (EconomyResult, error)
+	DepositStorageGold(context.Context, int64, uint32, uint64) (EconomyResult, error)
+	WithdrawStorageGold(context.Context, int64, uint32, uint64) (EconomyResult, error)
 	MoveStorage(context.Context, uint32, byte, byte, uint16) error
 }
 
@@ -444,6 +447,66 @@ func (r *SQLEconomyRepository) Deposit(ctx context.Context, characterID int64, u
 
 func (r *SQLEconomyRepository) Withdraw(ctx context.Context, characterID int64, userID uint32, source, destination byte) (EconomyResult, error) {
 	return r.transfer(ctx, characterID, userID, source, destination, false)
+}
+
+func (r *SQLEconomyRepository) DepositStorageGold(ctx context.Context, characterID int64, userID uint32, amount uint64) (EconomyResult, error) {
+	return r.transferStorageGold(ctx, characterID, userID, amount, true)
+}
+
+func (r *SQLEconomyRepository) WithdrawStorageGold(ctx context.Context, characterID int64, userID uint32, amount uint64) (EconomyResult, error) {
+	return r.transferStorageGold(ctx, characterID, userID, amount, false)
+}
+
+func (r *SQLEconomyRepository) transferStorageGold(ctx context.Context, characterID int64, userID uint32, amount uint64, deposit bool) (EconomyResult, error) {
+	ctx = normalizeEconomyContext(ctx)
+	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || amount == 0 {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	owner, characterGold, err := lockEconomyCharacter(ctx, tx, characterID)
+	if err != nil || owner != userID {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO `STORAGE_INFO` (`FK_USER`) VALUES (?)", userID); err != nil {
+		return EconomyResult{}, err
+	}
+	var storageGold uint64
+	if err = tx.QueryRowContext(ctx, "SELECT `GOLD` FROM `STORAGE_INFO` WHERE `FK_USER`=? FOR UPDATE", userID).Scan(&storageGold); err != nil {
+		return EconomyResult{}, err
+	}
+	if deposit {
+		if characterGold < amount || storageGold > math.MaxUint64-amount {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		characterGold -= amount
+		storageGold += amount
+	} else {
+		if storageGold < amount || characterGold > math.MaxUint64-amount {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		storageGold -= amount
+		characterGold += amount
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=? AND `FK_USER`=?", characterGold, characterID, userID); err != nil {
+		return EconomyResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE `STORAGE_INFO` SET `GOLD`=? WHERE `FK_USER`=?", storageGold, userID); err != nil {
+		return EconomyResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	committed = true
+	return EconomyResult{Gold: characterGold, StorageGold: storageGold, Amount: 1}, nil
 }
 
 func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, userID uint32, source, destination byte, deposit bool) (EconomyResult, error) {

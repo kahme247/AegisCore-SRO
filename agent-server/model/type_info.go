@@ -215,6 +215,14 @@ func (ti TypeInfo) IsCOS() bool {
 	return ti.IsNPC() && ti.TypeID3 == 3
 }
 
+func (ti TypeInfo) COSKind() (COSKind, bool) {
+	if !ti.IsCOS() {
+		return 0, false
+	}
+	kind := COSKind(ti.TypeID4)
+	return kind, kind.Valid()
+}
+
 func (ti TypeInfo) IsSiegeObject() bool {
 	return ti.IsNPC() && ti.TypeID3 == 4
 }

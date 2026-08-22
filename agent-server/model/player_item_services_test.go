@@ -27,6 +27,49 @@ func TestItemServiceFromReferenceUsesMediaTimeTicketParameters(t *testing.T) {
 	}
 }
 
+func TestExperienceScrollServicesUseCatalogDurationMarkerAndPercentage(t *testing.T) {
+	now := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		marker    int
+		kind      ItemServiceKind
+		wantEXP   uint32
+		wantSkill uint32
+	}{
+		{name: "experience", marker: itemServiceExperienceMarker, kind: ItemServiceExperience, wantEXP: 150},
+		{name: "skill experience", marker: itemServiceSkillExperienceMarker, kind: ItemServiceSkillExperience, wantSkill: 150},
+		{name: "event skill experience", marker: itemServiceSkillExperienceEventMarker, kind: ItemServiceSkillExperience, wantSkill: 30},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			percent := 150
+			if test.marker == itemServiceSkillExperienceEventMarker {
+				percent = 30
+			}
+			ref := RefItem{Param1: 3600, Param2: test.marker, Param3: percent}
+			ref.ID, ref.IsUseable = 24170, true
+			ref.TypeInfo = TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 10}
+			effect, err := itemServiceFromReference(ref, now)
+			if err != nil {
+				t.Fatalf("itemServiceFromReference() error = %v", err)
+			}
+			if effect.Kind != test.kind || effect.ExperienceBonusPercent != test.wantEXP || effect.SkillExperienceBonusPercent != test.wantSkill || !effect.ExpiresAt.Equal(now.Add(time.Hour)) {
+				t.Fatalf("effect = %+v", effect)
+			}
+		})
+	}
+}
+
+func TestExperienceScrollPerkValueUsesAuthoredPercentage(t *testing.T) {
+	previous := RefItems
+	t.Cleanup(func() { RefItems = previous })
+	RefItems = map[uint32]RefItem{24170: {Param3: 150}}
+	effect := ItemServiceEffect{Kind: ItemServiceExperience, SourceRefItemID: 24170, DailyBudget: time.Millisecond}
+	if got := ItemServicePerkValue(effect); got != 150*time.Millisecond {
+		t.Fatalf("ItemServicePerkValue() = %v, want raw value 150", got)
+	}
+}
+
 func TestItemPerkPacketsCarryPremiumIconAndDuration(t *testing.T) {
 	premium := ItemServiceEffect{SourceRefItemID: 35567}
 	if ItemServiceUsesItemPerk(premium) {
@@ -98,6 +141,17 @@ func TestPremiumAndSkillGoldRatesStackAndExpire(t *testing.T) {
 	experience, skill = player.ItemServiceRates(now.Add(2 * time.Hour))
 	if experience != 0 || skill != 0 {
 		t.Fatalf("expired rates = %d/%d, want 0/0", experience, skill)
+	}
+}
+
+func TestExperienceAndSkillExperienceScrollRatesStackWithPremium(t *testing.T) {
+	now := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	player := &Player{}
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceGold, ExperienceBonusPercent: 100, SkillExperienceBonusPercent: 100, ExpiresAt: now.Add(time.Hour)})
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceExperience, ExperienceBonusPercent: 150, ExpiresAt: now.Add(time.Hour)})
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceSkillExperience, SkillExperienceBonusPercent: 50, ExpiresAt: now.Add(time.Hour)})
+	if experience, skill := player.ItemServiceRates(now); experience != 250 || skill != 150 {
+		t.Fatalf("stacked scroll rates = %d/%d, want 250/150", experience, skill)
 	}
 }
 

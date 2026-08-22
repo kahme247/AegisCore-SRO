@@ -1,6 +1,8 @@
 package model
 
 import (
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -35,6 +37,72 @@ func TestRecoveryValuesRejectsNonRecoveryExpendables(t *testing.T) {
 	ref := RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 1}}}
 	if hp, mp, ok := recoveryValues(ref, ItemUseVitals{HP: 50, MP: 50, MaxHP: 200, MaxMP: 200}); ok || hp != 50 || mp != 50 {
 		t.Fatalf("scroll recoveryValues() = (%d, %d, %v), want unchanged unsupported item", hp, mp, ok)
+	}
+}
+
+func TestIsReturnScrollRecognizesBoundCityFamilyOnly(t *testing.T) {
+	ordinary := RefItem{RefObject: RefObject{
+		IsUseable: true,
+		TypeInfo:  TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 1},
+	}}
+	ordinary.Param1 = 30_000
+	ordinary.Param3Desc = " resurrect "
+	if !IsReturnScroll(ordinary) {
+		t.Fatal("ordinary return-city scroll was not recognized")
+	}
+
+	reverse := ordinary
+	reverse.TypeID4 = 3
+	if IsReturnScroll(reverse) {
+		t.Fatal("reverse-return scroll was treated as a bound-city scroll")
+	}
+	if !IsReverseReturnScroll(reverse) || !IsTeleportScroll(reverse) {
+		t.Fatal("reverse-return scroll was not recognized as a teleport scroll")
+	}
+	specialDestination := ordinary
+	specialDestination.Param3Desc = "THIEFDEN"
+	if IsReturnScroll(specialDestination) {
+		t.Fatal("special-destination scroll was treated as a bound-city scroll")
+	}
+	ordinary.Param1 = 0
+	if IsReturnScroll(ordinary) {
+		t.Fatal("return scroll without a reference-data cast duration was accepted")
+	}
+}
+
+func TestIsCOSScrollRecognizesLiveGrowthAndAbilityPetItems(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ref  RefItem
+	}{
+		{name: "growth flute", ref: RefItem{RefObject: RefObject{CodeName: "ITEM_COS_P_FLUTE_WHITE", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 1}}, Param1Desc: "COS_P_WOLF_WHITE_001"}},
+		{name: "ability scroll", ref: RefItem{RefObject: RefObject{CodeName: "ITEM_COS_P_RACCOONDOG_SCROLL", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 2}}, Param1Desc: "COS_P_RACCOONDOG"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !IsCOSScroll(test.ref) {
+				t.Fatalf("IsCOSScroll(%s) = false", test.ref.CodeName)
+			}
+		})
+	}
+	invalid := RefItem{RefObject: RefObject{CodeName: "ITEM_COS_P_FLUTE_WHITE", TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 1}}}
+	if IsCOSScroll(invalid) {
+		t.Fatal("non-usable COS item was accepted")
+	}
+}
+
+func TestValidateCOSItemRentalRejectsExpiredAbilityPetOnly(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	if err := validateCOSItemRental(COSAbilityPet, sql.NullTime{Valid: true, Time: now.Add(-time.Second)}, now); !errors.Is(err, ErrItemUseExpired) {
+		t.Fatalf("expired ability rental error = %v, want ErrItemUseExpired", err)
+	}
+	if err := validateCOSItemRental(COSAbilityPet, sql.NullTime{}, now); !errors.Is(err, ErrItemUseExpired) {
+		t.Fatalf("missing ability rental error = %v, want ErrItemUseExpired", err)
+	}
+	if err := validateCOSItemRental(COSAbilityPet, sql.NullTime{Valid: true, Time: now.Add(time.Second)}, now); err != nil {
+		t.Fatalf("future ability rental rejected: %v", err)
+	}
+	if err := validateCOSItemRental(COSGrowthPet, sql.NullTime{}, now); err != nil {
+		t.Fatalf("permanent growth pet rejected: %v", err)
 	}
 }
 

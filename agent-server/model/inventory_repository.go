@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -26,15 +28,15 @@ import (
 	12 - Extra Slot (PVP Cape, Job Suit)
 
 	Avatar Inventory
-	0 - Flag
+	0 - Helm
 	1 - Chest / Dress
 	2 - Attachment
-	3 - Helm
-	4 - Devil Spirit ?
+	3 - Flag
+	4 - Devil Spirit
 */
 
 const (
-	SelectCharacterInventory string = "SELECT inv.SLOT, inv.FK_ITEM, it.VARIANCE, it.FK_REF_ITEM, it.STACK_COUNT, it.OPT_LEVEL, it.DATA, it.RENT_TYPE, it.RENT_CAN_DELETE, it.RENT_CAN_RECHARGE, it.RENT_PERIOD_BEGIN_TIME, it.RENT_PERIOD_END_TIME, it.RENT_METER_RATE_TIME, it.RENT_PACKING_TIME FROM `SRO_SHARD`.`INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` AS it ON inv.FK_ITEM = it.ID WHERE inv.FK_CHAR=?"
+	SelectCharacterInventory string = "SELECT inv.SLOT,inv.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,COALESCE(cos.REF_OBJECT_ID,0),COALESCE(cos.KIND,0),COALESCE(cos.STATE,0),COALESCE(cos.NAME,''),COALESCE(cos.LEVEL,0),cos.RENT_ENDS_AT,COALESCE(cos.INVENTORY_SLOT,0),COALESCE(cos.HEALTH,0),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),COALESCE(ap.ASTRAL,0),COALESCE(ap.IMMORTAL,0),COALESCE(ap.STEADY,0) FROM `SRO_SHARD`.`INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` AS it ON inv.FK_ITEM=it.ID LEFT JOIN `SRO_SHARD`.`CHAR_COS` cos ON cos.ID=it.DATA AND cos.OWNER_CHAR_ID=inv.FK_CHAR LEFT JOIN `SRO_SHARD`.`ITEM_ALCHEMY_PROTECTION` ap ON ap.FK_ITEM=it.ID WHERE inv.FK_CHAR=?"
 	InsertInventoryItem      string = "INSERT INTO `SRO_SHARD`.`INVENTORY` (FK_CHAR, SLOT, FK_ITEM) VALUES(?, ?, ?);"
 )
 
@@ -185,8 +187,27 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 	var optLevel byte
 	var data uint32
 	var rent RentInfo
-	if err := scanner.Scan(&slot, &itemID, &variance, &referenceItemID, &stackCount, &optLevel, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime); err != nil {
+	var cosRefObjectID uint32
+	var cosKind, cosState, cosLevel, cosInventorySlot byte
+	var cosName string
+	var cosRentEndsAt sql.NullTime
+	var cosHealth int32
+	var magicJSON, socketsJSON, advancedJSON []byte
+	var protection EquipmentProtection
+	if err := scanner.Scan(&slot, &itemID, &variance, &referenceItemID, &stackCount, &optLevel, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime, &cosRefObjectID, &cosKind, &cosState, &cosName, &cosLevel, &cosRentEndsAt, &cosInventorySlot, &cosHealth, &magicJSON, &socketsJSON, &advancedJSON, &protection.Astral, &protection.Immortal, &protection.Steady); err != nil {
 		return 0, Item{}, err
+	}
+	magicOptions, err := decodeMagicOptions(magicJSON)
+	if err != nil {
+		return 0, Item{}, err
+	}
+	sockets, err := decodeBindingOptions(socketsJSON)
+	if err != nil {
+		return 0, Item{}, err
+	}
+	advanced, err := decodeBindingOptions(advancedJSON)
+	if err != nil || !protection.Valid() {
+		return 0, Item{}, ErrAlchemyConflict
 	}
 
 	validatedSlot, err := validatedPersistedInventorySlot(slot)
@@ -206,13 +227,17 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 	}
 
 	item := Item{
-		ID:        int(itemID),
-		Name:      refItem.CodeName,
-		Variance:  variance,
-		StackSize: stackCount,
-		OptLevel:  optLevel,
-		Data:      data,
-		RentInfo:  rent,
+		ID:              int(itemID),
+		Name:            refItem.CodeName,
+		Variance:        variance,
+		StackSize:       stackCount,
+		OptLevel:        optLevel,
+		Data:            data,
+		RentInfo:        rent,
+		MagicOptions:    magicOptions,
+		SocketOptions:   sockets,
+		AdvancedElixirs: advanced,
+		Protection:      protection,
 	}
 	item.RefObjectID = refItem.ID
 	item.LevelInfo = LevelInfo{
@@ -231,7 +256,58 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 		TypeID3: refItem.TypeID3,
 		TypeID4: refItem.TypeID4,
 	})
+	if cosRefObjectID != 0 {
+		state := COSItemState(cosState)
+		// A linked persistent COS is an activated control item even when legacy
+		// rows retain DB state 1 from _ActivateCharCOS/import. Wire state 1 omits
+		// the identity and rental tail entirely, making a valid ability pet look
+		// expired and then appear usable without metadata.
+		if state == COSItemInactive {
+			state = COSItemActive
+		}
+		if state < COSItemInactive || state > COSItemDead {
+			state = COSItemActive
+		}
+		if cosHealth <= 0 {
+			state = COSItemDead
+		}
+		item.COS = COSItemInfo{Present: true, RefObjectID: cosRefObjectID, Kind: COSKind(cosKind), State: state, Name: cosName, Level: cosLevel, InventorySlot: cosInventorySlot}
+		if cosRentEndsAt.Valid {
+			item.COS.RentEndsAt = cosRentEndsAt.Time.UTC()
+		}
+	}
 	return validatedSlot, item, nil
+}
+
+func decodeMagicOptions(data []byte) ([]MagicOption, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var values []struct {
+		Slot      byte   `json:"slot"`
+		Type      uint32 `json:"type"`
+		Value     uint32 `json:"value"`
+		ParamType uint32 `json:"paramType"`
+	}
+	if err := json.Unmarshal(data, &values); err != nil || len(values) > 12 {
+		return nil, fmt.Errorf("decode item magic options: %w", err)
+	}
+	result := make([]MagicOption, len(values))
+	for i, value := range values {
+		result[i] = MagicOption{Type: value.Type, Value: value.Value, ParamType: value.ParamType}
+	}
+	return result, nil
+}
+
+func decodeBindingOptions(data []byte) ([]BindingOption, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var values []BindingOption
+	if err := json.Unmarshal(data, &values); err != nil || len(values) > 12 {
+		return nil, fmt.Errorf("decode item binding options: %w", err)
+	}
+	return values, nil
 }
 
 func validateInventoryCharacterID(characterID int64) error {

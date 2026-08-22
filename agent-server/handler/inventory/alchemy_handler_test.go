@@ -1,12 +1,27 @@
 package inventory
 
 import (
+	"bytes"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
+
+func TestAlchemyWaitUsesAnimationDuration(t *testing.T) {
+	var waited time.Duration
+	h := &AlchemyHandler{wait: func(duration time.Duration) { waited = duration }}
+	h.waitFor(3 * time.Second)
+	if waited != 3*time.Second {
+		t.Fatalf("elixir wait = %v", waited)
+	}
+	h.waitFor(4500 * time.Millisecond)
+	if waited != 4500*time.Millisecond {
+		t.Fatalf("stone wait = %v", waited)
+	}
+}
 
 func TestParseAlchemyElixirRequestVSRO188(t *testing.T) {
 	packet := network.EmptyClientPacket()
@@ -37,6 +52,40 @@ func TestParseAlchemyElixirRequestVSRO188(t *testing.T) {
 	duplicateLength.WriteByte(99)
 	if _, err = parseAlchemyElixirRequest(&duplicateLength); err == nil {
 		t.Fatal("request with trailing byte unexpectedly parsed")
+	}
+}
+
+func TestParseExtendedAlchemyRequestsVSRO188(t *testing.T) {
+	stone := network.EmptyClientPacket()
+	stone.WriteByte(alchemyActionFuse)
+	stone.WriteByte(alchemyTypeMagicStone)
+	stone.WriteByte(2)
+	stone.WriteByte(13)
+	stone.WriteByte(14)
+	request, err := parseAlchemyPairRequest(&stone)
+	if err != nil || request.alchemyType != alchemyTypeMagicStone || request.targetSlot != 13 || request.materialSlot != 14 {
+		t.Fatalf("stone request = %+v, %v", request, err)
+	}
+
+	socket := network.EmptyClientPacket()
+	socket.WriteByte(alchemyActionFuse)
+	socket.WriteByte(alchemyTypeSocketInsert)
+	socket.WriteByte(13)
+	socket.WriteByte(14)
+	request, err = parseAlchemySocketRequest(&socket)
+	if err != nil || request.targetSlot != 13 || request.materialSlot != 14 {
+		t.Fatalf("socket request = %+v, %v", request, err)
+	}
+
+	advanced := network.EmptyClientPacket()
+	advanced.WriteByte(alchemyActionFuse)
+	advanced.WriteByte(alchemyTypeAdvancedElixir)
+	advanced.WriteByte(2)
+	advanced.WriteByte(13)
+	advanced.WriteByte(14)
+	elixir, err := parseAlchemyElixirRequest(&advanced)
+	if err != nil || elixir.alchemyType != alchemyTypeAdvancedElixir || elixir.powderSlot != nil {
+		t.Fatalf("advanced request = %+v, %v", elixir, err)
 	}
 }
 
@@ -73,5 +122,59 @@ func TestAlchemyResponsesMatchVSRO188Layout(t *testing.T) {
 	rSlot, _ := removed.ReadByte()
 	if removed.MessageID != opcode.ItemOperationResponse || ok != 1 || operation != 15 || rSlot != 15 || removed.Remaining() != 0 {
 		t.Fatalf("remove update = opcode %#x result %d operation %d slot %d", removed.MessageID, ok, operation, rSlot)
+	}
+}
+
+func TestAlchemyResultPayloadsMatchVSRO188Layouts(t *testing.T) {
+	item := model.Item{OptLevel: 0, Data: 10}
+	item.RefObjectID = 1234
+	item.SetTypeInfo(model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2})
+	target := network.EmptyPacket()
+	writeAlchemyTarget(&target, item)
+	targetPayload := append([]byte(nil), target.Payload()...)
+
+	tests := []struct {
+		name   string
+		packet network.Packet
+		opcode uint16
+		prefix []byte
+		target bool
+	}{
+		{name: "elixir success", packet: buildElixirAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 1, 13}, target: true},
+		{name: "elixir non-destructive failure", packet: buildElixirAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 0, 13, 0}, target: true},
+		{name: "elixir destruction", packet: buildElixirAlchemyResult(model.AlchemyResult{TargetSlot: 13, Destroyed: true}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 0, 13, 1}},
+		{name: "stone success", packet: buildStoneAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 1, 13}, target: true},
+		{name: "stone failure", packet: buildStoneAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 0, 13}, target: true},
+		{name: "socket success", packet: buildSocketAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemySocketResponse, prefix: []byte{1, 2, 13}, target: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := append([]byte(nil), tt.prefix...)
+			if tt.target {
+				want = append(want, targetPayload...)
+			}
+			if tt.packet.MessageID != tt.opcode || !bytes.Equal(tt.packet.Payload(), want) {
+				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, want)
+			}
+		})
+	}
+}
+
+func TestAlchemyProtocolFailuresMatchVSRO188Layouts(t *testing.T) {
+	tests := []struct {
+		name   string
+		packet network.Packet
+		opcode uint16
+		want   []byte
+	}{
+		{name: "stone", packet: buildStoneAlchemyFailure(), opcode: opcode.AlchemyStoneResponse, want: []byte{2, 0, 0}},
+		{name: "socket", packet: buildSocketAlchemyFailure(), opcode: opcode.AlchemySocketResponse, want: []byte{2, 2, 0, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.packet.MessageID != tt.opcode || !bytes.Equal(tt.packet.Payload(), tt.want) {
+				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, tt.want)
+			}
+		})
 	}
 }

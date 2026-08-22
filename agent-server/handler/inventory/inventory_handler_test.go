@@ -55,6 +55,54 @@ func TestInventoryMoveWithTrailingPayloadIsRejectedBeforeLookupOrDatabase(t *tes
 	}
 }
 
+func TestParseAvatarTransferRequestUsesTwoSlotPayload(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	mustWriteAvatarTest(t, packet.WriteByte(32))
+	mustWriteAvatarTest(t, packet.WriteByte(4))
+
+	request, err := parseAvatarTransferRequest(&packet)
+	if err != nil {
+		t.Fatalf("parseAvatarTransferRequest() error = %v", err)
+	}
+	if request.sourceSlot != 32 || request.targetSlot != 4 || request.amount != 0 {
+		t.Fatalf("request = %+v, want source 32 target 4", request)
+	}
+}
+
+func TestParseAvatarTransferRequestRejectsTrailingData(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	mustWriteAvatarTest(t, packet.WriteByte(32))
+	mustWriteAvatarTest(t, packet.WriteByte(4))
+	mustWriteAvatarTest(t, packet.WriteByte(0xff))
+
+	if _, err := parseAvatarTransferRequest(&packet); err == nil {
+		t.Fatal("parseAvatarTransferRequest() accepted trailing data")
+	}
+}
+
+func TestAvatarTransferSuccessEchoesAvatarOperation(t *testing.T) {
+	packet := buildAvatarTransferSuccess(EquipAvatarItemOperation, moveItemRequest{sourceSlot: 35, targetSlot: 4})
+	success, e1 := packet.ReadByte()
+	operation, e2 := packet.ReadByte()
+	source, e3 := packet.ReadByte()
+	target, e4 := packet.ReadByte()
+	quantity, e5 := packet.ReadUInt16()
+	reserved, e6 := packet.ReadByte()
+	if errors.Join(e1, e2, e3, e4, e5, e6) != nil {
+		t.Fatal(errors.Join(e1, e2, e3, e4, e5, e6))
+	}
+	if packet.MessageID != 0xB034 || success != 1 || operation != byte(EquipAvatarItemOperation) || source != 35 || target != 4 || quantity != 0 || reserved != 0 || packet.Remaining() != 0 {
+		t.Fatalf("avatar response = opcode 0x%04X payload %d/%d/%d/%d/%d/%d trailing %d", packet.MessageID, success, operation, source, target, quantity, reserved, packet.Remaining())
+	}
+}
+
+func mustWriteAvatarTest(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInventoryRelocationUsesSessionUniqueAndCharacterIDsNotCharacterName(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{
 		UniqueID:    77,

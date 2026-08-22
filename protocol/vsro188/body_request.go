@@ -23,7 +23,9 @@ var ErrClientBodyRequestRejected = errors.New("client body request is not allowe
 
 // TranslateClientBodyRequest validates a client-originated body request and
 // returns the corresponding authoritative state. Berserk's client request
-// value is 1, while the server-authoritative BodyBerserker value is 5.
+// value and the vSRO 1.188 entity BodyBerserker value are both 1. The types
+// remain separate so privileged body modes can never be selected by casting a
+// client byte directly into the authoritative namespace.
 //
 // This is a pure domain translation. It deliberately does not parse or emit
 // packet bytes; the exact wire codec remains capture-blocked.

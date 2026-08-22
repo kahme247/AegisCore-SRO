@@ -1,7 +1,10 @@
 package model
 
 import (
+	"time"
+
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 func WriteRentInfo(p *network.Packet, item Item) {
@@ -41,7 +44,6 @@ func WriteInventoryItem(p *network.Packet, item Item) {
 }
 
 func WriteEquipmentItem(p *network.Packet, item Item) {
-	numMagParams := 0
 	p.WriteByte(item.OptLevel)
 	p.WriteUInt64(item.Variance)
 	data := item.Data
@@ -49,54 +51,88 @@ func WriteEquipmentItem(p *network.Packet, item Item) {
 		data = 10 // Preserve legacy durability for pre-economy item rows.
 	}
 	p.WriteUInt32(data)
-	p.WriteByte(0) // Number of MagParams / Blues
-
-	// TODO write mag params
-	for i := 0; i < numMagParams; i++ {
-		p.WriteUInt32(0) // magParam.Type
-		p.WriteUInt32(0) // magParam.Value
+	magicOptions := boundedMagicOptions(item.MagicOptions)
+	p.WriteByte(byte(len(magicOptions)))
+	for _, option := range magicOptions {
+		p.WriteUInt32(option.Type)
+		p.WriteUInt32(option.Value)
 	}
 
-	// TODO write bind options
-	numBindOptions := 0
 	p.WriteByte(1) // bindingOptionType - 1 = Socket
-	p.WriteByte(0) // bindingOptionCount
-
-	for i := 0; i < numBindOptions; i++ {
-		p.WriteByte(0)   // BindingOption.Slot
-		p.WriteUInt32(0) // BindingOption.ID
-		p.WriteUInt32(0) // BindingOption.nParam1
+	sockets := boundedBindingOptions(item.SocketOptions)
+	p.WriteByte(byte(len(sockets)))
+	for _, option := range sockets {
+		p.WriteByte(option.Slot)
+		p.WriteUInt32(option.ID)
+		p.WriteUInt32(option.Value)
 	}
 
 	p.WriteByte(2) // bindingOptionType - 2 = Advanced Elixir
-	p.WriteByte(0) // bindingOptionCount
-	for i := 0; i < numBindOptions; i++ {
-		p.WriteByte(0)   // BindingOption.Slot
-		p.WriteUInt32(0) // BindingOption.ID
-		p.WriteUInt32(0) // BindingOption.OptValue / Plus
+	advanced := boundedBindingOptions(item.AdvancedElixirs)
+	p.WriteByte(byte(len(advanced)))
+	for _, option := range advanced {
+		p.WriteByte(option.Slot)
+		p.WriteUInt32(option.ID)
+		p.WriteUInt32(option.Value)
 	}
+}
 
+func boundedMagicOptions(options []MagicOption) []MagicOption {
+	if len(options) > 12 {
+		return options[:12]
+	}
+	return options
+}
+
+func boundedBindingOptions(options []BindingOption) []BindingOption {
+	if len(options) > 12 {
+		return options[:12]
+	}
+	return options
 }
 
 func WriteContainerItem(p *network.Packet, item Item) {
 	if item.TypeID3 == 1 {
-		// ITEM_COS_P
-		p.WriteByte(0) // TODO COS State
-		p.WriteUInt32(item.GetRefObjectID())
-		p.WriteString(item.Name)
-
-		if item.TypeID4 == 2 {
-			p.WriteUInt32(3600) // TODO Seconds to Rent End Time
+		state := item.COS.State
+		if !item.COS.Present || state < COSItemInactive || state > COSItemDead {
+			state = COSItemInactive
 		}
-		p.WriteByte(0) // TODO Unknown
+		p.WriteByte(byte(state))
+		if state != COSItemInactive {
+			p.WriteUInt32(item.COS.RefObjectID)
+			p.WriteString(item.COS.Name)
+			if item.TypeID4 == 2 {
+				writeCOSFixedPeriodRental(p, item.COS.RentEndsAt)
+			} else {
+				level := item.COS.Level
+				if level == 0 {
+					level = 1
+				}
+				p.WriteByte(level)
+			}
+			p.WriteByte(0) // active COS item buff count
+		}
 
 	} else if item.TypeID3 == 2 {
 		// ITEM_ETC_TRANS_MONSTER
-		p.WriteUInt32(item.GetRefObjectID())
+		p.WriteUInt32(item.Data)
 	} else if item.TypeID3 == 3 {
 		// MAGIC_CUBE
 		p.WriteUInt32(0) // TODO Amount of elixirs inside the cube
 	}
+}
+
+func writeCOSFixedPeriodRental(p *network.Packet, endsAt time.Time) {
+	if endsAt.IsZero() {
+		p.WriteUInt32(0)
+		return
+	}
+	// Ability-pet items use the normal RentInfo type-1 layout. The vSRO 1.188
+	// client reads packed 32-bit Silkroad timestamps for both boundaries.
+	p.WriteUInt32(1)
+	p.WriteUInt16(1)
+	p.WriteUInt32(utils.ToSilkroadTime(time.Now().UTC()))
+	p.WriteUInt32(utils.ToSilkroadTime(endsAt.UTC()))
 }
 
 func WriteExpendableItem(p *network.Packet, item Item) {
@@ -112,7 +148,11 @@ func WriteExpendableItem(p *network.Packet, item Item) {
 	if item.TypeID3 == 11 {
 		if item.TypeID4 == 1 || item.TypeID4 == 2 {
 			// MAGICSTONE, ATTRSTONE
-			p.WriteByte(0) // TODO AttributeAssimilationProbability
+			assimilation := item.Data
+			if assimilation > 100 {
+				assimilation = 100
+			}
+			p.WriteByte(byte(assimilation))
 		}
 	} else if item.TypeID3 == 14 && (item.TypeID4 == 1 || item.TypeID4 == 2) {
 		// ITEM_MALL_GACHA_CARD_WIN

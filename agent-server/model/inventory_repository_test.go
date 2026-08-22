@@ -112,7 +112,7 @@ type inventoryRepositoryTestRows struct {
 }
 
 func (r *inventoryRepositoryTestRows) Columns() []string {
-	return []string{"SLOT", "FK_ITEM", "VARIANCE", "FK_REF_ITEM", "STACK_COUNT", "OPT_LEVEL", "DATA", "RENT_TYPE", "RENT_CAN_DELETE", "RENT_CAN_RECHARGE", "RENT_PERIOD_BEGIN_TIME", "RENT_PERIOD_END_TIME", "RENT_METER_RATE_TIME", "RENT_PACKING_TIME"}
+	return []string{"SLOT", "FK_ITEM", "VARIANCE", "FK_REF_ITEM", "STACK_COUNT", "OPT_LEVEL", "DATA", "RENT_TYPE", "RENT_CAN_DELETE", "RENT_CAN_RECHARGE", "RENT_PERIOD_BEGIN_TIME", "RENT_PERIOD_END_TIME", "RENT_METER_RATE_TIME", "RENT_PACKING_TIME", "COS_REF_OBJECT_ID", "COS_KIND", "COS_STATE", "COS_NAME", "COS_LEVEL", "COS_RENT_ENDS_AT", "COS_INVENTORY_SLOT", "COS_HEALTH", "MAGIC_OPTIONS", "SOCKET_OPTIONS", "ADVANCED_ELIXIRS", "ASTRAL", "IMMORTAL", "STEADY"}
 }
 
 func (*inventoryRepositoryTestRows) Close() error { return nil }
@@ -138,7 +138,7 @@ func cloneInventoryRepositoryRows(rows [][]driver.Value) [][]driver.Value {
 }
 
 func inventoryTestRow(values ...driver.Value) []driver.Value {
-	return append(values, int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0))
+	return append(values, int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), "", int64(0), nil, int64(0), int64(0), []byte("[]"), []byte("[]"), []byte("[]"), int64(0), int64(0), int64(0))
 }
 
 func openInventoryRepositoryTestDB(t *testing.T, store *inventoryRepositoryTestStore) *sql.DB {
@@ -233,6 +233,35 @@ func TestSQLInventoryRepositoryReadsCharacterInventory(t *testing.T) {
 	}
 	if len(store.lastQueryArgs) != 1 || store.lastQueryArgs[0].Value != int64(44) {
 		t.Fatalf("query arguments = %#v, want character ID 44", store.lastQueryArgs)
+	}
+}
+
+func TestSQLInventoryRepositoryActivatesLinkedLegacyCOSState(t *testing.T) {
+	setInventoryRepositoryRefItems(t, map[uint32]RefItem{
+		9279: {
+			RefObject: RefObject{
+				ID:       9279,
+				CodeName: "ITEM_COS_P_FLUTE_WHITE",
+				TypeInfo: TypeInfo{TypeID1: TypeID1Item, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+			},
+		},
+	})
+	row := inventoryTestRow(int64(15), int64(133), int64(0), int64(9279), int64(1), int64(0), int64(2))
+	row[14] = int64(9384)
+	row[15] = int64(COSGrowthPet)
+	row[16] = int64(COSItemInactive)
+	row[18] = int64(1)
+	row[20] = int64(15)
+	row[21] = int64(360)
+	repository, _ := newInventoryRepositoryForTest(t, &inventoryRepositoryTestStore{queryRows: [][]driver.Value{row}})
+
+	inventory, err := repository.GetCharacterInventory(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("GetCharacterInventory returned an error: %v", err)
+	}
+	item := inventory.Items[15]
+	if !item.COS.Present || item.COS.State != COSItemActive {
+		t.Fatalf("COS state = %+v, want activated linked state", item.COS)
 	}
 }
 

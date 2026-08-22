@@ -16,9 +16,13 @@ type itemUseServiceRepository struct {
 	result      model.ItemUseResult
 }
 
-func (r *itemUseServiceRepository) UseRecoveryItem(_ context.Context, characterID int64, slot byte, itemType uint16, vitals model.ItemUseVitals) (model.ItemUseResult, error) {
+func (r *itemUseServiceRepository) UseItem(_ context.Context, characterID int64, slot byte, itemType uint16, vitals model.ItemUseVitals) (model.ItemUseResult, error) {
 	r.characterID, r.slot, r.itemType, r.vitals = characterID, slot, itemType, vitals
 	return r.result, nil
+}
+
+func (r *itemUseServiceRepository) UseResurrectionItem(context.Context, int64, model.ItemUseVitals) (model.ItemUseResult, error) {
+	return model.ItemUseResult{}, model.ErrItemUseUnsupported
 }
 
 func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
@@ -31,9 +35,9 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	player.BaseStats.Str, player.BaseStats.Int = 20, 15
 	player.BonusStats.HP, player.BonusStats.MP = 102, 51
 
-	result, err := NewItemUseService(repository).UseRecoveryItem(context.Background(), player, 14, 0x08EC)
+	result, err := NewItemUseService(repository).UseItem(context.Background(), player, 14, 0x08EC)
 	if err != nil {
-		t.Fatalf("UseRecoveryItem() error = %v", err)
+		t.Fatalf("UseItem() error = %v", err)
 	}
 	if repository.characterID != 77 || repository.slot != 14 || repository.itemType != 0x08EC {
 		t.Fatalf("repository request = character %d slot %d type 0x%04X", repository.characterID, repository.slot, repository.itemType)

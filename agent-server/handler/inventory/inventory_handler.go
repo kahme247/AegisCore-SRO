@@ -40,6 +40,7 @@ type InventoryHandler struct {
 	economy    model.EconomyRepository
 	mall       model.ItemMallRepository
 	guild      model.GuildStorageRepository
+	avatar     model.AvatarInventoryRepository
 	exchange   ExchangeOperations
 	send       func(*server.Session, network.Packet) error
 	buybackMu  sync.Mutex
@@ -64,6 +65,8 @@ const (
 	BuyItemOperation                    ItemInventoryOperation = 0x08
 	SellItemOperation                   ItemInventoryOperation = 0x09
 	DropGoldOperation                   ItemInventoryOperation = 0x0A
+	DepositStorageGoldOperation         ItemInventoryOperation = 0x0B
+	WithdrawStorageGoldOperation        ItemInventoryOperation = 0x0C
 	BuyItemFromMallOperation            ItemInventoryOperation = 0x12
 	BuyItemFromModernMallOperation      ItemInventoryOperation = 0x18
 	BuySpecialtyGoodsOperation          ItemInventoryOperation = 0x2B
@@ -107,16 +110,17 @@ func RegisterInventoryHandlerWithExchange(target *server.Server, relocator model
 	if len(economy) > 0 {
 		economyRepository = economy[0]
 	}
-	RegisterInventoryHandlerWithGuildStorage(target, relocator, exchange, economyRepository, nil)
+	RegisterInventoryHandlerWithGuildStorage(target, relocator, exchange, economyRepository, nil, nil)
 }
 
-func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository, mall ...model.ItemMallRepository) {
+func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository, avatar model.AvatarInventoryRepository, mall ...model.ItemMallRepository) {
 	if target == nil {
 		return
 	}
 	handler := NewInventoryHandler(service.GetWorldServiceInstance(), relocator, economy)
 	handler.exchange = exchange
 	handler.guild = guild
+	handler.avatar = avatar
 	if len(mall) > 0 {
 		handler.mall = mall[0]
 	}
@@ -175,8 +179,12 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		return h.handleMallBuy(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case SellItemOperation:
 		return h.handleSell(ctx, session, &packet)
+	case DepositStorageGoldOperation, WithdrawStorageGoldOperation:
+		return h.handleStorageGold(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case BuyBackItemOperation:
 		return h.handleBuyBack(ctx, session, &packet)
+	case EquipAvatarItemOperation, UnequipAvatarItemOperation:
+		return h.handleAvatarTransfer(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case PutItemIntoStorageOperation, TakeItemFromStorageOperation, 1:
 		return h.handleStorageMutation(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case GuildStorageMoveOperation, GuildStorageDepositItemOperation, GuildStorageWithdrawItemOperation,
@@ -213,6 +221,89 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		return err
 	}
 	return sendMoveItemSuccess(session, request)
+}
+
+func (h *InventoryHandler) handleAvatarTransfer(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
+	if h == nil || h.avatar == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	request, err := parseAvatarTransferRequest(packet)
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	result, err := h.avatar.TransferAvatarItem(ctx, int64(player.ID), operation == EquipAvatarItemOperation, request.sourceSlot, request.targetSlot)
+	if err != nil {
+		if errors.Is(err, model.ErrAlchemyOutcomeUnknown) {
+			return err
+		}
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.CommitInventoryAndAvatar(result.Inventory, result.AvatarInventory)
+	sendAvatarStateUpdate(player, operation, request, result)
+	player.SendStatsUpdate()
+	return sendAvatarTransferSuccess(session, operation, request)
+}
+
+func sendAvatarStateUpdate(player *model.Player, operation ItemInventoryOperation, request moveItemRequest, result model.AvatarTransferResult) {
+	if player == nil {
+		return
+	}
+	packet := network.EmptyPacket()
+	if operation == EquipAvatarItemOperation {
+		item, exists := result.AvatarInventory.Items[request.targetSlot]
+		if !exists {
+			return
+		}
+		packet.MessageID = opcode.EntityEquipItem
+		packet.WriteUInt32(player.GetUniqueID())
+		packet.WriteByte(request.targetSlot)
+		packet.WriteUInt32(item.GetRefObjectID())
+		packet.WriteBool(false)
+	} else {
+		item, exists := result.Inventory.Items[request.targetSlot]
+		if !exists {
+			return
+		}
+		packet.MessageID = opcode.EntityUnequipItem
+		packet.WriteUInt32(player.GetUniqueID())
+		packet.WriteByte(request.sourceSlot)
+		packet.WriteUInt32(item.GetRefObjectID())
+	}
+	player.SendToSelfAndKnown(&packet)
+}
+
+func (h *InventoryHandler) handleStorageGold(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
+	if h.economy == nil || packet == nil || packet.Remaining() != 8 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	amount, err := packet.ReadUInt64()
+	if err != nil || amount == 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if h.exchange != nil && h.exchange.Busy(player.ID) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	var result model.EconomyResult
+	if operation == DepositStorageGoldOperation {
+		result, err = h.economy.DepositStorageGold(ctx, int64(player.ID), session.UserContext.UserID, amount)
+	} else {
+		result, err = h.economy.WithdrawStorageGold(ctx, int64(player.ID), session.UserContext.UserID, amount)
+	}
+	if err != nil {
+		return h.handleEconomyError(session, err)
+	}
+	player.SetGold(result.Gold)
+	return h.sendPacket(session, buildStorageGoldSuccess(operation, amount, result.Gold))
 }
 
 type itemMallPurchaseRequest struct {
@@ -748,6 +839,19 @@ func buildGoldUpdate(gold uint64) network.Packet {
 	return p
 }
 
+func buildStorageGoldSuccess(operation ItemInventoryOperation, amount, characterGold uint64) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.ItemOperationResponse
+	p.WriteByte(1)
+	p.WriteByte(byte(operation))
+	if operation == DepositStorageGoldOperation {
+		p.WriteUInt64(characterGold)
+	} else {
+		p.WriteUInt64(amount)
+	}
+	return p
+}
+
 func buildBuyBackSuccess(destination, source byte, amount uint16) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.ItemOperationResponse
@@ -860,6 +964,32 @@ func parseMoveItemRequest(packet *network.Packet) (moveItemRequest, error) {
 		return moveItemRequest{}, fmt.Errorf("inventory move request has %d trailing bytes", packet.Remaining())
 	}
 	return moveItemRequest{sourceSlot: sourceSlot, targetSlot: targetSlot, amount: amount}, nil
+}
+
+func parseAvatarTransferRequest(packet *network.Packet) (moveItemRequest, error) {
+	if packet == nil {
+		return moveItemRequest{}, errors.New("avatar transfer request packet is nil")
+	}
+	sourceSlot, err := packet.ReadByte()
+	if err != nil {
+		return moveItemRequest{}, fmt.Errorf("read avatar transfer source slot: %w", err)
+	}
+	targetSlot, err := packet.ReadByte()
+	if err != nil {
+		return moveItemRequest{}, fmt.Errorf("read avatar transfer target slot: %w", err)
+	}
+	// vSRO 1.188 sends only the two slots. Accept the older four-byte form
+	// only when its unused quantity is zero.
+	if packet.Remaining() == 2 {
+		amount, readErr := packet.ReadUInt16()
+		if readErr != nil || amount != 0 {
+			return moveItemRequest{}, errors.New("avatar transfer quantity must be zero")
+		}
+	}
+	if packet.Remaining() != 0 {
+		return moveItemRequest{}, fmt.Errorf("avatar transfer request has %d trailing bytes", packet.Remaining())
+	}
+	return moveItemRequest{sourceSlot: sourceSlot, targetSlot: targetSlot}, nil
 }
 
 // relocate resolves the player exclusively from session-owned identity and
@@ -978,4 +1108,23 @@ func sendMoveItemSuccess(session *server.Session, request moveItemRequest) error
 		return err
 	}
 	return session.Send(packet)
+}
+
+func sendAvatarTransferSuccess(session *server.Session, operation ItemInventoryOperation, request moveItemRequest) error {
+	if session == nil {
+		return ErrInventoryHandlerSessionIdentityInvalid
+	}
+	return session.Send(buildAvatarTransferSuccess(operation, request))
+}
+
+func buildAvatarTransferSuccess(operation ItemInventoryOperation, request moveItemRequest) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemOperationResponse
+	packet.WriteBool(true)
+	packet.WriteByte(byte(operation))
+	packet.WriteByte(request.sourceSlot)
+	packet.WriteByte(request.targetSlot)
+	packet.WriteUInt16(0)
+	packet.WriteByte(0)
+	return packet
 }

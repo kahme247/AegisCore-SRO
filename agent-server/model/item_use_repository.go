@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,7 @@ var (
 	ErrItemUseInvalidRequest        = errors.New("invalid item-use request")
 	ErrItemUseUnsupported           = errors.New("item use is not supported")
 	ErrItemUseNoEffect              = errors.New("item use would have no effect")
+	ErrItemUseExpired               = errors.New("item use has expired")
 	ErrItemUseOutcomeUnknown        = errors.New("item-use transaction outcome is unknown")
 	ErrItemServiceDailyUnavailable  = errors.New("item-service daily activation is unavailable")
 )
@@ -32,6 +34,12 @@ type ItemUseResult struct {
 	ItemService              *ItemServiceEffect
 	ItemServiceToken         uint32
 	ReplacedItemServiceToken uint32
+	ReturnDestination        *TeleportDestination
+	ReturnDelay              time.Duration
+	BuffModifiers            BuffModifiers
+	COSPersistentID          uint64
+	MaskRefCharID            uint32
+	MaskDuration             time.Duration
 }
 
 type ItemUseVitals struct {
@@ -40,7 +48,8 @@ type ItemUseVitals struct {
 }
 
 type ItemUseRepository interface {
-	UseRecoveryItem(context.Context, int64, byte, uint16, ItemUseVitals) (ItemUseResult, error)
+	UseItem(context.Context, int64, byte, uint16, ItemUseVitals) (ItemUseResult, error)
+	UseResurrectionItem(context.Context, int64, ItemUseVitals) (ItemUseResult, error)
 }
 
 type SpeedEffect struct {
@@ -58,6 +67,8 @@ type ItemServiceKind byte
 const (
 	ItemServiceGold ItemServiceKind = iota + 1
 	ItemServiceSkillGold
+	ItemServiceExperience
+	ItemServiceSkillExperience
 )
 
 type ItemServiceEffect struct {
@@ -75,6 +86,21 @@ type ItemServiceEffect struct {
 type ItemServiceRepository interface {
 	LoadItemServices(context.Context, int64) ([]ItemServiceEffect, error)
 	ActivateItemServiceDaily(context.Context, int64, ItemServiceKind, time.Time) (time.Time, error)
+}
+
+type ItemBuffEffect struct {
+	SourceRefItemID uint32
+	SkillID         uint32
+	ExpiresAt       time.Time
+	Modifiers       BuffModifiers
+}
+
+type ItemBuffRepository interface {
+	LoadItemBuffs(context.Context, int64) ([]ItemBuffEffect, error)
+}
+
+type ResurrectionItemRepository interface {
+	UseResurrectionItem(context.Context, int64, ItemUseVitals) (ItemUseResult, error)
 }
 
 type SQLItemUseRepository struct{ shard *sql.DB }
@@ -105,7 +131,27 @@ func recoveryValues(ref RefItem, vitals ItemUseVitals) (int, int, bool) {
 	return newHP, newMP, newHP != vitals.HP || newMP != vitals.MP
 }
 
-func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals) (result ItemUseResult, err error) {
+// IsReturnScroll identifies the ordinary return-city scroll family from the
+// reference-data contract. This includes the normal, fast, mall, event, and
+// newbie variants. Reverse/friend/special-destination scrolls have different
+// state or target requirements and deliberately do not match this predicate.
+func IsReturnScroll(ref RefItem) bool {
+	return ref.IsUseable &&
+		ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 1 &&
+		ref.Param1 > 0 && strings.EqualFold(strings.TrimSpace(ref.Param3Desc), "RESURRECT")
+}
+
+func IsReverseReturnScroll(ref RefItem) bool {
+	return ref.IsUseable &&
+		ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 3 &&
+		ref.Param1 > 0
+}
+
+func IsTeleportScroll(ref RefItem) bool {
+	return IsReturnScroll(ref) || IsReverseReturnScroll(ref)
+}
+
+func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals) (result ItemUseResult, err error) {
 	if r == nil || r.shard == nil {
 		return result, ErrItemUseRepositoryUnavailable
 	}
@@ -122,14 +168,17 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	defer func() { _ = tx.Rollback() }()
 
 	var lockedCharacterID int64
-	if err = tx.QueryRowContext(ctx, "SELECT `id` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&lockedCharacterID); err != nil {
+	var origin TeleportDestination
+	if err = tx.QueryRowContext(ctx, "SELECT `id`,`FK_REGION`,`POS_X`,`POS_Y`,`POS_Z` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&lockedCharacterID, &origin.Region, &origin.X, &origin.Y, &origin.Z); err != nil {
 		return result, fmt.Errorf("lock item-use character: %w", err)
 	}
+	origin.WorldID = 1
 	var itemID int64
 	var refID uint32
+	var itemData uint32
 	var stack int
 	var skillID, durationMarker, duration, speedMarker, speedPercent int
-	if err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,COALESCE(s.`ID`,0),COALESCE(s.`PARAM3`,0),COALESCE(s.`PARAM4`,0),COALESCE(s.`PARAM5`,0),COALESCE(s.`PARAM6`,0) FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` r ON r.`ItemID`=it.`FK_REF_ITEM` LEFT JOIN `REF_SKILL` s ON s.`BASIC_CODE`=r.`Desc_1` AND s.`SERVICE`=1 WHERE i.`FK_CHAR`=? AND i.`SLOT`=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &stack, &skillID, &durationMarker, &duration, &speedMarker, &speedPercent); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,it.`DATA`,COALESCE(s.`ID`,0),COALESCE(s.`PARAM3`,0),COALESCE(s.`PARAM4`,0),COALESCE(s.`PARAM5`,0),COALESCE(s.`PARAM6`,0) FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` r ON r.`ItemID`=it.`FK_REF_ITEM` LEFT JOIN `REF_SKILL` s ON s.`BASIC_CODE`=r.`Desc_1` AND s.`SERVICE`=1 WHERE i.`FK_CHAR`=? AND i.`SLOT`=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &stack, &itemData, &skillID, &durationMarker, &duration, &speedMarker, &speedPercent); err != nil {
 		return result, fmt.Errorf("lock item-use inventory slot: %w", err)
 	}
 	ref, ok := RefItems[refID]
@@ -143,10 +192,51 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	newHP, newMP := vitals.HP, vitals.MP
 	isRecovery := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 >= 1 && ref.TypeID4 <= 3
 	isSpeedDrug := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1
-	isTimeService := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && (ref.TypeID4 == 4 || ref.TypeID4 == 5 || ref.TypeID4 == 14)
+	isTimeService := isItemServiceReference(ref)
+	isReturnScroll := IsReturnScroll(ref)
+	isReverseReturnScroll := IsReverseReturnScroll(ref)
+	isCOSScroll := IsCOSScroll(ref)
+	isMonsterMask := ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 2 && itemData != 0
+	linkedSkill, hasLinkedSkill := RefSkills[uint32(skillID)]
+	isSkillBuff := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1 &&
+		hasLinkedSkill && linkedSkill.ExecutionKind() == SkillExecutionBuff && linkedSkill.BuffDuration > 0 && linkedSkill.BuffModifiers != (BuffModifiers{})
 	switch {
 	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
+	case isCOSScroll:
+		if itemData != 0 {
+			var cosOwnerID int64
+			var cosKind byte
+			var cosRentEndsAt sql.NullTime
+			err = tx.QueryRowContext(ctx, "SELECT `OWNER_CHAR_ID`,`KIND`,`RENT_ENDS_AT` FROM `CHAR_COS` WHERE `ID`=? FOR UPDATE", itemData).Scan(&cosOwnerID, &cosKind, &cosRentEndsAt)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				// Items imported from the legacy inventory can retain a stale COS
+				// identifier even when _CharCOS itself was not migrated. Recreate
+				// the missing owned row and replace DATA atomically below.
+				itemData = 0
+			case err != nil:
+				return result, fmt.Errorf("lock item COS: %w", err)
+			case cosOwnerID != characterID:
+				return result, ErrItemUseInvalidRequest
+			case validateCOSItemRental(COSKind(cosKind), cosRentEndsAt, time.Now().UTC()) != nil:
+				return result, ErrItemUseExpired
+			}
+		}
+		if itemData == 0 {
+			createdID, createErr := createCOSForItemUse(ctx, tx, characterID, itemID, slot, ref)
+			if createErr != nil {
+				return result, createErr
+			}
+			itemData = createdID
+		}
+		result.COSPersistentID = uint64(itemData)
+	case isMonsterMask:
+		if _, exists := RefChars[itemData]; !exists {
+			return result, ErrItemUseNoEffect
+		}
+		result.MaskRefCharID = itemData
+		result.MaskDuration = time.Duration(max(0, ref.DecayTime)) * time.Millisecond
 	case isRecovery:
 		var changed bool
 		newHP, newMP, changed = recoveryValues(ref, vitals)
@@ -156,6 +246,16 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=?", newHP, newMP, characterID); err != nil {
 			return result, fmt.Errorf("persist item-use recovery: %w", err)
 		}
+	case isSkillBuff:
+		now := time.Now().UTC()
+		expiresAt := now.Add(time.Duration(linkedSkill.BuffDuration) * time.Millisecond)
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_ITEM_BUFF` (`CHAR_ID`,`SKILL_ID`,`SOURCE_REF_ITEM_ID`,`EXPIRES_AT`) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE `SOURCE_REF_ITEM_ID`=VALUES(`SOURCE_REF_ITEM_ID`),`EXPIRES_AT`=VALUES(`EXPIRES_AT`)", characterID, linkedSkill.ID, ref.ID, expiresAt); err != nil {
+			return result, fmt.Errorf("persist character item buff: %w", err)
+		}
+		result.EffectSkillID = linkedSkill.ID
+		result.EffectDuration = linkedSkill.BuffDuration
+		result.EffectExpiresAt = expiresAt
+		result.BuffModifiers = linkedSkill.BuffModifiers
 	case isSpeedDrug:
 		// vSRO speed-drug skills encode duration and movement percentage in
 		// PARAM4/PARAM6, guarded by their standard parameter identifiers.
@@ -198,10 +298,49 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 			return result, fmt.Errorf("persist character item service: %w", err)
 		}
 		result.ItemService = &effect
+	case isReturnScroll:
+		// RETURN_TELEPORT_ID is the authoritative per-character bind point.
+		// Resolve it while the character row is locked and commit the item and
+		// destination together so reconnecting can never duplicate the scroll
+		// or leave the character at the old position.
+		var destination TeleportDestination
+		err = tx.QueryRowContext(ctx, "SELECT t.`ID`,t.`REGION_ID`,t.`POS_X`,t.`POS_Y`,t.`POS_Z`,t.`WORLD_ID`,0,0 FROM `CHAR` c JOIN `TELEPORT_POINT` t ON t.`ID`=c.`RETURN_TELEPORT_ID` AND t.`SERVICE`=1 WHERE c.`ID`=?", characterID).Scan(
+			&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, ErrItemUseUnsupported
+		}
+		if err != nil {
+			return result, fmt.Errorf("resolve return-scroll destination: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_REVERSE_RETURN_POSITION` (`CHAR_ID`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID`) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `REGION_ID`=VALUES(`REGION_ID`),`POS_X`=VALUES(`POS_X`),`POS_Y`=VALUES(`POS_Y`),`POS_Z`=VALUES(`POS_Z`),`WORLD_ID`=VALUES(`WORLD_ID`),`SAVED_AT`=CURRENT_TIMESTAMP(6)", characterID, origin.Region, origin.X, origin.Y, origin.Z, origin.WorldID); err != nil {
+			return result, fmt.Errorf("persist reverse-return origin: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `FK_REGION`=?,`POS_X`=?,`POS_Y`=?,`POS_Z`=?,`UTIME`=CURRENT_TIMESTAMP WHERE `id`=?", destination.Region, destination.X, destination.Y, destination.Z, characterID); err != nil {
+			return result, fmt.Errorf("persist return-scroll destination: %w", err)
+		}
+		result.ReturnDestination = &destination
+		result.ReturnDelay = time.Duration(ref.Param1) * time.Millisecond
+	case isReverseReturnScroll:
+		var destination TeleportDestination
+		destination.ID = ref.ID
+		err = tx.QueryRowContext(ctx, "SELECT `REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID` FROM `CHAR_REVERSE_RETURN_POSITION` WHERE `CHAR_ID`=? FOR UPDATE", characterID).Scan(&destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, ErrItemUseNoEffect
+		}
+		if err != nil {
+			return result, fmt.Errorf("load reverse-return destination: %w", err)
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `FK_REGION`=?,`POS_X`=?,`POS_Y`=?,`POS_Z`=?,`UTIME`=CURRENT_TIMESTAMP WHERE `id`=?", destination.Region, destination.X, destination.Y, destination.Z, characterID); err != nil {
+			return result, fmt.Errorf("persist reverse-return destination: %w", err)
+		}
+		result.ReturnDestination = &destination
+		result.ReturnDelay = time.Duration(ref.Param1) * time.Millisecond
 	default:
 		return result, ErrItemUseUnsupported
 	}
-	if stack > 1 {
+	consumeItem := !isCOSScroll
+	if consumeItem && stack > 1 {
 		mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-1 WHERE `id`=? AND `STACK_COUNT`=?", itemID, stack)
 		if mutationErr != nil {
 			err = mutationErr
@@ -210,7 +349,7 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 		if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
 			return result, ErrItemUseInvalidRequest
 		}
-	} else {
+	} else if consumeItem {
 		mutation, mutationErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, slot, itemID)
 		if mutationErr != nil {
 			err = mutationErr
@@ -229,8 +368,10 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	}
 	result.HP, result.MP, result.RefItemID, result.ItemType = newHP, newMP, refID, itemType
 	result.SourceSlot = slot
-	if stack > 1 {
+	if consumeItem && stack > 1 {
 		result.NewAmount = uint16(stack - 1)
+	} else if !consumeItem {
+		result.NewAmount = uint16(stack)
 	}
 	if err = tx.Commit(); err != nil {
 		return ItemUseResult{}, fmt.Errorf("%w: %v", ErrItemUseOutcomeUnknown, err)
@@ -238,26 +379,175 @@ func (r *SQLItemUseRepository) UseRecoveryItem(ctx context.Context, characterID 
 	return result, nil
 }
 
+func validateCOSItemRental(kind COSKind, endsAt sql.NullTime, now time.Time) error {
+	if kind != COSAbilityPet {
+		return nil
+	}
+	if !endsAt.Valid || !endsAt.Time.UTC().After(now.UTC()) {
+		return ErrItemUseExpired
+	}
+	return nil
+}
+
+// IsCOSScroll identifies both persistent growth-pet instruments (TypeID4=1)
+// and ability/grab-pet scrolls (TypeID4=2). Their actual summoned RefChar is
+// linked by ITEMDATA.Desc_1; the item TypeID4 is not the COS TypeID4.
+func IsCOSScroll(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 1 &&
+		(ref.TypeID4 == 1 || ref.TypeID4 == 2) && strings.Contains(strings.ToUpper(ref.CodeName), "COS_")
+}
+
+func createCOSForItemUse(ctx context.Context, tx *sql.Tx, characterID, itemID int64, inventorySlot byte, item RefItem) (uint32, error) {
+	codeName := strings.TrimSpace(item.Param1Desc)
+	if tx == nil || characterID <= 0 || itemID <= 0 || codeName == "" || strings.EqualFold(codeName, "xxx") {
+		return 0, ErrItemUseNoEffect
+	}
+	var refObjectID uint32
+	var typeID1, typeID2, typeID3, typeID4 int
+	var level int
+	var maxHP, maxMP int32
+	err := tx.QueryRowContext(ctx, "SELECT `RefObjID`,`TypeID_1`,`TypeID_2`,`TypeID_3`,`TypeID_4`,`Lvl`,`Max_HP`,`Max_MP` FROM `CHAR_REF_DATA` WHERE `CodeName`=? LIMIT 1", codeName).Scan(
+		&refObjectID, &typeID1, &typeID2, &typeID3, &typeID4, &level, &maxHP, &maxMP,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrItemUseNoEffect
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve COS item reference: %w", err)
+	}
+	kind := COSKind(typeID4)
+	if typeID1 != 1 || typeID2 != 2 || typeID3 != 3 || !kind.Valid() || refObjectID == 0 {
+		return 0, ErrInvalidCOSKind
+	}
+	if level < 1 {
+		level = 1
+	}
+	if maxHP < 1 {
+		maxHP = 1
+	}
+	hgp := 0
+	if kind == COSGrowthPet {
+		hgp = 10000
+	}
+	var rentEndsAt any
+	if item.Param1 > 0 {
+		// Fixed-term COS item references encode their lifetime in minutes;
+		// 40320 is the stock 28-day value in the v188 catalog.
+		rentEndsAt = time.Now().UTC().Add(time.Duration(item.Param1) * time.Minute)
+	}
+	insert, err := tx.ExecContext(ctx, "INSERT INTO `CHAR_COS` (`OWNER_CHAR_ID`,`REF_OBJECT_ID`,`KIND`,`INVENTORY_SLOT`,`MP`,`STATE`,`LEVEL`,`HEALTH`,`MAX_HEALTH`,`HGP`,`RENT_ENDS_AT`) VALUES (?,?,?,?,?,3,?,?,?,?,?)", characterID, refObjectID, kind, inventorySlot, maxMP, level, maxHP, maxHP, hgp, rentEndsAt)
+	if err != nil {
+		return 0, fmt.Errorf("create COS for inventory item: %w", err)
+	}
+	createdID, err := insert.LastInsertId()
+	if err != nil || createdID <= 0 || uint64(createdID) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("read created COS identity: %w", errors.Join(err, ErrItemUseOutcomeUnknown))
+	}
+	mutation, err := tx.ExecContext(ctx, "UPDATE `ITEM` SET `DATA`=? WHERE `id`=? AND (`DATA`=0 OR NOT EXISTS (SELECT 1 FROM `CHAR_COS` existing WHERE existing.`ID`=`ITEM`.`DATA`))", createdID, itemID)
+	if err != nil {
+		return 0, fmt.Errorf("link inventory item to COS: %w", err)
+	}
+	if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+		return 0, ErrItemUseInvalidRequest
+	}
+	return uint32(createdID), nil
+}
+
+func (r *SQLItemUseRepository) UseResurrectionItem(ctx context.Context, characterID int64, vitals ItemUseVitals) (result ItemUseResult, err error) {
+	if r == nil || r.shard == nil {
+		return result, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 || vitals.HP != 0 || vitals.MaxHP <= 0 || vitals.MaxMP <= 0 {
+		return result, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return result, fmt.Errorf("begin resurrection-item transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var persistedHP int
+	if err = tx.QueryRowContext(ctx, "SELECT `HP` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&persistedHP); err != nil {
+		return result, fmt.Errorf("lock resurrection-item character: %w", err)
+	}
+	if persistedHP != 0 {
+		return result, ErrItemUseNoEffect
+	}
+	inventory, err := loadLockedAlchemyInventory(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	var sourceSlot byte
+	var source Item
+	var ref RefItem
+	found := false
+	for _, slot := range SortedInventorySlots(inventory.Items) {
+		item := inventory.Items[slot]
+		candidate, exists := RefItems[item.RefObjectID]
+		if !exists || !candidate.IsUseable || candidate.TypeID1 != 3 || candidate.TypeID2 != 3 || candidate.TypeID3 != 13 || candidate.TypeID4 != 6 {
+			continue
+		}
+		sourceSlot, source, ref, found = slot, item, candidate, true
+		break
+	}
+	if !found {
+		return result, ErrItemUseUnsupported
+	}
+	hpPercent := ref.Param2
+	if hpPercent <= 0 || hpPercent > 100 {
+		hpPercent = 100
+	}
+	newHP := maxInt(1, vitals.MaxHP*hpPercent/100)
+	newMP := vitals.MaxMP
+	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=? AND `HP`=0", newHP, newMP, characterID); err != nil {
+		return result, fmt.Errorf("persist resurrection-item vitals: %w", err)
+	}
+	if err = consumeAlchemyMaterial(ctx, tx, characterID, sourceSlot, source); err != nil {
+		return result, err
+	}
+	result.Inventory, err = loadInventoryInItemUseTransaction(ctx, tx, characterID)
+	if err != nil {
+		return ItemUseResult{}, err
+	}
+	result.HP, result.MP = newHP, newMP
+	result.RefItemID, result.ItemType, result.SourceSlot = ref.ID, InventoryItemType(ref), sourceSlot
+	result.NewAmount = remainingAlchemyStack(source)
+	if err = tx.Commit(); err != nil {
+		return ItemUseResult{}, fmt.Errorf("%w: %v", ErrItemUseOutcomeUnknown, err)
+	}
+	return result, nil
+}
+
 func itemServiceFromReference(ref RefItem, now time.Time) (ItemServiceEffect, error) {
-	if !ref.IsUseable || ref.TypeID1 != 3 || ref.TypeID2 != 3 || ref.TypeID3 != 13 || ref.Param1 <= 0 {
+	if !isItemServiceReference(ref) {
 		return ItemServiceEffect{}, ErrItemUseUnsupported
 	}
 	effect := ItemServiceEffect{SourceRefItemID: ref.ID, ActivatedAt: now.UTC(), ExpiresAt: now.UTC().Add(time.Duration(ref.Param1) * time.Second)}
-	switch ref.TypeID4 {
-	case 4:
+	switch {
+	case ref.TypeID3 == 13 && ref.TypeID4 == 4:
 		effect.Kind = ItemServiceGold
 		effect.ExperienceBonusPercent = uint32(maxInt(0, ref.Param4))
 		effect.SkillExperienceBonusPercent = uint32(maxInt(0, ref.Param5))
 		effect.DailyBudget = time.Duration(maxInt(0, ref.Param3)) * time.Millisecond
-	case 5:
+	case ref.TypeID3 == 13 && ref.TypeID4 == 5:
 		effect.Kind = ItemServiceSkillGold
 		effect.SkillExperienceBonusPercent = uint32(maxInt(0, ref.Param5))
 		effect.DailyBudget = time.Duration(maxInt(0, ref.Param3)) * time.Millisecond
-	case 14:
+	case ref.TypeID3 == 13 && ref.TypeID4 == 14:
 		effect.Kind = ItemServiceGold
 		effect.ExperienceBonusPercent = 100
 		effect.SkillExperienceBonusPercent = 100
 		effect.DailyBudget = 3 * time.Hour
+	case ref.TypeID3 == 3 && ref.TypeID4 == 10 && ref.Param2 == itemServiceExperienceMarker:
+		effect.Kind = ItemServiceExperience
+		effect.ExperienceBonusPercent = uint32(ref.Param3)
+		effect.DailyBudget = time.Millisecond
+	case ref.TypeID3 == 3 && ref.TypeID4 == 10 && (ref.Param2 == itemServiceSkillExperienceMarker || ref.Param2 == itemServiceSkillExperienceEventMarker):
+		effect.Kind = ItemServiceSkillExperience
+		effect.SkillExperienceBonusPercent = uint32(ref.Param3)
+		effect.DailyBudget = time.Millisecond
 	default:
 		return ItemServiceEffect{}, ErrItemUseUnsupported
 	}
@@ -265,6 +555,25 @@ func itemServiceFromReference(ref RefItem, now time.Time) (ItemServiceEffect, er
 		return ItemServiceEffect{}, ErrItemUseUnsupported
 	}
 	return effect, nil
+}
+
+const (
+	itemServiceExperienceMarker           = 1885696629
+	itemServiceSkillExperienceMarker      = 1886614133
+	itemServiceSkillExperienceEventMarker = 1936028277
+)
+
+func isItemServiceReference(ref RefItem) bool {
+	if !ref.IsUseable || ref.TypeID1 != 3 || ref.TypeID2 != 3 || ref.Param1 <= 0 {
+		return false
+	}
+	if ref.TypeID3 == 13 {
+		return ref.TypeID4 == 4 || ref.TypeID4 == 5 || ref.TypeID4 == 14
+	}
+	if ref.TypeID3 != 3 || ref.TypeID4 != 10 || ref.Param3 <= 0 {
+		return false
+	}
+	return ref.Param2 == itemServiceExperienceMarker || ref.Param2 == itemServiceSkillExperienceMarker || ref.Param2 == itemServiceSkillExperienceEventMarker
 }
 
 func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID int64) ([]ItemServiceEffect, error) {
@@ -302,6 +611,41 @@ func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID
 		effects = append(effects, effect)
 	}
 	return effects, rows.Err()
+}
+
+func (r *SQLItemUseRepository) LoadItemBuffs(ctx context.Context, characterID int64) ([]ItemBuffEffect, error) {
+	if r == nil || r.shard == nil {
+		return nil, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return nil, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := r.shard.QueryContext(ctx, "SELECT `SOURCE_REF_ITEM_ID`,`SKILL_ID`,`EXPIRES_AT` FROM `CHAR_ITEM_BUFF` WHERE `CHAR_ID`=? AND `EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY `SKILL_ID`", characterID)
+	if err != nil {
+		return nil, fmt.Errorf("load character item buffs: %w", err)
+	}
+	defer rows.Close()
+	effects := make([]ItemBuffEffect, 0)
+	for rows.Next() {
+		var effect ItemBuffEffect
+		if err = rows.Scan(&effect.SourceRefItemID, &effect.SkillID, &effect.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan character item buff: %w", err)
+		}
+		skill, exists := RefSkills[effect.SkillID]
+		if !exists || skill.ExecutionKind() != SkillExecutionBuff || skill.BuffModifiers == (BuffModifiers{}) {
+			return nil, fmt.Errorf("load character item buff skill %d: %w", effect.SkillID, ErrItemUseUnsupported)
+		}
+		effect.ExpiresAt = effect.ExpiresAt.UTC()
+		effect.Modifiers = skill.BuffModifiers
+		effects = append(effects, effect)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate character item buffs: %w", err)
+	}
+	return effects, nil
 }
 
 func (r *SQLItemUseRepository) ActivateItemServiceDaily(ctx context.Context, characterID int64, kind ItemServiceKind, now time.Time) (activeUntil time.Time, err error) {

@@ -2,9 +2,12 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 )
 
 var (
@@ -16,13 +19,11 @@ var (
 )
 
 const (
-	alchemyElixirClassProtector = 16909056
-	alchemyElixirClassShield    = 67108864
-	alchemyElixirClassAccessory = 83886080
-	alchemyElixirClassWeapon    = 100663296
-	// Enhancement-only phase one intentionally stops before advanced-elixir
-	// and destruction/protection rules become necessary.
-	MaxBasicAlchemyOptLevel byte = 5
+	alchemyElixirClassProtector      = 16909056
+	alchemyElixirClassShield         = 67108864
+	alchemyElixirClassAccessory      = 83886080
+	alchemyElixirClassWeapon         = 100663296
+	MaxBasicAlchemyOptLevel     byte = MaxEquipmentPlus
 )
 
 type AlchemyMaterialUpdate struct {
@@ -31,24 +32,54 @@ type AlchemyMaterialUpdate struct {
 }
 
 type AlchemyResult struct {
-	Inventory  Inventory
-	TargetSlot byte
-	Target     Item
-	Success    bool
-	Materials  []AlchemyMaterialUpdate
+	Inventory      Inventory
+	TargetSlot     byte
+	Target         Item
+	Success        bool
+	Destroyed      bool
+	DurabilityLost bool
+	Materials      []AlchemyMaterialUpdate
 }
 
 type AlchemyRepository interface {
 	FuseElixir(context.Context, int64, uint32, byte, byte, *byte) (AlchemyResult, error)
+	FuseStone(context.Context, int64, uint32, byte, byte, byte) (AlchemyResult, error)
+	ApplyAdvancedElixir(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
+	InsertSocket(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
 }
 
-type SQLAlchemyRepository struct{ shard *sql.DB }
+type SQLAlchemyRepository struct {
+	shard *sql.DB
+	roll  func() float64
+}
 
 func NewAlchemyRepository(shard *sql.DB) (*SQLAlchemyRepository, error) {
 	if shard == nil {
 		return nil, ErrAlchemyRepositoryUnavailable
 	}
-	return &SQLAlchemyRepository{shard: shard}, nil
+	return &SQLAlchemyRepository{shard: shard, roll: secureAlchemyRoll}, nil
+}
+
+func secureAlchemyRoll() float64 {
+	value, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return 1
+	}
+	return float64(value.Int64()) / 1_000_000
+}
+
+func enhancementSucceeds(level byte, powder bool, roll float64) bool {
+	if level >= MaxEquipmentPlus || roll < 0 || roll >= 1 {
+		return false
+	}
+	chance := 80 - 10*float64(level)
+	if powder {
+		chance += 5
+	}
+	if chance < 5 {
+		chance = 5
+	}
+	return roll*100 < chance
 }
 
 func alchemyTargetClass(ref RefItem) (int, bool) {
@@ -88,6 +119,26 @@ func validateElixirMaterials(target, elixir RefItem, powder *RefItem) error {
 		return ErrAlchemyUnsupported
 	}
 	return nil
+}
+
+func validateAdvancedElixir(target, elixir RefItem) (byte, bool) {
+	if elixir.TypeID1 != 3 || elixir.TypeID2 != 3 || elixir.TypeID3 != 10 || elixir.TypeID4 != 4 ||
+		alchemyDegree(target) != elixir.ItemClass {
+		return 0, false
+	}
+	targetClass, ok := alchemyTargetClass(target)
+	if !ok || elixir.Param1 != targetClass || (elixir.Rarity != 0 && elixir.Rarity != target.Rarity) {
+		return 0, false
+	}
+	code := strings.ToUpper(elixir.CodeName)
+	switch {
+	case strings.Contains(code, "_B_") || strings.HasSuffix(code, "_B"):
+		return 2, true
+	case strings.Contains(code, "_A_") || strings.HasSuffix(code, "_A"):
+		return 1, true
+	default:
+		return 0, false
+	}
 }
 
 func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64, userID uint32, targetSlot, elixirSlot byte, powderSlot *byte) (result AlchemyResult, err error) {
@@ -144,6 +195,42 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 		}
 		powder, powderRef = &item, &ref
 	}
+	if increase, advanced := validateAdvancedElixir(targetRef, elixirRef); advanced {
+		if powder != nil {
+			return result, ErrAlchemyUnsupported
+		}
+		newLevel, ok := ApplyAdvancedElixir(target.OptLevel, increase)
+		if !ok {
+			return result, ErrAlchemyConflict
+		}
+		if err = consumeAlchemyMaterial(ctx, tx, characterID, elixirSlot, elixir); err != nil {
+			return result, err
+		}
+		result.Materials = append(result.Materials, AlchemyMaterialUpdate{Slot: elixirSlot, Remaining: remainingAlchemyStack(elixir)})
+		update, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=? AND `OPT_LEVEL`=?", newLevel, target.ID, target.OptLevel)
+		if updateErr != nil {
+			return result, updateErr
+		}
+		if affected, affectedErr := update.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrAlchemyConflict
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_BINDING_OPTION` (`FK_ITEM`,`OPTION_TYPE`,`SLOT`,`OPTION_ID`,`OPTION_VALUE`) VALUES (?,2,0,?,?) ON DUPLICATE KEY UPDATE `OPTION_ID`=VALUES(`OPTION_ID`),`OPTION_VALUE`=VALUES(`OPTION_VALUE`)", target.ID, elixirRef.ID, increase); err != nil {
+			return result, err
+		}
+		result.Inventory, err = loadInventoryInItemUseTransaction(ctx, tx, characterID)
+		if err != nil {
+			return AlchemyResult{}, err
+		}
+		result.Target, ok = result.Inventory.Items[targetSlot]
+		if !ok {
+			return AlchemyResult{}, ErrAlchemyConflict
+		}
+		result.TargetSlot, result.Success = targetSlot, true
+		if err = tx.Commit(); err != nil {
+			return AlchemyResult{}, fmt.Errorf("%w: %v", ErrAlchemyOutcomeUnknown, err)
+		}
+		return result, nil
+	}
 	if err = validateElixirMaterials(targetRef, elixirRef, powderRef); err != nil {
 		return result, err
 	}
@@ -158,12 +245,37 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 		}
 		result.Materials = append(result.Materials, AlchemyMaterialUpdate{Slot: *powderSlot, Remaining: remainingAlchemyStack(*powder)})
 	}
-	update, err := tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=? AND `OPT_LEVEL`=?", target.OptLevel+1, target.ID, target.OptLevel)
-	if err != nil {
-		return result, fmt.Errorf("update alchemy target: %w", err)
-	}
-	if affected, affectedErr := update.RowsAffected(); affectedErr != nil || affected != 1 {
-		return result, ErrAlchemyConflict
+	result.Success = enhancementSucceeds(target.OptLevel, powder != nil, r.roll())
+	if result.Success {
+		update, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=? AND `OPT_LEVEL`=?", target.OptLevel+1, target.ID, target.OptLevel)
+		if updateErr != nil {
+			return result, fmt.Errorf("update alchemy target: %w", updateErr)
+		}
+		if affected, affectedErr := update.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrAlchemyConflict
+		}
+	} else {
+		newLevel, protection, destroyed, durabilityLost := ApplyEnhancementFailure(target.OptLevel, target.Protection)
+		result.Destroyed, result.DurabilityLost = destroyed, durabilityLost
+		if destroyed {
+			if _, err = tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, targetSlot, target.ID); err != nil {
+				return result, err
+			}
+			if _, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", target.ID); err != nil {
+				return result, err
+			}
+		} else {
+			newData := target.Data
+			if durabilityLost && newData > 1 {
+				newData--
+			}
+			if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=?,`DATA`=? WHERE `id`=? AND `OPT_LEVEL`=?", newLevel, newData, target.ID, target.OptLevel); err != nil {
+				return result, err
+			}
+			if _, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_ALCHEMY_PROTECTION` (`FK_ITEM`,`ASTRAL`,`IMMORTAL`,`STEADY`) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE `ASTRAL`=VALUES(`ASTRAL`),`IMMORTAL`=VALUES(`IMMORTAL`),`STEADY`=VALUES(`STEADY`)", target.ID, protection.Astral, protection.Immortal, protection.Steady); err != nil {
+				return result, err
+			}
+		}
 	}
 
 	result.Inventory, err = loadInventoryInItemUseTransaction(ctx, tx, characterID)
@@ -171,10 +283,10 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 		return AlchemyResult{}, err
 	}
 	result.Target, targetOK = result.Inventory.Items[targetSlot]
-	if !targetOK {
+	if !targetOK && !result.Destroyed {
 		return AlchemyResult{}, ErrAlchemyConflict
 	}
-	result.TargetSlot, result.Success = targetSlot, true
+	result.TargetSlot = targetSlot
 	if err = tx.Commit(); err != nil {
 		return AlchemyResult{}, fmt.Errorf("%w: %v", ErrAlchemyOutcomeUnknown, err)
 	}
