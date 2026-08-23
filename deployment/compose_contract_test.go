@@ -10,10 +10,52 @@ import (
 type composeService struct {
 	Volumes     []string                     `yaml:"volumes"`
 	Ports       []string                     `yaml:"ports"`
+	Expose      []string                     `yaml:"expose"`
+	Profiles    []string                     `yaml:"profiles"`
 	Environment map[string]string            `yaml:"environment"`
 	Image       string                       `yaml:"image"`
 	Build       composeBuild                 `yaml:"build"`
 	DependsOn   map[string]composeDependency `yaml:"depends_on"`
+}
+
+func TestComposeKeepsSMCAndAgentManagementPrivateAndOptIn(t *testing.T) {
+	data, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	var compose composeContract
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("parse docker-compose.yml: %v", err)
+	}
+	agent := compose.Services["agent-server"]
+	for _, published := range agent.Ports {
+		if published == "15884" || published == "15884:15884" {
+			t.Fatalf("Agent management port is host-published: %v", agent.Ports)
+		}
+	}
+	foundManagementExpose := false
+	for _, exposed := range agent.Expose {
+		if exposed == "15884" {
+			foundManagementExpose = true
+		}
+	}
+	if !foundManagementExpose {
+		t.Fatalf("Agent private exposes = %v, want 15884", agent.Expose)
+	}
+	if agent.Environment["AGENT_MANAGEMENT_ENABLED"] != "${AGENT_MANAGEMENT_ENABLED:-0}" {
+		t.Fatal("Agent management must default disabled")
+	}
+
+	smc := compose.Services["smc-server"]
+	if len(smc.Profiles) != 1 || smc.Profiles[0] != "smc" {
+		t.Fatalf("SMC profiles = %v, want opt-in smc profile", smc.Profiles)
+	}
+	if len(smc.Ports) != 1 || smc.Ports[0] != "127.0.0.1:${SMC_PUBLIC_PORT:-15900}:15900" {
+		t.Fatalf("SMC ports = %v, want loopback-only publication", smc.Ports)
+	}
+	if smc.Environment["SMC_AGENT_MANAGEMENT_ENABLED"] != "${SMC_AGENT_MANAGEMENT_ENABLED:-0}" {
+		t.Fatal("SMC Agent management client must default disabled")
+	}
 }
 
 type composeBuild struct {

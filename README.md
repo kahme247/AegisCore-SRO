@@ -24,6 +24,8 @@ slug. Original Ferdoran identifiers remain only where required for attribution.
 | Gateway | `15779` | patch/profile reply, notices, shard list, login policy, Agent handoff | Implemented and unit-tested |
 | Agent | `15882` | character lobby, world, movement, visibility, gameplay handlers | Implemented in stages; stock-client validation is incomplete |
 | Admission API | `15883` internal only | one-time Gateway-to-Agent tickets over mTLS | Implemented; intentionally not host-published |
+| Agent management API | `15884` internal only | authoritative SMC player snapshots over separate mTLS identity | Implemented; disabled until dedicated certificates are configured |
+| SMC Server | `15900` loopback by default | authenticated web management control plane and audit | Initial read-only dashboard implemented; opt-in Compose profile |
 | DownloadServer | `15880` | streams trusted, prepared legacy patch payloads by numeric file ID | Implemented; end-to-end clean-client 188→189 validation remains |
 
 The older six-service diagram under `_docs/architecture.puml` describes a
@@ -39,13 +41,13 @@ change the Gateway/Agent wire contract.
 | Build and safety | Go 1.26.5 pin, headless builds, verification script, safe PK2 reader, cache manifest checks | CI/runtime soak and dependency modernization |
 | Transport and sessions | framed packet handling, encrypted-session support, session lifecycle, handler dispatch | sanitized fragmentation/coalescing and `0x600D` fixtures |
 | Gateway | patch/profile, notices, shard list/ping, credential checks, login rate tracking, admission policy, mTLS ticket install | canonical client hash, locale, Content ID, module/version captures |
-| Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position and quick-slot persistence | rename persistence, guild/academy fields and broader stock-client fixtures |
+| Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position, quick-slot and social bootstrap persistence | broader stock-client fixtures |
 | World and movement | region/spawn repositories, Data.pk2 navmesh, visibility, authoritative movement, wall/object collision, position checkpoints, teleport | dungeon/neighbour-plane support, memory reduction, broader collision corpus |
 | Entities and spawning | staged-to-active player admission, reciprocal player/NPC/mob group spawn/despawn, headings, bounded collision-aware respawn, basic mob AI | capture-backed player field validation, COS/pet/item/structure serializers and broader collision fixtures |
 | Character systems | stat allocation, combat/XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | skill casting breadth, quest lifecycle and capture-backed talk/action masks |
 | Economy and inventory | move/equip, storage, guild storage, repair, item use, elixir alchemy, exchange, stall | complete item option/rent/bind formats and transactional live testing |
-| Social | local/global/party/stall/whisper chat, party core and matching | guild, academy, jobs, stealth/invisibility rules |
-| Data and migrations | target-bound runner through shard `000029`; identity, gameplay, reference catalog, movement, rental, return-city, rate, quick-slot and MySQL 8.4 compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
+| Social | local/global/party/stall/whisper/guild/union/academy chat, party core and matching, persistent guilds, academies and jobs | capture validation for elections, guild wars, academy honor buffs, job safe-trade and stealth/invisibility rules |
+| Data and migrations | target-bound runner through shard `000047`; identity, gameplay, reference catalogs, economy, social systems and MySQL compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
 
 Current crash/collision safeguards include:
 

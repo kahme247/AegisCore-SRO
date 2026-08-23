@@ -124,7 +124,7 @@ func TestCharacterSelectionJoinRejectsUnknownAndUnownedCharactersWithoutBootstra
 			if err != nil {
 				t.Fatalf("handleJoin() error = %v", err)
 			}
-			assertCharacterSelectionResult(t, &response, OpcodeCharSelectionJoinResponse, nil, ResultFalse)
+			assertCharacterSelectionJoinFailure(t, &response, JOIN_MSG_ERROR_ID)
 			assertNoAdditionalCharacterSelectionResponse(t, clientConn)
 
 			if got, want := test.store.characterCalls, 1; got != want {
@@ -159,11 +159,22 @@ func TestCharacterSelectionJoinRejectsMalformedPacketBeforeStoreAccess(t *testin
 	if err != nil {
 		t.Fatalf("handleJoin(malformed) error = %v", err)
 	}
-	assertCharacterSelectionResult(t, &response, OpcodeCharSelectionJoinResponse, nil, ResultFalse)
+	assertCharacterSelectionJoinFailure(t, &response, JOIN_ERROR_CHARACTER_NAME_STRING)
 	assertNoAdditionalCharacterSelectionResponse(t, clientConn)
 	if store.characterCalls != 0 {
 		t.Fatalf("CharacterForOwner calls = %d, want 0 for malformed input", store.characterCalls)
 	}
+}
+
+func TestBuildJoinResultUsesProtocolFailureShape(t *testing.T) {
+	success := buildJoinResult(ResultTrue, JOIN_MSG_ERROR_ID)
+	assertCharacterSelectionResult(t, &success, OpcodeCharSelectionJoinResponse, nil, ResultTrue)
+	if remaining := success.Remaining(); remaining != 0 {
+		t.Fatalf("successful join response has %d trailing bytes", remaining)
+	}
+
+	failure := buildJoinResult(ResultFalse, JOIN_MSG_ERROR_ID)
+	assertCharacterSelectionJoinFailure(t, &failure, JOIN_MSG_ERROR_ID)
 }
 
 func TestCharacterSelectionRejectsTrailingPayloadBeforeStoreAccess(t *testing.T) {
@@ -185,7 +196,7 @@ func TestCharacterSelectionRejectsTrailingPayloadBeforeStoreAccess(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleJoin(trailing) error = %v", err)
 	}
-	assertCharacterSelectionResult(t, &joinResponse, OpcodeCharSelectionJoinResponse, nil, ResultFalse)
+	assertCharacterSelectionJoinFailure(t, &joinResponse, JOIN_ERROR_CHARACTER_NAME_STRING)
 	if store.characterCalls != 0 {
 		t.Fatalf("CharacterForOwner calls = %d, want 0 for trailing join input", store.characterCalls)
 	}
@@ -282,7 +293,7 @@ func TestCharacterSelectionJoinAndActionShareOneSerializationLock(t *testing.T) 
 
 	close(store.releaseJoin)
 	joinResponse := readCharacterSelectionPacket(t, joinClient)
-	assertCharacterSelectionResult(t, &joinResponse, OpcodeCharSelectionJoinResponse, nil, ResultFalse)
+	assertCharacterSelectionJoinFailure(t, &joinResponse, JOIN_MSG_ERROR_ID)
 	actionResponse := readCharacterSelectionPacket(t, actionClient)
 	expectedAction := byte(CharActionDelete)
 	assertCharacterSelectionResult(t, &actionResponse, OpcodeCharSelectionActionResponse, &expectedAction, ResultTrue)
@@ -451,7 +462,7 @@ func TestCharacterSelectionActionRejectsMalformedAndUnknownInputWithoutStoreAcce
 	}
 }
 
-func TestCharacterSelectionRenameRemainsRejected(t *testing.T) {
+func TestCharacterSelectionRenameWithoutRepositoryIsRejected(t *testing.T) {
 	session, clientConn := newCharacterSelectionTestSession(t)
 	defer session.Close()
 	defer clientConn.Close()
@@ -468,7 +479,11 @@ func TestCharacterSelectionRenameRemainsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleCharSelectionRenameRequest() error = %v", err)
 	}
-	assertCharacterSelectionResult(t, &response, OpcodeCharSelectionRenameResponse, nil, ResultFalse)
+	action := byte(CharSelectionCharacterRename)
+	assertCharacterSelectionResult(t, &response, OpcodeCharSelectionRenameResponse, &action, ResultFalse)
+	if code, readErr := response.ReadUInt16(); readErr != nil || code != RENAME_SMERR_NOT_ALLOWED_CHARNAME {
+		t.Fatalf("rename failure code = %d, %v", code, readErr)
+	}
 	assertNoAdditionalCharacterSelectionResponse(t, clientConn)
 }
 
@@ -549,6 +564,21 @@ func assertCharacterSelectionResult(t *testing.T, response *network.Packet, mess
 	}
 	if gotResult != result {
 		t.Fatalf("response result = %d, want %d", gotResult, result)
+	}
+}
+
+func assertCharacterSelectionJoinFailure(t *testing.T, response *network.Packet, errorCode uint16) {
+	t.Helper()
+	assertCharacterSelectionResult(t, response, OpcodeCharSelectionJoinResponse, nil, ResultFalse)
+	gotErrorCode, err := response.ReadUInt16()
+	if err != nil {
+		t.Fatalf("join failure response missing error code: %v", err)
+	}
+	if gotErrorCode != errorCode {
+		t.Fatalf("join failure error code = 0x%04X, want 0x%04X", gotErrorCode, errorCode)
+	}
+	if remaining := response.Remaining(); remaining != 0 {
+		t.Fatalf("join failure response has %d trailing bytes", remaining)
 	}
 }
 

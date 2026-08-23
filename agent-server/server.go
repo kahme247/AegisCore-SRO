@@ -22,7 +22,9 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/handler/logout"
 	"github.com/Harvi8/AegisCore/agent-server/handler/party"
 	"github.com/Harvi8/AegisCore/agent-server/handler/ping"
+	"github.com/Harvi8/AegisCore/agent-server/handler/social"
 	"github.com/Harvi8/AegisCore/agent-server/handler/stall"
+	"github.com/Harvi8/AegisCore/agent-server/management"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -32,6 +34,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
+	"github.com/Harvi8/AegisCore/framework/security/mtls"
 	"github.com/Harvi8/AegisCore/framework/server"
 	gwHandlers "github.com/Harvi8/AegisCore/gateway-server/handler"
 	log "github.com/sirupsen/logrus"
@@ -42,6 +45,7 @@ type AgentServer struct {
 	*server.Server
 	AdmissionTickets       *auth.AdmissionTicketStore
 	AdmissionTicketServer  *auth.AdmissionTicketInstallServer
+	ManagementServer       *management.Server
 	UnhandledPacketsLogger *log.Logger
 	packetContext          context.Context
 	cancelPacketHandling   context.CancelFunc
@@ -68,10 +72,12 @@ type AgentServer struct {
 	// retained so disconnect teardown can release it immediately.
 	GuildStorage       model.GuildStorageRepository
 	Combat             *character.CombatHandler
+	Hwan               *character.HwanHandler
 	Skill              *character.SkillHandler
 	CharacterSelection *lobby.CharacterSelectionHandler
 	Vitals             model.CharacterVitalsRepository
 	GameplayRates      *manager.GameplayRateManager
+	COS                *service.COSService
 	//SpawnEngine             *spawn.SpawnEngine
 }
 
@@ -214,6 +220,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureCharacterCreationPolicy(repositories.CharacterCreationPolicy); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character creation policy: %w", err)
 	}
+	if err := characterSelection.ConfigureAvatarInventoryRepository(repositories.AvatarInventory); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent avatar inventory bootstrap: %w", err)
+	}
 	if err := characterSelection.ConfigureQuestRepository(repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quest bootstrap: %w", err)
 	}
@@ -232,32 +241,47 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureItemServiceRepository(repositories.ItemServices); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character item-service bootstrap: %w", err)
 	}
+	if err := characterSelection.ConfigureItemBuffRepository(repositories.ItemBuffs); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character item-buff bootstrap: %w", err)
+	}
+	if err := characterSelection.ConfigureHwanRepository(repositories.Hwan); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent character HWAN bootstrap: %w", err)
+	}
 	characterSelection.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
 	if err := characterSelection.ConfigureMovementSettingsRepository(repositories.MovementSettings); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent movement settings: %w", err)
 	}
 	agentServer.CharacterSelection = characterSelection
-	lobby.RegisterCharSelectionRenameRequestHandler(&serv)
-	character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
+	lobby.RegisterCharSelectionRenameRequestHandler(&serv, repositories.CharacterRename)
+	gameReadyHandler := character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
 	character.RegisterGuideHandler(&serv)
+	agentServer.Hwan, err = character.RegisterHwanHandler(&serv, repositories.Hwan)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent HWAN handler: %w", err)
+	}
 	character.RegisterPremiumDailyHandler(&serv, repositories.ItemServices)
 	ping.RegisterHandler(&serv)
 	movementHandler := character.RegisterMovementHandler(&serv)
 	character.RegisterSelectEntityHandler(&serv)
 	character.RegisterDeselectEntityHandler(&serv)
 	cos.RegisterMountStateHandler(&serv)
+	cosLifecycle := cos.RegisterLifecycleHandlers(&serv, repositories.COS)
 	if err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent NPC talk handler: %w", err)
 	}
 	if err := character.RegisterQuestHandler(&serv, repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest handlers: %w", err)
 	}
-	character.RegisterTeleportHandler(&serv, repositories.Teleport)
-	character.RegisterResurrectionHandler(&serv, repositories.Vitals)
+	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
+	character.RegisterResurrectionHandler(&serv, repositories.Vitals, repositories.ItemUse)
 	manager.GetMobAIManagerInstance().ConfigureVitals(repositories.Vitals)
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
+	manager.GetRespawnManagerInstance().ConfigureGiantSpawnRatio(viper.GetInt(config.AgentGiantMonsterSpawnRatio))
 	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
 	agentServer.Combat.ConfigureVitals(repositories.Vitals)
+	agentServer.Combat.ConfigureMonsterMasks(repositories.MonsterMasks)
+	agentServer.Combat.ConfigureHwan(repositories.Hwan)
+	cosLifecycle.Service().ConfigureCombat(agentServer.Combat, levelTable)
 	movementHandler.ConfigureCombatCancellation(agentServer.Combat.CancelPlayerAttack)
 	if err := character.RegisterAttributeHandlers(&serv, repositories.CharacterAttributes); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character attribute handlers: %w", err)
@@ -272,7 +296,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err := character.RegisterQuickSlotHandler(&serv, repositories.QuickSlots); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot handler: %w", err)
 	}
-	chat.RegisterChatHandler(&serv)
+	socialHandler := social.RegisterHandlers(&serv, repositories.Social)
+	gameReadyHandler.ConfigureSocial(socialHandler)
+	chat.RegisterChatHandler(&serv, repositories.Social)
 	logout.RegisterLogoutHandler(&serv)
 	stall.RegisterStallCreateHandler(&serv)
 	stall.RegisterStallDestroyHandler(&serv)
@@ -287,11 +313,16 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Exchange = exchangeManager
 	agentServer.GuildStorage = repositories.GuildStorage
 	agentServer.Vitals = repositories.Vitals
-	inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.ItemMall)
-	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse)
+	inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.AvatarInventory, repositories.ItemMall)
+	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse, teleportHandler)
+	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
+	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
+	agentServer.COS = cosLifecycle.Service()
+	gameReadyHandler.ConfigureCOS(cosLifecycle.Service())
+	manager.GetGameTimeManagerInstance().ConfigureCOS(cosLifecycle.Service())
 	itemUseHandler.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
 	inventory.RegisterAlchemyHandler(&serv, repositories.Alchemy)
-	party.RegisterPartyHandlers(&serv)
+	party.RegisterPartyHandlers(&serv, socialHandler)
 
 	if err := world.ConfigureRepositories(service.WorldRepositories{
 		RegionCatalog: repositories.Regions,
@@ -302,6 +333,25 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent world repositories: %w", err)
 	}
 	agentServer.World = world
+	serv.SetSessionClosedHandler(agentServer.playerSessionClosed)
+	if viper.GetBool(config.AgentManagementEnabled) {
+		managementTLS, managementTLSErr := mtls.LoadServerConfig(mtls.Files{
+			CertFile: viper.GetString(config.AgentManagementTLSCertFile),
+			KeyFile:  viper.GetString(config.AgentManagementTLSKeyFile),
+			CAFile:   viper.GetString(config.AgentManagementTLSClientCAFile),
+		})
+		if managementTLSErr != nil {
+			return AgentServer{}, fmt.Errorf("configure SMC-to-Agent management mTLS server: %w", managementTLSErr)
+		}
+		agentServer.ManagementServer, err = management.NewServer(
+			net.JoinHostPort(viper.GetString(config.AgentManagementHost), fmt.Sprintf("%d", viper.GetInt(config.AgentManagementPort))),
+			managementTLS,
+			world,
+		)
+		if err != nil {
+			return AgentServer{}, fmt.Errorf("configure Agent management listener: %w", err)
+		}
+	}
 
 	keepPools = true
 	return agentServer, nil
@@ -322,6 +372,15 @@ func (a *AgentServer) Start() error {
 	if err := a.AdmissionTicketServer.Start(); err != nil {
 		_ = a.Server.CloseListener()
 		return fmt.Errorf("start Gateway admission ticket listener: %w", err)
+	}
+	if a.ManagementServer != nil {
+		if err := a.ManagementServer.Start(); err != nil {
+			rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = a.AdmissionTicketServer.Close(rollbackCtx)
+			cancelRollback()
+			_ = a.Server.CloseListener()
+			return fmt.Errorf("start Agent management listener: %w", err)
+		}
 	}
 	if a.GameplayRates != nil {
 		a.GameplayRates.Start(a.packetContext)
@@ -362,6 +421,11 @@ func (a *AgentServer) Close(ctx context.Context) error {
 	if a.Server != nil {
 		if err := a.Server.StopAccepting(); err != nil && !errors.Is(err, net.ErrClosed) {
 			closeErrors = append(closeErrors, fmt.Errorf("stop Agent public listener: %w", err))
+		}
+	}
+	if a.ManagementServer != nil {
+		if err := a.ManagementServer.Close(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop Agent management listener: %w", err))
 		}
 	}
 	if a.AdmissionTicketServer != nil {
@@ -468,6 +532,15 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 			cancel()
 		}
 	}
+	if a.COS != nil {
+		if player, err := world.GetPlayerByUniqueId(closedSession.UserContext.UniqueID); err == nil && player != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := a.COS.UnsummonAll(ctx, player); err != nil {
+				log.WithError(err).Warn("save and remove character COS on disconnect")
+			}
+			cancel()
+		}
+	}
 	world.PlayerDisconnected(closedSession.UserContext.UniqueID, closedSession.UserContext.CharName)
 }
 
@@ -539,6 +612,7 @@ func main() {
 		// characters from an earlier load.
 		model.RefItems = snapshot.Items
 		model.RefChars = snapshot.Characters
+		model.RefSkills = snapshot.Skills
 		model.RefObjects = buildReferenceObjectIndex(snapshot.Items, snapshot.Characters)
 	}
 

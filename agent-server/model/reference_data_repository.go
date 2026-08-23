@@ -53,7 +53,12 @@ type ReferenceDataSnapshot struct {
 	Skills     map[uint32]RefSkill
 }
 
-var SelectAllRefSkills = "SELECT `ID`,`GROUP_ID`,`BASIC_GROUP`,`BASIC_ORIGINAL`,`BASIC_LEVEL`,`BASIC_ACTIVITY`,`BASIC_CHAINCODE`,`REQCOMMON_MASTERY1`,`REQCOMMON_MASTERY2`,`REQCOMMON_MASTERYLEVEL1`,`REQCOMMON_MASTERYLEVEL2`,`REQCOMMON_STR`,`REQCOMMON_INT`,`REQLEARN_SKILL1`,`REQLEARN_SKILL2`,`REQLEARN_SKILL3`,`REQLEARN_SKILLLEVEL1`,`REQLEARN_SKILLLEVEL2`,`REQLEARN_SKILLLEVEL3`,`REQLEARN_SP`,`REQLEARN_RACE`,`TARGET_REQUIRED`,`TARGETGROUP_SELF`,`TARGETGROUP_ALLY`,`TARGETGROUP_PARTY`,`TARGETGROUP_ENEMY_M`,`TARGETGROUP_ENEMY_P`,`TARGETETC_SELECTDEADBODY`,`REQCAST_WEAPON1`,`REQCAST_WEAPON2`,`CONSUME_HP`,`CONSUME_MP`,`CONSUME_HPRATIO`,`CONSUME_MPRATIO`,`ACTION_PREPARINGTIME`,`ACTION_CASTINGTIME`,`ACTION_ACTIONDURATION`,`ACTION_REUSEDELAY`,`ACTION_COOLTIME`,`ACTION_RANGE`," + refSkillParameterProjection() + " FROM `SRO_SHARD`.`REF_SKILL` WHERE `SERVICE` = 1"
+// RefSkills is published atomically with RefItems during Agent gamedata
+// bootstrap. Item-use transactions use it to interpret ITEMDATA.Desc_1 skill
+// links without duplicating REF_SKILL's parameter parser in SQL code.
+var RefSkills map[uint32]RefSkill
+
+var SelectAllRefSkills = "SELECT `ID`,`BASIC_CODE`,`GROUP_ID`,`BASIC_GROUP`,`BASIC_ORIGINAL`,`BASIC_LEVEL`,`BASIC_ACTIVITY`,`BASIC_CHAINCODE`,`REQCOMMON_MASTERY1`,`REQCOMMON_MASTERY2`,`REQCOMMON_MASTERYLEVEL1`,`REQCOMMON_MASTERYLEVEL2`,`REQCOMMON_STR`,`REQCOMMON_INT`,`REQLEARN_SKILL1`,`REQLEARN_SKILL2`,`REQLEARN_SKILL3`,`REQLEARN_SKILLLEVEL1`,`REQLEARN_SKILLLEVEL2`,`REQLEARN_SKILLLEVEL3`,`REQLEARN_SP`,`REQLEARN_RACE`,`TARGET_REQUIRED`,`TARGETGROUP_SELF`,`TARGETGROUP_ALLY`,`TARGETGROUP_PARTY`,`TARGETGROUP_ENEMY_M`,`TARGETGROUP_ENEMY_P`,`TARGETETC_SELECTDEADBODY`,`REQCAST_WEAPON1`,`REQCAST_WEAPON2`,`CONSUME_HP`,`CONSUME_MP`,`CONSUME_HPRATIO`,`CONSUME_MPRATIO`,`ACTION_PREPARINGTIME`,`ACTION_CASTINGTIME`,`ACTION_ACTIONDURATION`,`ACTION_REUSEDELAY`,`ACTION_COOLTIME`,`ACTION_RANGE`," + refSkillParameterProjection() + " FROM `SRO_SHARD`.`REF_SKILL` WHERE `SERVICE` = 1"
 
 func refSkillParameterProjection() string {
 	columns := make([]string, len(RefSkill{}.Params))
@@ -127,7 +132,7 @@ func (r *SQLReferenceDataRepository) loadSkills(ctx context.Context) (map[uint32
 	for rows.Next() {
 		var skill RefSkill
 		destinations := []any{
-			&skill.ID, &skill.GroupID, &skill.BasicGroup, &skill.BasicOriginal, &skill.BasicLevel, &skill.BasicActivity, &skill.BasicChainCode,
+			&skill.ID, &skill.CodeName, &skill.GroupID, &skill.BasicGroup, &skill.BasicOriginal, &skill.BasicLevel, &skill.BasicActivity, &skill.BasicChainCode,
 			&skill.Mastery1, &skill.Mastery2, &skill.MasteryLevel1, &skill.MasteryLevel2, &skill.RequiredStr, &skill.RequiredInt,
 			&skill.RequiredSkill1, &skill.RequiredSkill2, &skill.RequiredSkill3, &skill.RequiredLevel1, &skill.RequiredLevel2,
 			&skill.RequiredLevel3, &skill.RequiredSP, &skill.RequiredRace, &skill.TargetRequired, &skill.TargetSelf, &skill.TargetAlly,

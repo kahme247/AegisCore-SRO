@@ -19,15 +19,22 @@ func TestAgentDefaults(t *testing.T) {
 	assertConfigValue(t, AgentTrafficPacketLimit, 200)
 	assertConfigValue(t, AgentTrafficWindowMS, 1000)
 	assertConfigValue(t, AgentTimedBuffDuration, false)
+	assertConfigValue(t, AgentGiantMonsterSpawnRatio, 1000)
 	assertConfigValue(t, AgentDiagnosticsEnabled, false)
 	assertConfigValue(t, AgentDiagnosticsPort, 6060)
+	assertConfigValue(t, AgentManagementEnabled, false)
+	assertConfigValue(t, AgentManagementHost, "127.0.0.1")
+	assertConfigValue(t, AgentManagementPort, 15884)
 	assertConfigValue(t, AgentAdmissionHost, "127.0.0.1")
 	assertConfigValue(t, AgentAdmissionPort, 15883)
 	assertConfigValue(t, GameTimeTicksPerSecond, 20)
 	assertConfigValue(t, GameTimeDaySpeed, 1.0)
 	assertConfigValue(t, PositionCheckpointSeconds, 30)
 
-	for _, key := range []string{AgentAdmissionTLSCertFile, AgentAdmissionTLSKeyFile, AgentAdmissionTLSClientCAFile} {
+	for _, key := range []string{
+		AgentAdmissionTLSCertFile, AgentAdmissionTLSKeyFile, AgentAdmissionTLSClientCAFile,
+		AgentManagementTLSCertFile, AgentManagementTLSKeyFile, AgentManagementTLSClientCAFile,
+	} {
 		if viper.IsSet(key) {
 			t.Fatalf("%s must not have an insecure default", key)
 		}
@@ -44,8 +51,12 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	t.Setenv("AGENT_ADMISSION_PORT", "16001")
 	t.Setenv("AGENT_TRAFFIC_FILTER_PACKET_LIMIT", "250")
 	t.Setenv("AGENT_TIMED_BUFF_DURATION", "1")
+	t.Setenv("AGENT_GIANT_MONSTER_SPAWN_RATIO", "750")
 	t.Setenv("AGENT_DIAGNOSTICS_ENABLED", "1")
 	t.Setenv("AGENT_DIAGNOSTICS_PORT", "6061")
+	t.Setenv("AGENT_MANAGEMENT_ENABLED", "1")
+	t.Setenv("AGENT_MANAGEMENT_PORT", "16002")
+	t.Setenv("AGENT_MANAGEMENT_TLS_CERT_FILE", "/tls/management-agent.pem")
 	t.Setenv("GAME_TIME_TICKS_PER_SECOND", "20")
 	t.Setenv("GAME_TIME_DAY_SPEED", "1.5")
 	t.Setenv("AGENT_POSITION_CHECKPOINT_SECONDS", "45")
@@ -64,12 +75,19 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	if !viper.GetBool(AgentTimedBuffDuration) {
 		t.Fatal("timed buff duration extension was not enabled from environment")
 	}
+	if got := viper.GetInt(AgentGiantMonsterSpawnRatio); got != 750 {
+		t.Fatalf("giant monster spawn ratio = %d, want 750", got)
+	}
 	if !viper.GetBool(AgentDiagnosticsEnabled) {
 		t.Fatal("Agent diagnostics were not enabled from environment")
 	}
 	if got := viper.GetInt(AgentDiagnosticsPort); got != 6061 {
 		t.Fatalf("diagnostics port = %d, want 6061", got)
 	}
+	if !viper.GetBool(AgentManagementEnabled) || viper.GetInt(AgentManagementPort) != 16002 {
+		t.Fatal("Agent management environment was not bound")
+	}
+	assertConfigValue(t, AgentManagementTLSCertFile, "/tls/management-agent.pem")
 	if got := viper.GetInt(GameTimeTicksPerSecond); got != 20 {
 		t.Fatalf("ticks per second = %d, want 20", got)
 	}

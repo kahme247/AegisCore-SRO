@@ -15,6 +15,7 @@ Agent startup performs these operations in order:
 4. Load a complete prepared navmesh cache or the raw PK2 archive.
 5. Start game-time, spawn, respawn, mob-AI and gameplay-rate managers.
 6. Bind public SRO port `15882`, then private mTLS admission port `15883`.
+7. When enabled, bind the independent SMC management mTLS port `15884`.
 
 Startup never runs migrations or performs a complete schema preflight. Missing
 tables used by initial reference/world loading are fatal; tables used only by a
@@ -55,6 +56,7 @@ prepared-cache validation does.
 | `AGENT_LEVEL_DATA_FILE` | `./Media/server_dep/silkroad/textdata/leveldata.txt` | Level-data path |
 | `AGENT_TRAFFIC_FILTER_PACKET_LIMIT` | `200` | Physical frames per window |
 | `AGENT_TRAFFIC_FILTER_WINDOW_MS` | `1000` | Traffic-filter window |
+| `AGENT_GIANT_MONSTER_SPAWN_RATIO` | `1000` | One-in-N giant generation ratio; `0` disables runtime giants |
 | `AGENT_DIAGNOSTICS_ENABLED` | `false` | Enable loopback-only pprof and runtime metrics |
 | `AGENT_DIAGNOSTICS_PORT` | `6060` | Loopback diagnostics port |
 | `AGENT_ADMISSION_HOST` | `127.0.0.1` | Private mTLS bind host |
@@ -62,6 +64,12 @@ prepared-cache validation does.
 | `AGENT_ADMISSION_TLS_CERT_FILE` | none | Required Agent certificate |
 | `AGENT_ADMISSION_TLS_KEY_FILE` | none | Required Agent key |
 | `AGENT_ADMISSION_TLS_CLIENT_CA_FILE` | none | Required Gateway client CA |
+| `AGENT_MANAGEMENT_ENABLED` | `false` | Enable the private SMC management API |
+| `AGENT_MANAGEMENT_HOST` | `127.0.0.1` | Private management bind host |
+| `AGENT_MANAGEMENT_PORT` | `15884` | Private management API port |
+| `AGENT_MANAGEMENT_TLS_CERT_FILE` | none | Management server certificate |
+| `AGENT_MANAGEMENT_TLS_KEY_FILE` | none | Management server private key |
+| `AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE` | none | CA that issued the SMC client certificate |
 | `GAME_TIME_TICKS_PER_SECOND` | `10` | World clock frequency |
 | `GAME_TIME_DAY_SPEED` | `1.0` | World clock multiplier |
 | `AGENT_POSITION_CHECKPOINT_SECONDS` | `30` | Position checkpoint interval |
@@ -82,6 +90,13 @@ go tool pprof ./agent-heap.pb.gz
 Scalar Go runtime metrics are available at `/debug/runtime/metrics`. Diagnostics
 are disabled by default and are never attached to the public SRO or admission
 listeners.
+
+The optional management listener exposes `GET /v1/management/players` and
+`POST /v1/management/player-disconnects` only to mutually authenticated SMC
+clients. Snapshots include only sessions that completed character loading.
+Disconnect commands require immutable character ID, the expected runtime UID,
+and a reason. The listener has no plaintext, shared-secret, public-port, or
+admission-port fallback.
 
 ## Implemented behavior
 
@@ -104,13 +119,16 @@ listeners.
 - NPC interaction, family-specific talk actions, teleport, buy/sell, inventory,
   storage, guild storage, repair, recovery-item use, elixir alchemy and
   transactional two-party exchange.
-- Party lifecycle and matching, five-second logout/restart countdown, local,
-  global, party and whisper chat, stall acknowledgement and GM commands.
+- Party lifecycle and matching; persistent guild membership, permissions,
+  notices, SP donation and invitations; academy membership and matching; job
+  enrollment, aliases, ranking and rewards; five-second logout/restart
+  countdown; local, global, party, guild, union, academy and whisper chat;
+  stall acknowledgement and GM commands.
 - In-memory stall host create/update/leave/destroy handling. Customer entry,
   buying, persistence and stall talk are not implemented.
 
 Local chat currently broadcasts world-wide, global chat does not consume its
-inventory item, and notice/guild/union/NPC/academy chat is not implemented.
+inventory item, and notice/NPC chat is not implemented.
 
 ## World invariants
 
@@ -132,7 +150,7 @@ inventory item, and notice/guild/union/NPC/academy chat is not implemented.
 
 ## Persistence and resources
 
-Apply account `000001` and shard migrations through `000029` before runtime.
+Apply account migrations and shard migrations through `000047` before runtime.
 Shard `000007` is intentionally unresolved. Current paths depend on movement
 settings (`000021`), rental metadata (`000022`), return city (`000023`),
 progression rates (`000024`), mob rates (`000025`), quick slots (`000026`),
@@ -154,8 +172,8 @@ reduces parsing/startup work but is not region-scoped runtime storage.
   accept/progress/complete/reward handlers do not.
 - Magic parameters, socket/bind/advanced-elixir fields and several appearance
   or container formats remain placeholders.
-- Guild/academy fields, stealth/invisibility, dungeons and neighbour planes are
-  not implemented.
+- Guild elections/wars, academy honor buffs, job safe-trade,
+  stealth/invisibility, dungeons and neighbour planes are not implemented.
 - GameReady deliberately emits no capture-unverified bootstrap spawn sequence.
 
 ## Verification

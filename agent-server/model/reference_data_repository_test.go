@@ -394,6 +394,8 @@ func referenceDataSkillDriverRow(id int64) ([]string, []driver.Value) {
 	row[28], row[29], row[31] = int64(11), int64(255), int64(50)
 	row[34], row[35], row[36], row[37], row[38], row[39] = int64(200), int64(600), int64(2400), int64(3000), int64(3000), int64(10)
 	row[41], row[42], row[43], row[44], row[45] = int64(skillParameterAttack), int64(9), int64(325), int64(32), int64(39)
+	columns = append(columns[:1], append([]string{"BASIC_CODE"}, columns[1:]...)...)
+	row = append(row[:1], append([]driver.Value{"SKILL_TEST"}, row[1:]...)...)
 	return columns, row
 }
 

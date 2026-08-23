@@ -19,5 +19,5 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /etc/aegiscore
 COPY --from=builder /app/agent-server-bin ./agent-server
 
-EXPOSE 15882
+EXPOSE 15882 15883 15884
 CMD ["./agent-server"]

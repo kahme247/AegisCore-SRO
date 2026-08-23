@@ -13,15 +13,20 @@ import (
 type GameplayRepositories struct {
 	ReferenceData           model.ReferenceDataRepository
 	Characters              model.CharacterRepository
+	CharacterRename         model.CharacterRenameRepository
 	Inventory               model.InventoryRepository
+	AvatarInventory         model.AvatarInventoryRepository
+	MonsterMasks            model.MonsterMaskRepository
 	InventoryRelocator      model.InventoryRelocator
 	Economy                 model.EconomyRepository
 	ItemMall                model.ItemMallRepository
 	GuildStorage            model.GuildStorageRepository
+	Social                  model.SocialRepository
 	Exchange                model.ExchangeRepository
 	ItemUse                 model.ItemUseRepository
 	SpeedEffects            model.SpeedEffectRepository
 	ItemServices            model.ItemServiceRepository
+	ItemBuffs               model.ItemBuffRepository
 	Alchemy                 model.AlchemyRepository
 	Teleport                model.TeleportRepository
 	CharacterCreator        model.CharacterCreator
@@ -40,6 +45,8 @@ type GameplayRepositories struct {
 	MovementSettings        model.MovementSettingsRepository
 	GameplayRates           model.GameplayRateRepository
 	Vitals                  model.CharacterVitalsRepository
+	Hwan                    model.HwanRepository
+	COS                     model.COSRepository
 }
 
 func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, error) {
@@ -51,8 +58,17 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.Characters, err = model.NewCharacterRepository(shard, account); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character repository: %w", err)
 	}
+	if repositories.CharacterRename, err = model.NewCharacterRenameRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent character-rename repository: %w", err)
+	}
 	if repositories.Inventory, err = model.NewInventoryRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent inventory repository: %w", err)
+	}
+	if repositories.AvatarInventory, err = model.NewAvatarInventoryRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent avatar inventory repository: %w", err)
+	}
+	if repositories.MonsterMasks, err = model.NewMonsterMaskRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent monster-mask repository: %w", err)
 	}
 	if repositories.InventoryRelocator, err = model.NewInventoryRelocationRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent inventory relocation repository: %w", err)
@@ -66,6 +82,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.GuildStorage, err = model.NewGuildStorageRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent guild-storage repository: %w", err)
 	}
+	if repositories.Social, err = model.NewSocialRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent social repository: %w", err)
+	}
 	if repositories.Exchange, err = model.NewExchangeRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent exchange repository: %w", err)
 	}
@@ -76,6 +95,7 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	repositories.ItemUse = itemUse
 	repositories.SpeedEffects = itemUse
 	repositories.ItemServices = itemUse
+	repositories.ItemBuffs = itemUse
 	if repositories.Alchemy, err = model.NewAlchemyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent alchemy repository: %w", err)
 	}
@@ -127,6 +147,12 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.Vitals, err = model.NewCharacterVitalsRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character vitals repository: %w", err)
+	}
+	if repositories.Hwan, err = model.NewHwanRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent HWAN repository: %w", err)
+	}
+	if repositories.COS, err = model.NewCOSRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent COS repository: %w", err)
 	}
 	return repositories, nil
 }

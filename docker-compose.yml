@@ -92,6 +92,7 @@ services:
     # the Gateway-to-Agent ticket installation port to the host.
     expose:
       - "15883"
+      - "15884"
     deploy:
       resources:
         limits:
@@ -108,6 +109,7 @@ services:
       AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/aegiscore/Media/server_dep/silkroad/textdata/leveldata.txt}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
+      AGENT_GIANT_MONSTER_SPAWN_RATIO: ${AGENT_GIANT_MONSTER_SPAWN_RATIO:-1000}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
       AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
       SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-1}
@@ -121,10 +123,17 @@ services:
       AGENT_ADMISSION_TLS_CERT_FILE: /run/secrets/aegiscore/agent-cert.pem
       AGENT_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/agent-key.pem
       AGENT_ADMISSION_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore/gateway-ca.pem
+      AGENT_MANAGEMENT_ENABLED: "${AGENT_MANAGEMENT_ENABLED:-0}"
+      AGENT_MANAGEMENT_HOST: "0.0.0.0"
+      AGENT_MANAGEMENT_PORT: "15884"
+      AGENT_MANAGEMENT_TLS_CERT_FILE: /run/secrets/aegiscore-management/agent-management-cert.pem
+      AGENT_MANAGEMENT_TLS_KEY_FILE: /run/secrets/aegiscore-management/agent-management-key.pem
+      AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore-management/smc-ca.pem
     volumes:
     - ./Data:/etc/aegiscore/Data:ro
     - ./Media/Media:/etc/aegiscore/Media:ro
     - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
+    - "${SRO_AGENT_MANAGEMENT_TLS_DIR:-./.local/smc-agent-tls}:/run/secrets/aegiscore-management:ro"
 
   gateway-server:
     build:
@@ -170,6 +179,57 @@ services:
       GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/gateway-key.pem
     volumes:
     - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/aegiscore:ro"
+
+  # Dedicated browser-facing management control plane. It is opt-in until an
+  # operator credential is configured and binds to host loopback by default.
+  # Browsers talk only to this service; Gateway and Agent control APIs remain
+  # private service-to-service boundaries.
+  smc-server:
+    profiles: ["smc"]
+    build:
+      context: .
+      dockerfile: smc-server/Dockerfile
+    image: aegiscore-smc-server:local
+    restart: unless-stopped
+    container_name: aegiscore-smc-server
+    networks:
+      - aegiscore
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SMC_PUBLIC_PORT:-15900}:15900"
+    environment:
+      DB_ACCOUNT_HOST: db
+      DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
+      DB_SHARD_HOST: db
+      DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
+      SMC_HOST: "0.0.0.0"
+      SMC_PORT: "15900"
+      SMC_ADMIN_USERNAME: "${SMC_ADMIN_USERNAME:-admin}"
+      SMC_ADMIN_PASSWORD: "${SMC_ADMIN_PASSWORD:-}"
+      SMC_ADMIN_PASSWORD_HASH: "${SMC_ADMIN_PASSWORD_HASH:-}"
+      SMC_ALLOW_WEAK_PASSWORD: "${SMC_ALLOW_WEAK_PASSWORD:-0}"
+      SMC_SESSION_TTL: "${SMC_SESSION_TTL:-8h}"
+      SMC_COOKIE_SECURE: "${SMC_COOKIE_SECURE:-0}"
+      SMC_AUDIT_PATH: "/var/lib/aegiscore-smc/audit.jsonl"
+      SMC_GATEWAY_ADDRESS: "gateway-server:15779"
+      SMC_AGENT_ADDRESS: "agent-server:15882"
+      SMC_AGENT_MANAGEMENT_ENABLED: "${SMC_AGENT_MANAGEMENT_ENABLED:-0}"
+      SMC_AGENT_MANAGEMENT_ENDPOINT: "https://agent-server:15884"
+      SMC_AGENT_MANAGEMENT_TLS_CERT_FILE: "/run/secrets/aegiscore-smc/smc-cert.pem"
+      SMC_AGENT_MANAGEMENT_TLS_KEY_FILE: "/run/secrets/aegiscore-smc/smc-key.pem"
+      SMC_AGENT_MANAGEMENT_TLS_CA_FILE: "/run/secrets/aegiscore-smc/agent-management-ca.pem"
+      SMC_AGENT_MANAGEMENT_TLS_SERVER_NAME: "${AGENT_MANAGEMENT_TLS_SERVER_NAME:-}"
+    volumes:
+      - smc-data:/var/lib/aegiscore-smc
+      - "${SRO_SMC_TLS_DIR:-./.local/smc-tls}:/run/secrets/aegiscore-smc:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:15900/healthz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
 
   # Opt-in until Gateway catalog negotiation is connected. Keeping this behind
   # a profile means a missing operator-built patch catalog cannot break the
@@ -236,3 +296,5 @@ volumes:
   mysql-data:
     # Keep the 8.0 volume untouched as the pre-cutover rollback point.
     name: ${MYSQL_DATA_VOLUME:-aegiscore-mysql-data-84}
+  smc-data:
+    name: ${SMC_DATA_VOLUME:-aegiscore-smc-data}

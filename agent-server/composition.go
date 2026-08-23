@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Harvi8/AegisCore/agent-server/handler/exchange"
+	"github.com/Harvi8/AegisCore/agent-server/management"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -22,6 +23,7 @@ type AgentDependencies struct {
 	Server                 *server.Server
 	AdmissionTickets       *auth.AdmissionTicketStore
 	AdmissionTicketServer  *auth.AdmissionTicketInstallServer
+	ManagementServer       *management.Server
 	UnhandledPacketsLogger *log.Logger
 	Pools                  *frameworkdb.Pools
 	ReferenceData          model.ReferenceDataRepository
@@ -44,6 +46,7 @@ func NewAgentServerWithDependencies(dependencies AgentDependencies) (AgentServer
 		Server:                 dependencies.Server,
 		AdmissionTickets:       dependencies.AdmissionTickets,
 		AdmissionTicketServer:  dependencies.AdmissionTicketServer,
+		ManagementServer:       dependencies.ManagementServer,
 		UnhandledPacketsLogger: dependencies.UnhandledPacketsLogger,
 		packetContext:          packetContext,
 		cancelPacketHandling:   cancelPacketHandling,

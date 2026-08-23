@@ -7,17 +7,24 @@ import (
 )
 
 const (
-	AgentHost                 = "agent.host"
-	AgentPort                 = "agent.port"
-	AgentModuleId             = "agent.module_id"
-	AgentDataPath             = "agent.data_path"
-	AgentPrelinkedNavdataFile = "agent.prelinked_navdata_file"
-	AgentLevelDataFile        = "agent.level_data_file"
-	AgentTrafficPacketLimit   = "agent.traffic_filter.packet_limit"
-	AgentTrafficWindowMS      = "agent.traffic_filter.window_ms"
-	AgentTimedBuffDuration    = "agent.client.timed_buff_duration"
-	AgentDiagnosticsEnabled   = "agent.diagnostics.enabled"
-	AgentDiagnosticsPort      = "agent.diagnostics.port"
+	AgentHost                      = "agent.host"
+	AgentPort                      = "agent.port"
+	AgentModuleId                  = "agent.module_id"
+	AgentDataPath                  = "agent.data_path"
+	AgentPrelinkedNavdataFile      = "agent.prelinked_navdata_file"
+	AgentLevelDataFile             = "agent.level_data_file"
+	AgentTrafficPacketLimit        = "agent.traffic_filter.packet_limit"
+	AgentTrafficWindowMS           = "agent.traffic_filter.window_ms"
+	AgentTimedBuffDuration         = "agent.client.timed_buff_duration"
+	AgentGiantMonsterSpawnRatio    = "agent.monsters.giant_spawn_ratio"
+	AgentDiagnosticsEnabled        = "agent.diagnostics.enabled"
+	AgentDiagnosticsPort           = "agent.diagnostics.port"
+	AgentManagementEnabled         = "agent.management.enabled"
+	AgentManagementHost            = "agent.management.host"
+	AgentManagementPort            = "agent.management.port"
+	AgentManagementTLSCertFile     = "agent.management.tls.cert_file"
+	AgentManagementTLSKeyFile      = "agent.management.tls.key_file"
+	AgentManagementTLSClientCAFile = "agent.management.tls.client_ca_file"
 
 	// AgentAdmission* configures the private Gateway-to-Agent mTLS listener.
 	// Certificate paths have no defaults so an Agent cannot start an insecure
@@ -52,8 +59,15 @@ func bindEnvAliases() {
 	viper.BindEnv(AgentTrafficPacketLimit, "AGENT_TRAFFIC_FILTER_PACKET_LIMIT")
 	viper.BindEnv(AgentTrafficWindowMS, "AGENT_TRAFFIC_FILTER_WINDOW_MS")
 	viper.BindEnv(AgentTimedBuffDuration, "AGENT_TIMED_BUFF_DURATION")
+	viper.BindEnv(AgentGiantMonsterSpawnRatio, "AGENT_GIANT_MONSTER_SPAWN_RATIO")
 	viper.BindEnv(AgentDiagnosticsEnabled, "AGENT_DIAGNOSTICS_ENABLED")
 	viper.BindEnv(AgentDiagnosticsPort, "AGENT_DIAGNOSTICS_PORT")
+	viper.BindEnv(AgentManagementEnabled, "AGENT_MANAGEMENT_ENABLED")
+	viper.BindEnv(AgentManagementHost, "AGENT_MANAGEMENT_HOST")
+	viper.BindEnv(AgentManagementPort, "AGENT_MANAGEMENT_PORT")
+	viper.BindEnv(AgentManagementTLSCertFile, "AGENT_MANAGEMENT_TLS_CERT_FILE")
+	viper.BindEnv(AgentManagementTLSKeyFile, "AGENT_MANAGEMENT_TLS_KEY_FILE")
+	viper.BindEnv(AgentManagementTLSClientCAFile, "AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE")
 	viper.BindEnv(AgentAdmissionHost, "AGENT_ADMISSION_HOST")
 	viper.BindEnv(AgentAdmissionPort, "AGENT_ADMISSION_PORT")
 	viper.BindEnv(AgentAdmissionTLSCertFile, "AGENT_ADMISSION_TLS_CERT_FILE")
@@ -75,8 +89,12 @@ func setDefaultValues() {
 	viper.SetDefault(AgentTrafficPacketLimit, 200)
 	viper.SetDefault(AgentTrafficWindowMS, 1000)
 	viper.SetDefault(AgentTimedBuffDuration, false)
+	viper.SetDefault(AgentGiantMonsterSpawnRatio, 1000)
 	viper.SetDefault(AgentDiagnosticsEnabled, false)
 	viper.SetDefault(AgentDiagnosticsPort, 6060)
+	viper.SetDefault(AgentManagementEnabled, false)
+	viper.SetDefault(AgentManagementHost, "127.0.0.1")
+	viper.SetDefault(AgentManagementPort, 15884)
 	// A bare Agent defaults to loopback. Container deployments explicitly bind
 	// this to their private service network through AGENT_ADMISSION_HOST.
 	viper.SetDefault(AgentAdmissionHost, "127.0.0.1")

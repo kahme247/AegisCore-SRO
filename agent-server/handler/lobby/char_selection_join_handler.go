@@ -49,7 +49,7 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 
 	owner, ownerErr := characterOwner(session)
 	if ownerErr != nil {
-		return sendJoinResult(session, ResultFalse)
+		return sendJoinResult(session, ResultFalse, JOIN_SMERR_CANT_ACCESS_PARENT_SERVER)
 	}
 	if !session.EnterLobby() {
 		return fmt.Errorf("character join is invalid while session is %s", session.LifecyclePhase())
@@ -57,36 +57,36 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 
 	charName, err := packet.ReadString()
 	if err != nil || charName == "" || packet.Remaining() != 0 {
-		return sendJoinResult(session, ResultFalse)
+		return sendJoinResult(session, ResultFalse, JOIN_ERROR_CHARACTER_NAME_STRING)
 	}
 	char, err := h.characters.CharacterForOwner(ctx, charName, owner.UserID, owner.ShardID)
 	if err != nil || char.ID == 0 || char.IsDeleting || char.User != int(owner.UserID) || char.Shard != int(owner.ShardID) {
 		// Unknown, foreign, and deleting characters all receive the same
 		// rejection. Do not instantiate a player or disclose ownership.
-		return sendJoinResult(session, ResultFalse)
+		return sendJoinResult(session, ResultFalse, JOIN_MSG_ERROR_ID)
 	}
 	if char.HP == 0 {
 		recovery, ok := h.characters.(deadCharacterJoinRecoveryStore)
 		if !ok {
-			return sendJoinResult(session, ResultFalse)
+			return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
 		}
 		fullHP := utils.BaseHPOrMP(char.Level, char.Str)
 		fullMP := utils.BaseHPOrMP(char.Level, char.Int)
 		updated, err := recovery.RecoverDeadCharacterForJoin(ctx, char.ID, owner.UserID, owner.ShardID, fullHP, fullMP)
 		if err != nil || !updated {
 			log.Warnf("failed to recover dead character %d for join: %v", char.ID, err)
-			return sendJoinResult(session, ResultFalse)
+			return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
 		}
 		char, err = h.characters.CharacterForOwner(ctx, charName, owner.UserID, owner.ShardID)
 		if err != nil || char.HP != fullHP || char.MP != fullMP {
-			return sendJoinResult(session, ResultFalse)
+			return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
 		}
 	}
 
 	player, err := h.loadSelectedPlayer(ctx, char, session)
 	if err != nil {
 		log.Debugf("rejecting character join for account %d: %v", owner.UserID, err)
-		return sendJoinResult(session, ResultFalse)
+		return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
 	}
 	if !session.BeginCharacterLoading() {
 		return fmt.Errorf("character join could not begin loading while session is %s", session.LifecyclePhase())
@@ -110,7 +110,7 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 	}()
 	if err := world.AddPlayer(player); err != nil {
 		log.Debugf("rejecting duplicate character join for account %d: %v", owner.UserID, err)
-		return sendJoinResult(session, ResultFalse)
+		return sendJoinResult(session, ResultFalse, JOIN_MSG_ERROR_OVERLAP)
 	}
 	addedToWorld = true
 	player.SetLifeState(model.Spawning)
@@ -121,7 +121,7 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 	session.UserContext.CharName = player.CharName
 	session.UserContext.RefObjId = player.GetRefObjectID()
 
-	joinResult := buildJoinResult(ResultTrue)
+	joinResult := buildJoinResult(ResultTrue, 0)
 	dataBegin := network.EmptyPacket()
 	dataBegin.MessageID = opcode.CharacterDataBegin
 	if err := session.SendBatch([]network.Packet{joinResult, dataBegin}); err != nil {
@@ -152,6 +152,14 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 		return nil, model.ErrCharacterNotFound
 	}
 
+	avatarInventory := model.NewInventory(nil)
+	var err error
+	if h != nil && h.avatarInventory != nil {
+		avatarInventory, err = h.avatarInventory.GetCharacterAvatarInventory(ctx, int64(char.ID))
+		if err != nil {
+			return nil, err
+		}
+	}
 	inventory, err := h.loadPlayerInventory(ctx, int64(char.ID))
 	if err != nil {
 		return nil, err
@@ -186,13 +194,14 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	// different vertical scale than the client position protocol.
 
 	player := &model.Player{
-		SRObject:      model.NewSRObject(),
-		Session:       session,
-		ID:            char.ID,
-		CharName:      char.Name,
-		Scale:         char.Scale,
-		Inventory:     inventory,
-		InventorySize: char.InventorySize,
+		SRObject:        model.NewSRObject(),
+		Session:         session,
+		ID:              char.ID,
+		CharName:        char.Name,
+		Scale:           char.Scale,
+		Inventory:       inventory,
+		AvatarInventory: avatarInventory,
+		InventorySize:   char.InventorySize,
 		BaseStats: model.BaseStats{
 			HP:  char.HP,
 			MP:  char.MP,
@@ -241,7 +250,35 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	if err := h.loadPlayerItemServices(ctx, player); err != nil {
 		return nil, err
 	}
+	if err := h.loadPlayerItemBuffs(ctx, player); err != nil {
+		return nil, err
+	}
+	if h.hwan != nil {
+		snapshot, err := h.hwan.Load(ctx, player.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load character HWAN state: %w", err)
+		}
+		player.CommitHwanSnapshot(snapshot)
+	}
 	return player, nil
+}
+
+func (h *CharacterSelectionHandler) loadPlayerItemBuffs(ctx context.Context, player *model.Player) error {
+	if player == nil || h == nil || h.itemBuffs == nil {
+		return nil
+	}
+	effects, err := h.itemBuffs.LoadItemBuffs(ctx, int64(player.ID))
+	if err != nil {
+		return err
+	}
+	for _, effect := range effects {
+		remaining := time.Until(effect.ExpiresAt)
+		if remaining <= 0 {
+			continue
+		}
+		player.CommitActiveBuff(effect.SkillID, model.NextActionUID(), remaining, effect.Modifiers)
+	}
+	return nil
 }
 
 func (h *CharacterSelectionHandler) loadPlayerItemServices(ctx context.Context, player *model.Player) error {
@@ -382,17 +419,20 @@ func (h *CharacterSelectionHandler) loadPlayerInventory(ctx context.Context, cha
 	return inventoryDAO.Snapshot(), nil
 }
 
-func sendJoinResult(session *server.Session, result byte) error {
+func sendJoinResult(session *server.Session, result byte, errorCode uint16) error {
 	if session == nil {
 		return fmt.Errorf("character join has no session")
 	}
-	return session.Send(buildJoinResult(result))
+	return session.Send(buildJoinResult(result, errorCode))
 }
 
-func buildJoinResult(result byte) network.Packet {
+func buildJoinResult(result byte, errorCode uint16) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = OpcodeCharSelectionJoinResponse
 	packet.WriteByte(result)
+	if result == ResultFalse {
+		packet.WriteUInt16(errorCode)
+	}
 	return packet
 }
 
@@ -422,8 +462,7 @@ func sendCharacterBootstrapBody(session *server.Session, player *model.Player) e
 	if traceBootstrap {
 		log.Infof("CHAR_BOOTSTRAP_TRACE inventory character=%s size=%d", player.CharName, pDataBody.PayloadLen())
 	}
-	pDataBody.WriteByte(5) // Avatar inventory size
-	pDataBody.WriteByte(0) // Avatar inventory item count
+	WriteAvatarInventoryToPacket(&pDataBody, player.AvatarInventory)
 	pDataBody.WriteByte(0) // Mastery section begin
 	masteries := player.MasterySnapshot()
 	masteryIDs := make([]uint32, 0, len(masteries))
@@ -588,23 +627,39 @@ func WriteCharDataToPacket(p *network.Packet, data *model.Player) {
 	p.WriteUInt64(data.Gold)
 	p.WriteUInt32(uint32(data.SkillPoints))
 	p.WriteUInt16(uint16(data.StatPoints))
-	p.WriteByte(0)
-	p.WriteUInt32(0)
+	p.WriteByte(data.RemainHwanCount)
+	p.WriteUInt32(data.GatheredHwanPoint)
 	p.WriteUInt32(uint32(data.BaseStats.HP))
 	p.WriteUInt32(uint32(data.BaseStats.MP))
 	p.WriteByte(1)
 	p.WriteByte(0)
 	p.WriteUInt16(0)
 	p.WriteUInt32(0)
-	p.WriteByte(0)
+	p.WriteByte(data.GetHwanLevel())
 	p.WriteByte(0)
 }
 
 func WriteInventoryToPacket(p *network.Packet, data model.Inventory) {
 	data = data.Snapshot()
-	p.WriteByte(45)
+	p.WriteByte(model.BaseInventorySize)
 	p.WriteByte(byte(len(data.Items)))
 	for _, slot := range model.SortedInventorySlots(data.Items) {
+		item := data.Items[slot]
+		p.WriteByte(slot)
+		model.WriteRentInfo(p, item)
+		p.WriteUInt32(item.GetRefObjectID())
+		model.WriteInventoryItem(p, item)
+	}
+}
+
+func WriteAvatarInventoryToPacket(p *network.Packet, data model.Inventory) {
+	data = data.Snapshot()
+	p.WriteByte(model.AvatarInventorySize)
+	p.WriteByte(byte(len(data.Items)))
+	for _, slot := range model.SortedInventorySlots(data.Items) {
+		if slot >= model.AvatarInventorySize {
+			continue
+		}
 		item := data.Items[slot]
 		p.WriteByte(slot)
 		model.WriteRentInfo(p, item)

@@ -133,12 +133,15 @@ type CharacterSelectionHandler struct {
 	mu                sync.Mutex
 	characters        CharacterStore
 	inventory         CharacterInventoryStore
+	avatarInventory   model.AvatarInventoryRepository
 	quests            model.CharacterQuestRepository
 	masteries         model.MasteryRepository
 	skills            model.CharacterSkillRepository
 	quickSlots        model.CharacterQuickSlotRepository
 	speedEffects      model.SpeedEffectRepository
 	itemServices      model.ItemServiceRepository
+	itemBuffs         model.ItemBuffRepository
+	hwan              model.HwanRepository
 	movement          model.MovementSettingsRepository
 	referenceData     *model.ReferenceDataCatalog
 	creationPolicy    model.CharacterCreationPolicyRepository
@@ -146,6 +149,22 @@ type CharacterSelectionHandler struct {
 	creator           model.CharacterCreator
 	loadPlayer        func(model.Char, *server.Session) (*model.Player, error)
 	world             characterJoinWorld
+}
+
+func (h *CharacterSelectionHandler) ConfigureHwanRepository(repository model.HwanRepository) error {
+	if h == nil || repository == nil {
+		return model.ErrHwanRepositoryUnavailable
+	}
+	h.hwan = repository
+	return nil
+}
+
+func (h *CharacterSelectionHandler) ConfigureAvatarInventoryRepository(repository model.AvatarInventoryRepository) error {
+	if h == nil || repository == nil {
+		return model.ErrAvatarRepositoryUnavailable
+	}
+	h.avatarInventory = repository
+	return nil
 }
 
 func (h *CharacterSelectionHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) error {
@@ -185,6 +204,14 @@ func (h *CharacterSelectionHandler) ConfigureItemServiceRepository(services mode
 		return model.ErrItemUseRepositoryUnavailable
 	}
 	h.itemServices = services
+	return nil
+}
+
+func (h *CharacterSelectionHandler) ConfigureItemBuffRepository(buffs model.ItemBuffRepository) error {
+	if h == nil || buffs == nil {
+		return model.ErrItemUseRepositoryUnavailable
+	}
+	h.itemBuffs = buffs
 	return nil
 }
 
