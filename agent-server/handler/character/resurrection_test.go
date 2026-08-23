@@ -21,6 +21,13 @@ type resurrectionRepositoryFake struct {
 	characterID int
 	hp, mp      int
 	updated     bool
+	itemResult  model.ItemUseResult
+	itemCalls   int
+}
+
+func (f *resurrectionRepositoryFake) UseResurrectionItem(context.Context, int64, model.ItemUseVitals) (model.ItemUseResult, error) {
+	f.itemCalls++
+	return f.itemResult, nil
 }
 
 func (f *resurrectionRepositoryFake) SaveVitals(context.Context, int, int, int) error { return nil }
@@ -54,7 +61,7 @@ func TestResurrectionRestoresPersistedAndRuntimeVitals(t *testing.T) {
 	repository := &resurrectionRepositoryFake{updated: true}
 	handler := &ResurrectionHandler{players: resurrectionPlayersFake{player: player}, repository: repository}
 	request := network.EmptyClientPacket()
-	if err := request.WriteByte(resurrectAtPresentPoint); err != nil {
+	if err := request.WriteByte(resurrectAtReturnPoint); err != nil {
 		t.Fatalf("build resurrection request: %v", err)
 	}
 
@@ -69,6 +76,29 @@ func TestResurrectionRestoresPersistedAndRuntimeVitals(t *testing.T) {
 	}
 	if player.GetLifeState() != model.Alive {
 		t.Fatalf("runtime resurrection state = %d, want alive", player.GetLifeState())
+	}
+}
+
+func TestPresentPointResurrectionConsumesCatalogScroll(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+	session := server.NewSession(serverConn, network.EncodingOptions{}, nil, nil, "resurrection-item-test")
+	t.Cleanup(func() { session.Close(); _ = clientConn.Close() })
+	session.UserContext.UniqueID, session.UserContext.CharacterID = 77, 123
+	player := &model.Player{ID: 123, Session: session, LifeState: model.Dead, Level: 1, BaseStats: model.BaseStats{HP: 0, MP: 50, Str: 20, Int: 20}}
+	player.SetUniqueID(77)
+	repository := &resurrectionRepositoryFake{itemResult: model.ItemUseResult{
+		Inventory: model.Inventory{Items: map[byte]model.Item{}}, HP: 200, MP: 200,
+		SourceSlot: 14, NewAmount: 2, ItemType: 0x6EEC,
+	}}
+	handler := &ResurrectionHandler{players: resurrectionPlayersFake{player: player}, repository: repository, items: repository}
+	request := network.EmptyClientPacket()
+	request.WriteByte(resurrectAtPresentPoint)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("present-point resurrection failed: %v", err)
+	}
+	if repository.itemCalls != 1 || player.GetLifeState() != model.Alive {
+		t.Fatalf("item calls=%d life=%d", repository.itemCalls, player.GetLifeState())
 	}
 }
 

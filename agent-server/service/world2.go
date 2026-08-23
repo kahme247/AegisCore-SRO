@@ -214,6 +214,10 @@ func (w *WorldService) GetPlayerByUniqueId(playerUniqueId uint32) (*model.Player
 	return w.index().playerByUniqueID(playerUniqueId)
 }
 
+func (w *WorldService) GetPlayerByCharacterID(characterID int) (*model.Player, error) {
+	return w.index().playerByCharacterID(characterID)
+}
+
 func (w *WorldService) GetNPCs() []*model.NPC {
 	return w.index().npcs()
 }
@@ -692,15 +696,16 @@ func (w *WorldService) loadSpawnData(continent string, spawns []model.SpawnDB) {
 				// so stationary NPCs face the direction authored in the shard DB.
 				Heading: float32(spawn.Heading),
 			},
-			RefObjID:       spawn.RefObjID,
-			NpcCodeName:    spawn.NpcCodeName,
-			Radius:         spawn.Radius,
-			GenerateRadius: spawn.GenerateRadius,
-			MaxTotalCount:  spawn.MaxTotalCount,
-			DelayTimeMin:   spawn.DelayTimeMin,
-			DelayTimeMax:   spawn.DelayTimeMax,
-			SightRange:     spawn.SightRange,
-			AggressType:    spawn.AggressType,
+			RefObjID:              spawn.RefObjID,
+			NpcCodeName:           spawn.NpcCodeName,
+			Radius:                spawn.Radius,
+			GenerateRadius:        spawn.GenerateRadius,
+			ChampionGenPercentage: spawn.ChampionGenPercentage,
+			MaxTotalCount:         spawn.MaxTotalCount,
+			DelayTimeMin:          spawn.DelayTimeMin,
+			DelayTimeMax:          spawn.DelayTimeMax,
+			SightRange:            spawn.SightRange,
+			AggressType:           spawn.AggressType,
 		}
 		spawnsByRegion[reg.Region.ID] = append(spawnsByRegion[reg.Region.ID], model.InitSpawnAreaFromSpawnNestWithRates(s, countRate, respawnRate))
 	}

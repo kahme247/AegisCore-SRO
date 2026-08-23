@@ -19,6 +19,10 @@ type RespawnManager struct {
 	referenceData      *model.ReferenceDataCatalog
 	gameplayRatesMutex sync.RWMutex
 	gameplayRates      interface{ Current() model.GameplayRates }
+	rarityMutex        sync.RWMutex
+	giantSpawnRatio    int
+	rollPercent        func(int) bool
+	rollOneIn          func(int) bool
 }
 
 const maxRespawnPositionAttempts = 32
@@ -41,13 +45,57 @@ var ErrRespawnReferenceCharacterUnavailable = errors.New("respawn reference char
 
 func GetRespawnManagerInstance() *RespawnManager {
 	respawnManagerOnce.Do(func() {
-		respawnManagerInstance = &RespawnManager{}
+		respawnManagerInstance = &RespawnManager{
+			giantSpawnRatio: 1000,
+			rollPercent: func(chance int) bool {
+				return chance >= 100 || chance > 0 && rand.Intn(100) < chance
+			},
+			rollOneIn: func(ratio int) bool {
+				return ratio > 0 && rand.Intn(ratio) == 0
+			},
+		}
 		respawnManagerInstance.Name = "RespawnManager"
 		respawnManagerInstance.initialDelay = time.Second
 		respawnManagerInstance.rate = time.Millisecond * 100
 		respawnManagerInstance.runnerFunc = respawnManagerInstance.respawn
 	})
 	return respawnManagerInstance
+}
+
+// ConfigureGiantSpawnRatio mirrors SR_GameServer's GiantMonster_SpawnRatio.
+// The value is a denominator (1000 means one giant per 1000 eligible spawns);
+// zero disables runtime giant generation. Authored giant/party rows are not
+// affected.
+func (s *RespawnManager) ConfigureGiantSpawnRatio(ratio int) {
+	if s == nil {
+		return
+	}
+	if ratio < 0 {
+		ratio = 0
+	}
+	s.rarityMutex.Lock()
+	s.giantSpawnRatio = ratio
+	s.rarityMutex.Unlock()
+}
+
+func (s *RespawnManager) selectRuntimeRarity(refRarity int, championPercentage int) model.MonsterRarity {
+	if refRarity != int(model.MonsterNormal) {
+		if refRarity > 0 && refRarity <= int(^uint8(0)) {
+			return model.MonsterRarity(refRarity)
+		}
+		return model.MonsterNormal
+	}
+	s.rarityMutex.RLock()
+	giantRatio, rollOneIn, rollPercent := s.giantSpawnRatio, s.rollOneIn, s.rollPercent
+	s.rarityMutex.RUnlock()
+	if rollOneIn != nil && rollOneIn(giantRatio) {
+		return model.MonsterGiant
+	}
+	championPercentage = min(max(championPercentage, 0), 100)
+	if rollPercent != nil && rollPercent(championPercentage) {
+		return model.MonsterChampion
+	}
+	return model.MonsterNormal
 }
 
 // ConfigureReferenceData supplies the immutable catalog produced by the
@@ -166,17 +214,19 @@ func (s *RespawnManager) newNPCForSpawn(spawnArea *model.SpawnArea) (*model.NPC,
 	npc.RefObjectID = refObjectID
 	npc.TypeInfo = refChar.TypeInfo
 	npc.ConfigureMovementSpeeds(float32(refChar.Speed1), float32(refChar.Speed2))
-	if refChar.Rarity > 0xff {
-		npc.SetRarity(0xff)
-	} else if refChar.Rarity > 0 {
-		npc.SetRarity(byte(refChar.Rarity))
-	}
 	if refChar.TypeInfo.IsNPCMob() {
+		rarity := s.selectRuntimeRarity(refChar.Rarity, spawnArea.ChampionGenPercentage)
+		npc.SetRarity(byte(rarity))
+		multiplier := rarity.RuntimeStatMultiplier()
 		experience := uint64(0)
 		if refChar.ExpToGive > 0 {
-			experience = uint64(refChar.ExpToGive)
+			experience = uint64(refChar.ExpToGive) * uint64(multiplier)
 		}
-		npc.ConfigureCombat(refChar.MaxHP, experience)
+		maxHP := refChar.MaxHP
+		if maxHP > 0 && multiplier > 1 {
+			maxHP *= multiplier
+		}
+		npc.ConfigureCombat(maxHP, experience)
 		npc.ConfigureDecayTime(refChar.DecayTime)
 		npc.SetLifeState(model.Alive)
 		npc.ConfigureAI(refChar.Level, spawnArea.AggressType == byte(model.Aggressive), spawnArea.SightRange)

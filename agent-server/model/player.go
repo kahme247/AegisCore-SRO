@@ -70,6 +70,7 @@ type Player struct {
 	ID                    int
 	CharName              string
 	Inventory             Inventory
+	AvatarInventory       Inventory
 	InventorySize         byte
 	BaseStats             BaseStats
 	BaseAttackStats       AttackStats
@@ -90,6 +91,8 @@ type Player struct {
 	Masteries             map[uint32]byte
 	Skills                map[uint32]byte
 	ActiveBuffs           map[uint32]ActiveBuff
+	combatStatuses        map[CombatStatusKind]CombatStatus
+	characterMask         CharacterMask
 	activeBarrier         ActiveBarrier
 	QuickSlots            map[byte]CharacterQuickSlot
 	Quests                []CharacterQuest
@@ -103,6 +106,11 @@ type Player struct {
 	WalkSpeed             float32
 	RunSpeed              float32
 	HwanSpeed             float32
+	HwanLevel             byte
+	RemainHwanCount       byte
+	GatheredHwanPoint     uint32
+	berserkGeneration     uint64
+	berserkExpiresAt      time.Time
 	speedEffectPercent    int
 	speedEffectGeneration uint64
 	speedEffectToken      uint32
@@ -204,6 +212,36 @@ func (p *Player) CommitInventory(inventory Inventory) {
 	p.Mutex.Lock()
 	p.Inventory = inventory.Snapshot()
 	p.Mutex.Unlock()
+}
+
+func (p *Player) CommitInventoryAndAvatar(inventory, avatar Inventory) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.Inventory = inventory.Snapshot()
+	p.AvatarInventory = avatar.Snapshot()
+	p.Mutex.Unlock()
+}
+
+func (p *Player) SetCOSItemState(slot byte, cos *COS, state COSItemState) bool {
+	if p == nil || cos == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	item, exists := p.Inventory.Items[slot]
+	if !exists || item.Data != uint32(cos.PersistentID) || !item.IsContainer() || item.TypeID3 != 1 {
+		return false
+	}
+	snapshot := cos.Snapshot()
+	item.COS = COSItemInfo{
+		Present: true, RefObjectID: snapshot.RefObjectID, Kind: snapshot.Kind,
+		State: state, Name: snapshot.Name, Level: snapshot.Level,
+		RentEndsAt: snapshot.RentEndsAt, InventorySlot: snapshot.InventorySlot,
+	}
+	p.Inventory.Items[slot] = item
+	return true
 }
 
 // SetGold applies a persistence-backed balance change without replacing the
@@ -328,6 +366,9 @@ func (p *Player) SetLifeState(state LifeState) {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	p.LifeState = state
+	if state == Dead {
+		p.clearBerserkLocked()
+	}
 }
 
 func (p *Player) GetBodyState() BodyState {
@@ -382,6 +423,15 @@ func (p *Player) SetHwanSpeed(speed float32) {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	p.HwanSpeed = speed
+}
+
+func (p *Player) GetHwanLevel() byte {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.HwanLevel
 }
 
 func (p *Player) SetName(name string) {
@@ -458,6 +508,9 @@ func (p *Player) MovementSpeeds() (float32, float32) {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	multiplier := float32(100+p.speedEffectPercent) / 100
+	if p.BodyState == Berserker {
+		multiplier *= BerserkSpeedMultiplier
+	}
 	return p.WalkSpeed * multiplier, p.RunSpeed * multiplier
 }
 
@@ -476,14 +529,8 @@ func (p *Player) MaxVitals() (int, int) {
 	if p == nil {
 		return 0, 0
 	}
-	p.Mutex.Lock()
-	level, stats, bonus := p.Level, p.BaseStats, p.BonusStats
-	p.Mutex.Unlock()
-	maxHP := utils.BaseHPOrMP(level, stats.Str+bonus.Str) + bonus.HP
-	maxMP := utils.BaseHPOrMP(level, stats.Int+bonus.Int) + bonus.MP
-	maxHP += maxHP * bonus.HpPercent / 100
-	maxMP += maxMP * bonus.MpPercent / 100
-	return maxHP, maxMP
+	stats := p.DerivedStats()
+	return stats.MaxHP, stats.MaxMP
 }
 
 func (p *Player) AverageAttackPower(magical bool) int {
@@ -495,7 +542,11 @@ func (p *Player) AverageAttackPower(magical bool) int {
 	if magical {
 		minimum, maximum = stats.MagAttackMin, stats.MagAttackMax
 	}
-	return (minimum + maximum) / 2
+	power := (minimum + maximum) / 2
+	if p.GetBodyState() == Berserker {
+		power *= BerserkAttackMultiplier
+	}
+	return power
 }
 
 func (p *Player) CurrentVitals() (int, int) {
@@ -529,8 +580,9 @@ func (p *Player) PreviewHealing(hpAmount, mpAmount int) (hp, mp, healedHP, heale
 	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
 		return 0, 0, 0, 0, false
 	}
-	maxHP := utils.BaseHPOrMP(p.Level, p.BaseStats.Str+p.BonusStats.Str) + p.BonusStats.HP
-	maxMP := utils.BaseHPOrMP(p.Level, p.BaseStats.Int+p.BonusStats.Int) + p.BonusStats.MP
+	magic := equippedMagicOptionStats(p.Inventory, p.AvatarInventory)
+	maxHP := utils.BaseHPOrMP(p.Level, p.BaseStats.Str+p.BonusStats.Str+magic.Strength) + p.BonusStats.HP + magic.HP
+	maxMP := utils.BaseHPOrMP(p.Level, p.BaseStats.Int+p.BonusStats.Int+magic.Intellect) + p.BonusStats.MP + magic.MP
 	maxHP += maxHP * p.BonusStats.HpPercent / 100
 	maxMP += maxMP * p.BonusStats.MpPercent / 100
 	hp, mp = p.BaseStats.HP, p.BaseStats.MP
@@ -633,11 +685,13 @@ func (p *Player) DerivedStats() DerivedCharacterStats {
 	attackBonus := p.BonusAttackStats
 	defenseBonus := p.BonusDefenseStats
 	inventory := p.Inventory.Snapshot()
+	avatar := p.AvatarInventory.Snapshot()
 	p.Mutex.Unlock()
 	equipment := equippedItemStats(inventory)
-	effectiveStr, effectiveInt := stats.Str+bonus.Str, stats.Int+bonus.Int
-	maxHP := utils.BaseHPOrMP(level, effectiveStr) + bonus.HP
-	maxMP := utils.BaseHPOrMP(level, effectiveInt) + bonus.MP
+	magic := equippedMagicOptionStats(inventory, avatar)
+	effectiveStr, effectiveInt := stats.Str+bonus.Str+magic.Strength, stats.Int+bonus.Int+magic.Intellect
+	maxHP := utils.BaseHPOrMP(level, effectiveStr) + bonus.HP + magic.HP
+	maxMP := utils.BaseHPOrMP(level, effectiveInt) + bonus.MP + magic.MP
 	maxHP += maxHP * bonus.HpPercent / 100
 	maxMP += maxMP * bonus.MpPercent / 100
 	return DerivedCharacterStats{
@@ -649,8 +703,10 @@ func (p *Player) DerivedStats() DerivedCharacterStats {
 		MagAttackMax: applyStatPercent(utils.BaseMaxAttack(effectiveInt)+baseAttack.MagAttackMax+equipment.MagAttackMax+attackBonus.MagAttackMax, attackBonus.MagAttackPercent),
 		PhyDef:       applyStatPercent(utils.BaseDef(effectiveStr)+baseDefense.PhyDef+equipment.PhyDef+defenseBonus.PhyDef, defenseBonus.PhyDefPercent),
 		MagDef:       applyStatPercent(utils.BaseDef(effectiveInt)+baseDefense.MagDef+equipment.MagDef+defenseBonus.MagDef, defenseBonus.MagDefPercent),
-		HitRate:      applyStatPercent(11+baseAttack.HitRate+equipment.HitRate+attackBonus.HitRate, attackBonus.HitRatePercent),
-		ParryRate:    applyStatPercent(11+baseDefense.ParryRate+equipment.ParryRate+defenseBonus.ParryRate, defenseBonus.ParryRatePercent),
+		HitRate:      applyStatPercent(11+baseAttack.HitRate+equipment.HitRate+attackBonus.HitRate+magic.HitRate, attackBonus.HitRatePercent),
+		ParryRate:    applyStatPercent(11+baseDefense.ParryRate+equipment.ParryRate+defenseBonus.ParryRate+magic.ParryRate, defenseBonus.ParryRatePercent),
+		CriticalRate: applyStatPercent(baseAttack.CriticalRate+equipment.CriticalRate+attackBonus.CriticalRate+magic.CriticalRate, attackBonus.CriticalRatePercent),
+		BlockRate:    applyStatPercent(baseDefense.BlockRate+equipment.BlockRate+defenseBonus.BlockRate, defenseBonus.BlockRatePercent),
 		MaxHP:        maxHP,
 		MaxMP:        maxMP,
 	}
@@ -668,12 +724,23 @@ func (p *Player) SendMovementStateUpdate() {
 // BuildBodyStateUpdatePacket emits entity state category 4, which the vSRO
 // client parses as BodyState. Sending the old hardcoded value 2 placed every
 // joining character into Untouchable mode indefinitely.
-func BuildBodyStateUpdatePacket(uniqueID uint32, state BodyState) network.Packet {
+func BuildBodyStateUpdatePacket(uniqueID uint32, state BodyState, berserkEffect ...byte) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityUpdateMovementState
 	packet.WriteUInt32(uniqueID)
 	packet.WriteByte(4)
 	packet.WriteByte(byte(state))
+	// The stock vSRO 1.188 type-4 handler conditionally reads one more byte
+	// when BodyState is Berserker. This is a boolean effect variant (red/blue),
+	// not the numeric HWAN title level. Omitting it leaves the client parsing a
+	// truncated packet and can crash it as soon as Berserk is activated.
+	if state == Berserker {
+		variant := byte(0)
+		if len(berserkEffect) != 0 && berserkEffect[0] != 0 {
+			variant = 1
+		}
+		packet.WriteByte(variant)
+	}
 	return packet
 }
 
@@ -722,21 +789,31 @@ func (p *Player) CommitStatPoint(attribute CharacterAttribute) bool {
 }
 
 func (p *Player) ApplyDamage(damage int) (applied int, killed bool) {
-	return p.applyTypedDamage(damage, false)
+	result := p.ApplyCombatDamage(damage, false)
+	return result.AppliedDamage, result.Killed
 }
 
 func (p *Player) ApplyMagicalDamage(damage int) (applied int, killed bool) {
-	return p.applyTypedDamage(damage, true)
+	result := p.ApplyCombatDamage(damage, true)
+	return result.AppliedDamage, result.Killed
 }
 
-func (p *Player) applyTypedDamage(damage int, magical bool) (applied int, killed bool) {
+type PlayerDamageApplication struct {
+	WireDamage    int
+	AppliedDamage int
+	Killed        bool
+}
+
+// ApplyCombatDamage returns damage after absorption/barriers separately from
+// HP loss, which is capped by the character's remaining HP.
+func (p *Player) ApplyCombatDamage(damage int, magical bool) PlayerDamageApplication {
 	if p == nil || damage <= 0 {
-		return 0, false
+		return PlayerDamageApplication{}
 	}
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
-		return 0, false
+		return PlayerDamageApplication{}
 	}
 	if magical {
 		damage = p.absorbMagicalDamageLocked(damage)
@@ -744,17 +821,20 @@ func (p *Player) applyTypedDamage(damage int, magical bool) (applied int, killed
 		damage = p.absorbPhysicalDamageLocked(damage)
 	}
 	if damage <= 0 {
-		return 0, false
+		return PlayerDamageApplication{}
 	}
-	if damage > p.BaseStats.HP {
-		damage = p.BaseStats.HP
+	wireDamage := damage
+	appliedDamage := damage
+	if appliedDamage > p.BaseStats.HP {
+		appliedDamage = p.BaseStats.HP
 	}
-	p.BaseStats.HP -= damage
+	p.BaseStats.HP -= appliedDamage
 	if p.BaseStats.HP == 0 {
 		p.LifeState = Dead
-		return damage, true
+		p.clearBerserkLocked()
+		return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage, Killed: true}
 	}
-	return damage, false
+	return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage}
 }
 
 func (p *Player) CurrentHP() int {
@@ -824,6 +904,15 @@ func (p *Player) GetInventory() Inventory {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	return p.Inventory.Snapshot()
+}
+
+func (p *Player) GetAvatarInventory() Inventory {
+	if p == nil {
+		return Inventory{}
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.AvatarInventory.Snapshot()
 }
 
 func (p *Player) GetName() string {

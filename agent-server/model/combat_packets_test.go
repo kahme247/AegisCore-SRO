@@ -49,6 +49,27 @@ func TestCombatPacketGoldenFixtures(t *testing.T) {
 	}
 }
 
+func TestCombatDamageRecordsEncodeCriticalStatusAndBlock(t *testing.T) {
+	packet := BuildAttackEndDamageRecords(20, 30, []CombatDamageRecord{
+		{DamageState: DamageStateCritical, Damage: 0x010203, EffectMask: 2},
+		{AttackState: DamageAttackStateBlock},
+	})
+	want := []byte{
+		1,
+		30, 0, 0, 0,
+		20, 0, 0, 0,
+		1, 2, 1,
+		20, 0, 0, 0,
+		DamageAttackStateNormal, DamageStateCritical | DamageStateStatus,
+		3, 2, 1,
+		2, 0, 0, 0,
+		DamageAttackStateBlock,
+	}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("critical/status/block payload = % X, want % X", got, want)
+	}
+}
+
 func TestAttackBeginCarriesSelectedBaseSkill(t *testing.T) {
 	packet := BuildAttackBeginWithSkill(8419, 10, 20, 30, 40, false)
 	for range 3 {
@@ -96,11 +117,54 @@ func TestBuildTeleportCastEndCarriesTeleportFlagAndEndpoint(t *testing.T) {
 		0x01, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x08,
 		0x89, 0x5C,
 		0xD0, 0x01, 0x00, 0x00,
-		0x0B, 0x00, 0x00, 0x00,
 		0xFC, 0x01, 0x00, 0x00,
+		0x0B, 0x00, 0x00, 0x00,
 	}
 	if packet.MessageID != opcode.EntitySkillCastEnd || !bytes.Equal(packet.Payload(), want) {
 		t.Fatalf("teleport end = opcode %04X payload % X, want B071 % X", packet.MessageID, packet.Payload(), want)
+	}
+}
+
+func TestBuildMovementCastBeginCarriesEndpointBeforeAnimation(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(0x5C89),
+		Offset: math32.NewVector3(464, 508, 11),
+	}
+	packet := BuildMovementCastBegin(8142, 0x11223344, 0x11223344, 0x55667788, position)
+	payload := packet.Payload()
+	if packet.MessageID != opcode.EntitySkillCastBegin || len(payload) != 34 || payload[19] != 0x08 {
+		t.Fatalf("movement begin = opcode %04X payload % X", packet.MessageID, payload)
+	}
+	wantPosition := []byte{
+		0x89, 0x5C,
+		0xD0, 0x01, 0x00, 0x00,
+		0xFC, 0x01, 0x00, 0x00,
+		0x0B, 0x00, 0x00, 0x00,
+	}
+	if !bytes.Equal(payload[20:], wantPosition) {
+		t.Fatalf("movement begin endpoint = % X, want % X", payload[20:], wantPosition)
+	}
+}
+
+func TestBuildStatusAttackEndCarriesFrostbiteWithoutDamage(t *testing.T) {
+	packet := BuildStatusAttackEnd(200, 300, []SkillEffectTarget{{TargetUID: 200, EffectMask: 2}})
+	payload := packet.Payload()
+	if len(payload) != 25 || payload[9] != 1 || payload[10] != 1 || payload[11] != 1 {
+		t.Fatalf("status cast end = % X", payload)
+	}
+	if got := payload[18:21]; !bytes.Equal(got, []byte{0, 0, 0}) {
+		t.Fatalf("status-only damage = % X, want zero", got)
+	}
+	if got := payload[21:25]; !bytes.Equal(got, []byte{2, 0, 0, 0}) {
+		t.Fatalf("status effect = % X, want Frostbite bit 2", got)
+	}
+}
+
+func TestBuildBadEffectUpdateCarriesMaskAndHighEffectLevel(t *testing.T) {
+	packet := BuildBadEffectUpdate(200, 0x4002, []byte{7})
+	want := []byte{0xC8, 0, 0, 0, 0, 0, 4, 2, 0x40, 0, 0, 7}
+	if packet.MessageID != opcode.EntityUpdateStatus || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("bad-effect update = opcode %04X payload % X, want 3057 % X", packet.MessageID, packet.Payload(), want)
 	}
 }
 

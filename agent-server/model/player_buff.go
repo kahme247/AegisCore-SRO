@@ -5,6 +5,7 @@ import "time"
 type ActiveBuff struct {
 	SkillID   uint32
 	Token     uint32
+	SourceUID uint32
 	ExpiresAt time.Time
 	Modifiers BuffModifiers
 }
@@ -36,6 +37,10 @@ func (p *Player) HasAggroSuppression(catalog *ReferenceDataCatalog) bool {
 }
 
 func (p *Player) CommitActiveBuff(skillID, token uint32, duration time.Duration, modifiers BuffModifiers) (replacedToken uint32, ok bool) {
+	return p.CommitActiveBuffFrom(skillID, token, p.GetUniqueID(), duration, modifiers)
+}
+
+func (p *Player) CommitActiveBuffFrom(skillID, token, sourceUID uint32, duration time.Duration, modifiers BuffModifiers) (replacedToken uint32, ok bool) {
 	if p == nil || skillID == 0 || token == 0 || duration <= 0 {
 		return 0, false
 	}
@@ -53,8 +58,22 @@ func (p *Player) CommitActiveBuff(skillID, token uint32, duration time.Duration,
 		}
 	}
 	p.applyBuffModifiersLocked(modifiers, 1)
-	p.ActiveBuffs[token] = ActiveBuff{SkillID: skillID, Token: token, ExpiresAt: time.Now().Add(duration), Modifiers: modifiers}
+	p.ActiveBuffs[token] = ActiveBuff{SkillID: skillID, Token: token, SourceUID: sourceUID, ExpiresAt: time.Now().Add(duration), Modifiers: modifiers}
 	return replacedToken, true
+}
+
+func (p *Player) AggroAbsorber(catalog *ReferenceDataCatalog) (uint32, int, bool) {
+	if p == nil || catalog == nil {
+		return 0, 0, false
+	}
+	now := time.Now()
+	for _, buff := range p.ActiveBuffSnapshot() {
+		skill, exists := catalog.Skill(buff.SkillID)
+		if exists && buff.SourceUID != 0 && buff.SourceUID != p.GetUniqueID() && buff.ExpiresAt.After(now) && skill.AggroAbsorbPercent > 0 {
+			return buff.SourceUID, min(skill.AggroAbsorbPercent, 100), true
+		}
+	}
+	return 0, 0, false
 }
 
 func (p *Player) RemoveActiveBuff(token uint32) bool {

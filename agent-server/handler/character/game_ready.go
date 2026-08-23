@@ -32,6 +32,24 @@ type gameReadyVisibilityActivator interface {
 type GameReadyHandler struct {
 	players gameReadyPlayerLookup
 	mall    model.ItemMallRepository
+	cos     interface {
+		RehydratePlayer(context.Context, *model.Player) error
+	}
+	social interface {
+		Bootstrap(context.Context, *server.Session) error
+	}
+}
+
+func (h *GameReadyHandler) ConfigureCOS(runtime interface {
+	RehydratePlayer(context.Context, *model.Player) error
+}) {
+	h.cos = runtime
+}
+
+func (h *GameReadyHandler) ConfigureSocial(runtime interface {
+	Bootstrap(context.Context, *server.Session) error
+}) {
+	h.social = runtime
 }
 
 func NewGameReadyHandler(players gameReadyPlayerLookup, mall ...model.ItemMallRepository) *GameReadyHandler {
@@ -46,12 +64,13 @@ func NewGameReadyHandler(players gameReadyPlayerLookup, mall ...model.ItemMallRe
 // per-session registry. The old PacketChannel path was best-effort and left
 // the opcode unregistered, so a client could never complete the intended
 // loading lifecycle deterministically.
-func RegisterGameReadyHandler(target *server.Server, mall ...model.ItemMallRepository) {
+func RegisterGameReadyHandler(target *server.Server, mall ...model.ItemMallRepository) *GameReadyHandler {
 	if target == nil {
-		return
+		return nil
 	}
 	handler := NewGameReadyHandler(nil, mall...)
 	target.RegisterHandler(opcode.GameReadyRequest, handler.handleSessionPacket)
+	return handler
 }
 
 func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -121,9 +140,43 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 			return fmt.Errorf("send item mall balances: %w", err)
 		}
 	}
+	if h.cos != nil {
+		if err := h.cos.RehydratePlayer(ctx, player); err != nil {
+			return fmt.Errorf("rehydrate COS after GameReady: %w", err)
+		}
+	}
+	if h.social != nil {
+		if err := h.social.Bootstrap(ctx, session); err != nil {
+			return fmt.Errorf("bootstrap social systems after GameReady: %w", err)
+		}
+	}
 	publishRestoredItemServices(player)
+	publishRestoredActiveBuffs(player)
 	logrus.Debugf("player %s's client is ready", player.CharName)
 	return nil
+}
+
+func publishRestoredActiveBuffs(player *model.Player) {
+	if player == nil {
+		return
+	}
+	for _, buff := range player.ActiveBuffSnapshot() {
+		remaining := time.Until(buff.ExpiresAt)
+		if remaining <= 0 || buff.Token == 0 {
+			continue
+		}
+		added := model.BuildTimedBuffAdd(player.GetUniqueID(), buff.SkillID, buff.Token, uint32(remaining.Milliseconds()))
+		player.SendToSelfAndKnown(&added)
+		token := buff.Token
+		time.AfterFunc(remaining, func() {
+			if player.RemoveActiveBuff(token) {
+				removed := model.BuildBuffRemove(token)
+				player.SendToSelfAndKnown(&removed)
+				stats := player.BuildStatsUpdatePacket()
+				player.SendToSelf(&stats)
+			}
+		})
+	}
 }
 
 func publishRestoredItemServices(player *model.Player) {
@@ -138,7 +191,7 @@ func publishRestoredItemServices(player *model.Player) {
 			continue
 		}
 		if model.ItemServiceUsesItemPerk(effect) {
-			added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, effect.DailyBudget, remaining)
+			added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, model.ItemServicePerkValue(effect), remaining)
 			player.SendToSelfAndKnown(&added)
 		}
 		if premiumAdded, exists := model.BuildPremiumDailyAdd(token, effect, remaining); exists {

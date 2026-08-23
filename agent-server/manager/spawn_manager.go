@@ -159,8 +159,10 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 		verifiedPlayerLayout := isPlayer && typeInfo.IsPlayerCharacter()
 		verifiedMobLayout := typeInfo.IsNPCMob() && typeInfo.TypeID4 != 2 && typeInfo.TypeID4 != 3
 		verifiedNPCLayout := typeInfo.IsNPCNpc() && typeInfo.TypeID4 == 0
+		_, verifiedCOSLayout := object.(*model.COS)
+		verifiedCOSLayout = verifiedCOSLayout && typeInfo.IsCOS()
 		verifiedTeleportGateLayout := model.IsTeleportGateObject(object)
-		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedTeleportGateLayout) {
+		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedCOSLayout || verifiedTeleportGateLayout) {
 			supported[uid] = object
 			continue
 		}

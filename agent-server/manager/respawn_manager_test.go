@@ -124,6 +124,61 @@ func TestRespawnManagerRejectsNilReferenceCatalog(t *testing.T) {
 	}
 }
 
+func TestRespawnManagerSelectsAndScalesRuntimeMonsterClasses(t *testing.T) {
+	base := model.RefChar{
+		RefObject: model.RefObject{ID: 4001, CodeName: "MOB_TEST", TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1}},
+		Level:     10, MaxHP: 100, ExpToGive: 50, DefaultSkill1: 160,
+	}
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{4001: base}})
+
+	tests := []struct {
+		name           string
+		giant          bool
+		champion       bool
+		wantRarity     model.MonsterRarity
+		wantHP         int
+		wantExperience uint64
+	}{
+		{"normal", false, false, model.MonsterNormal, 100, 50},
+		{"champion", false, true, model.MonsterChampion, 200, 100},
+		{"giant", true, true, model.MonsterGiant, 2000, 1000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			respawn := &RespawnManager{
+				giantSpawnRatio: 1000,
+				rollOneIn:       func(int) bool { return test.giant },
+				rollPercent:     func(chance int) bool { return test.champion && chance == 10 },
+			}
+			if err := respawn.ConfigureReferenceData(catalog); err != nil {
+				t.Fatal(err)
+			}
+			npc, err := respawn.newNPCForSpawn(&model.SpawnArea{Spawn: model.Spawn{RefObjID: 4001, ChampionGenPercentage: 10}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := npc.MonsterRarity(); got != test.wantRarity {
+				t.Fatalf("rarity = %d, want %d", got, test.wantRarity)
+			}
+			if got := npc.CurrentHitPoints(); got != test.wantHP {
+				t.Fatalf("HP = %d, want %d", got, test.wantHP)
+			}
+			if got := npc.ExperienceReward(); got != test.wantExperience {
+				t.Fatalf("EXP = %d, want %d", got, test.wantExperience)
+			}
+		})
+	}
+}
+
+func TestRespawnManagerPreservesAuthoredUniqueEliteAndPartyStats(t *testing.T) {
+	for _, rarity := range []model.MonsterRarity{model.MonsterUnique, model.MonsterElite, model.MonsterPartyNormal, model.MonsterPartyChampion, model.MonsterPartyGiant, model.MonsterPartyUnique, model.MonsterPartyElite} {
+		respawn := &RespawnManager{rollOneIn: func(int) bool { return true }, rollPercent: func(int) bool { return true }}
+		if got := respawn.selectRuntimeRarity(int(rarity), 100); got != rarity {
+			t.Fatalf("authored rarity %d became %d", rarity, got)
+		}
+	}
+}
+
 func TestGenerateRandomPositionKeepsAuthoredRegionAndHeading(t *testing.T) {
 	spawn := &model.SpawnArea{Spawn: model.Spawn{
 		Position:       respawnTestPosition(25000, 100, 12, 200),

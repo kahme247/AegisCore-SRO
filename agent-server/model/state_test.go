@@ -24,8 +24,9 @@ func TestAuthoritativeModelStateValues(t *testing.T) {
 		{"body hwan", uint8(Hwan), 1},
 		{"body untouchable", uint8(Untouchable), 2},
 		{"body gm invincible", uint8(GmInvincible), 3},
-		{"body gm invisible", uint8(GmInvisible), 4},
-		{"body berserker", uint8(Berserker), 5},
+		{"body gm untouchable", uint8(GmUntouchable), 4},
+		{"body gm invisible", uint8(GmInvisible), 5},
+		{"body berserker", uint8(Berserker), 1},
 		{"body stealth", uint8(Stealth), 6},
 		{"body invisible", uint8(Invisible), 7},
 		{"motion stand", uint8(Stand), 0},
@@ -94,6 +95,7 @@ func TestBerserkerMovementAndLegacySpawnSerializationUseAuthoritativeValue(t *te
 		MotionState: Run,
 		BodyState:   Berserker,
 		RunSpeed:    30,
+		HwanLevel:   7,
 	}
 
 	if got, want := player.GetMovementSpeed(), float32(60); got != want {
@@ -104,6 +106,9 @@ func TestBerserkerMovementAndLegacySpawnSerializationUseAuthoritativeValue(t *te
 	packet := network.EmptyPacket()
 	WriteEntitySpawn(&packet, player)
 	payload := packet.Payload()
+	if len(payload) <= 5 || payload[5] != 7 {
+		t.Fatalf("serialized HWAN level = %x, want 7", payload)
+	}
 
 	// This is the existing spawn writer's state block: life, legacy unknown,
 	// motion, and body. The test locks in the corrected values without

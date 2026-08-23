@@ -1,11 +1,20 @@
 package model
 
 import (
+	"time"
+
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/sirupsen/logrus"
 )
+
+func entityHwanLevel(character any) byte {
+	if titled, ok := character.(interface{ GetHwanLevel() byte }); ok {
+		return titled.GetHwanLevel()
+	}
+	return 0
+}
 
 func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 	p.WriteUInt32(object.GetRefObjectID())
@@ -25,7 +34,7 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 			}
 
 			p.WriteByte(byte(player.GetScale()))
-			p.WriteByte(0) // HwanLevel
+			p.WriteByte(entityHwanLevel(player))
 			p.WriteByte(byte(player.GetPVPCape()))
 			p.WriteByte(1) // AutoInverstXP
 			inventory := player.GetInventory()
@@ -47,7 +56,22 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 			p.WriteByte(5) // Avatar Inventory Slots
 			p.WriteByte(0) // Avatar Items
 
-			p.WriteByte(0) // HasMask
+			mask, hasMask := CharacterMask{}, false
+			if masked, ok := player.(interface {
+				CharacterMask(time.Time) (CharacterMask, bool)
+			}); ok {
+				mask, hasMask = masked.CharacterMask(time.Now())
+			}
+			p.WriteBool(hasMask)
+			if hasMask {
+				p.WriteUInt32(mask.RefCharID)
+				p.WriteByte(mask.Scale)
+				count := min(len(mask.Skills), 255)
+				p.WriteByte(byte(count))
+				for _, skillID := range mask.Skills[:count] {
+					p.WriteUInt32(skillID)
+				}
+			}
 
 		} else if typeInfo.IsSiegeStruct() {
 			// NPC_FORTRESS_STRUCT
@@ -117,6 +141,14 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 					rarity = npc.Rarity()
 				}
 				p.WriteByte(rarity)
+			}
+			if typeInfo.IsCOS() {
+				cos, ok := object.(*COS)
+				if !ok {
+					logrus.Warnf("COS ref=%d uid=%d has model type %T", object.GetRefObjectID(), object.GetUniqueID(), object)
+					return
+				}
+				WriteCOSSpawnTail(p, cos.Snapshot())
 			}
 			//	//NPC
 			//	1   byte    TalkFlag
@@ -258,12 +290,47 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 	}
 }
 
+// WriteCOSSpawnTail is the vSRO 1.188 NPC_COS branch consumed after the
+// ordinary bionic/NPC state. The layout is cross-checked against RSBot's
+// SpawnedCos reader; unsupported guild metadata remains explicit and bounded.
+func WriteCOSSpawnTail(p *network.Packet, cos COSSnapshot) {
+	// Ride transports (TypeID4=1) end after the ordinary NPC state. Their
+	// owner association is delivered owner-only by 0x30C8, not in 0x3019.
+	if cos.Kind == COSRideTransport {
+		return
+	}
+	switch cos.Kind {
+	case COSGrowthPet, COSAbilityPet, COSFellowPet:
+		p.WriteString(cos.Name)
+	case COSGuild:
+		p.WriteString(cos.GuildName)
+	}
+	switch cos.Kind {
+	case COSJobTransport, COSGrowthPet, COSAbilityPet, COSGuild, COSCaptured, COSFellowPet:
+		p.WriteString(cos.OwnerName)
+	}
+	switch cos.Kind {
+	case COSJobTransport, COSGrowthPet, COSAbilityPet, COSGuild, COSFellowPet:
+		p.WriteByte(0) // owner job type
+		if cos.Kind != COSAbilityPet {
+			p.WriteByte(0) // owner PvP/murder state
+		}
+		if cos.Kind == COSGuild {
+			p.WriteUInt32(0) // owner reference/guild field
+		}
+	}
+	p.WriteUInt32(cos.OwnerUniqueID)
+	if cos.Kind == COSFellowPet {
+		p.WriteByte(0) // v188 fellow trailing discriminator
+	}
+}
+
 func WriteEntitySpawn(p *network.Packet, player *Player) {
 	// TODO not just players supported
 	p.WriteUInt32(uint32(player.GetRefObjectID()))
 
 	p.WriteByte(byte(player.Scale))
-	p.WriteByte(0) // HwanLevel
+	p.WriteByte(player.GetHwanLevel())
 	p.WriteByte(byte(player.PVPCape))
 	p.WriteByte(1) // AutoInverstXP
 	inventory := player.GetInventory()

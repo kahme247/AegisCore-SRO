@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Harvi8/AegisCore/framework/utils"
+)
 
 func TestDerivedStatsCombinesEquipmentEnhancementAndRuntimeEffects(t *testing.T) {
 	original := RefItems
@@ -91,5 +95,40 @@ func TestEquippedItemStatsIgnoresBackpackEquipment(t *testing.T) {
 	got := player.DerivedStats()
 	if got.PhyAttackMin != 9 || got.PhyAttackMax != 13 {
 		t.Fatalf("backpack item changed attack to %d-%d", got.PhyAttackMin, got.PhyAttackMax)
+	}
+}
+
+func TestEquippedMagicOptionsAffectDerivedStats(t *testing.T) {
+	player := &Player{
+		Level:     10,
+		BaseStats: BaseStats{Str: 20, Int: 20},
+		Inventory: NewInventory(map[byte]Item{
+			SlotHelmet: {MagicOptions: []MagicOption{
+				{ParamType: magicParamStrength, Value: 2},
+				{ParamType: magicParamIntellect, Value: 3},
+				{ParamType: magicParamHP, Value: 150},
+				{ParamType: magicParamMP, Value: 100},
+				{ParamType: magicParamHitRate, Value: 4},
+				{ParamType: magicParamEvasionRate, Value: 5},
+				{ParamType: magicParamCriticalRate, Value: 1},
+			}},
+			20: {MagicOptions: []MagicOption{{ParamType: magicParamStrength, Value: 99}}},
+		}),
+		AvatarInventory: NewInventory(map[byte]Item{
+			4: {MagicOptions: []MagicOption{{ParamType: magicParamStrength, Value: 1}}},
+		}),
+	}
+
+	got := player.DerivedStats()
+	if got.Strength != 23 || got.Intellect != 23 {
+		t.Fatalf("attributes = %d/%d, want 23/23", got.Strength, got.Intellect)
+	}
+	if got.HitRate != 15 || got.ParryRate != 16 || got.CriticalRate != 1 {
+		t.Fatalf("rates = hit %d parry %d critical %d", got.HitRate, got.ParryRate, got.CriticalRate)
+	}
+	wantHP := utils.BaseHPOrMP(10, 23) + 150
+	wantMP := utils.BaseHPOrMP(10, 23) + 100
+	if got.MaxHP != wantHP || got.MaxMP != wantMP {
+		t.Fatalf("max vitals = %d/%d, want %d/%d", got.MaxHP, got.MaxMP, wantHP, wantMP)
 	}
 }

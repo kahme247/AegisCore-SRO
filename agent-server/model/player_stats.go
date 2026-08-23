@@ -15,8 +15,66 @@ type DerivedCharacterStats struct {
 	MagDef       int
 	HitRate      int
 	ParryRate    int
+	CriticalRate int
+	BlockRate    int
 	MaxHP        int
 	MaxMP        int
+}
+
+type magicOptionStats struct {
+	Strength     int
+	Intellect    int
+	HP           int
+	MP           int
+	HitRate      int
+	ParryRate    int
+	CriticalRate int
+}
+
+const (
+	magicParamStrength     = uint32(0x00737472)
+	magicParamIntellect    = uint32(0x00696e74)
+	magicParamHP           = uint32(0x00006870)
+	magicParamMP           = uint32(0x00006d70)
+	magicParamHitRate      = uint32(0x00006872)
+	magicParamEvasionRate  = uint32(0x00006572)
+	magicParamCriticalRate = uint32(0x00637269)
+)
+
+func equippedMagicOptionStats(inventory, avatar Inventory) magicOptionStats {
+	var result magicOptionStats
+	apply := func(item Item) {
+		for _, option := range item.MagicOptions {
+			value := int(option.Value)
+			switch option.ParamType {
+			case magicParamStrength:
+				result.Strength += value
+			case magicParamIntellect:
+				result.Intellect += value
+			case magicParamHP:
+				result.HP += value
+			case magicParamMP:
+				result.MP += value
+			case magicParamHitRate:
+				result.HitRate += value
+			case magicParamEvasionRate:
+				result.ParryRate += value
+			case magicParamCriticalRate:
+				result.CriticalRate += value
+			}
+		}
+	}
+	for slot, item := range inventory.Items {
+		if slot <= SlotRightRing && slot != SlotExtra {
+			apply(item)
+		}
+	}
+	for slot, item := range avatar.Items {
+		if slot < AvatarInventorySize {
+			apply(item)
+		}
+	}
+	return result
 }
 
 type equipmentStats struct {

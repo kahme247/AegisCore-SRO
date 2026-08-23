@@ -36,6 +36,15 @@ func (i worldIndex) playerByUniqueID(uniqueID uint32) (*model.Player, error) {
 	return nil, errors.New(fmt.Sprintf("player with uniqueId %d does not exist", uniqueID))
 }
 
+func (i worldIndex) playerByCharacterID(characterID int) (*model.Player, error) {
+	i.world.mutex.Lock()
+	defer i.world.mutex.Unlock()
+	if player, exists := i.world.playersByCharacterID[characterID]; exists {
+		return player, nil
+	}
+	return nil, errors.New(fmt.Sprintf("player with character ID %d does not exist", characterID))
+}
+
 func (i worldIndex) npcs() []*model.NPC {
 	i.world.mutex.Lock()
 	defer i.world.mutex.Unlock()

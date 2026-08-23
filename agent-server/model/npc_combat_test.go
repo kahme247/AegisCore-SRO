@@ -1,6 +1,7 @@
 package model
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +73,32 @@ func TestNPCFreezeStopsAndRestoresMovement(t *testing.T) {
 	}
 }
 
+func TestNPCCombatBadEffectStateAggregatesAllFamiliesAndLevels(t *testing.T) {
+	now := time.Now()
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.ConfigureCombat(1000, 10)
+	npc.SetLifeState(Alive)
+	for _, status := range []CombatStatus{
+		{Kind: CombatStatusFrostbite, SkillID: 1, Power: 240, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusPoison, SkillID: 2, Power: 206, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDarkness, SkillID: 3, Level: 11, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDamageTakenUp, SkillID: 4, Level: 9, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusHidden, SkillID: 5, Level: 7, ExpiresAt: now.Add(time.Minute)},
+	} {
+		if !npc.ApplyCombatStatus(status) {
+			t.Fatalf("failed to apply %+v", status)
+		}
+	}
+	mask, levels := npc.CombatBadEffectState(now)
+	wantMask := uint32(1<<1 | 1<<4 | 1<<13 | 1<<20 | 1<<24)
+	if mask != wantMask {
+		t.Fatalf("mask = %#x, want %#x", mask, wantMask)
+	}
+	if !slices.Equal(levels, []byte{11, 9, 7}) {
+		t.Fatalf("levels = %v, want [11 9 7]", levels)
+	}
+}
+
 func TestNPCDeathQueuesOneReplacement(t *testing.T) {
 	area := &SpawnArea{
 		Spawn:       Spawn{DelayTimeMin: 1, DelayTimeMax: 1},
@@ -96,5 +123,25 @@ func TestNPCDeathQueuesOneReplacement(t *testing.T) {
 	}
 	if got := area.TakeDueRespawns(time.Now().Add(2 * time.Second)); got != 1 {
 		t.Fatalf("due replacements = %d, want 1", got)
+	}
+}
+
+func TestNPCAggroTableRetargetsAfterTauntAndReduction(t *testing.T) {
+	npc := &NPC{}
+	npc.AddAggro(100, 500)
+	npc.AddAggro(200, 300)
+	if _, _, _, target := npc.AIProfile(); target != 100 {
+		t.Fatalf("initial target = %d, want 100", target)
+	}
+	npc.AddAggro(200, 250)
+	if _, _, _, target := npc.AIProfile(); target != 200 {
+		t.Fatalf("taunted target = %d, want 200", target)
+	}
+	npc.ReduceAggro(200, 100)
+	if _, _, _, target := npc.AIProfile(); target != 100 {
+		t.Fatalf("reduced target = %d, want 100", target)
+	}
+	if got := npc.AggroValue(200); got != 450 {
+		t.Fatalf("remaining aggro = %d, want 450", got)
 	}
 }

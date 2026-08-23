@@ -300,13 +300,13 @@ func (p *Player) GetMovementSpeed() float32 {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	multiplier := float32(100+p.speedEffectPercent) / 100
+	if p.BodyState == Berserker {
+		multiplier *= BerserkSpeedMultiplier
+	}
 	switch p.MotionState {
 	case Walking:
 		return p.WalkSpeed * multiplier
 	case Running:
-		if p.BodyState == Berserk {
-			return p.RunSpeed * multiplier * 2
-		}
 		return p.RunSpeed * multiplier
 	default:
 		return p.RunSpeed * multiplier

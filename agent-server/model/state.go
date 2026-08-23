@@ -18,14 +18,15 @@ const (
 type BodyState = vsro188.BodyMode
 
 const (
-	Normal       BodyState = vsro188.BodyNormal
-	Hwan         BodyState = vsro188.BodyHwan
-	Untouchable  BodyState = vsro188.BodyUntouchable
-	GmInvincible BodyState = vsro188.BodyGMInvincible
-	GmInvisible  BodyState = vsro188.BodyGMInvisible
-	Berserker    BodyState = vsro188.BodyBerserker
-	Stealth      BodyState = vsro188.BodyStealth
-	Invisible    BodyState = vsro188.BodyInvisible
+	Normal        BodyState = vsro188.BodyNormal
+	Hwan          BodyState = vsro188.BodyHwan
+	Untouchable   BodyState = vsro188.BodyUntouchable
+	GmInvincible  BodyState = vsro188.BodyGMInvincible
+	GmUntouchable BodyState = vsro188.BodyGMUntouchable
+	GmInvisible   BodyState = vsro188.BodyGMInvisible
+	Berserker     BodyState = vsro188.BodyBerserker
+	Stealth       BodyState = vsro188.BodyStealth
+	Invisible     BodyState = vsro188.BodyInvisible
 
 	// Legacy names remain source-compatible aliases.
 	NoStatus   = Normal

@@ -50,6 +50,8 @@ const (
 	CharacterIncreaseStrengthResponse  uint16 = 0xB050
 	CharacterIncreaseIntellectRequest  uint16 = 0x7051
 	CharacterIncreaseIntellectResponse uint16 = 0xB051
+	CharacterBodyStateRequest          uint16 = 0x70A7
+	CharacterBodyStateResponse         uint16 = 0xB0A7
 	TeleportUseRequest                 uint16 = 0x705A
 	TeleportUseResponse                uint16 = 0xB05A
 	TeleportReadyRequest               uint16 = 0x34B5

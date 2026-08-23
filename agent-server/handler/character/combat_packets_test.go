@@ -3,6 +3,7 @@ package character
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"reflect"
 	"sync"
@@ -207,8 +208,8 @@ func TestCombatGhostWalkAcceptsStockAreaTargetPacket(t *testing.T) {
 	packet.WriteByte(2)
 	packet.WriteUInt16(24231)
 	packet.WriteUInt32(200)
-	packet.WriteUInt32(100)
 	packet.WriteUInt32(0)
+	packet.WriteUInt32(100)
 	if err := handler.handlePacket(context.Background(), session, packet); err != nil {
 		t.Fatalf("stock area-target Ghost Walk disconnected session: %v", err)
 	}
@@ -509,7 +510,7 @@ func TestCombatFireImbueBurnTicksAuthoritativeDamage(t *testing.T) {
 	if got, want := target.CurrentHitPoints(), 760; got != want {
 		t.Fatalf("burned HP = %d, want %d", got, want)
 	}
-	if len(sent) != 2 || sent[0].MessageID != opcode.EntityBuffAdd || sent[1].MessageID != opcode.EntitySkillCastBegin {
+	if len(sent) != 2 || sent[0].MessageID != opcode.EntityUpdateStatus || sent[1].MessageID != opcode.EntitySkillCastBegin {
 		t.Fatalf("burn packets = %04X", packetOpcodesForCombat(sent))
 	}
 }
@@ -589,6 +590,189 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	if next := handler.nextSkill[key]; !next.Equal(time.Unix(108, 0)) {
 		t.Fatalf("skill cooldown ends at %v, want %v", next, time.Unix(108, 0))
 	}
+}
+
+func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.T) {
+	const (
+		physicalSkillID = uint32(7001)
+		magicalSkillID  = uint32(7002)
+		blockedSkillID  = uint32(7003)
+		criticalParam   = uint32(0x00637269)
+	)
+	previous := model.RefItems
+	t.Cleanup(func() { model.RefItems = previous })
+	model.RefItems = map[uint32]model.RefItem{5001: {
+		RefObject: model.RefObject{ID: 5001, TypeInfo: model.TypeInfo{
+			TypeID1: model.TypeID1Item, TypeID2: model.TypeID2Wearable, TypeID3: model.TypeID3Weapon,
+		}},
+		PhyAttackMinLower: 100, PhyAttackMinUpper: 131,
+		PhyAttackMaxLower: 200, PhyAttackMaxUpper: 231,
+		PhyAttackIncrease: 10,
+		MagAttackMinLower: 50, MagAttackMinUpper: 81,
+		MagAttackMaxLower: 100, MagAttackMaxUpper: 131,
+		MagAttackIncrease: 5,
+		CritRateLower:     3, CritRateUpper: 3,
+	}}
+
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20},
+		Skills: map[uint32]byte{physicalSkillID: 1, magicalSkillID: 1, blockedSkillID: 1},
+		Inventory: model.NewInventory(map[byte]model.Item{
+			model.SlotPrimaryWeapon: {
+				SRObject: model.SRObject{RefObjectID: 5001},
+				Variance: model.WeaponVariance{
+					PhyAttack: 31, MagAttack: 31, CriticalRate: 31,
+				}.ToVariance(),
+				OptLevel:     2,
+				MagicOptions: []model.MagicOption{{ParamType: criticalParam, Value: 7}},
+			},
+		}),
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	if _, ok := player.CommitActiveBuff(900, 901, time.Minute, model.BuffModifiers{DamagePercent: 25}); !ok {
+		t.Fatal("failed to arrange the authored damage buff")
+	}
+	stats := player.DerivedStats()
+	if stats.PhyAttackMin != 200 || stats.PhyAttackMax != 330 || stats.MagAttackMin != 125 || stats.MagAttackMax != 192 || stats.CriticalRate != 10 {
+		t.Fatalf("equipment/buff derived stats = %+v, want physical 200-330 magical 125-192 critical 10", stats)
+	}
+
+	newMob := func(uid, refID uint32) *model.NPC {
+		mob := &model.NPC{SRObject: model.SRObject{
+			UniqueID: uid, RefObjectID: refID,
+			TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+			RtNavmeshPosition: combatTestPosition(24231, 104, 0, 100),
+		}, Type: "NPC", Mutex: &sync.Mutex{}}
+		mob.ConfigureCombat(5000, 10)
+		mob.SetLifeState(model.Alive)
+		mob.KnownObjectList = model.NewKnownObjectList(mob)
+		player.GetKnownObjectList().AddObject(mob)
+		return mob
+	}
+	physicalTarget := newMob(201, 9001)
+	magicalTarget := newMob(202, 9002)
+	blockedTarget := newMob(203, 9003)
+	world := &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{
+		201: physicalTarget, 202: magicalTarget, 203: blockedTarget,
+	}}
+	physicalSkill := model.RefSkill{
+		ID: physicalSkillID, BasicActivity: 2, AttackType: 5, AttackPercent: 200, AttackMin: 40, AttackMax: 60,
+		StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusBurn, Power: 25, Chance: 100, DurationMS: 5000}},
+	}
+	magicalSkill := model.RefSkill{ID: magicalSkillID, BasicActivity: 2, AttackType: 10, AttackPercent: 150, AttackMin: 10, AttackMax: 30}
+	blockedSkill := physicalSkill
+	blockedSkill.ID, blockedSkill.ConsumeMP, blockedSkill.ReuseDelay = blockedSkillID, 20, 3000
+	vitals := &combatVitalsFake{spent: true}
+	var sent []network.Packet
+	criticalRolls := 0
+	handler := &CombatHandler{
+		world: world, vitals: vitals, now: func() time.Time { return time.Unix(100, 0) },
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+			Characters: map[uint32]model.RefChar{
+				9001: {RefObject: model.RefObject{ID: 9001}, PhyDef: 130},
+				9002: {RefObject: model.RefObject{ID: 9002}, MagDef: 67},
+				9003: {RefObject: model.RefObject{ID: 9003}, PhyDef: 130, BlockRate: 100},
+			},
+			Skills: map[uint32]model.RefSkill{physicalSkillID: physicalSkill, magicalSkillID: magicalSkill, blockedSkillID: blockedSkill},
+		}),
+		hitRollPercent: func(int) bool { return true },
+		criticalRoll: func(rate int) bool {
+			criticalRolls++
+			if rate != 10 {
+				t.Fatalf("critical roll rate = %d, want equipment-derived 10", rate)
+			}
+			return true
+		},
+		blockRoll:   func(rate int) bool { return rate == 100 },
+		rollPercent: func(int) bool { return true },
+		send:        func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast:   func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(physicalSkillID, physicalTarget.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if got := physicalTarget.CurrentHitPoints(); got != 4000 {
+		t.Fatalf("physical critical target HP = %d, want 4000", got)
+	}
+	physicalRecord := combatBeginDamageRecord(t, sent, physicalSkillID)
+	if physicalRecord.attackState != model.DamageAttackStateNormal || physicalRecord.damageState != model.DamageStateCritical|model.DamageStateStatus || physicalRecord.damage != 1000 || physicalRecord.effectMask == 0 {
+		t.Fatalf("physical critical B070 = %+v, want critical/status damage 1000", physicalRecord)
+	}
+	if _, active := physicalTarget.CombatStatus(model.CombatStatusBurn, time.Unix(100, 0)); !active {
+		t.Fatal("landed physical skill did not connect its authored status")
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(magicalSkillID, magicalTarget.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if got := magicalTarget.CurrentHitPoints(); got != 4800 {
+		t.Fatalf("magical target HP = %d, want 4800", got)
+	}
+	magicalRecord := combatBeginDamageRecord(t, sent, magicalSkillID)
+	if magicalRecord.attackState != model.DamageAttackStateNormal || magicalRecord.damageState != model.DamageStateNormal || magicalRecord.damage != 200 || magicalRecord.effectMask != 0 {
+		t.Fatalf("magical B070 = %+v, want normal magical damage 200", magicalRecord)
+	}
+	if criticalRolls != 1 {
+		t.Fatalf("physical/magical critical rolls = %d, want only the physical skill to roll", criticalRolls)
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(blockedSkillID, blockedTarget.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockedTarget.CurrentHitPoints(); got != 5000 {
+		t.Fatalf("blocked target HP = %d, want 5000", got)
+	}
+	blockedRecord := combatBeginDamageRecord(t, sent, blockedSkillID)
+	if blockedRecord.attackState != model.DamageAttackStateBlock || blockedRecord.damageState != 0 || blockedRecord.damage != 0 || blockedRecord.effectMask != 0 {
+		t.Fatalf("blocked B070 = %+v, want block-only record", blockedRecord)
+	}
+	if _, active := blockedTarget.CombatStatus(model.CombatStatusBurn, time.Unix(100, 0)); active {
+		t.Fatal("blocked skill applied its status")
+	}
+	if _, _, _, targetUID := blockedTarget.AIProfile(); targetUID != 0 {
+		t.Fatalf("blocked skill created aggro target %d", targetUID)
+	}
+	if _, mp := player.CurrentVitals(); mp != 80 || vitals.spendCalls != 1 || vitals.cost != 20 {
+		t.Fatalf("blocked skill MP = %d, spend calls/cost = %d/%d; want 80 and 1/20", mp, vitals.spendCalls, vitals.cost)
+	}
+	wantCooldown := time.Unix(103, 0)
+	if got := handler.nextSkill[skillCooldownKey{playerUID: 100, skillID: blockedSkillID}]; !got.Equal(wantCooldown) {
+		t.Fatalf("blocked skill cooldown = %v, want %v", got, wantCooldown)
+	}
+}
+
+type combatTestDamageRecord struct {
+	attackState byte
+	damageState byte
+	damage      uint32
+	effectMask  uint32
+}
+
+func combatBeginDamageRecord(t *testing.T, packets []network.Packet, skillID uint32) combatTestDamageRecord {
+	t.Helper()
+	for index := len(packets) - 1; index >= 0; index-- {
+		payload := packets[index].Payload()
+		if packets[index].MessageID != opcode.EntitySkillCastBegin || len(payload) < 27 || binary.LittleEndian.Uint32(payload[3:7]) != skillID {
+			continue
+		}
+		record := combatTestDamageRecord{attackState: payload[26]}
+		if record.attackState&model.DamageAttackStateBlock != 0 {
+			return record
+		}
+		if len(payload) < 35 {
+			t.Fatalf("skill %d B070 damage record is truncated: % X", skillID, payload)
+		}
+		record.damageState = payload[27]
+		record.damage = uint32(payload[28]) | uint32(payload[29])<<8 | uint32(payload[30])<<16
+		record.effectMask = binary.LittleEndian.Uint32(payload[31:35])
+		return record
+	}
+	t.Fatalf("skill %d B070 damage record not found", skillID)
+	return combatTestDamageRecord{}
 }
 
 func TestCombatCastTimeSkillAppliesDamageAtAuthoredImpact(t *testing.T) {
@@ -676,6 +860,23 @@ func TestCombatStatusOnlyColdWaveAppliesFrostbite(t *testing.T) {
 	}
 	if mob.CurrentHitPoints() != 1000 {
 		t.Fatalf("status-only skill dealt direct damage: hp=%d", mob.CurrentHitPoints())
+	}
+	var statusPacket, castEnd *network.Packet
+	for index := range sent {
+		switch sent[index].MessageID {
+		case opcode.EntityUpdateStatus:
+			statusPacket = &sent[index]
+		case opcode.EntitySkillCastEnd:
+			castEnd = &sent[index]
+		case opcode.EntityBuffAdd:
+			t.Fatalf("Cold Wave published its casting skill as B0BD: % X", sent[index].Payload())
+		}
+	}
+	if statusPacket == nil || len(statusPacket.Payload()) < 11 || statusPacket.Payload()[6] != 4 || binary.LittleEndian.Uint32(statusPacket.Payload()[7:11]) != 2 {
+		t.Fatalf("Cold Wave status packet = %#v, want Frostbite abnormal-state bit 2", statusPacket)
+	}
+	if castEnd == nil || len(castEnd.Payload()) < 25 || binary.LittleEndian.Uint32(castEnd.Payload()[21:25]) != 2 {
+		t.Fatalf("Cold Wave cast end = %#v, want Frostbite effect record", castEnd)
 	}
 }
 

@@ -19,6 +19,7 @@ const (
 type ResurrectionHandler struct {
 	players    resurrectionPlayerLookup
 	repository model.CharacterVitalsRepository
+	items      model.ResurrectionItemRepository
 }
 
 type resurrectionPlayerLookup interface {
@@ -29,11 +30,14 @@ type resurrectionVisibilityReconciler interface {
 	ReconcileCharacterVisibility(model.ICharacter) []service.VisibilityDelta
 }
 
-func RegisterResurrectionHandler(target *server.Server, repository model.CharacterVitalsRepository) {
+func RegisterResurrectionHandler(target *server.Server, repository model.CharacterVitalsRepository, items ...model.ResurrectionItemRepository) {
 	if target == nil || repository == nil {
 		return
 	}
 	handler := &ResurrectionHandler{players: service.GetWorldServiceInstance(), repository: repository}
+	if len(items) > 0 {
+		handler.items = items[0]
+	}
 	target.RegisterHandler(opcode.CharacterResurrectRequest, handler.handlePacket)
 }
 
@@ -54,6 +58,34 @@ func (h *ResurrectionHandler) handlePacket(ctx context.Context, session *server.
 		return fmt.Errorf("character is not dead")
 	}
 	hp, mp := player.MaxVitals()
+	if mode == resurrectAtPresentPoint {
+		if h.items == nil {
+			return fmt.Errorf("present-point resurrection item service is unavailable")
+		}
+		_, currentMP := player.CurrentVitals()
+		player.LockEconomy()
+		result, useErr := h.items.UseResurrectionItem(ctx, int64(player.ID), model.ItemUseVitals{HP: 0, MP: currentMP, MaxHP: hp, MaxMP: mp})
+		if useErr != nil {
+			player.UnlockEconomy()
+			return useErr
+		}
+		player.CommitInventory(result.Inventory)
+		if !player.CommitResurrection(result.HP, result.MP) {
+			player.UnlockEconomy()
+			return fmt.Errorf("character item resurrection was superseded")
+		}
+		player.UnlockEconomy()
+		used := network.EmptyPacket()
+		used.MessageID = opcode.InventoryItemUseResponse
+		used.WriteByte(1)
+		used.WriteByte(result.SourceSlot)
+		used.WriteUInt16(result.NewAmount)
+		used.WriteUInt16(result.ItemType)
+		if err = session.Send(used); err != nil {
+			return err
+		}
+		return h.publishResurrection(player)
+	}
 	updated, err := h.repository.Resurrect(ctx, player.ID, hp, mp)
 	if err != nil {
 		return err
@@ -61,6 +93,10 @@ func (h *ResurrectionHandler) handlePacket(ctx context.Context, session *server.
 	if !updated || !player.CommitResurrection(hp, mp) {
 		return fmt.Errorf("character resurrection was superseded")
 	}
+	return h.publishResurrection(player)
+}
+
+func (h *ResurrectionHandler) publishResurrection(player *model.Player) error {
 	player.SendVitalsUpdate()
 	state := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), model.Alive)
 	player.SendToSelfAndKnown(&state)

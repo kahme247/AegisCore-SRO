@@ -12,7 +12,7 @@ type NPC struct {
 	SRObject
 	Type   string
 	Mutex  *sync.Mutex
-	rarity byte
+	rarity MonsterRarity
 	BodyState
 	LifeState
 	MotionState
@@ -33,13 +33,24 @@ func (n *NPC) SetRarity(rarity byte) {
 		return
 	}
 	n.combat.mutex.Lock()
-	n.rarity = rarity
+	// Preserve authored extension values. Valid identifies the stock classes
+	// AegisCore understands semantically, but the wire byte is forward-compatible.
+	n.rarity = MonsterRarity(rarity)
 	n.combat.mutex.Unlock()
 }
 
 func (n *NPC) Rarity() byte {
 	if n == nil {
 		return 0
+	}
+	n.combat.mutex.Lock()
+	defer n.combat.mutex.Unlock()
+	return byte(n.rarity)
+}
+
+func (n *NPC) MonsterRarity() MonsterRarity {
+	if n == nil {
+		return MonsterNormal
 	}
 	n.combat.mutex.Lock()
 	defer n.combat.mutex.Unlock()
@@ -100,6 +111,21 @@ const (
 	CombatStatusAttackDown
 	CombatStatusDamageTakenUp
 	CombatStatusStun
+	CombatStatusPoison
+	CombatStatusZombie
+	CombatStatusSleep
+	CombatStatusBind
+	CombatStatusDull
+	CombatStatusFear
+	CombatStatusShortSight
+	CombatStatusBleed
+	CombatStatusPetrify
+	CombatStatusDarkness
+	CombatStatusDisease
+	CombatStatusConfusion
+	CombatStatusPanic
+	CombatStatusCombustion
+	CombatStatusHidden
 )
 
 type CombatStatus struct {
@@ -108,7 +134,148 @@ type CombatStatus struct {
 	SourceUID uint32
 	SkillID   uint32
 	Power     int
+	Level     int
+	Payload   int
 	ExpiresAt time.Time
+}
+
+func CombatStatusBadEffectBit(kind CombatStatusKind) uint32 {
+	switch kind {
+	case CombatStatusFreeze:
+		return 1 << 0
+	case CombatStatusFrostbite:
+		return 1 << 1
+	case CombatStatusShock:
+		return 1 << 2
+	case CombatStatusBurn:
+		return 1 << 3
+	case CombatStatusPoison:
+		return 1 << 4
+	case CombatStatusZombie:
+		return 1 << 5
+	case CombatStatusSleep:
+		return 1 << 6
+	case CombatStatusBind:
+		return 1 << 7
+	case CombatStatusDull:
+		return 1 << 8
+	case CombatStatusFear:
+		return 1 << 9
+	case CombatStatusShortSight:
+		return 1 << 10
+	case CombatStatusBleed:
+		return 1 << 11
+	case CombatStatusPetrify:
+		return 1 << 12
+	case CombatStatusDarkness:
+		return 1 << 13
+	case CombatStatusStun:
+		return 1 << 14
+	case CombatStatusDisease:
+		return 1 << 15
+	case CombatStatusConfusion:
+		return 1 << 16
+	case CombatStatusPhysicalDefenseDown:
+		return 1 << 17 // Decay
+	case CombatStatusMagicalDefenseDown:
+		return 1 << 18 // Weak
+	case CombatStatusAttackDown:
+		return 1 << 19 // Impotent
+	case CombatStatusDamageTakenUp:
+		return 1 << 20 // Division
+	case CombatStatusPanic:
+		return 1 << 21
+	case CombatStatusCombustion:
+		return 1 << 22
+	case CombatStatusHidden:
+		return 1 << 24
+	default:
+		return 0
+	}
+}
+
+var combatBadEffectKinds = []CombatStatusKind{
+	CombatStatusFreeze, CombatStatusFrostbite, CombatStatusShock, CombatStatusBurn,
+	CombatStatusPoison, CombatStatusZombie, CombatStatusSleep, CombatStatusBind,
+	CombatStatusDull, CombatStatusFear, CombatStatusShortSight, CombatStatusBleed,
+	CombatStatusPetrify, CombatStatusDarkness, CombatStatusStun, CombatStatusDisease,
+	CombatStatusConfusion, CombatStatusPhysicalDefenseDown, CombatStatusMagicalDefenseDown,
+	CombatStatusAttackDown, CombatStatusDamageTakenUp, CombatStatusPanic,
+	CombatStatusCombustion, CombatStatusHidden,
+}
+
+// CombatBadEffectState returns the stock client's abnormal-state bitmask and
+// level bytes. Levels are present only for effects above Zombie, in ascending
+// bit order; among the currently supported states that means Stun.
+func (n *NPC) CombatBadEffectState(now time.Time) (uint32, []byte) {
+	var mask uint32
+	levels := make([]byte, 0, 1)
+	for _, kind := range combatBadEffectKinds {
+		status, active := n.CombatStatus(kind, now)
+		if !active {
+			continue
+		}
+		mask |= CombatStatusBadEffectBit(kind)
+		if CombatStatusBadEffectBit(kind) > 1<<5 {
+			level := status.Level
+			if level < 1 {
+				level = status.Power
+			}
+			if level > 255 {
+				level = 255
+			}
+			levels = append(levels, byte(level))
+		}
+	}
+	return mask, levels
+}
+
+func (n *NPC) RemoveCombatStatus(kind CombatStatusKind, token uint32) bool {
+	if n == nil || kind == 0 {
+		return false
+	}
+	n.combat.mutex.Lock()
+	status, exists := n.combat.statuses[kind]
+	if !exists || token != 0 && status.Token != token {
+		n.combat.mutex.Unlock()
+		return false
+	}
+	delete(n.combat.statuses, kind)
+	n.combat.mutex.Unlock()
+	n.restoreStatusMovementEffect(kind)
+	return true
+}
+
+func (n *NPC) CureCombatStatuses(mask uint32, maxLevel, count int, now time.Time) int {
+	return n.CureCombatStatusesWithCurse(mask, maxLevel, false, 0, 100, count, now, nil)
+}
+
+func (n *NPC) CureCombatStatusesWithCurse(statusMask uint32, statusMaxLevel int, cureCurse bool, curseMaxLevel, curseChance, count int, now time.Time, roll func(int) bool) int {
+	removed := 0
+	for _, kind := range combatBadEffectKinds {
+		bit := CombatStatusBadEffectBit(kind)
+		if bit == 0 || count > 0 && removed >= count {
+			continue
+		}
+		status, active := n.CombatStatus(kind, now)
+		if !active || !combatCureEligible(bit, status.Level, statusMask, statusMaxLevel, cureCurse, curseMaxLevel) {
+			continue
+		}
+		if bit > 1<<5 && roll != nil && !roll(curseChance) {
+			continue
+		}
+		if n.RemoveCombatStatus(kind, status.Token) {
+			removed++
+		}
+	}
+	return removed
+}
+
+func combatCureEligible(bit uint32, level int, statusMask uint32, statusMaxLevel int, cureCurse bool, curseMaxLevel int) bool {
+	if bit <= 1<<5 {
+		return statusMask&bit != 0 && (statusMaxLevel <= 0 || level <= statusMaxLevel)
+	}
+	return cureCurse && (curseMaxLevel <= 0 || level <= curseMaxLevel)
 }
 
 func (n *NPC) ApplyCombatStatus(status CombatStatus) bool {
@@ -199,10 +366,13 @@ type npcAIState struct {
 	sightRange     float32
 	attackSkillID  uint32
 	targetUID      uint32
+	threat         map[uint32]int64
 	nextAttack     time.Time
 	nextWander     time.Time
 	nextPursuit    time.Time
 	pursuitPending bool
+	aggroCandidate uint32
+	aggroReadyAt   time.Time
 }
 
 func (n *NPC) ConfigureAI(level int, aggressive bool, sightRange int) {
@@ -258,10 +428,53 @@ func (n *NPC) SetAggroTarget(uid uint32) {
 		return
 	}
 	n.ai.mutex.Lock()
+	if uid != 0 {
+		if n.ai.threat == nil {
+			n.ai.threat = make(map[uint32]int64)
+		}
+		if n.ai.threat[uid] < 1 {
+			n.ai.threat[uid] = 1
+		}
+	}
 	if n.ai.targetUID != uid {
 		n.ai.pursuitPending = uid != 0
 	}
 	n.ai.targetUID = uid
+	if uid != 0 {
+		n.ai.aggroCandidate = 0
+		n.ai.aggroReadyAt = time.Time{}
+	}
+	n.ai.mutex.Unlock()
+}
+
+// ReadyToAcquireAggro implements the ordinary SR_GameServer awareness phase:
+// seeing a player starts a reaction timer; it does not instantly commit the
+// monster to pursuit. Damage-created threat still calls SetAggroTarget and
+// therefore retaliates immediately.
+func (n *NPC) ReadyToAcquireAggro(uid uint32, now time.Time, delay time.Duration) bool {
+	if n == nil || uid == 0 {
+		return false
+	}
+	n.ai.mutex.Lock()
+	defer n.ai.mutex.Unlock()
+	if n.ai.targetUID != 0 {
+		return true
+	}
+	if n.ai.aggroCandidate != uid {
+		n.ai.aggroCandidate = uid
+		n.ai.aggroReadyAt = now.Add(delay)
+		return false
+	}
+	return !now.Before(n.ai.aggroReadyAt)
+}
+
+func (n *NPC) ClearAggroCandidate() {
+	if n == nil {
+		return
+	}
+	n.ai.mutex.Lock()
+	n.ai.aggroCandidate = 0
+	n.ai.aggroReadyAt = time.Time{}
 	n.ai.mutex.Unlock()
 }
 
@@ -270,11 +483,68 @@ func (n *NPC) ClearAggroTarget(uid uint32) {
 		return
 	}
 	n.ai.mutex.Lock()
-	if uid == 0 || n.ai.targetUID == uid {
-		n.ai.targetUID = 0
+	if uid == 0 {
+		clear(n.ai.threat)
+	} else {
+		delete(n.ai.threat, uid)
+	}
+	n.selectHighestThreatLocked()
+	n.ai.mutex.Unlock()
+}
+
+func (n *NPC) AddAggro(uid uint32, amount int) {
+	if n == nil || uid == 0 || amount <= 0 {
+		return
+	}
+	n.ai.mutex.Lock()
+	if n.ai.threat == nil {
+		n.ai.threat = make(map[uint32]int64)
+	}
+	n.ai.threat[uid] += int64(amount)
+	n.selectHighestThreatLocked()
+	n.ai.mutex.Unlock()
+}
+
+func (n *NPC) ReduceAggro(uid uint32, amount int) {
+	if n == nil || uid == 0 || amount <= 0 {
+		return
+	}
+	n.ai.mutex.Lock()
+	remaining := n.ai.threat[uid] - int64(amount)
+	if remaining > 0 {
+		n.ai.threat[uid] = remaining
+	} else {
+		delete(n.ai.threat, uid)
+	}
+	n.selectHighestThreatLocked()
+	n.ai.mutex.Unlock()
+}
+
+func (n *NPC) AggroValue(uid uint32) int64 {
+	if n == nil || uid == 0 {
+		return 0
+	}
+	n.ai.mutex.Lock()
+	defer n.ai.mutex.Unlock()
+	return n.ai.threat[uid]
+}
+
+func (n *NPC) selectHighestThreatLocked() {
+	previous := n.ai.targetUID
+	var selected uint32
+	var highest int64
+	for uid, threat := range n.ai.threat {
+		if threat > highest || threat == highest && (selected == 0 || uid < selected) {
+			selected, highest = uid, threat
+		}
+	}
+	n.ai.targetUID = selected
+	if selected != previous {
+		n.ai.pursuitPending = selected != 0
+	}
+	if selected == 0 {
 		n.ai.pursuitPending = false
 	}
-	n.ai.mutex.Unlock()
 }
 
 // ReadyToPursue lets a newly acquired or changed target override an in-flight
@@ -599,6 +869,8 @@ func (n *NPC) SetHwanSpeed(speed float32) {
 	defer n.Mutex.Unlock()
 	n.HwanSpeed = speed
 }
+
+func (n *NPC) GetHwanLevel() byte { return 0 }
 
 func (n *NPC) GetMovementSpeed() float32 {
 	return n.GetRunSpeed()

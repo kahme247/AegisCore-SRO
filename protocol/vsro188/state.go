@@ -17,14 +17,15 @@ const (
 type BodyMode uint8
 
 const (
-	BodyNormal       BodyMode = 0
-	BodyHwan         BodyMode = 1
-	BodyUntouchable  BodyMode = 2
-	BodyGMInvincible BodyMode = 3
-	BodyGMInvisible  BodyMode = 4
-	BodyBerserker    BodyMode = 5
-	BodyStealth      BodyMode = 6
-	BodyInvisible    BodyMode = 7
+	BodyNormal        BodyMode = 0
+	BodyBerserker     BodyMode = 1
+	BodyHwan                   = BodyBerserker
+	BodyUntouchable   BodyMode = 2
+	BodyGMInvincible  BodyMode = 3
+	BodyGMUntouchable BodyMode = 4
+	BodyGMInvisible   BodyMode = 5
+	BodyStealth       BodyMode = 6
+	BodyInvisible     BodyMode = 7
 )
 
 // MotionState covers the documented locomotion states. Action-state values

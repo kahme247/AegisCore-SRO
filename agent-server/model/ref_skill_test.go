@@ -2,6 +2,13 @@ package model
 
 import "testing"
 
+func TestNASRUNMallSkillExecutesAsBuff(t *testing.T) {
+	skill := RefSkill{CodeName: "SKILL_MALL_NASRUN_ECCENTRICDEMON_01", BasicActivity: 2, BuffDuration: 600000}
+	if skill.SystemOwner() != SkillSystemNone || skill.ExecutionKind() != SkillExecutionBuff {
+		t.Fatalf("NASRUN classification = owner %d execution %d", skill.SystemOwner(), skill.ExecutionKind())
+	}
+}
+
 func TestRefSkillParsesTaggedParametersAtArbitraryOffsets(t *testing.T) {
 	var skill RefSkill
 	skill.Params[6] = skillParameterAttack
@@ -52,7 +59,7 @@ func TestRefSkillParsesLightningImbueTransferAndShock(t *testing.T) {
 	if !skill.IsWeaponImbue() || skill.ExecutionKind() != SkillExecutionBuff {
 		t.Fatalf("lightning skill was not classified as an imbue: %+v", skill)
 	}
-	if skill.ShockPower != 240 || skill.ShockChance != 25 || skill.ShockDuration != 5000 {
+	if skill.ShockPower != 240 || skill.ShockChance != 25 || skill.ShockDuration != 24000 {
 		t.Fatalf("shock = power:%d chance:%d duration:%d", skill.ShockPower, skill.ShockChance, skill.ShockDuration)
 	}
 	if skill.TransferRange != 50 || skill.TransferCount != 2 {
@@ -68,7 +75,7 @@ func TestRefSkillParsesFireAndColdImbueStatuses(t *testing.T) {
 		skillParameterBurn, 240, 25, 108,
 	})
 	fire.parseParameters()
-	if len(fire.StatusEffects) != 1 || fire.StatusEffects[0] != (SkillStatusEffect{Kind: CombatStatusBurn, Power: 240, Chance: 25, DurationMS: 10800}) {
+	if len(fire.StatusEffects) != 1 || fire.StatusEffects[0] != (SkillStatusEffect{Kind: CombatStatusBurn, Power: 240, Payload: 108, Chance: 25, DurationMS: 24000}) {
 		t.Fatalf("fire statuses = %+v", fire.StatusEffects)
 	}
 
@@ -81,8 +88,8 @@ func TestRefSkillParsesFireAndColdImbueStatuses(t *testing.T) {
 	})
 	cold.parseParameters()
 	want := []SkillStatusEffect{
-		{Kind: CombatStatusFreeze, Power: 240, Chance: 5, DurationMS: 5000},
-		{Kind: CombatStatusFrostbite, Power: 240, Chance: 25, DurationMS: 5000},
+		{Kind: CombatStatusFreeze, Power: 240, Chance: 5, DurationMS: 24000},
+		{Kind: CombatStatusFrostbite, Power: 240, Chance: 25, DurationMS: 24000},
 	}
 	if len(cold.StatusEffects) != len(want) || cold.StatusEffects[0] != want[0] || cold.StatusEffects[1] != want[1] {
 		t.Fatalf("cold statuses = %+v, want %+v", cold.StatusEffects, want)
@@ -171,8 +178,72 @@ func TestRefSkillParsesDedicatedChineseSkillMechanics(t *testing.T) {
 	vital := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
 	copy(vital.Params[:], []int{0, skillParameterPhyDefDown, 30000, 80, 11, 712})
 	vital.parseParameters()
-	want := SkillStatusEffect{Kind: CombatStatusPhysicalDefenseDown, Power: 712, Chance: 80, DurationMS: 30000}
+	want := SkillStatusEffect{Kind: CombatStatusPhysicalDefenseDown, Power: 712, Level: 11, Chance: 80, DurationMS: 30000}
 	if vital.ExecutionKind() != SkillExecutionStatusAttack || len(vital.StatusEffects) != 1 || vital.StatusEffects[0] != want {
 		t.Fatalf("vital spot = %+v", vital)
+	}
+}
+
+func TestRefSkillParsesCatalogWideAbnormalStatesAndTeleportVariants(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []int
+		want   SkillStatusEffect
+	}{
+		{"poison", []int{skillParameterPoison, 240, 25, 91}, SkillStatusEffect{Kind: CombatStatusPoison, Power: 240, Payload: 91, Chance: 25, DurationMS: 24000}},
+		{"zombie", []int{skillParameterZombie, 206, 70}, SkillStatusEffect{Kind: CombatStatusZombie, Power: 206, Chance: 70, DurationMS: 20600}},
+		{"sleep", []int{skillParameterSleep, 5000, 80, 11}, SkillStatusEffect{Kind: CombatStatusSleep, Chance: 80, Level: 11, DurationMS: 5000}},
+		{"darkness", []int{skillParameterDarkness, 30000, 75, 10, 122}, SkillStatusEffect{Kind: CombatStatusDarkness, Power: 122, Chance: 75, Level: 10, DurationMS: 30000}},
+		{"bleed", []int{skillParameterBleed, 12000, 0, 9, 72, 65}, SkillStatusEffect{Kind: CombatStatusBleed, Power: 72, Chance: 65, Level: 9, DurationMS: 12000}},
+		{"panic", []int{skillParameterPanic, 8000, 60, 7}, SkillStatusEffect{Kind: CombatStatusPanic, Chance: 60, Level: 7, DurationMS: 8000}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var skill RefSkill
+			copy(skill.Params[:], test.params)
+			skill.TargetEnemyMob = true
+			skill.BasicActivity = 2
+			skill.parseParameters()
+			if len(skill.StatusEffects) != 1 || skill.StatusEffects[0] != test.want {
+				t.Fatalf("effects = %+v, want %+v", skill.StatusEffects, test.want)
+			}
+			if skill.ExecutionKind() != SkillExecutionStatusAttack {
+				t.Fatalf("execution kind = %d, want status attack", skill.ExecutionKind())
+			}
+		})
+	}
+
+	movement := RefSkill{BasicActivity: 2}
+	copy(movement.Params[:], []int{skillParameterTeleportV1, 500, 245})
+	movement.parseParameters()
+	if movement.ExecutionKind() != SkillExecutionMovement || movement.MovementDurationMS != 500 || movement.MovementDistance != 245 {
+		t.Fatalf("v1 teleport = %+v", movement)
+	}
+}
+
+func TestRefSkillParsesUtilitySkillFamiliesFromOfficialArgumentCounts(t *testing.T) {
+	cure := RefSkill{BasicActivity: 2}
+	copy(cure.Params[:], []int{
+		0, skillParameterCureStatus, 63, 36,
+		skillParameterCureLevel, skillParameterCureCurse, 100, 1,
+		skillParameterCureCount, 2,
+	})
+	cure.parseParameters()
+	if cure.ExecutionKind() != SkillExecutionCure || cure.CureStatusMask != 63 || cure.CureStatusMaxLevel != 36 || !cure.CureCurse || cure.CureCurseChance != 100 || cure.CureCurseMaxLevel != 1 || cure.CureCount != 2 {
+		t.Fatalf("water cure = %+v", cure)
+	}
+
+	absorb := RefSkill{BasicActivity: 2, TargetRequired: true, TargetEnemyMob: true}
+	copy(absorb.Params[:], []int{0, skillParameterAbsoluteDamage, 130, skillParameterDamageToMP, 0, 100})
+	absorb.parseParameters()
+	if absorb.ExecutionKind() != SkillExecutionMagicalAttack || absorb.AbsoluteDamage != 130 || absorb.DamageToHPPercent != 0 || absorb.DamageToMPPercent != 100 {
+		t.Fatalf("MP absorb = %+v", absorb)
+	}
+
+	transform := RefSkill{BasicActivity: 2, TargetRequired: true}
+	copy(transform.Params[:], []int{0, skillParameterTransformMask, 20, 10371})
+	transform.parseParameters()
+	if transform.ExecutionKind() != SkillExecutionTransform || transform.TransformMaxLevel != 20 || transform.TransformItemRefID != 10371 {
+		t.Fatalf("monster mask = %+v", transform)
 	}
 }

@@ -12,38 +12,40 @@ import (
 )
 
 type Spawn struct {
-	NestID         int
-	Position       navmeshv2.RtNavmeshPosition
-	RefObjID       uint64
-	NpcCodeName    string
-	Radius         int
-	GenerateRadius int
-	MaxTotalCount  int
-	DelayTimeMin   int
-	DelayTimeMax   int
-	SightRange     int
-	AggressType    byte
+	NestID                int
+	Position              navmeshv2.RtNavmeshPosition
+	RefObjID              uint64
+	NpcCodeName           string
+	Radius                int
+	GenerateRadius        int
+	MaxTotalCount         int
+	DelayTimeMin          int
+	DelayTimeMax          int
+	SightRange            int
+	AggressType           byte
+	ChampionGenPercentage int
 }
 
 type SpawnDB struct {
-	NestID         int
-	X              float32
-	Y              float32
-	Z              float32
-	Heading        int
-	RegionID       int16
-	RefObjID       uint64
-	NpcCodeName    string
-	Radius         int
-	GenerateRadius int
-	MaxTotalCount  int
-	DelayTimeMin   int
-	DelayTimeMax   int
-	SightRange     int
-	AggressType    byte
+	NestID                int
+	X                     float32
+	Y                     float32
+	Z                     float32
+	Heading               int
+	RegionID              int16
+	RefObjID              uint64
+	NpcCodeName           string
+	Radius                int
+	GenerateRadius        int
+	MaxTotalCount         int
+	DelayTimeMin          int
+	DelayTimeMax          int
+	SightRange            int
+	AggressType           byte
+	ChampionGenPercentage int
 }
 
-const SelectSpawnsForContinent string = `SELECT n.dwNestID, r.wRegionID, n.fLocalPosX, n.fLocalPosY, n.fLocalPosZ, n.wInitialDir, t.ObjID, c.CodeName, n.nRadius, n.nGenerateRadius, n.dwMaxTotalCount, n.dwDelayTimeMin, n.dwDelayTimeMax, t.SightRange, t.AggressType
+const SelectSpawnsForContinent string = `SELECT n.dwNestID, r.wRegionID, n.fLocalPosX, n.fLocalPosY, n.fLocalPosZ, n.wInitialDir, t.ObjID, c.CodeName, n.nRadius, n.nGenerateRadius, n.nChampionGenPercentage, n.dwMaxTotalCount, n.dwDelayTimeMin, n.dwDelayTimeMax, t.SightRange, t.AggressType
 FROM SRO_SHARD.REGION_REFERENCE r, SRO_SHARD.SPAWN_REF_NESTS n, SRO_SHARD.SPAWN_REF_TACTICS t, SRO_SHARD.CHAR_REF_DATA c
 WHERE r.ContinentName=?
 AND r.wRegionID = n.nRegionDBID
@@ -133,29 +135,30 @@ func (r *SQLContinentSpawnRepository) GetSpawnsForContinent(ctx context.Context,
 		var x, y, z float32
 		var refObjID uint64
 		var codeName string
-		var nestID, heading, radius, generateRadius, maxTotalCount, delayTimeMin, delayTimeMax, sightRange int
+		var nestID, heading, radius, generateRadius, championGenPercentage, maxTotalCount, delayTimeMin, delayTimeMax, sightRange int
 		var aggressType byte
 
-		if err := rows.Scan(&nestID, &regionID, &x, &y, &z, &heading, &refObjID, &codeName, &radius, &generateRadius, &maxTotalCount, &delayTimeMin, &delayTimeMax, &sightRange, &aggressType); err != nil {
+		if err := rows.Scan(&nestID, &regionID, &x, &y, &z, &heading, &refObjID, &codeName, &radius, &generateRadius, &championGenPercentage, &maxTotalCount, &delayTimeMin, &delayTimeMax, &sightRange, &aggressType); err != nil {
 			return nil, &ContinentSpawnRepositoryError{Operation: "scan", Err: err}
 		}
 
 		spawns = append(spawns, SpawnDB{
-			NestID:         nestID,
-			RegionID:       regionID,
-			X:              x,
-			Y:              y,
-			Z:              z,
-			Heading:        heading,
-			RefObjID:       refObjID,
-			NpcCodeName:    codeName,
-			Radius:         radius,
-			GenerateRadius: generateRadius,
-			MaxTotalCount:  maxTotalCount,
-			DelayTimeMin:   delayTimeMin,
-			DelayTimeMax:   delayTimeMax,
-			SightRange:     sightRange,
-			AggressType:    aggressType,
+			NestID:                nestID,
+			RegionID:              regionID,
+			X:                     x,
+			Y:                     y,
+			Z:                     z,
+			Heading:               heading,
+			RefObjID:              refObjID,
+			NpcCodeName:           codeName,
+			Radius:                radius,
+			GenerateRadius:        generateRadius,
+			ChampionGenPercentage: championGenPercentage,
+			MaxTotalCount:         maxTotalCount,
+			DelayTimeMin:          delayTimeMin,
+			DelayTimeMax:          delayTimeMax,
+			SightRange:            sightRange,
+			AggressType:           aggressType,
 		})
 	}
 	if err := rows.Err(); err != nil {

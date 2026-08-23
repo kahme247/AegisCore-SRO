@@ -126,6 +126,54 @@ func TestTeleportUsesValidatedLinkAndCompletesLoadingHandshake(t *testing.T) {
 	}
 }
 
+func TestReturnScrollUsesTeleportLoadingHandshakeWithoutGateResponse(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not prepare an in-world return-scroll session")
+	}
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(25000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{
+		selectEntityWorldFake: &selectEntityWorldFake{player: player},
+		region:                region,
+	}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	bootstraps := 0
+	handler.bootstrap = func(*server.Session, *model.Player) error {
+		bootstraps++
+		return nil
+	}
+
+	if err := handler.PrepareItemReturn(session, player); err != nil {
+		t.Fatalf("PrepareItemReturn() error = %v", err)
+	}
+	if session.LifecyclePhase() != server.SessionCharacterLoading || world.stops != 1 || world.flushes != 1 {
+		t.Fatalf("prepared state = %s stops=%d flushes=%d", session.LifecyclePhase(), world.stops, world.flushes)
+	}
+	destination := model.TeleportDestination{ID: 1, Region: 25000, X: 969, Z: 1369, WorldID: 1}
+	if err := handler.CompleteItemReturn(session, player, destination); err != nil {
+		t.Fatalf("CompleteItemReturn() error = %v", err)
+	}
+	if world.resets != 1 || world.stops != 2 || player.GetLifeState() != model.Spawning {
+		t.Fatalf("completed world state resets=%d stops=%d life=%d", world.resets, world.stops, player.GetLifeState())
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.TeleportReadyRequest || !reflect.DeepEqual(sent[0].Payload(), []byte{0xA8, 0x61}) {
+		t.Fatalf("return-scroll handshake = %#v", sent)
+	}
+	if err := handler.handleReady(context.Background(), session, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("handleReady() error = %v", err)
+	}
+	if bootstraps != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", bootstraps)
+	}
+}
+
 func TestTeleportRejectsUnlinkedDestinationBeforeMutation(t *testing.T) {
 	session, player, npc := selectEntityFixture(t)
 	session.UserContext.UserID = 7

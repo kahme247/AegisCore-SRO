@@ -27,3 +27,34 @@ func TestJoiningPlayerBodyStateUpdateIsNormal(t *testing.T) {
 		t.Fatalf("body state = %d, want normal state 0; value 2 is untouchable", got)
 	}
 }
+
+func TestBerserkBodyStateUpdateIncludesBlueEffectVariant(t *testing.T) {
+	packet := BuildBodyStateUpdatePacket(0x11223344, Berserker, 1)
+	if packet.MessageID != opcode.EntityUpdateMovementState {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntityUpdateMovementState)
+	}
+
+	payload := packet.Payload()
+	if len(payload) != 7 {
+		t.Fatalf("payload length = %d, want 7", len(payload))
+	}
+	if got := binary.LittleEndian.Uint32(payload[:4]); got != 0x11223344 {
+		t.Fatalf("unique ID = 0x%08X, want 0x11223344", got)
+	}
+	if got := payload[4]; got != 4 {
+		t.Fatalf("state category = %d, want body-state category 4", got)
+	}
+	if got := payload[5]; got != byte(Berserker) {
+		t.Fatalf("body state = %d, want Berserker state %d", got, Berserker)
+	}
+	if got := payload[6]; got != 1 {
+		t.Fatalf("Berserk effect variant = %d, want Blue Berserk variant 1", got)
+	}
+}
+
+func TestBerserkBodyStateUpdateNormalizesEffectVariant(t *testing.T) {
+	packet := BuildBodyStateUpdatePacket(0x11223344, Berserker, 5)
+	if payload := packet.Payload(); len(payload) != 7 || payload[6] != 1 {
+		t.Fatalf("Berserk effect payload = %x, want normalized variant 1", payload)
+	}
+}

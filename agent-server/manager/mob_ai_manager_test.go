@@ -19,10 +19,15 @@ func TestMobAIAggressiveMobPursuesNearestKnownPlayer(t *testing.T) {
 	now := time.Now()
 	npc, player := mobAIFixture(100)
 	npc.ConfigureAI(5, true, 150)
+	npc.BindSpawnArea(&model.SpawnArea{Spawn: model.Spawn{Position: npc.GetNavmeshPosition(), Radius: 500}})
 	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
 
 	manager := mobAIManagerForTest()
 	manager.tick(world, now)
+	if world.moves != 0 {
+		t.Fatalf("ordinary mob pursued during awareness delay: %d moves", world.moves)
+	}
+	manager.tick(world, now.Add(2*time.Second))
 	if world.moves != 1 || npc.GetMotionState() != model.Running {
 		t.Fatalf("pursuit = moves %d state %d", world.moves, npc.GetMotionState())
 	}
@@ -134,12 +139,13 @@ func TestMobAIPassiveMobRetaliatesOnlyAfterHit(t *testing.T) {
 
 func TestMobAIUsesAuthoredNestRadiusForLeash(t *testing.T) {
 	now := time.Now()
-	npc, _ := mobAIFixture(10)
+	npc, player := mobAIFixture(10)
 	npc.ConfigureAI(5, true, 115)
 	npc.BindSpawnArea(&model.SpawnArea{Spawn: model.Spawn{
 		Position: mobAIPosition(600, 0),
 		Radius:   700,
 	}})
+	npc.SetAggroTarget(player.GetUniqueID())
 	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
 	manager := mobAIManagerForTest()
 
@@ -285,6 +291,47 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	}
 	if got := player.CurrentHP(); got != 90 {
 		t.Fatalf("HP at B071 = %d, want 90", got)
+	}
+}
+
+func TestMobAIPhysicalCriticalAndPlayerBlockUseStockDamageStates(t *testing.T) {
+	criticalNPC, criticalTarget := mobAIFixture(10)
+	criticalTarget.BaseStats.HP = 1000
+	criticalConn := &mobAICaptureConn{}
+	criticalTarget.Session = server.NewSession(criticalConn, network.EncodingOptions{}, nil, nil, "mob-critical-test")
+	defer criticalTarget.Session.Close()
+	criticalSpawned := criticalTarget.GetCharKnownObjectList().GetObjectsToSpawn()
+	criticalTarget.GetCharKnownObjectList().MarkSpawned(criticalSpawned)
+	manager := mobAIManagerForTest()
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.criticalRoll = func(int) bool { return true }
+	manager.blockRoll = func(int) bool { return false }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+		1933: {RefObject: model.RefObject{ID: 1933}, CriticalHitRate: 100},
+	}}))
+	manager.applyAttackDamage(&mobAIWorldFake{}, criticalNPC, criticalTarget, 10, 100, false, false)
+	criticalPackets := readCapturedPackets(t, criticalConn, 2)
+	criticalPayload := criticalPackets[0].Payload()
+	if criticalTarget.CurrentHP() != 800 || len(criticalPayload) < 31 || criticalPayload[27] != model.DamageStateCritical || !bytes.Equal(criticalPayload[28:31], []byte{200, 0, 0}) {
+		t.Fatalf("critical attack = hp:%d payload:% X", criticalTarget.CurrentHP(), criticalPayload)
+	}
+
+	blockedNPC, blockedTarget := mobAIFixture(10)
+	blockedTarget.BaseDefenseStats.BlockRate = 100
+	blockedConn := &mobAICaptureConn{}
+	blockedTarget.Session = server.NewSession(blockedConn, network.EncodingOptions{}, nil, nil, "mob-block-test")
+	defer blockedTarget.Session.Close()
+	blockedSpawned := blockedTarget.GetCharKnownObjectList().GetObjectsToSpawn()
+	blockedTarget.GetCharKnownObjectList().MarkSpawned(blockedSpawned)
+	blockedManager := mobAIManagerForTest()
+	blockedManager.hitRollPercent = func(int) bool { return true }
+	blockedManager.criticalRoll = func(int) bool { return true }
+	blockedManager.blockRoll = func(int) bool { return true }
+	blockedManager.applyAttackDamage(&mobAIWorldFake{}, blockedNPC, blockedTarget, 11, 100, false, false)
+	blockedPackets := readCapturedPackets(t, blockedConn, 2)
+	blockedPayload := blockedPackets[0].Payload()
+	if blockedTarget.CurrentHP() != 100 || len(blockedPayload) != 27 || blockedPayload[26] != model.DamageAttackStateBlock {
+		t.Fatalf("blocked attack = hp:%d payload:% X", blockedTarget.CurrentHP(), blockedPayload)
 	}
 }
 
