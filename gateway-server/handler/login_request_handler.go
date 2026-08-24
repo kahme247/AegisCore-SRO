@@ -12,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	"github.com/Harvi8/AegisCore/gateway-server/db"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -155,30 +156,13 @@ func (h *LoginRequestHandler) handleSessionPacket(ctx context.Context, session *
 }
 
 func (h *LoginRequestHandler) handlePacket(ctx context.Context, packet server.PacketChannelData) {
-	contentID, err := packet.ReadByte()
+	decoded, err := (vsro188.GatewayLoginRequestCodec{}).Decode(packet.Packet)
 	if err != nil {
-		h.sendInvalidLogin(packet.Session, "malformed content id")
+		h.sendInvalidLogin(packet.Session, "malformed login request")
 		return
 	}
-	username, err := packet.ReadString()
-	if err != nil {
-		h.sendInvalidLogin(packet.Session, "malformed username")
-		return
-	}
-	password, err := packet.ReadString()
-	if err != nil {
-		h.sendInvalidLogin(packet.Session, "malformed password")
-		return
-	}
-	shardID, err := packet.ReadUInt16()
-	if err != nil {
-		h.sendInvalidLogin(packet.Session, "malformed shard id")
-		return
-	}
-	if packet.Remaining() != 0 {
-		h.sendInvalidLogin(packet.Session, "trailing login request data")
-		return
-	}
+	contentID, username, password, shardID := decoded.ContentID, decoded.Username, decoded.Password, decoded.ShardID
+	decoded.Password = ""
 
 	sourceIP := sourceIPFromSession(packet.Session)
 	if !sourceIP.IsValid() {

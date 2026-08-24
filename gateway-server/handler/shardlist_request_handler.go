@@ -16,6 +16,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	"github.com/Harvi8/AegisCore/gateway-server/db"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -201,8 +202,8 @@ func shardsForContentID(shards []db.Shard, contentID byte) []db.Shard {
 }
 
 func validateEmptyGatewayRequest(packet network.Packet, name string) error {
-	if packet.Remaining() != 0 {
-		return fmt.Errorf("malformed %s request: unexpected payload", name)
+	if _, err := (vsro188.GatewayShardListRequestCodec{}).Decode(packet); err != nil {
+		return fmt.Errorf("malformed %s request: %w", name, err)
 	}
 	return nil
 }

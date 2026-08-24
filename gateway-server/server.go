@@ -16,13 +16,14 @@ import (
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	"github.com/Harvi8/AegisCore/framework/logging"
 	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	gatewaydb "github.com/Harvi8/AegisCore/gateway-server/db"
 	"github.com/Harvi8/AegisCore/gateway-server/handler"
 	patchcatalog "github.com/Harvi8/AegisCore/patching/catalog"
+	protocolregistry "github.com/Harvi8/AegisCore/protocol/registry"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -120,13 +121,12 @@ func NewGatewayServer() (GatewayServer, error) {
 		Window:      time.Duration(viper.GetInt(config.GatewayTrafficWindowMS)) * time.Millisecond,
 		PacketLimit: uint32(viper.GetUint(config.GatewayTrafficPacketLimit)),
 	})
-	s.SetAdmissionPolicy(server.AllowListedAdmissionPolicy(
-		opcode.PatchRequest,
-		opcode.ShardlistRequest,
-		opcode.LoginRequest,
-		opcode.NoticeRequest,
-		opcode.ShardlistPing,
-	))
+	gatewayOpcodes := vsro188.ProtocolRegistry().Opcodes(
+		protocolregistry.ServiceGateway,
+		protocolregistry.ClientToServer,
+		protocolregistry.GatewayPreLogin,
+	)
+	s.SetAdmissionPolicy(server.AllowListedAdmissionPolicy(gatewayOpcodes...))
 	handler.RegisterPatchRequestHandlerWithCatalog(&s, patches, viper.GetString(config.GatewayPatchChannel))
 	handler.RegisterShardlistRequestHandlerWithReadiness(&s, shards, installer)
 	handler.RegisterShardlistPingHandler(&s)

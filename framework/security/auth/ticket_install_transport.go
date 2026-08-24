@@ -56,6 +56,10 @@ type AdmissionReadinessProbe interface {
 	Ready(context.Context) error
 }
 
+// AdmissionReadiness is evaluated for every readiness probe and ticket
+// installation. Returning false makes the private endpoint fail closed.
+type AdmissionReadiness func() bool
+
 // MutualTLSFiles declares the three mandatory certificate inputs. No shared
 // secret fallback exists: missing or invalid paths fail startup.
 type MutualTLSFiles struct {
@@ -129,6 +133,10 @@ type AdmissionTicketInstallServer struct {
 }
 
 func NewAdmissionTicketInstallServer(address string, tlsConfig *tls.Config, store *AdmissionTicketStore) (*AdmissionTicketInstallServer, error) {
+	return NewAdmissionTicketInstallServerWithReadiness(address, tlsConfig, store, nil)
+}
+
+func NewAdmissionTicketInstallServerWithReadiness(address string, tlsConfig *tls.Config, store *AdmissionTicketStore, readiness AdmissionReadiness) (*AdmissionTicketInstallServer, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("admission ticket listener address is required")
 	}
@@ -142,7 +150,7 @@ func NewAdmissionTicketInstallServer(address string, tlsConfig *tls.Config, stor
 		address:   address,
 		tlsConfig: tlsConfig.Clone(),
 		server: &http.Server{
-			Handler:           NewAdmissionTicketInstallHandler(store),
+			Handler:           NewAdmissionTicketInstallHandlerWithReadiness(store, readiness),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,
@@ -199,6 +207,11 @@ func (s *AdmissionTicketInstallServer) Addr() net.Addr {
 // It accepts only a compact, version-independent representation of an
 // admission ticket and acknowledges only after Store.Install succeeds.
 func NewAdmissionTicketInstallHandler(store *AdmissionTicketStore) http.Handler {
+	return NewAdmissionTicketInstallHandlerWithReadiness(store, nil)
+}
+
+func NewAdmissionTicketInstallHandlerWithReadiness(store *AdmissionTicketStore, readiness AdmissionReadiness) http.Handler {
+	isReady := func() bool { return store != nil && (readiness == nil || readiness()) }
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == AdmissionReadinessPath {
 			if request.Method != http.MethodGet {
@@ -206,7 +219,7 @@ func NewAdmissionTicketInstallHandler(store *AdmissionTicketStore) http.Handler 
 				http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			if store == nil {
+			if !isReady() {
 				http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -225,7 +238,7 @@ func NewAdmissionTicketInstallHandler(store *AdmissionTicketStore) http.Handler 
 			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if store == nil {
+		if !isReady() {
 			http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
 			return
 		}

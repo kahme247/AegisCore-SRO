@@ -73,3 +73,19 @@ func TestAllowListedAdmissionPolicyRequiresModuleIdentification(t *testing.T) {
 		t.Fatal("non-allow-listed opcode accepted")
 	}
 }
+
+func TestAvailabilityAdmissionPolicyFailsClosedUntilReady(t *testing.T) {
+	ready := false
+	called := false
+	policy := AvailabilityAdmissionPolicy(func() bool { return ready }, func(*Session, uint16) error {
+		called = true
+		return nil
+	})
+	if err := policy(nil, 0x6103); err == nil || called {
+		t.Fatal("unavailable policy admitted or delegated application traffic")
+	}
+	ready = true
+	if err := policy(nil, 0x6103); err != nil || !called {
+		t.Fatalf("ready policy error=%v delegated=%t", err, called)
+	}
+}

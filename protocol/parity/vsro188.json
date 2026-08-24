@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "target": "vsro188",
+  "binaries": [
+    {
+      "service": "agent-server",
+      "file": "AgentServer.exe",
+      "sha256": "03103ae0b3073048482885e6ff0be31ad1d9a88083691ab7003421a9b2e59a72"
+    },
+    {
+      "service": "download-server",
+      "file": "DownloadServer.exe",
+      "sha256": "f1280db6ce604f39932160cf140196acf6d3da1696d0699f413a0215b7b26620"
+    },
+    {
+      "service": "farm-manager",
+      "file": "FarmManager.exe",
+      "sha256": "af9c44a6f3ec7c0bb95843dc159506e2212265fd1d790e540784e4ccbc2e6024"
+    },
+    {
+      "service": "gateway-server",
+      "file": "GatewayServer.exe",
+      "sha256": "f7a7770b074f880885e7f43274362107a1d07338949c7c5b68e32a5c7df391cc"
+    },
+    {
+      "service": "global-manager",
+      "file": "GlobalManager.exe",
+      "sha256": "376ea0a7781140a83891d871792110a5d11bbb2fb63749618e3ff4991bb07721"
+    },
+    {
+      "service": "machine-manager",
+      "file": "MachineManager.exe",
+      "sha256": "d2328f8112adf2578d3306f6d4571919849bca3ccbbef2fa976c1379fc37517e"
+    },
+    {
+      "service": "game-server",
+      "file": "SR_GameServer.exe",
+      "sha256": "0efe7eafe6e0b8ae3284c377b59211f3a8864713d8674d274105739baac35e35"
+    },
+    {
+      "service": "shard-manager",
+      "file": "SR_ShardManager.exe",
+      "sha256": "00751081e8dc4d13d928bd6c0d58979dbc63788f269cd2932e881334093504df"
+    }
+  ],
+  "catalogs": [
+    {
+      "id": "opcodes",
+      "source": "../.references/testin-decompilation/opcode-catalog.csv",
+      "unique_field": "opcode",
+      "expected_unique": 723
+    },
+    {
+      "id": "procedures",
+      "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+      "unique_field": "object",
+      "filter_field": "kind",
+      "filter_value": "procedure",
+      "expected_unique": 114
+    },
+    {
+      "id": "tables",
+      "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+      "unique_field": "object",
+      "filter_field": "kind",
+      "filter_value": "table",
+      "expected_unique": 104
+    }
+  ],
+  "completion_requirements": [
+    "primary evidence with binary function or capture locator",
+    "exact packet codec fixtures where client-visible",
+    "transaction and recovery tests where stateful",
+    "stock vSRO 1.188 client validation"
+  ],
+  "capabilities": [
+    {
+      "id": "PAR-001",
+      "family": "protocol",
+      "name": "typed packet identity and listener admission registry",
+      "enabled_default": true,
+      "status": "implemented",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/opcode-catalog.csv",
+          "locator": "723 unique opcode values; mixed provenance",
+          "confidence": "catalogued-not-stock-client-verified"
+        }
+      ],
+      "implementation": [
+        "protocol/registry/registry.go",
+        "protocol/vsro188/registry.go"
+      ],
+      "tests": [
+        "protocol/registry/registry_test.go",
+        "protocol/vsro188/registry_test.go"
+      ]
+    },
+    {
+      "id": "PAR-002",
+      "family": "persistence",
+      "name": "map recovered SQL contracts to aggregate owners",
+      "enabled_default": true,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+          "locator": "114 procedure and 104 table names across recovered services",
+          "confidence": "embedded-strings-call-semantics-pending"
+        }
+      ]
+    },
+    {
+      "id": "PAR-003",
+      "family": "runtime",
+      "name": "dependency lifecycle, drain, idempotency, outbox, and scheduler",
+      "enabled_default": true,
+      "status": "implemented",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/baseline-review.md",
+          "locator": "Confirmed architectural evidence and service health sections",
+          "confidence": "binary-import-and-diagnostic-string-evidence"
+        }
+      ],
+      "implementation": [
+        "agent-server/runtime/lifecycle.go",
+        "agent-server/feature/catalog.go",
+        "framework/aggregate/contracts.go",
+        "framework/aggregate/coordinator.go",
+        "framework/aggregate/outbox.go",
+        "framework/scheduler/schedule.go",
+        "framework/scheduler/store.go",
+        "framework/server/admission_policy.go",
+        "framework/security/auth/ticket_install_transport.go",
+        "db/migrations/shard/000048_aggregate_runtime_foundations.up.sql",
+        "db/migrations/shard/000049_outbox_dispatch_leases.up.sql",
+        "db/migrations/shard/000050_persistent_scheduler.up.sql"
+      ],
+      "tests": [
+        "agent-server/runtime/lifecycle_test.go",
+        "agent-server/feature/catalog_test.go",
+        "agent-server/server_lifecycle_test.go",
+        "framework/aggregate/contracts_test.go",
+        "framework/aggregate/coordinator_test.go",
+        "framework/aggregate/outbox_test.go",
+        "framework/scheduler/schedule_test.go",
+        "framework/scheduler/store_test.go",
+        "framework/security/auth/ticket_install_transport_test.go"
+      ]
+    },
+    {
+      "id": "PAR-004",
+      "family": "world",
+      "name": "character, dungeon, entity, COS, drop, and world serialization parity",
+      "enabled_default": true,
+      "status": "blocked",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/notes/game-server.md",
+          "locator": "world and grouped-spawn findings",
+          "confidence": "partial-function-evidence-capture-required"
+        }
+      ]
+    },
+    {
+      "id": "PAR-005",
+      "family": "combat",
+      "name": "combat, skills, AI, progression, and loot parity",
+      "enabled_default": true,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/skill-runtime",
+          "locator": "recovered skill runtime functions",
+          "confidence": "selected-function-evidence"
+        }
+      ],
+      "implementation": [
+        "agent-server/handler/character/combat.go",
+        "agent-server/handler/inventory/inventory_handler.go",
+        "agent-server/model/character_vitals_repository.go",
+        "agent-server/model/player_buff.go",
+        "agent-server/model/ref_skill.go"
+      ],
+      "tests": [
+        "agent-server/handler/character/combat_packets_test.go",
+        "agent-server/handler/inventory/inventory_handler_test.go",
+        "agent-server/model/character_vitals_resurrection_test.go",
+        "agent-server/model/player_passive_skill_test.go",
+        "agent-server/model/ref_skill_test.go"
+      ]
+    },
+    {
+      "id": "PAR-006",
+      "family": "quests",
+      "name": "complete deterministic quest and event-script runtime",
+      "enabled_default": true,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+          "locator": "_quest_manage and quest-related contracts",
+          "confidence": "embedded-strings-script-semantics-pending"
+        }
+      ]
+    },
+    {
+      "id": "PAR-007",
+      "family": "economy",
+      "name": "inventory, item services, exchange, stalls, and open market",
+      "enabled_default": true,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+          "locator": "inventory, chest, rental, item-log, and open-market contracts",
+          "confidence": "embedded-strings-transaction-semantics-pending"
+        }
+      ]
+    },
+    {
+      "id": "PAR-008",
+      "family": "social",
+      "name": "party, guild, union, academy, jobs, messenger, and collection book",
+      "enabled_default": true,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+          "locator": "guild, academy, job, memo, and collection-book contracts",
+          "confidence": "embedded-strings-call-semantics-pending"
+        }
+      ]
+    },
+    {
+      "id": "PAR-009",
+      "family": "fortress-events",
+      "name": "fortress, scheduled events, and battle arenas",
+      "enabled_default": false,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/sql-contract-catalog.csv",
+          "locator": "siege-fortress, schedule, and server-event contracts",
+          "confidence": "embedded-strings-and-configuration-evidence"
+        }
+      ]
+    },
+    {
+      "id": "PAR-010",
+      "family": "management",
+      "name": "secure ShardManager-equivalent commands and reporting",
+      "enabled_default": false,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/notes/game-server.md",
+          "locator": "ShardManager dependency and administrative contracts",
+          "confidence": "binary-and-SQL-string-evidence"
+        }
+      ]
+    },
+    {
+      "id": "PAR-011",
+      "family": "adapters",
+      "name": "replace crest FTP and insecure billing/web integrations",
+      "enabled_default": false,
+      "status": "evidenced",
+      "evidence": [
+        {
+          "source": "../.references/testin-decompilation/baseline-review.md",
+          "locator": "imports and external integration findings",
+          "confidence": "binary-import-and-string-evidence"
+        }
+      ]
+    },
+    {
+      "id": "PAR-012",
+      "family": "certification",
+      "name": "capture replay, stock-client, fault, concurrency, and soak certification",
+      "enabled_default": true,
+      "status": "blocked",
+      "evidence": [
+        {
+          "source": "protocol/captures/README.md",
+          "locator": "capture provenance and sanitization contract",
+          "confidence": "acceptance-contract-corpus-missing"
+        }
+      ]
+    }
+  ]
+}

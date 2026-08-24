@@ -7,6 +7,22 @@ import "fmt"
 // always handled first by the protocol state machine.
 type PacketAdmissionPolicy func(*Session, uint16) error
 
+// AvailabilityAdmissionPolicy rejects every application packet while its
+// process-level dependency is not ready. Handshake traffic remains handled by
+// the core protocol state machine, but no authentication or gameplay handler
+// can run during loading, degradation, drain, or after stop.
+func AvailabilityAdmissionPolicy(isReady func() bool, next PacketAdmissionPolicy) PacketAdmissionPolicy {
+	return func(session *Session, opcode uint16) error {
+		if isReady == nil || !isReady() {
+			return fmt.Errorf("application opcode 0x%04X rejected while service is unavailable", opcode)
+		}
+		if next == nil {
+			return fmt.Errorf("application opcode 0x%04X rejected without an admission policy", opcode)
+		}
+		return next(session, opcode)
+	}
+}
+
 // AllowListedAdmissionPolicy requires a completed module identification and
 // then permits only the supplied application opcodes. It is appropriate for
 // Gateway's documented pre-login surface, where no player session becomes

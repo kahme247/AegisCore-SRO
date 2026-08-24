@@ -11,6 +11,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	patchcatalog "github.com/Harvi8/AegisCore/patching/catalog"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -226,22 +227,11 @@ func (h *PatchRequestHandler) loadProfiles() ([]config.ProtocolProfile, error) {
 // violation rather than an extension point because every accepted profile uses
 // this exact layout.
 func parsePatchRequest(packet network.Packet) (PatchRequest, error) {
-	contentID, err := packet.ReadByte()
+	request, err := (vsro188.GatewayPatchRequestCodec{}).Decode(packet)
 	if err != nil {
-		return PatchRequest{}, fmt.Errorf("malformed patch request content ID: %w", err)
+		return PatchRequest{}, fmt.Errorf("malformed patch request: %w", err)
 	}
-	moduleName, err := packet.ReadString()
-	if err != nil {
-		return PatchRequest{}, fmt.Errorf("malformed patch request module name: %w", err)
-	}
-	version, err := packet.ReadUInt32()
-	if err != nil {
-		return PatchRequest{}, fmt.Errorf("malformed patch request version: %w", err)
-	}
-	if packet.Remaining() != 0 {
-		return PatchRequest{}, fmt.Errorf("malformed patch request: trailing data")
-	}
-	return PatchRequest{ContentID: contentID, ModuleName: moduleName, Version: version}, nil
+	return PatchRequest{ContentID: request.ContentID, ModuleName: request.ModuleName, Version: request.Version}, nil
 }
 
 func (request PatchRequest) Validate(profile config.ProtocolProfile) error {

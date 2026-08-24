@@ -8,6 +8,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 // ShardlistPingHandler writes the documented 0xA106 success branch only after
@@ -79,17 +80,6 @@ func buildShardlistPong(farm config.Farm, endpoint config.AgentEndpoint) (networ
 		return network.Packet{}, fmt.Errorf("invalid advertised Agent IPv4 endpoint")
 	}
 
-	response := network.EmptyPacket()
-	response.MessageID = opcode.ShardlistPong
-	if err := response.WriteByte(1); err != nil { // result = successful
-		return network.Packet{}, err
-	}
-	if err := response.WriteByte(farm.ID); err != nil {
-		return network.Packet{}, err
-	}
 	ipBytes := endpoint.IP.As4()
-	if err := response.WriteBytes(ipBytes[:]); err != nil {
-		return network.Packet{}, err
-	}
-	return response, nil
+	return (vsro188.GatewayEndpointResponseCodec{}).Encode(vsro188.GatewayEndpointResponse{Profile: 1, FarmID: farm.ID, IPv4: ipBytes})
 }

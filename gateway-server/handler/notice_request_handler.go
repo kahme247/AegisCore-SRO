@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
 	"github.com/Harvi8/AegisCore/gateway-server/db"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const maxGatewayNotices = math.MaxUint8
@@ -105,14 +106,11 @@ func (h *NoticeRequestHandler) Handle(ctx context.Context, session *server.Sessi
 
 // parseNoticeRequest accepts only the documented one-byte ContentID request.
 func parseNoticeRequest(packet network.Packet) (byte, error) {
-	contentID, err := packet.ReadByte()
+	request, err := (vsro188.GatewayNoticeRequestCodec{}).Decode(packet)
 	if err != nil {
-		return 0, fmt.Errorf("malformed notice request content ID: %w", err)
+		return 0, fmt.Errorf("malformed notice request: %w", err)
 	}
-	if packet.Remaining() != 0 {
-		return 0, fmt.Errorf("malformed notice request: trailing data")
-	}
-	return contentID, nil
+	return request.ContentID, nil
 }
 
 // BuildNoticeResponse serializes a documented logical 0xA104 payload. Sender

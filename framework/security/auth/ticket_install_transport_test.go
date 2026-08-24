@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,6 +88,46 @@ func TestAdmissionReadinessUsesPrivateMutualTLSListener(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("POST readiness status = %d, want %d", response.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestAdmissionHandlerRejectsReadinessAndInstallsWhenRuntimeIsNotReady(t *testing.T) {
+	store := NewAdmissionTicketStore()
+	var ready atomic.Bool
+	handler := NewAdmissionTicketInstallHandlerWithReadiness(store, ready.Load)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + AdmissionReadinessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	payload, err := json.Marshal(newAdmissionTicketInstallPayload(validTransportTicket(0x10203042)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = http.Post(server.URL+AdmissionTicketInstallPath, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable || store.Len() != 0 {
+		t.Fatalf("not-ready install status=%d tickets=%d", response.StatusCode, store.Len())
+	}
+
+	ready.Store(true)
+	response, err = http.Post(server.URL+AdmissionTicketInstallPath, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || store.Len() != 1 {
+		t.Fatalf("ready install status=%d tickets=%d", response.StatusCode, store.Len())
 	}
 }
 
