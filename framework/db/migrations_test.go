@@ -429,12 +429,102 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 46 {
-		t.Fatalf("shard migration count = %d, want 46", len(shardMigrations))
+	if len(shardMigrations) != 62 {
+		t.Fatalf("shard migration count = %d, want 62", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
 		shardMigrationByVersion[migration.Version] = migration
+	}
+	guildRenameMigration := shardMigrationByVersion[51]
+	if guildRenameMigration.Version != 51 || guildRenameMigration.Name != "guild_forced_rename" ||
+		!strings.Contains(guildRenameMigration.UpSQL, "RENAME_REQUIRED") ||
+		!strings.Contains(guildRenameMigration.DownSQL, "DROP COLUMN") {
+		t.Fatalf("guild rename migration = %#v, want reversible forced-rename state", guildRenameMigration)
+	}
+	deletionMigration := shardMigrationByVersion[52]
+	if deletionMigration.Version != 52 || deletionMigration.Name != "character_deletion_lifecycle" ||
+		!strings.Contains(deletionMigration.UpSQL, "DELETION_REQUESTED_AT") ||
+		!strings.Contains(deletionMigration.UpSQL, "ON DELETE SET NULL") ||
+		!strings.Contains(deletionMigration.DownSQL, "DROP COLUMN") {
+		t.Fatalf("character deletion migration = %#v, want reversible deletion clock and audit retention", deletionMigration)
+	}
+	pkMigration := shardMigrationByVersion[53]
+	if pkMigration.Version != 53 || pkMigration.Name != "character_pk_state" ||
+		!strings.Contains(pkMigration.UpSQL, "`DAILY_PK` TINYINT UNSIGNED") ||
+		!strings.Contains(pkMigration.UpSQL, "`TOTAL_PK` SMALLINT") ||
+		!strings.Contains(pkMigration.UpSQL, "`PK_PENALTY_POINT` INT") ||
+		!strings.Contains(pkMigration.DownSQL, "DROP COLUMN `DAILY_PK`") {
+		t.Fatalf("character PK migration = %#v, want reversible recovered PK state", pkMigration)
+	}
+	questReferenceMigration := shardMigrationByVersion[54]
+	if questReferenceMigration.Version != 54 || questReferenceMigration.Name != "quest_reference_catalog" ||
+		!strings.Contains(questReferenceMigration.UpSQL, "REF_QUEST_REWARD_ITEM") ||
+		!strings.Contains(questReferenceMigration.DownSQL, "DROP TABLE `SRO_SHARD`.`REF_QUEST`") {
+		t.Fatalf("quest reference migration = %#v, want reversible native quest catalogs", questReferenceMigration)
+	}
+	questScriptMigration := shardMigrationByVersion[55]
+	if questScriptMigration.Version != 55 || questScriptMigration.Name != "quest_script_declarations" ||
+		!strings.Contains(questScriptMigration.UpSQL, "REF_QUEST_SCRIPT_DECLARATION") ||
+		!strings.Contains(questScriptMigration.UpSQL, "SCRIPT_SHA256") ||
+		!strings.Contains(questScriptMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest script migration = %#v, want reversible decoded declaration catalog", questScriptMigration)
+	}
+	questKillMigration := shardMigrationByVersion[56]
+	if questKillMigration.Version != 56 || questKillMigration.Name != "quest_kill_objectives" ||
+		!strings.Contains(questKillMigration.UpSQL, "REF_QUEST_KILL_OBJECTIVE") ||
+		!strings.Contains(questKillMigration.UpSQL, "RUNTIME_ENABLED") ||
+		!strings.Contains(questKillMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest kill migration = %#v, want reversible typed kill-objective catalog", questKillMigration)
+	}
+	questDeliverMigration := shardMigrationByVersion[57]
+	if questDeliverMigration.Version != 57 || questDeliverMigration.Name != "quest_deliver_item_ex" ||
+		!strings.Contains(questDeliverMigration.UpSQL, "REF_QUEST_DELIVER_ITEM_EX") ||
+		!strings.Contains(questDeliverMigration.UpSQL, "ITEM_REF_OBJECT_ID") ||
+		!strings.Contains(questDeliverMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest deliver migration = %#v, want reversible typed deliver-item EX catalog", questDeliverMigration)
+	}
+	questRewardMigration := shardMigrationByVersion[58]
+	if questRewardMigration.Version != 58 || questRewardMigration.Name != "quest_script_rewards" ||
+		!strings.Contains(questRewardMigration.UpSQL, "REF_QUEST_SCRIPT_REWARD_ITEM") ||
+		!strings.Contains(questRewardMigration.UpSQL, "SCRIPT_SHA256") ||
+		!strings.Contains(questRewardMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest reward migration = %#v, want reversible script reward catalog", questRewardMigration)
+	}
+	questDeliverObjectivesMigration := shardMigrationByVersion[59]
+	if questDeliverObjectivesMigration.Version != 59 || questDeliverObjectivesMigration.Name != "quest_deliver_item_objectives" ||
+		!strings.Contains(questDeliverObjectivesMigration.UpSQL, "REF_QUEST_DELIVER_ITEM_ENTRY") ||
+		!strings.Contains(questDeliverObjectivesMigration.UpSQL, "ITEM_COUNT") ||
+		!strings.Contains(questDeliverObjectivesMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest deliver objectives migration = %#v, want reversible standard deliver-item catalog", questDeliverObjectivesMigration)
+	}
+	questDialogObjectivesMigration := shardMigrationByVersion[60]
+	if questDialogObjectivesMigration.Version != 60 || questDialogObjectivesMigration.Name != "quest_dialog_objectives" ||
+		!strings.Contains(questDialogObjectivesMigration.UpSQL, "REF_QUEST_DIALOG_OBJECTIVE") ||
+		!strings.Contains(questDialogObjectivesMigration.UpSQL, "DIALOGUE_KEY") ||
+		!strings.Contains(questDialogObjectivesMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest dialog objectives migration = %#v, want reversible dialog-objective catalog", questDialogObjectivesMigration)
+	}
+	questKillPlayerObjectivesMigration := shardMigrationByVersion[61]
+	if questKillPlayerObjectivesMigration.Version != 61 || questKillPlayerObjectivesMigration.Name != "quest_kill_player_objectives" ||
+		!strings.Contains(questKillPlayerObjectivesMigration.UpSQL, "REF_QUEST_KILL_PLAYER_JOB_STATE") ||
+		!strings.Contains(questKillPlayerObjectivesMigration.UpSQL, "REGION_VALUE") ||
+		!strings.Contains(questKillPlayerObjectivesMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest kill-player objectives migration = %#v, want reversible filtered kill-player catalog", questKillPlayerObjectivesMigration)
+	}
+	questCollectionObjectivesMigration := shardMigrationByVersion[62]
+	if questCollectionObjectivesMigration.Version != 62 || questCollectionObjectivesMigration.Name != "quest_collection_item_objectives" ||
+		!strings.Contains(questCollectionObjectivesMigration.UpSQL, "REF_QUEST_COLLECTION_ITEM_SOURCE") ||
+		!strings.Contains(questCollectionObjectivesMigration.UpSQL, "SOURCE_PARAMETER") ||
+		!strings.Contains(questCollectionObjectivesMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest collection objectives migration = %#v, want reversible monster-item collection catalog", questCollectionObjectivesMigration)
+	}
+	questExtendedKillMigration := shardMigrationByVersion[63]
+	if questExtendedKillMigration.Version != 63 || questExtendedKillMigration.Name != "quest_extended_kill_objectives" ||
+		!strings.Contains(questExtendedKillMigration.UpSQL, "REF_QUEST_EXTENDED_KILL_TARGET") ||
+		!strings.Contains(questExtendedKillMigration.UpSQL, "multi_target") ||
+		!strings.Contains(questExtendedKillMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest extended kill migration = %#v, want reversible classified/multi-target kill catalog", questExtendedKillMigration)
 	}
 	buybackMigration := shardMigrationByVersion[38]
 	if buybackMigration.Version != 38 || buybackMigration.Name != "character_buyback" ||

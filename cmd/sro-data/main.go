@@ -19,7 +19,7 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
-var errUsage = errors.New("usage: sro-data verify --profile <profile.json> --archive <Data.pk2> | sro-data import-reference --media <Media directory> | sro-data import-item-mall --media <Media directory> | sro-data import-vsro-skills --export-dir <directory> | sro-data import-vsro-items --export-dir <directory>")
+var errUsage = errors.New("usage: sro-data <verify|import-reference|import-item-mall|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -54,6 +54,15 @@ func runWithCanonicalProfile(ctx context.Context, arguments []string, output io.
 	}
 	if arguments[0] == "import-vsro-items" {
 		return importVSROItemReference(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-vsro-quests" {
+		return importVSROQuestReference(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "inspect-vsro-quest-script" {
+		return inspectVSROQuestScript(arguments[1:], output)
+	}
+	if arguments[0] == "import-vsro-quest-script" {
+		return importVSROQuestScript(ctx, arguments[1:], output)
 	}
 	if arguments[0] != "verify" {
 		return errUsage

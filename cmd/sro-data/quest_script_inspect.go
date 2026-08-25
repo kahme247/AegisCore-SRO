@@ -1,0 +1,116 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/Harvi8/AegisCore/agent-server/questscript"
+)
+
+var errQuestScriptInspectUsage = errors.New("usage: sro-data inspect-vsro-quest-script --script <Quest.sct> [--source <substring>]")
+
+func inspectVSROQuestScript(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("sro-data inspect-vsro-quest-script", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	scriptPath := flags.String("script", "", "Lua 5.1 quest chunk")
+	sourceFilter := flags.String("source", "", "optional prototype source substring")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *scriptPath == "" {
+		return errQuestScriptInspectUsage
+	}
+	file, err := os.Open(*scriptPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	chunk, err := questscript.Decode(file)
+	if err != nil {
+		return err
+	}
+	prototypes := questscript.AllPrototypes(chunk)
+	definitions, err := questscript.Definitions(chunk)
+	if err != nil {
+		return err
+	}
+	killObjectives, err := questscript.KillMonsterObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	deliverObjectives, err := questscript.DeliverItemEXObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	standardDeliverObjectives, err := questscript.DeliverItemObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	dialogObjectives, err := questscript.DialogObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	killPlayerObjectives, err := questscript.KillPlayerObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	collectionObjectives, err := questscript.CollectionItemObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	extendedKillObjectives, err := questscript.ExtendedKillMonsterObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	talismanObjectives, err := questscript.TalismanObjectives(definitions)
+	if err != nil {
+		return err
+	}
+	rewards, err := questscript.RewardDeclarations(definitions)
+	if err != nil {
+		return err
+	}
+	functionCounts := make(map[string]int)
+	totalCalls := 0
+	matched := make([]struct {
+		Source string             `json:"source"`
+		Calls  []questscript.Call `json:"calls"`
+	}, 0)
+	for _, prototype := range prototypes {
+		calls := questscript.Calls(prototype)
+		totalCalls += len(calls)
+		for _, call := range calls {
+			functionCounts[call.Function]++
+		}
+		if *sourceFilter != "" && strings.Contains(prototype.Source, *sourceFilter) {
+			matched = append(matched, struct {
+				Source string             `json:"source"`
+				Calls  []questscript.Call `json:"calls"`
+			}{prototype.Source, calls})
+		}
+	}
+	functions := make([]string, 0, len(functionCounts))
+	for name := range functionCounts {
+		functions = append(functions, name)
+	}
+	sort.Strings(functions)
+	if _, err = fmt.Fprintf(output, "decoded %d prototypes, %d quest definitions, %d kill-monster objectives, %d deliver-item EX objectives, %d standard deliver-item objectives, %d dialog objectives, %d kill-player objectives, %d collection-item objectives, %d extended kill objectives, %d talisman objectives, %d rewards, and %d declarative calls\n", len(prototypes), len(definitions), len(killObjectives), len(deliverObjectives), len(standardDeliverObjectives), len(dialogObjectives), len(killPlayerObjectives), len(collectionObjectives), len(extendedKillObjectives), len(talismanObjectives), len(rewards), totalCalls); err != nil {
+		return err
+	}
+	for _, name := range functions {
+		if _, err = fmt.Fprintf(output, "%s %d\n", name, functionCounts[name]); err != nil {
+			return err
+		}
+	}
+	if *sourceFilter != "" {
+		encoded, marshalErr := json.MarshalIndent(matched, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	return err
+}
