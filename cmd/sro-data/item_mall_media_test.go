@@ -1,12 +1,22 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestCheckedInItemMallMedia(t *testing.T) {
-	rows, err := loadItemMallPlacements(filepath.Join("..", "..", "Media", "Media", "server_dep", "silkroad", "textdata"))
+func TestLocalItemMallMedia(t *testing.T) {
+	textData := filepath.Join("..", "..", "Media", "Media", "server_dep", "silkroad", "textdata")
+	if _, err := os.Stat(textData); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Skip("local Media reference tree is unavailable")
+		}
+		t.Fatalf("stat local Media reference tree: %v", err)
+	}
+	rows, err := loadItemMallPlacements(textData)
 	if err != nil {
 		t.Fatal(err)
 	}

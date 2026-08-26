@@ -1,12 +1,21 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestLoadReferenceDataFromCheckedInMedia(t *testing.T) {
+func TestLoadReferenceDataFromLocalMedia(t *testing.T) {
 	textData := filepath.Join("..", "..", "Media", "Media", "server_dep", "silkroad", "textdata")
+	if _, err := os.Stat(textData); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Skip("local Media reference tree is unavailable")
+		}
+		t.Fatalf("stat local Media reference tree: %v", err)
+	}
 	levels, err := loadLevelReferenceData(filepath.Join(textData, "leveldata.txt"))
 	if err != nil {
 		t.Fatalf("loadLevelReferenceData() error = %v", err)

@@ -2,6 +2,7 @@ package deployment
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -95,14 +96,27 @@ func TestComposePersistsMySQLAndWaitsForSchemaHealth(t *testing.T) {
 		t.Fatalf("database ports = %v, want loopback-only classic MySQL", database.Ports)
 	}
 	foundDataMount := false
+	foundBackupMount := false
 	for _, volume := range database.Volumes {
 		if volume == "mysql-data:/var/lib/mysql" {
 			foundDataMount = true
-			break
+		}
+		if strings.HasSuffix(volume, ":/docker-entrypoint-initdb.d/10-aegiscore-backup.sql:ro") && strings.Contains(volume, "DB_BACKUP_FILE") {
+			foundBackupMount = true
 		}
 	}
 	if !foundDataMount {
 		t.Fatal("database service does not mount mysql-data at /var/lib/mysql")
+	}
+	if !foundBackupMount {
+		t.Fatalf("database volumes = %v, want required read-only DB_BACKUP_FILE init mount", database.Volumes)
+	}
+	dockerfile, err := os.ReadFile("../db/Dockerfile")
+	if err != nil {
+		t.Fatalf("read db/Dockerfile: %v", err)
+	}
+	if strings.Contains(string(dockerfile), "create_sro_account.sql") || strings.Contains(string(dockerfile), "create_sro_shard.sql") {
+		t.Fatal("database image still embeds fresh-install snapshots instead of restoring DB_BACKUP_FILE")
 	}
 	if got := database.Environment["MYSQL_PASSWORD"]; got != "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}" {
 		t.Fatalf("database MYSQL_PASSWORD = %q, want required interpolation", got)

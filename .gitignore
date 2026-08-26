@@ -20,6 +20,10 @@
 /VSRO_274/
 /Patch/
 /PatchSource/
+/db/media/
+/db/DB_BKUP/
+/main.obj
+/tmp_read_minidump.go
 
 
 # Test binary, build with `go test -c`

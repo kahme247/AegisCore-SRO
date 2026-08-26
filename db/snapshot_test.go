@@ -155,3 +155,97 @@ func TestFreshShardSnapshotContainsCharacterBuyback(t *testing.T) {
 		}
 	}
 }
+
+func TestFreshShardSnapshotContainsAggregateRuntimeFoundations(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"CREATE TABLE `AEGIS_AGGREGATE_VERSION`",
+		"CREATE TABLE `AEGIS_COMMAND_IDEMPOTENCY`",
+		"CREATE TABLE `AEGIS_OUTBOX_MESSAGE`",
+		"CONSTRAINT `FK_AEGIS_COMMAND_AGGREGATE`",
+		"CONSTRAINT `FK_AEGIS_OUTBOX_AGGREGATE`",
+		"KEY `IX_AEGIS_OUTBOX_DISPATCH`",
+		"`LEASE_OWNER` varchar(128)",
+		"CONSTRAINT `CK_AEGIS_OUTBOX_STATE`",
+		"CREATE TABLE `AEGIS_SCHEDULE_DEFINITION`",
+		"CREATE TABLE `AEGIS_SCHEDULE_RUN`",
+		"UNIQUE KEY `UX_AEGIS_SCHEDULE_RUN_OCCURRENCE`",
+		"CONSTRAINT `CK_AEGIS_SCHEDULE_RUN_STATE`",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks aggregate runtime contract %q", required)
+		}
+	}
+}
+
+func TestFreshShardSnapshotContainsQuestReferenceCatalog(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"CREATE TABLE `REF_QUEST`",
+		"CREATE TABLE `REF_QUEST_REWARD`",
+		"CREATE TABLE `REF_QUEST_REWARD_ITEM`",
+		"CREATE TABLE `REF_QUEST_SCRIPT_DECLARATION`",
+		"CREATE TABLE `REF_QUEST_KILL_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_DELIVER_ITEM_EX`",
+		"CREATE TABLE `REF_QUEST_DELIVER_ITEM`",
+		"CREATE TABLE `REF_QUEST_DELIVER_ITEM_ENTRY`",
+		"CREATE TABLE `REF_QUEST_DIALOG_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_KILL_PLAYER_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_KILL_PLAYER_JOB_STATE`",
+		"CREATE TABLE `REF_QUEST_COLLECTION_ITEM_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_COLLECTION_ITEM_SOURCE`",
+		"CREATE TABLE `REF_QUEST_EXTENDED_KILL_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_EXTENDED_KILL_TARGET`",
+		"CREATE TABLE `REF_QUEST_TALISMAN_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_SCRIPT_REWARD`",
+		"CREATE TABLE `REF_QUEST_SCRIPT_REWARD_ITEM`",
+		"CONSTRAINT `FK_REF_QUEST_REWARD_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_REWARD_ITEM_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_SCRIPT_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_KILL_TARGET`",
+		"CONSTRAINT `FK_REF_QUEST_DELIVER_EX_ITEM`",
+		"CONSTRAINT `FK_REF_QUEST_DELIVER_ENTRY_OBJECTIVE`",
+		"CONSTRAINT `FK_REF_QUEST_DELIVER_ENTRY_ITEM`",
+		"CONSTRAINT `FK_REF_QUEST_DIALOG_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_KILL_PLAYER_NPC`",
+		"CONSTRAINT `FK_REF_QUEST_KILL_PLAYER_STATE_OBJECTIVE`",
+		"CONSTRAINT `FK_REF_QUEST_COLLECTION_ITEM`",
+		"CONSTRAINT `FK_REF_QUEST_COLLECTION_SOURCE_MONSTER`",
+		"CONSTRAINT `FK_REF_QUEST_EXTENDED_KILL_TARGET_OBJECTIVE`",
+		"CONSTRAINT `FK_REF_QUEST_EXTENDED_KILL_TARGET_OBJECT`",
+		"CONSTRAINT `FK_REF_QUEST_TALISMAN_NPC`",
+		"CONSTRAINT `FK_REF_QUEST_SCRIPT_REWARD_ITEM_REWARD`",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks quest reference contract %q", required)
+		}
+	}
+}
+
+func TestFreshShardSnapshotContainsRuntimeMediaCatalogData(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"INSERT INTO `REF_LEVEL_DATA` VALUES",
+		"INSERT INTO `REF_MAGIC_OPTION` VALUES",
+		"INSERT INTO `ITEM_MALL_GOODS` VALUES",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks runtime Media catalog data %q", required)
+		}
+	}
+	if count := strings.Count(contents, "CREATE TABLE `REF_MAGIC_OPTION`"); count != 1 {
+		t.Fatalf("REF_MAGIC_OPTION table definitions = %d, want 1", count)
+	}
+}

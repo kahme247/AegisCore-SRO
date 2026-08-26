@@ -4,6 +4,7 @@
 tools/
 Data/
 **/Data/
+Media/
 **/*.exe
 **/*.log
 logs/

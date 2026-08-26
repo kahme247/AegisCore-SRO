@@ -25,6 +25,9 @@ services:
       # /var/lib/mysql volume, which is detached whenever the container is
       # recreated and makes a normal clean restart appear to lose all data.
       - mysql-data:/var/lib/mysql
+      # The official MySQL entrypoint restores this dump only when mysql-data
+      # is empty. Existing volumes are never overwritten on container restart.
+      - "${DB_BACKUP_FILE:?Set DB_BACKUP_FILE to the SQL backup used for fresh database initialization}:/docker-entrypoint-initdb.d/10-aegiscore-backup.sql:ro"
     # A TCP query against both schemas waits for the image's initialization
     # scripts, not merely for mysqld to have opened its port.
     healthcheck:
@@ -106,7 +109,6 @@ services:
       AGENT_HOST: agent-server
       AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/aegiscore/Data/Data.pk2}
       AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/aegiscore/Data/prelinked_navdata.gob}
-      AGENT_LEVEL_DATA_FILE: ${AGENT_LEVEL_DATA_FILE:-/etc/aegiscore/Media/server_dep/silkroad/textdata/leveldata.txt}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
       AGENT_GIANT_MONSTER_SPAWN_RATIO: ${AGENT_GIANT_MONSTER_SPAWN_RATIO:-1000}
@@ -131,7 +133,6 @@ services:
       AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore-management/smc-ca.pem
     volumes:
     - ./Data:/etc/aegiscore/Data:ro
-    - ./Media/Media:/etc/aegiscore/Media:ro
     - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
     - "${SRO_AGENT_MANAGEMENT_TLS_DIR:-./.local/smc-agent-tls}:/run/secrets/aegiscore-management:ro"
 
