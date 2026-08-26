@@ -3,11 +3,11 @@ package ping
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 func RegisterHandler(target *server.Server) {
@@ -32,21 +32,10 @@ func handleRequest(_ context.Context, session *server.Session, packet network.Pa
 }
 
 func readToken(packet network.Packet) (uint32, error) {
-	if packet.Remaining() != 4 {
-		return 0, fmt.Errorf("Agent ping payload length %d, want 4", packet.Remaining())
-	}
-	token, err := packet.ReadUInt32()
-	if err != nil {
-		return 0, fmt.Errorf("read Agent ping token: %w", err)
-	}
-	return token, nil
+	request, err := (vsro188.AgentPingRequestCodec{}).Decode(packet)
+	return request.Token, err
 }
 
 func buildResponse(token uint32) (network.Packet, error) {
-	response := network.EmptyPacket()
-	response.MessageID = opcode.AgentPingResponse
-	if err := response.WriteUInt32(token); err != nil {
-		return network.Packet{}, fmt.Errorf("write Agent ping token: %w", err)
-	}
-	return response, nil
+	return (vsro188.AgentPingResponseCodec{}).Encode(vsro188.AgentPingResponse{Token: token})
 }

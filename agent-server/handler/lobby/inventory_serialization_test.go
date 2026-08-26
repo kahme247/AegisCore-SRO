@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -12,6 +13,21 @@ import (
 
 type deterministicInventoryStore struct {
 	inventory model.Inventory
+}
+
+type deterministicAvatarInventoryRepository struct{ inventory model.Inventory }
+
+func (r deterministicAvatarInventoryRepository) GetCharacterAvatarInventory(context.Context, int64) (model.Inventory, error) {
+	return r.inventory, nil
+}
+func (deterministicAvatarInventoryRepository) TransferAvatarItem(context.Context, int64, bool, byte, byte) (model.AvatarTransferResult, error) {
+	return model.AvatarTransferResult{}, nil
+}
+func (deterministicAvatarInventoryRepository) ActivateDevilSpirit(context.Context, int64, byte) (model.DevilSpiritActivation, error) {
+	return model.DevilSpiritActivation{}, nil
+}
+func (deterministicAvatarInventoryRepository) ExpireDevilSpirit(context.Context, int64, int, time.Time) (model.DevilSpiritExpiration, error) {
+	return model.DevilSpiritExpiration{}, nil
 }
 
 func (s deterministicInventoryStore) GetCharacterInventory(context.Context, int64) (model.Inventory, error) {
@@ -62,6 +78,61 @@ func TestCharacterListAppearanceIsIndependentOfInventoryMapInsertionOrder(t *tes
 			t.Fatalf("character list item at offset %d = %#x, want %#x", offset, got, wantRefID)
 		}
 		offset += 5 // RefItemID plus the existing Plus byte.
+	}
+}
+
+func TestCharacterListSerializesGuildRenameAndAcademyClasses(t *testing.T) {
+	handler := &CharacterSelectionHandler{inventory: deterministicInventoryStore{inventory: model.Inventory{Items: map[byte]model.Item{}}}}
+	packet := network.EmptyPacket()
+	char := model.Char{
+		ID: 1, RefObjID: 1907, Name: "A", Scale: 1, Level: 1, Exp: 1,
+		Str: 20, Int: 20, HP: 200, MP: 200,
+		GuildMemberClass: 2, GuildRenameRequired: true, GuildName: "OldGuild", AcademyMemberClass: 1,
+	}
+	if err := handler.writeCharacterListEntry(context.Background(), &packet, char); err != nil {
+		t.Fatalf("writeCharacterListEntry() error = %v", err)
+	}
+	payload := packet.Payload()
+	const guildClassOffset = 32
+	if payload[guildClassOffset] != 2 || payload[guildClassOffset+1] != 1 {
+		t.Fatalf("guild class/rename flag = %d/%d, want 2/1", payload[guildClassOffset], payload[guildClassOffset+1])
+	}
+	nameLength := int(binary.LittleEndian.Uint16(payload[guildClassOffset+2 : guildClassOffset+4]))
+	nameStart := guildClassOffset + 4
+	if got := string(payload[nameStart : nameStart+nameLength]); got != "OldGuild" {
+		t.Fatalf("forced guild name = %q, want OldGuild", got)
+	}
+	if got := payload[nameStart+nameLength]; got != 1 {
+		t.Fatalf("academy member class = %d, want 1", got)
+	}
+}
+
+func TestCharacterListSerializesAvatarAppearanceInSlotOrder(t *testing.T) {
+	avatar := model.Inventory{Items: map[byte]model.Item{
+		3: {SRObject: model.SRObject{RefObjectID: 0x3300}, OptLevel: 3},
+		0: {SRObject: model.SRObject{RefObjectID: 0x1100}, OptLevel: 1},
+		1: {SRObject: model.SRObject{RefObjectID: 0x2200}, OptLevel: 2},
+	}}
+	handler := &CharacterSelectionHandler{
+		inventory:       deterministicInventoryStore{inventory: model.Inventory{Items: map[byte]model.Item{}}},
+		avatarInventory: deterministicAvatarInventoryRepository{inventory: avatar},
+	}
+	packet := network.EmptyPacket()
+	char := model.Char{ID: 1, RefObjID: 1907, Name: "A", Scale: 1, Level: 1, Exp: 1, Str: 20, Int: 20, HP: 200, MP: 200}
+	if err := handler.writeCharacterListEntry(context.Background(), &packet, char); err != nil {
+		t.Fatalf("writeCharacterListEntry() error = %v", err)
+	}
+	payload := packet.Payload()
+	const avatarCountOffset = 36 // Default affiliations plus zero normal appearance items.
+	if got := payload[avatarCountOffset]; got != 3 {
+		t.Fatalf("avatar appearance count = %d, want 3", got)
+	}
+	offset := avatarCountOffset + 1
+	for index, wantRefID := range []uint32{0x1100, 0x2200, 0x3300} {
+		if got := binary.LittleEndian.Uint32(payload[offset : offset+4]); got != wantRefID || payload[offset+4] != byte(index+1) {
+			t.Fatalf("avatar appearance %d = ref %#x plus %d, want %#x/%d", index, got, payload[offset+4], wantRefID, index+1)
+		}
+		offset += 5
 	}
 }
 

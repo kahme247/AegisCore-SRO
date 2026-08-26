@@ -229,6 +229,9 @@ func TestSQLCharacterRepositoryUsesOwnerAndShardInEveryPrimaryOperation(t *testi
 	if len(characters) != 1 || characters[0].User != 42 || characters[0].Shard != 7 {
 		t.Fatalf("GetCharactersForOwner = %#v, want one owner-qualified character", characters)
 	}
+	if characters[0].GuildMemberClass != 2 || !characters[0].GuildRenameRequired || characters[0].GuildName != "Aegis" || characters[0].AcademyMemberClass != 1 {
+		t.Fatalf("GetCharactersForOwner affiliations = %#v, want guild master forced rename and academy member", characters[0])
+	}
 
 	updated, err := repository.SetCharacterDeletionForOwner(context.Background(), "Alice", 42, 7, true)
 	if err != nil || !updated {
@@ -242,7 +245,7 @@ func TestSQLCharacterRepositoryUsesOwnerAndShardInEveryPrimaryOperation(t *testi
 
 	assertCharacterRepositoryCallArgs(t, findCharacterRepositoryCall(t, queries, SelectCharByNameAndOwner).args, "Alice", int64(42), int64(7))
 	assertCharacterRepositoryCallArgs(t, findCharacterRepositoryCall(t, queries, SelectCharsByAccountAndShard).args, int64(42), int64(7))
-	assertCharacterRepositoryCallArgs(t, findCharacterRepositoryCall(t, execs, update_is_deleting_for_owner).args, int64(1), "Alice", int64(42), int64(7))
+	assertCharacterRepositoryCallArgs(t, findCharacterRepositoryCall(t, execs, update_is_deleting_for_owner).args, "Alice", int64(42), int64(7))
 }
 
 func TestSQLCharacterRepositoryMapsMissingOwnerScopedCharacterToNotFound(t *testing.T) {
@@ -379,7 +382,7 @@ func characterRepositoryTestCharacterRow(now time.Time) []driver.Value {
 
 func characterRepositoryTestListRow(now time.Time) []driver.Value {
 	return []driver.Value{
-		int64(100), int64(200), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), now, int64(25000), int64(45),
+		int64(100), int64(200), int64(7), "Alice", int64(1), int64(10), int64(1000), int64(50), int64(12), int64(13), int64(4), int64(100), int64(80), int64(0), now, now, int64(25000), int64(45), int64(2), int64(1), "Aegis", int64(1),
 	}
 }
 
@@ -391,7 +394,7 @@ func characterRepositoryColumnsForLookup() []string {
 
 func characterRepositoryColumnsForList() []string {
 	return []string{
-		"ID", "REF_OBJ_ID", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "UTIME", "FK_REGION", "INVENTORY_SIZE",
+		"ID", "REF_OBJ_ID", "FK_SHARD", "CHAR_NAME", "CHAR_SCALE", "CURRENT_LEVEL", "EXP", "SKILL_EXP", "STRENGTH", "INTELLECT", "STAT_POINTS", "HP", "MP", "DELETING", "UTIME", "DELETION_REQUESTED_AT", "FK_REGION", "INVENTORY_SIZE", "GUILD_MEMBER_CLASS", "GUILD_RENAME_REQUIRED", "GUILD_NAME", "ACADEMY_MEMBER_CLASS",
 	}
 }
 

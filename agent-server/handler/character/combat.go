@@ -17,15 +17,16 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
 
 const (
-	actionPhaseStart = byte(1)
+	actionPhaseStart = vsro188.CombatActionPhaseStart
 	// vSRO 1.88 emits basic targeted attacks as
 	// `01 | 04 | targetUID:uint32 | 00` on 0x7074.
-	actionTypeAttack       = byte(4)
+	actionTypeAttack       = vsro188.CombatActionTypeCandidate
 	actionTypeAttackLegacy = byte(1)
 	actionTypeDispel       = byte(5)
 	maximumWireDamage      = 0xFFFFFF
@@ -71,6 +72,11 @@ type combatRateProvider interface {
 	Current() model.GameplayRates
 }
 
+type growthPetCombatSupport interface {
+	EngageOwnerTarget(*model.Player, *model.NPC) error
+	AwardOwnerKillExperience(context.Context, *model.Player, *model.NPC) error
+}
+
 type CombatHandler struct {
 	mu             sync.Mutex
 	world          combatWorld
@@ -82,6 +88,7 @@ type CombatHandler struct {
 	hwan           model.HwanRepository
 	levels         *model.LevelTable
 	rates          combatRateProvider
+	companions     growthPetCombatSupport
 	schedule       func(time.Duration, func())
 	move           func(*model.Player, navmeshv2.RtNavmeshPosition) uint64
 	send           func(*server.Session, network.Packet) error
@@ -182,6 +189,21 @@ func (h *CombatHandler) ConfigureHwan(repository model.HwanRepository) {
 	h.mu.Unlock()
 }
 
+func (h *CombatHandler) ConfigureCompanions(companions growthPetCombatSupport) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.companions = companions
+	h.mu.Unlock()
+}
+
+func (h *CombatHandler) engageGrowthPet(player *model.Player, target *model.NPC) {
+	if h != nil && h.companions != nil {
+		_ = h.companions.EngageOwnerTarget(player, target)
+	}
+}
+
 func (h *CombatHandler) CancelPlayerAttack(session *server.Session, playerUID uint32) {
 	if h == nil || playerUID == 0 {
 		return
@@ -198,6 +220,12 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	defer h.mu.Unlock()
 	if os.Getenv("SRO_SESSION_TRACE") == "1" {
 		logrus.Infof("COMBAT_ACTION_TRACE payload=% X", packet.Payload())
+	}
+	var candidateAction *vsro188.CombatCandidateActionRequest
+	if packet.Remaining() == 7 {
+		if decoded, decodeErr := (vsro188.CombatCandidateActionRequestCodec{}).Decode(packet); decodeErr == nil {
+			candidateAction = &decoded
+		}
 	}
 	if packet.Remaining() < 1 {
 		return fmt.Errorf("combat action payload length %d, want at least 1", packet.Remaining())
@@ -260,17 +288,13 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		switch packet.Remaining() {
 		case 5:
 			// A basic attack and a no-target skill share this five-byte tail.
-			candidateID, readErr := packet.ReadUInt32()
-			if readErr != nil {
-				return readErr
+			if candidateAction == nil {
+				return h.sendActionState(session, false)
 			}
-			terminator, readErr := packet.ReadByte()
-			if readErr != nil {
-				return readErr
-			}
+			candidateID := candidateAction.CandidateID
 			candidate, exists := h.referenceSkill(candidateID)
 			kind := candidate.ExecutionKind()
-			if terminator == 0 && exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionBarrier || kind == model.SkillExecutionMovement || kind == model.SkillExecutionStatusAttack && !candidate.TargetRequired || kind == model.SkillExecutionCure && !candidate.TargetRequired || kind == model.SkillExecutionAggro && !candidate.TargetRequired || kind == model.SkillExecutionHealing && (candidate.TargetSelf || !candidate.TargetRequired)) {
+			if exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionBarrier || kind == model.SkillExecutionMovement || kind == model.SkillExecutionStatusAttack && !candidate.TargetRequired || kind == model.SkillExecutionCure && !candidate.TargetRequired || kind == model.SkillExecutionAggro && !candidate.TargetRequired || kind == model.SkillExecutionHealing && (candidate.TargetSelf || !candidate.TargetRequired)) {
 				player, err = h.resolveCombatPlayer(session)
 				if err == nil && playerOwnsSkill(player, candidateID) {
 					skill, isSkillCast = candidate, true
@@ -284,9 +308,6 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 				}
 			}
 			targetUID = candidateID
-			if terminator != 0 || targetUID == 0 {
-				return h.sendActionState(session, false)
-			}
 		case 9:
 			// vSRO targeted skill cast: skill ID, entity target marker, target UID.
 			skillID, readErr := packet.ReadUInt32()
@@ -410,6 +431,18 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 			return h.sendActionState(session, false)
 		}
 		return h.executeHealing(ctx, session, caster, target, skill)
+	}
+	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionResurrection {
+		caster, resolveErr := h.resolveCombatPlayer(session)
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+			return h.sendActionState(session, false)
+		}
+		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
+		target, targetIsPlayer := object.(*model.Player)
+		if resolveErr != nil || !targetIsPlayer || !validResurrectionTarget(caster, target, skill) {
+			return h.sendActionState(session, false)
+		}
+		return h.executeResurrection(ctx, session, caster, target, skill)
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionCure {
 		caster, resolveErr := h.resolveCombatPlayer(session)
@@ -536,6 +569,14 @@ func validHealingTarget(caster, target *model.Player, skill model.RefSkill) bool
 	return party != nil && party == target.GetParty() && (skill.TargetAlly || skill.TargetParty)
 }
 
+func validResurrectionTarget(caster, target *model.Player, skill model.RefSkill) bool {
+	if caster == nil || target == nil || caster == target || target.GetLifeState() != model.Dead || target.CurrentHP() != 0 || target.Level > skill.ResurrectLevel {
+		return false
+	}
+	party := caster.GetParty()
+	return party != nil && party == target.GetParty() && (skill.TargetAlly || skill.TargetParty)
+}
+
 func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Session, caster, target *model.Player, skill model.RefSkill) error {
 	if caster == nil || target == nil || skill.ExecutionKind() != model.SkillExecutionHealing || h.vitals == nil {
 		return h.sendActionState(session, false)
@@ -565,7 +606,9 @@ func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Sess
 		}
 		casterMP -= skill.ConsumeMP
 	}
-	expectedHP, expectedMP, healedHP, healedMP, ok := target.PreviewHealing(skill.HealHP, skill.HealMP)
+	maxHP, maxMP := target.MaxVitals()
+	hpAmount, mpAmount := skill.RestorationAmounts(maxHP, maxMP)
+	expectedHP, expectedMP, healedHP, healedMP, ok := target.PreviewHealing(hpAmount, mpAmount)
 	if !ok {
 		return h.sendActionState(session, false)
 	}
@@ -603,6 +646,71 @@ func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Sess
 	if caster != target && skill.ConsumeMP > 0 {
 		casterVitals := model.BuildVitalsUpdatePacket(caster.GetUniqueID(), casterHP, casterMP)
 		return h.sendPlayerPacket(session, casterVitals)
+	}
+	return nil
+}
+
+func (h *CombatHandler) executeResurrection(ctx context.Context, session *server.Session, caster, target *model.Player, skill model.RefSkill) error {
+	resurrection, ok := h.vitals.(model.SkillResurrectionRepository)
+	if caster == nil || target == nil || skill.ExecutionKind() != model.SkillExecutionResurrection || !ok || !validResurrectionTarget(caster, target, skill) {
+		return h.sendActionState(session, false)
+	}
+	if reason, rejected := skillCastRejection(caster, skill); rejected {
+		return h.sendSkillCastError(session, reason)
+	}
+	if skill.ActionRange > 0 && navmeshv2.HorizontalDistance(caster.GetNavmeshPosition(), target.GetNavmeshPosition()) > float32(skill.ActionRange)/10 {
+		return h.sendActionState(session, false)
+	}
+	now := h.combatNow()
+	key := skillCooldownKey{playerUID: caster.GetUniqueID(), skillID: skill.ID}
+	if next := h.nextSkill[key]; !next.IsZero() && now.Before(next) {
+		return h.sendActionState(session, false)
+	}
+	maxHP, maxMP := target.MaxVitals()
+	targetHP, targetMP := skill.RestorationAmounts(maxHP, maxMP)
+	targetHP = max(1, targetHP)
+	_, casterMP := caster.CurrentVitals()
+	committed, err := resurrection.CastResurrection(ctx, caster.ID, target.ID, casterMP, skill.ConsumeMP, targetHP, targetMP)
+	if err != nil {
+		return err
+	}
+	if !committed || !model.CommitSkillResurrection(caster, target, casterMP, skill.ConsumeMP, targetHP, targetMP) {
+		return h.sendActionState(session, false)
+	}
+	if h.nextSkill == nil {
+		h.nextSkill = make(map[skillCooldownKey]time.Time)
+	}
+	if skill.ReuseDelay > 0 {
+		h.nextSkill[key] = now.Add(time.Duration(skill.ReuseDelay) * time.Millisecond)
+	}
+	if err := h.sendActionState(session, true); err != nil {
+		return err
+	}
+	castUID := model.NextActionUID()
+	begin := model.BuildBuffCastBegin(skill.ID, caster.GetUniqueID(), target.GetUniqueID(), castUID)
+	end := model.BuildBuffCastEnd(caster.GetUniqueID(), castUID)
+	if err := h.emitAttack(caster, &begin); err != nil {
+		return err
+	}
+	if err := h.emitAttack(caster, &end); err != nil {
+		return err
+	}
+	if err := h.sendActionState(session, false); err != nil {
+		return err
+	}
+	if err := h.sendPlayerPacket(target.Session, model.BuildVitalsUpdatePacket(target.GetUniqueID(), targetHP, targetMP)); err != nil {
+		return err
+	}
+	life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Alive)
+	h.publishCombatPacket(caster, &life)
+	if skill.ConsumeMP > 0 {
+		casterHP, _ := caster.CurrentVitals()
+		if err := h.sendPlayerPacket(session, model.BuildVitalsUpdatePacket(caster.GetUniqueID(), casterHP, casterMP-skill.ConsumeMP)); err != nil {
+			return err
+		}
+	}
+	if visibility, supported := h.world.(resurrectionVisibilityReconciler); supported {
+		_ = visibility.ReconcileCharacterVisibility(target)
 	}
 	return nil
 }
@@ -1160,6 +1268,7 @@ func (h *CombatHandler) executeAttack(ctx context.Context, session *server.Sessi
 	if next := h.nextAttack[playerUID]; !next.IsZero() && now.Before(next) {
 		return h.sendActionState(session, false)
 	}
+	h.engageGrowthPet(player, target)
 	targetUID := target.GetUniqueID()
 	damage := player.AverageAttackPower(false)
 	imbue, hasImbue := h.activeWeaponImbue(player)
@@ -1259,6 +1368,7 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 	if skill.ReuseDelay > 0 {
 		h.nextSkill[key] = now.Add(time.Duration(skill.ReuseDelay) * time.Millisecond)
 	}
+	h.engageGrowthPet(player, target)
 	impactDelay := time.Duration(skill.ActionPreparingTime+skill.ActionCastingTime) * time.Millisecond
 	if impactDelay > 0 && h.schedule != nil {
 		if err := h.sendActionState(session, true); err != nil {
@@ -2180,6 +2290,10 @@ func (h *CombatHandler) playerAttackLands(player *model.Player, target *model.NP
 }
 
 func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32) error {
+	return h.awardKill(ctx, session, player, target, targetUID, true)
+}
+
+func (h *CombatHandler) awardKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32, shareGrowthPetExperience bool) error {
 	baseReward := target.ExperienceReward()
 	if h.rates == nil {
 		return fmt.Errorf("gameplay progression rates are unavailable")
@@ -2202,6 +2316,11 @@ func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Ses
 	player.CommitProgress(progress)
 	if err := sendExperienceUpdate(session, targetUID, reward, skillReward, progress); err != nil {
 		return err
+	}
+	if shareGrowthPetExperience && h.companions != nil {
+		if err := h.companions.AwardOwnerKillExperience(ctx, player, target); err != nil {
+			logrus.Warnf("growth pet EXP award failed owner=%d target=%d: %v", player.ID, targetUID, err)
+		}
 	}
 	if h.hwan != nil && h.referenceData != nil {
 		character, exists := h.referenceData.Character(target.GetRefObjectID())
@@ -2235,18 +2354,24 @@ func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Ses
 	if err != nil {
 		return err
 	}
-	if !questProgress.Changed {
-		return nil
+	for _, progress := range questProgress {
+		if !progress.Changed {
+			continue
+		}
+		player.CommitQuestMutation(progress.Quest)
+		update, buildErr := buildQuestStatePacket(progress.Quest)
+		if buildErr != nil {
+			return buildErr
+		}
+		if h.send != nil {
+			if sendErr := h.send(session, update); sendErr != nil {
+				return sendErr
+			}
+		} else if sendErr := session.Send(update); sendErr != nil {
+			return sendErr
+		}
 	}
-	player.CommitQuestMutation(questProgress.Quest)
-	update, err := buildQuestStatePacket(questProgress.Quest)
-	if err != nil {
-		return err
-	}
-	if h.send != nil {
-		return h.send(session, update)
-	}
-	return session.Send(update)
+	return nil
 }
 
 // AwardCOSKill routes a growth-pet kill through the owner's normal progression,
@@ -2255,7 +2380,7 @@ func (h *CombatHandler) AwardCOSKill(ctx context.Context, owner *model.Player, t
 	if h == nil || owner == nil || owner.Session == nil || target == nil {
 		return ErrCombatTargetInvalid
 	}
-	return h.awardPlayerKill(ctx, owner.Session, owner, target, target.GetUniqueID())
+	return h.awardKill(ctx, owner.Session, owner, target, target.GetUniqueID(), false)
 }
 
 func (h *CombatHandler) baseAttackCooldown(player *model.Player) time.Duration {
@@ -2606,16 +2731,8 @@ func broadcastCombatPacket(player *model.Player, packet *network.Packet) {
 }
 
 func buildActionStateResponse(active bool) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntityActionResponse
-	if active {
-		p.WriteByte(1) // Enter action.
-		p.WriteByte(1) // Recurring/active.
-	} else {
-		p.WriteByte(2) // Exit action.
-		p.WriteByte(0) // Not recurring.
-	}
-	return p
+	packet, _ := (vsro188.CombatActionStateResponseCodec{}).Encode(vsro188.CombatActionStateResponse{Active: active})
+	return packet
 }
 
 func buildSkillCastErrorResponse(reason byte) network.Packet {

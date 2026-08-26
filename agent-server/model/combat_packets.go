@@ -6,6 +6,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 var nextActionUID atomic.Uint32
@@ -94,11 +95,7 @@ func BuildMovementCastBegin(skillID, sourceUID, targetUID, castUID uint32, posit
 }
 
 func BuildBuffCastEnd(targetUID, castUID uint32) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntitySkillCastEnd
-	p.WriteByte(1)
-	p.WriteUInt32(castUID)
-	p.WriteUInt32(targetUID)
+	p := buildAttackEndHeader(targetUID, castUID)
 	p.WriteBool(false)
 	return p
 }
@@ -107,11 +104,7 @@ func BuildBuffCastEnd(targetUID, castUID uint32) network.Packet {
 // and the authoritative endpoint. The stock client remains locked in the
 // Ghost Walk animation if B071 carries flag 0 or omits this position.
 func BuildTeleportCastEnd(targetUID, castUID uint32, position navmeshv2.RtNavmeshPosition) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntitySkillCastEnd
-	p.WriteByte(1)
-	p.WriteUInt32(castUID)
-	p.WriteUInt32(targetUID)
+	p := buildAttackEndHeader(targetUID, castUID)
 	writeActionPosition(&p, position)
 	return p
 }
@@ -166,7 +159,10 @@ func BuildBuffRemove(tokens ...uint32) network.Packet {
 }
 
 func buildAttackBeginHeader(skillID, sourceUID, targetUID, castUID uint32) network.Packet {
-	return buildAttackBeginHeaderWithType(2, skillID, sourceUID, targetUID, castUID)
+	packet, _ := (vsro188.CombatAttackBeginSuccessPrefixCodec{}).Encode(vsro188.CombatAttackBeginSuccessPrefix{
+		SkillID: skillID, SourceUniqueID: sourceUID, CastUniqueID: castUID, TargetUniqueID: targetUID,
+	})
+	return packet
 }
 
 func buildAttackBeginHeaderWithType(actionType byte, skillID, sourceUID, targetUID, castUID uint32) network.Packet {
@@ -196,11 +192,7 @@ func BuildAttackEndHitsAndEffect(targetUID, castUID uint32, damage []uint32, kil
 }
 
 func BuildAttackEndDamageRecords(targetUID, castUID uint32, records []CombatDamageRecord) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntitySkillCastEnd
-	p.WriteByte(1)
-	p.WriteUInt32(castUID)
-	p.WriteUInt32(targetUID)
+	p := buildAttackEndHeader(targetUID, castUID)
 	WriteDamageBlockRecords(&p, targetUID, records)
 	return p
 }
@@ -214,11 +206,7 @@ type SkillEffectTarget struct {
 // while retaining the abnormal-state mask in the stock per-target effect
 // record. This is how Cold Wave can apply Frostbite without inventing damage.
 func BuildStatusAttackEnd(animationTarget, castUID uint32, targets []SkillEffectTarget) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntitySkillCastEnd
-	p.WriteByte(1)
-	p.WriteUInt32(castUID)
-	p.WriteUInt32(animationTarget)
+	p := buildAttackEndHeader(animationTarget, castUID)
 	if len(targets) == 0 {
 		p.WriteBool(false)
 		return p
@@ -231,6 +219,13 @@ func BuildStatusAttackEnd(animationTarget, castUID uint32, targets []SkillEffect
 		writeDamageRecord(&p, CombatDamageRecord{DamageState: DamageStateNormal, EffectMask: target.EffectMask})
 	}
 	return p
+}
+
+func buildAttackEndHeader(targetUID, castUID uint32) network.Packet {
+	packet, _ := (vsro188.CombatAttackEndSuccessPrefixCodec{}).Encode(vsro188.CombatAttackEndSuccessPrefix{
+		CastUniqueID: castUID, TargetUniqueID: targetUID,
+	})
+	return packet
 }
 
 func WriteDamageBlock(p *network.Packet, targetUID, damage uint32, killed bool) {

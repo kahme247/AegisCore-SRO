@@ -130,6 +130,7 @@ func TestWorldNeighbourAndKnownObjectLookupsSynchronizeRegionStartup(t *testing.
 		regions: map[int16]*navmeshv2.RtNavmeshTerrain{
 			regionID: &terrain,
 		},
+		regionOwners: map[int16]string{regionID: "test"},
 		visibleObjectsByRegion: map[int16][]model.ISRObject{
 			regionID: {observer, other},
 		},

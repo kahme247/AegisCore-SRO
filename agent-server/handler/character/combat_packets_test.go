@@ -27,14 +27,35 @@ type combatWorldFake struct {
 }
 
 type combatVitalsFake struct {
-	spendCalls int
-	expectedMP int
-	cost       int
-	spent      bool
-	saveCalls  int
-	savedID    int
-	savedHP    int
-	savedMP    int
+	spendCalls        int
+	expectedMP        int
+	cost              int
+	spent             bool
+	saveCalls         int
+	savedID           int
+	savedHP           int
+	savedMP           int
+	resurrectionCalls int
+	resurrection      bool
+	resurrectionArgs  [6]int
+}
+
+type growthPetCombatFake struct {
+	engagedPlayer *model.Player
+	engagedTarget *model.NPC
+	engagements   int
+	awards        int
+}
+
+func (f *growthPetCombatFake) EngageOwnerTarget(player *model.Player, target *model.NPC) error {
+	f.engagedPlayer, f.engagedTarget = player, target
+	f.engagements++
+	return nil
+}
+
+func (f *growthPetCombatFake) AwardOwnerKillExperience(context.Context, *model.Player, *model.NPC) error {
+	f.awards++
+	return nil
 }
 
 func (f *combatVitalsFake) SaveVitals(_ context.Context, id, hp, mp int) error {
@@ -50,6 +71,11 @@ func (f *combatVitalsFake) SpendMP(_ context.Context, _ int, expectedMP, cost in
 	f.expectedMP = expectedMP
 	f.cost = cost
 	return f.spent, nil
+}
+func (f *combatVitalsFake) CastResurrection(_ context.Context, casterID, targetID, expectedMP, cost, hp, mp int) (bool, error) {
+	f.resurrectionCalls++
+	f.resurrectionArgs = [6]int{casterID, targetID, expectedMP, cost, hp, mp}
+	return f.resurrection, nil
 }
 
 func (f *combatWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) {
@@ -1142,6 +1168,94 @@ func TestCombatSelfHealingPersistsVitalsAndPublishesCast(t *testing.T) {
 	}
 }
 
+func TestCombatTargetedResurrectionCommitsMPAndRevivalAtomically(t *testing.T) {
+	const skillID = uint32(152)
+	casterSession := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	targetSession := &server.Session{UserContext: server.UserContext{UniqueID: 200, CharacterID: 84}}
+	caster := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(25000, 100, 0, 100)}, ID: 42, Level: 20, Session: casterSession,
+		BaseStats: model.BaseStats{HP: 200, MP: 150, Str: 20, Int: 20}, Skills: map[uint32]byte{skillID: 1}, Inventory: model.NewInventory(nil),
+	}
+	target := &model.Player{
+		SRObject: model.SRObject{UniqueID: 200, RtNavmeshPosition: combatTestPosition(25000, 101, 0, 100)}, ID: 84, Level: 20, Session: targetSession,
+		BaseStats: model.BaseStats{HP: 0, MP: 0, Str: 20, Int: 20}, Inventory: model.NewInventory(nil),
+	}
+	caster.SetLifeState(model.Alive)
+	target.SetLifeState(model.Dead)
+	party := &model.Party{Number: 9}
+	if err := caster.AddToParty(party); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.AddToParty(party); err != nil {
+		t.Fatal(err)
+	}
+	vitals := &combatVitalsFake{resurrection: true}
+	var sent []network.Packet
+	skill := model.RefSkill{
+		ID: skillID, BasicActivity: 2, TargetRequired: true, TargetAlly: true, TargetParty: true, TargetDeadBody: true,
+		HealHPPercent: 10, HealMPPercent: 10, ResurrectLevel: 27, ConsumeMP: 30, ReuseDelay: 1000, ActionRange: 150,
+	}
+	handler := &CombatHandler{
+		world:  &combatWorldFake{player: caster, objects: map[uint32]model.ISRObject{target.GetUniqueID(): target}},
+		vitals: vitals, referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{skillID: skill}}),
+		nextSkill: make(map[skillCooldownKey]time.Time),
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	if err := handler.handlePacket(context.Background(), casterSession, combatSkillPacket(skillID, target.GetUniqueID())); err != nil {
+		t.Fatalf("resurrection cast failed: %v", err)
+	}
+	maxHP, maxMP := target.MaxVitals()
+	wantHP, wantMP := skill.RestorationAmounts(maxHP, maxMP)
+	if hp, mp := target.CurrentVitals(); hp != wantHP || mp != wantMP || target.GetLifeState() != model.Alive {
+		t.Fatalf("target resurrection = life:%d vitals:%d/%d, want alive %d/%d", target.GetLifeState(), hp, mp, wantHP, wantMP)
+	}
+	if _, mp := caster.CurrentVitals(); mp != 120 {
+		t.Fatalf("caster MP = %d, want 120", mp)
+	}
+	wantArgs := [6]int{42, 84, 150, 30, wantHP, wantMP}
+	if vitals.resurrectionCalls != 1 || vitals.resurrectionArgs != wantArgs {
+		t.Fatalf("persistent resurrection = calls:%d args:%v, want 1 %v", vitals.resurrectionCalls, vitals.resurrectionArgs, wantArgs)
+	}
+	wantOpcodes := []uint16{
+		opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd,
+		opcode.EntityActionResponse, opcode.EntityUpdateStatus, opcode.EntityUpdateMovementState, opcode.EntityUpdateStatus,
+	}
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, wantOpcodes) {
+		t.Fatalf("resurrection packets = %04X, want %04X", got, wantOpcodes)
+	}
+}
+
+func TestCombatResurrectionRejectsTargetAboveAuthoredLevel(t *testing.T) {
+	const skillID = uint32(152)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	caster := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Level: 20, Session: session, BaseStats: model.BaseStats{HP: 200, MP: 150}, Skills: map[uint32]byte{skillID: 1}}
+	target := &model.Player{SRObject: model.SRObject{UniqueID: 200}, ID: 84, Level: 28, BaseStats: model.BaseStats{HP: 0}}
+	caster.SetLifeState(model.Alive)
+	target.SetLifeState(model.Dead)
+	party := &model.Party{Number: 9}
+	_ = caster.AddToParty(party)
+	_ = target.AddToParty(party)
+	vitals := &combatVitalsFake{resurrection: true}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: &combatWorldFake{player: caster, objects: map[uint32]model.ISRObject{200: target}}, vitals: vitals,
+		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, BasicActivity: 2, TargetRequired: true, TargetAlly: true, TargetParty: true, TargetDeadBody: true, HealHPPercent: 10, ResurrectLevel: 27},
+		}}),
+		send: func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+	}
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(skillID, 200)); err != nil {
+		t.Fatal(err)
+	}
+	if vitals.resurrectionCalls != 0 || target.GetLifeState() != model.Dead {
+		t.Fatalf("over-level resurrection mutated target: calls=%d life=%d", vitals.resurrectionCalls, target.GetLifeState())
+	}
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse}) {
+		t.Fatalf("over-level packets = %04X", got)
+	}
+}
+
 func TestCombatRightClickCancelsOwnedActiveBuff(t *testing.T) {
 	const skillID = uint32(1377)
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
@@ -1271,12 +1385,14 @@ func TestCombatNormalAttackRejectsRepeatInsideReferenceCooldown(t *testing.T) {
 	player.GetKnownObjectList().AddObject(mob)
 
 	var sent []network.Packet
+	companions := &growthPetCombatFake{}
 	handler := &CombatHandler{
 		world: &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{200: mob}},
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
 			1: {ID: 1, ActionDuration: 600, ReuseDelay: 1000, CoolTime: 800},
 		}}),
 		nextAttack: make(map[uint32]time.Time),
+		companions: companions,
 		now:        func() time.Time { return now },
 		send: func(_ *server.Session, packet network.Packet) error {
 			sent = append(sent, packet)
@@ -1305,6 +1421,9 @@ func TestCombatNormalAttackRejectsRepeatInsideReferenceCooldown(t *testing.T) {
 	}
 	if got := mob.CurrentHitPoints(); got >= hitPointsAfterFirst {
 		t.Fatalf("attack after cooldown left HP at %d, want below %d", got, hitPointsAfterFirst)
+	}
+	if companions.engagements != 2 || companions.engagedPlayer != player || companions.engagedTarget != mob {
+		t.Fatalf("growth pet engagements = %d player=%p target=%p", companions.engagements, companions.engagedPlayer, companions.engagedTarget)
 	}
 }
 

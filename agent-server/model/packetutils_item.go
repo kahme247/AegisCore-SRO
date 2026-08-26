@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 func WriteRentInfo(p *network.Packet, item Item) {
@@ -101,14 +100,8 @@ func WriteContainerItem(p *network.Packet, item Item) {
 		if state != COSItemInactive {
 			p.WriteUInt32(item.COS.RefObjectID)
 			p.WriteString(item.COS.Name)
-			if item.TypeID4 == 2 {
-				writeCOSFixedPeriodRental(p, item.COS.RentEndsAt)
-			} else {
-				level := item.COS.Level
-				if level == 0 {
-					level = 1
-				}
-				p.WriteByte(level)
+			if item.COS.Kind == COSAbilityPet || (item.COS.Kind == 0 && item.TypeID4 == 2) {
+				writeCOSAbilityPetLifetime(p, item.COS.RentEndsAt, time.Now().UTC())
 			}
 			p.WriteByte(0) // active COS item buff count
 		}
@@ -122,17 +115,20 @@ func WriteContainerItem(p *network.Packet, item Item) {
 	}
 }
 
-func writeCOSFixedPeriodRental(p *network.Packet, endsAt time.Time) {
-	if endsAt.IsZero() {
-		p.WriteUInt32(0)
-		return
+func writeCOSAbilityPetLifetime(p *network.Packet, endsAt, now time.Time) {
+	const maxLifetimeSeconds = int64(^uint32(0) >> 1)
+
+	remaining := int64(0)
+	if endsAt.After(now) {
+		remaining = int64((endsAt.Sub(now) + time.Second - 1) / time.Second)
+		if remaining > maxLifetimeSeconds {
+			remaining = maxLifetimeSeconds
+		}
 	}
-	// Ability-pet items use the normal RentInfo type-1 layout. The vSRO 1.188
-	// client reads packed 32-bit Silkroad timestamps for both boundaries.
-	p.WriteUInt32(1)
-	p.WriteUInt16(1)
-	p.WriteUInt32(utils.ToSilkroadTime(time.Now().UTC()))
-	p.WriteUInt32(utils.ToSilkroadTime(endsAt.UTC()))
+	// The stock vSRO 1.188 SOItem reader (0x008BE8F0) reads one signed
+	// 32-bit remaining-lifetime value and converts it from seconds to
+	// milliseconds. It does not read the generic RentInfo structure here.
+	p.WriteUInt32(uint32(remaining))
 }
 
 func WriteExpendableItem(p *network.Packet, item Item) {

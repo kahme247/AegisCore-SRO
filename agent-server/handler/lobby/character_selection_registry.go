@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -24,6 +25,10 @@ type CharacterStore interface {
 
 type deadCharacterJoinRecoveryStore interface {
 	RecoverDeadCharacterForJoin(context.Context, int, uint32, uint16, int, int) (bool, error)
+}
+
+type expiredCharacterDeletionStore interface {
+	PurgeExpiredCharacters(context.Context, time.Time, int) (int, error)
 }
 
 // CharacterInventoryStore is the narrow inventory-read dependency required
@@ -82,6 +87,16 @@ func (s repositoryCharacterStore) CharactersForOwner(ctx context.Context, userID
 		return nil, model.ErrCharacterRepositoryUnavailable
 	}
 	return s.repository.GetCharactersForOwner(ctx, userID, shardID)
+}
+
+func (s repositoryCharacterStore) PurgeExpiredCharacters(ctx context.Context, now time.Time, limit int) (int, error) {
+	purger, ok := s.repository.(interface {
+		PurgeExpiredCharacters(context.Context, time.Time, int) (int, error)
+	})
+	if !ok {
+		return 0, model.ErrCharacterRepositoryUnavailable
+	}
+	return purger.PurgeExpiredCharacters(ctx, now, limit)
 }
 
 func (s repositoryCharacterStore) SetDeletionForOwner(ctx context.Context, name string, userID uint32, shardID uint16, deleting bool) (bool, error) {

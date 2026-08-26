@@ -13,6 +13,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/sirupsen/logrus"
 )
 
@@ -75,16 +76,11 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 	// The legacy path consumed exactly one entity UID. Without a capture that
 	// establishes an extension layout, any short or trailing request is invalid
 	// and must reach the framework as a handler error so the session closes.
-	if packet.Remaining() != 4 {
-		return fmt.Errorf("entity selection request payload length %d, want 4", packet.Remaining())
-	}
-	uniqueID, err := packet.ReadUInt32()
+	request, err := (vsro188.EntitySelectRequestCodec{}).Decode(packet)
 	if err != nil {
-		return fmt.Errorf("read entity selection target: %w", err)
+		return err
 	}
-	if packet.Remaining() != 0 {
-		return fmt.Errorf("entity selection request has %d trailing bytes", packet.Remaining())
-	}
+	uniqueID := request.UniqueID
 
 	world := h.worldService()
 	player, err := resolveSelectingPlayer(world, session)

@@ -316,6 +316,36 @@ func (p *PositionPersistenceService) Drain(ctx context.Context) error {
 	}
 }
 
+// DiscardPlayer waits for an older in-flight checkpoint, then removes the
+// queued snapshot. A terminal transaction calls this before capturing the
+// live player so an old asynchronous write cannot commit after the newer
+// disconnect position.
+func (p *PositionPersistenceService) DiscardPlayer(ctx context.Context, playerUID uint32) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		p.mutex.Lock()
+		snapshot, exists := p.dirty[playerUID]
+		if !exists {
+			p.mutex.Unlock()
+			return nil
+		}
+		if !snapshot.flushing {
+			delete(p.dirty, playerUID)
+			p.mutex.Unlock()
+			return nil
+		}
+		waitFor := snapshot.flushDone
+		p.mutex.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitFor:
+		}
+	}
+}
+
 // Stats returns a safe point-in-time view of bounded-queue health.
 func (p *PositionPersistenceService) Stats() PositionPersistenceStats {
 	p.mutex.Lock()

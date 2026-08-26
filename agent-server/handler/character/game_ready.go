@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/sirupsen/logrus"
 )
 
@@ -83,8 +84,8 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 	// No sanitized capture establishes a payload structure beyond the opcode.
 	// The legacy implementation read no fields; accept the documented empty
 	// request only rather than guessing at optional fields.
-	if packet.Remaining() != 0 {
-		return fmt.Errorf("GameReady request contains trailing data")
+	if _, err := (vsro188.GameReadyRequestCodec{}).Decode(packet); err != nil {
+		return err
 	}
 	if session.UserContext.UniqueID == 0 || session.UserContext.CharacterID <= 0 || session.UserContext.CharName == "" {
 		return fmt.Errorf("GameReady request has no staged character")

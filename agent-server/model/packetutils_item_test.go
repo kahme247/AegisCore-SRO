@@ -21,40 +21,51 @@ func TestWriteExpendableItemDoesNotEncodeMPPotionAsGachaCard(t *testing.T) {
 	}
 }
 
-func TestWriteSummonedGrowthCOSItemIncludesIdentityLevelAndState(t *testing.T) {
+func TestWriteSummonedGrowthCOSItemMatchesStockVSRO188Reader(t *testing.T) {
 	packet := network.EmptyPacket()
 	WriteContainerItem(&packet, Item{
 		SRObject: SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 1}},
-		COS:      COSItemInfo{Present: true, State: COSItemSummoned, RefObjectID: 9384, Name: "Wolf", Level: 12},
+		COS:      COSItemInfo{Present: true, Kind: COSGrowthPet, State: COSItemSummoned, RefObjectID: 9384, Name: "Wolf", Level: 12},
 	})
-	want := []byte{2, 0xA8, 0x24, 0, 0, 4, 0, 'W', 'o', 'l', 'f', 12, 0}
+	// The stock reader consumes state, RefCharID, name, then buff count. It
+	// derives the growth pet level from RefChar rather than reading a level byte.
+	want := []byte{2, 0xA8, 0x24, 0, 0, 4, 0, 'W', 'o', 'l', 'f', 0}
 	if got := packet.Payload(); !bytes.Equal(got, want) {
 		t.Fatalf("summoned growth item = % X, want % X", got, want)
 	}
 }
 
-func TestWriteActiveAbilityCOSItemIncludesNonzeroRentalEnd(t *testing.T) {
+func TestWriteActiveAbilityCOSItemMatchesStockVSRO188Reader(t *testing.T) {
+	packet := network.EmptyPacket()
+	now := time.Date(2026, time.July, 19, 6, 0, 0, 0, time.UTC)
+	endsAt := now.Add(28 * 24 * time.Hour)
+	packet.WriteByte(byte(COSItemActive))
+	packet.WriteUInt32(23857)
+	packet.WriteString("")
+	writeCOSAbilityPetLifetime(&packet, endsAt, now)
+	packet.WriteByte(0)
+	want := []byte{3, 0x31, 0x5D, 0, 0, 0, 0, 0x00, 0xEA, 0x24, 0x00, 0}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("active ability item = % X, want % X", got, want)
+	}
+}
+
+func TestWriteContainerActiveAbilityCOSItemUsesRemainingLifetime(t *testing.T) {
 	packet := network.EmptyPacket()
 	endsAt := time.Now().Add(28 * 24 * time.Hour)
 	WriteContainerItem(&packet, Item{
 		SRObject: SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 2}},
-		COS:      COSItemInfo{Present: true, State: COSItemActive, RefObjectID: 23857, RentEndsAt: endsAt},
+		COS:      COSItemInfo{Present: true, Kind: COSAbilityPet, State: COSItemActive, RefObjectID: 23857, RentEndsAt: endsAt},
 	})
 	payload := packet.Payload()
-	if len(payload) != 22 || payload[0] != byte(COSItemActive) || binary.LittleEndian.Uint32(payload[1:5]) != 23857 {
+	if len(payload) != 12 || payload[0] != byte(COSItemActive) || binary.LittleEndian.Uint32(payload[1:5]) != 23857 {
 		t.Fatalf("active ability item payload = % X", payload)
 	}
-	if rentalType := binary.LittleEndian.Uint32(payload[7:11]); rentalType != 1 {
-		t.Fatalf("ability pet rental type = %d, want fixed-period type 1", rentalType)
+	if remaining := binary.LittleEndian.Uint32(payload[7:11]); remaining < 28*24*60*60-1 || remaining > 28*24*60*60 {
+		t.Fatalf("ability pet remaining lifetime = %d, want approximately 28 days", remaining)
 	}
-	if canDelete := binary.LittleEndian.Uint16(payload[11:13]); canDelete != 1 {
-		t.Fatalf("ability pet can-delete = %d, want 1", canDelete)
-	}
-	if begin, end := binary.LittleEndian.Uint32(payload[13:17]), binary.LittleEndian.Uint32(payload[17:21]); begin == 0 || end == 0 || begin == end {
-		t.Fatalf("ability pet rental timestamps = %08X/%08X, want distinct nonzero values", begin, end)
-	}
-	if payload[21] != 0 {
-		t.Fatalf("ability pet buff count = %d, want 0", payload[21])
+	if payload[11] != 0 {
+		t.Fatalf("ability pet buff count = %d, want 0", payload[11])
 	}
 }
 

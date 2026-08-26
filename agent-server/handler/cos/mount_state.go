@@ -10,9 +10,8 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
-
-const mountStateRequestSize = 5
 
 type playerLookup interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
@@ -42,31 +41,11 @@ func RegisterMountStateHandler(target *server.Server) {
 }
 
 func parseMountStateRequest(packet *network.Packet) (mountStateRequest, error) {
-	if packet == nil || packet.Remaining() != mountStateRequestSize {
-		remaining := 0
-		if packet != nil {
-			remaining = packet.Remaining()
-		}
-		return mountStateRequest{}, fmt.Errorf("COS mount-state payload length %d, want %d", remaining, mountStateRequestSize)
+	if packet == nil {
+		return mountStateRequest{}, fmt.Errorf("COS mount-state request is nil")
 	}
-	action, err := packet.ReadByte()
-	if err != nil {
-		return mountStateRequest{}, fmt.Errorf("read COS mount-state action: %w", err)
-	}
-	if action != 0 && action != 1 {
-		return mountStateRequest{}, fmt.Errorf("invalid COS mount-state action %d", action)
-	}
-	uniqueID, err := packet.ReadUInt32()
-	if err != nil {
-		return mountStateRequest{}, fmt.Errorf("read COS transport unique ID: %w", err)
-	}
-	if uniqueID == 0 {
-		return mountStateRequest{}, model.ErrInvalidTransport
-	}
-	if packet.Remaining() != 0 {
-		return mountStateRequest{}, fmt.Errorf("COS mount-state request has %d trailing bytes", packet.Remaining())
-	}
-	return mountStateRequest{mounted: action == 1, transportUniqueID: uniqueID}, nil
+	request, err := (vsro188.COSMountStateRequestCodec{}).Decode(*packet)
+	return mountStateRequest{mounted: request.Mounted, transportUniqueID: request.TransportUniqueID}, err
 }
 
 func (h *MountStateHandler) handlePacket(_ context.Context, session *server.Session, packet network.Packet) error {

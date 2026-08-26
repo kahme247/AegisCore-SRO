@@ -13,7 +13,7 @@ import (
 
 type questRuntimeStub struct {
 	grantResult    model.QuestItemGrantResult
-	progressResult model.QuestProgressResult
+	progressResult []model.QuestProgressResult
 	completeResult model.QuestCompletionResult
 	err            error
 }
@@ -22,7 +22,7 @@ func (r *questRuntimeStub) GrantMissionItem(context.Context, int, int) (model.Qu
 	return r.grantResult, r.err
 }
 
-func (r *questRuntimeStub) RecordMobKill(context.Context, int, uint32) (model.QuestProgressResult, error) {
+func (r *questRuntimeStub) RecordMobKill(context.Context, int, uint32) ([]model.QuestProgressResult, error) {
 	return r.progressResult, r.err
 }
 
@@ -210,13 +210,14 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 }
 
 func TestNPCTalkJingyoGrantsWeaponListAndAdvancesQuest(t *testing.T) {
+	const weaponListItemID = uint32(2200)
 	session, player, npc := selectEntityFixture(t)
 	npc.Name = "NPC_CH_SOLDIER_SO1"
 	npc.RefObjectID = jingyoRefObjectID
 	player.Quests = []model.CharacterQuest{{QuestID: model.QuestWeaponListID, Status: model.QuestStartedByUser, AchievementCount: 1}}
 	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
 	quest := model.CharacterQuest{QuestID: model.QuestWeaponListID, Status: model.QuestReadyToTurnInByUser, AchievementCount: 1, Data1: 1}
-	item := model.Item{SRObject: model.SRObject{RefObjectID: model.QuestWeaponListItemID}}
+	item := model.Item{SRObject: model.SRObject{RefObjectID: weaponListItemID}}
 	runtime := &questRuntimeStub{grantResult: model.QuestItemGrantResult{
 		Quest: quest, Inventory: model.NewInventory(map[byte]model.Item{13: item}), Added: model.QuestItemMutation{Slot: 13, Item: item},
 	}}

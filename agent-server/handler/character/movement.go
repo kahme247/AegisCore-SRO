@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
@@ -75,32 +76,25 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 		movementService.Stop(player, "wall-skill-root")
 		return
 	}
-	hasDestination, err := data.ReadBool()
+	request, err := (vsro188.EntityMovementRequestCodec{}).Decode(data.Packet)
 	if err != nil {
-		mh.rejectMalformed(player, "movement type", err)
+		mh.rejectMalformed(player, "movement request", err)
 		return
 	}
-	if !hasDestination {
-		source, heading, directionErr := parseDirectionalMovementPacket(&data.Packet)
-		if directionErr != nil {
-			mh.rejectMalformed(player, "direction movement", directionErr)
-			return
-		}
-		if source == 0 {
+	if !request.HasDestination {
+		if request.Directional.Source == 0 {
 			mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
-			movementService.Turn(player, float32(heading))
+			movementService.Turn(player, float32(request.Directional.Heading))
 		} else {
 			mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
-			movementService.WalkToDirection(player, float32(heading))
+			movementService.WalkToDirection(player, float32(request.Directional.Heading))
 		}
 		return
 	}
 
-	regionID, offset, err := parseDestinationMovementPacket(&data.Packet)
-	if err != nil {
-		mh.rejectMalformed(player, "destination movement", err)
-		return
-	}
+	destination := request.Destination
+	regionID := destination.RegionID
+	offset := math32.NewVector3(float32(destination.X), float32(destination.Y), float32(destination.Z))
 	targetPosition, err := resolveDestinationPosition(world, regionID, offset)
 	if err != nil {
 		mh.rejectMalformed(player, "destination position", err)
@@ -138,23 +132,11 @@ func parseDestinationMovementPacket(packet *network.Packet) (int16, *math32.Vect
 	if packet == nil {
 		return 0, nil, fmt.Errorf("missing destination packet")
 	}
-	regionID, err := packet.ReadInt16()
+	request, err := (vsro188.EntityDestinationMovementCodec{}).Decode(*packet)
 	if err != nil {
 		return 0, nil, err
 	}
-	if regionID < 0 {
-		return 0, nil, fmt.Errorf("dungeon region %d is unsupported", regionID)
-	}
-	if packet.Remaining() != 6 {
-		return 0, nil, fmt.Errorf("region %d has destination payload length %d, want 6", regionID, packet.Remaining())
-	}
-	x, xErr := packet.ReadInt16()
-	y, yErr := packet.ReadInt16()
-	z, zErr := packet.ReadInt16()
-	if err := firstError(xErr, yErr, zErr); err != nil {
-		return 0, nil, err
-	}
-	return regionID, math32.NewVector3(float32(x), float32(y), float32(z)), nil
+	return request.RegionID, math32.NewVector3(float32(request.X), float32(request.Y), float32(request.Z)), nil
 }
 
 // parseDirectionalMovementPacket reads the payload after the leading false
@@ -164,24 +146,11 @@ func parseDirectionalMovementPacket(packet *network.Packet) (byte, uint16, error
 	if packet == nil {
 		return 0, 0, fmt.Errorf("missing directional packet")
 	}
-	source := byte(1) // `00 | heading:uint16` means walk in that direction.
-	switch packet.Remaining() {
-	case 2:
-		// Exact stock-client form.
-	case 3:
-		var err error
-		source, err = packet.ReadByte()
-		if err != nil {
-			return 0, 0, err
-		}
-	default:
-		return 0, 0, fmt.Errorf("invalid directional payload length %d", packet.Remaining())
-	}
-	heading, err := packet.ReadUInt16()
+	request, err := (vsro188.EntityDirectionalMovementCodec{}).Decode(*packet)
 	if err != nil {
 		return 0, 0, err
 	}
-	return source, heading, nil
+	return request.Source, request.Heading, nil
 }
 
 func (mh *MovementHandler) handleForward(data server.PacketChannelData) {

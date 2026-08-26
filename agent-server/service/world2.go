@@ -55,7 +55,10 @@ type WorldService struct {
 	pets                 map[uint32]model.ISRObject // TODO Move to own type+
 	// Regions are immutable after bootstrap. Store pointers so lookups do not
 	// copy each region's fixed tile/plane/height arrays.
-	regions       map[int16]*navmeshv2.RtNavmeshTerrain
+	regions map[int16]*navmeshv2.RtNavmeshTerrain
+	// regionOwners records the validated continent/runtime partition. It is
+	// populated atomically with regions and immutable after bootstrap.
+	regionOwners  map[int16]string
 	movingObjects map[uint32]model.ICharacter
 	// movingObjectSnapshot changes only when movement membership changes. The
 	// game-time loop can iterate this stable slice without cloning a map every
@@ -140,6 +143,7 @@ func GetWorldServiceInstance() *WorldService {
 			npcsByUniqueId:         make(map[uint32]*model.NPC),
 			pets:                   make(map[uint32]model.ISRObject),
 			regions:                make(map[int16]*navmeshv2.RtNavmeshTerrain),
+			regionOwners:           make(map[int16]string),
 			movingObjects:          make(map[uint32]model.ICharacter),
 			visibleObjectsByRegion: make(map[int16][]model.ISRObject),
 			spawns:                 make(map[int16][]*model.SpawnArea),
@@ -304,7 +308,18 @@ func (w *WorldService) RemoveVisibleObject(object model.ISRObject) {
 	w.visibilityMutex.Unlock()
 }
 
-func (w *WorldService) PlayerDisconnected(uid uint32, _ string) {
+func (w *WorldService) PlayerDisconnected(uid uint32, name string) {
+	w.playerDisconnected(uid, name, true)
+}
+
+// PlayerDisconnectedAfterSave removes world state without scheduling a second
+// non-atomic position write. The caller must have completed its terminal save
+// attempt first.
+func (w *WorldService) PlayerDisconnectedAfterSave(uid uint32, name string) {
+	w.playerDisconnected(uid, name, false)
+}
+
+func (w *WorldService) playerDisconnected(uid uint32, _ string, checkpointPosition bool) {
 	if w == nil || w.mutex == nil {
 		return
 	}
@@ -360,7 +375,7 @@ func (w *WorldService) PlayerDisconnected(uid uint32, _ string) {
 		}
 	}
 	w.visibilityMutex.Unlock()
-	if player != nil {
+	if player != nil && checkpointPosition {
 		if w.positionPersistence != nil {
 			w.positionPersistence.MarkDirty(player)
 			if err := w.positionPersistence.FlushPlayer(uid); err != nil {
@@ -368,6 +383,15 @@ func (w *WorldService) PlayerDisconnected(uid uint32, _ string) {
 			}
 		}
 	}
+}
+
+// PrepareDisconnectSave removes any queued or older in-flight position write
+// before the terminal snapshot is captured.
+func (w *WorldService) PrepareDisconnectSave(ctx context.Context, playerUID uint32) error {
+	if w == nil || w.positionPersistence == nil {
+		return ErrPositionPersistenceNoRepository
+	}
+	return w.positionPersistence.DiscardPlayer(ctx, playerUID)
 }
 
 // BootstrapGameServerRegionsContext loads the live world without constructing
@@ -401,6 +425,10 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 		if err != nil {
 			return fmt.Errorf("load game-server region catalog: %w", err)
 		}
+	}
+	partition, err := validateWorldPartition(gsRegions)
+	if err != nil {
+		return err
 	}
 
 	// Query every spawn catalog before changing the world. An injected catalog
@@ -481,11 +509,15 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 		}
 	}
 	measurement.log(loadSource, w.loader2.Stats())
+	loadedRegions, err := w.stageWorldPartition(partition)
+	if err != nil {
+		return err
+	}
+	if err := w.commitWorldPartition(partition, loadedRegions); err != nil {
+		return err
+	}
 
 	for _, continent := range continents {
-		if err := w.AddRegions(continent.name, continent.regions...); err != nil {
-			return err
-		}
 		w.loadSpawnData(continent.name, continent.spawns)
 	}
 	if err := w.loadTeleportGates(teleportGates); err != nil {
@@ -537,38 +569,17 @@ func anyRegularPathExists(paths ...string) (bool, error) {
 
 func (w *WorldService) AddRegions(continent string, regions ...int16) error {
 	log.Debugf("loading regions for %s", continent)
-	numRegions := len(regions)
-	dungeonsCounter := 0
-	loadedRegions := make(map[int16]*navmeshv2.RtNavmeshTerrain, len(regions))
-	for i, reg := range regions {
-		if reg < 0 {
-			// TODO Load dungeon file
-			dungeonsCounter++
-			continue
-		}
-		x, z := utils.Int16ToXAndZ(reg)
-		log.Tracef("Loading region %02x%02x, X|Z (%d|%d)", z, x, x, z)
-		utils.PrintProgress(i+1, numRegions)
-		terrain, exists := w.loader2.RegionData[reg]
-		if !exists || terrain == nil {
-			return fmt.Errorf("load game server continent %q: navmesh terrain for region %d is unavailable", continent, reg)
-		}
-		loadedRegions[reg] = terrain
+	partition, err := validateWorldPartition([]model.GameServerRegion{{ContinentName: continent, Regions: regions}})
+	if err != nil {
+		return err
 	}
-
-	// Region loading is normally a startup operation, but world readers already
-	// run independently in tests and can do so during future reload work. Commit
-	// the loaded batch while holding the same mutex used by every region reader.
-	w.mutex.Lock()
-	if w.regions == nil {
-		w.regions = make(map[int16]*navmeshv2.RtNavmeshTerrain)
+	loadedRegions, err := w.stageWorldPartition(partition)
+	if err != nil {
+		return err
 	}
-	for regionID, terrain := range loadedRegions {
-		w.regions[regionID] = terrain
+	if err := w.commitWorldPartition(partition, loadedRegions); err != nil {
+		return err
 	}
-	w.mutex.Unlock()
-
-	log.Infof("Skipped %d dungeons for %s\n", dungeonsCounter, continent)
 	log.Infof("Finished loading regions for %s\n", continent)
 	return nil
 }

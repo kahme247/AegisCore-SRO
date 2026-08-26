@@ -13,6 +13,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
@@ -219,8 +220,8 @@ func buildTeleportReadyRequest(regionID int16) network.Packet {
 }
 
 func (h *TeleportHandler) handleReady(_ context.Context, session *server.Session, packet network.Packet) error {
-	if packet.Remaining() != 0 {
-		return fmt.Errorf("teleport ready response contains %d trailing bytes", packet.Remaining())
+	if _, err := (vsro188.TeleportReadyResponseCodec{}).Decode(packet); err != nil {
+		return err
 	}
 	h.mu.Lock()
 	player := h.pending[session]

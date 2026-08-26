@@ -32,18 +32,22 @@ func TestRefSkillClassifiesHealingAndResurrection(t *testing.T) {
 	healing := RefSkill{BasicActivity: 2}
 	healing.Params[2] = skillParameterHeal
 	healing.Params[3] = 369
+	healing.Params[4] = 10
 	healing.Params[5] = 12
+	healing.Params[6] = 5
 	healing.parseParameters()
-	if healing.ExecutionKind() != SkillExecutionHealing || healing.HealHP != 369 || healing.HealMP != 12 {
+	if healing.ExecutionKind() != SkillExecutionHealing || healing.HealHP != 369 || healing.HealHPPercent != 10 || healing.HealMP != 12 || healing.HealMPPercent != 5 {
 		t.Fatalf("healing skill = %+v", healing)
 	}
 
 	resurrection := RefSkill{BasicActivity: 2}
-	resurrection.Params[4] = skillParameterResurrection
-	resurrection.Params[5] = 30
+	copy(resurrection.Params[:], []int{0, skillParameterHeal, 0, 10, 0, 10, skillParameterResurrection, 30, 2})
 	resurrection.parseParameters()
-	if resurrection.ExecutionKind() != SkillExecutionResurrection || resurrection.ResurrectLevel != 30 {
+	if resurrection.ExecutionKind() != SkillExecutionResurrection || resurrection.ResurrectLevel != 30 || resurrection.HealHPPercent != 10 || resurrection.HealMPPercent != 10 {
 		t.Fatalf("resurrection skill = %+v", resurrection)
+	}
+	if hp, mp := resurrection.RestorationAmounts(1234, 987); hp != 123 || mp != 98 {
+		t.Fatalf("percentage resurrection = %d/%d, want 123/98", hp, mp)
 	}
 }
 

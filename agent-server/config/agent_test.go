@@ -3,6 +3,7 @@ package config
 import (
 	"testing"
 
+	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/spf13/viper"
 )
 
@@ -15,7 +16,6 @@ func TestAgentDefaults(t *testing.T) {
 	assertConfigValue(t, AgentModuleId, "AgentServer")
 	assertConfigValue(t, AgentDataPath, "./Data")
 	assertConfigValue(t, AgentPrelinkedNavdataFile, "./prelinked_navdata.gob")
-	assertConfigValue(t, AgentLevelDataFile, "./Media/server_dep/silkroad/textdata/leveldata.txt")
 	assertConfigValue(t, AgentTrafficPacketLimit, 200)
 	assertConfigValue(t, AgentTrafficWindowMS, 1000)
 	assertConfigValue(t, AgentTimedBuffDuration, false)
@@ -30,6 +30,9 @@ func TestAgentDefaults(t *testing.T) {
 	assertConfigValue(t, GameTimeTicksPerSecond, 20)
 	assertConfigValue(t, GameTimeDaySpeed, 1.0)
 	assertConfigValue(t, PositionCheckpointSeconds, 30)
+	for _, definition := range feature.Definitions() {
+		assertConfigValue(t, definition.ConfigKey, false)
+	}
 
 	for _, key := range []string{
 		AgentAdmissionTLSCertFile, AgentAdmissionTLSKeyFile, AgentAdmissionTLSClientCAFile,
@@ -61,6 +64,7 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 	t.Setenv("GAME_TIME_DAY_SPEED", "1.5")
 	t.Setenv("AGENT_POSITION_CHECKPOINT_SECONDS", "45")
 	t.Setenv("AGENT_ADMISSION_TLS_CERT_FILE", "/tls/agent.pem")
+	t.Setenv("AGENT_FEATURE_OPEN_MARKET_ENABLED", "1")
 
 	assertConfigValue(t, AgentHost, "agent-server")
 	if got := viper.GetInt(AgentPort); got != 16000 {
@@ -98,6 +102,12 @@ func TestAgentEnvironmentBindingsConvertRuntimeValues(t *testing.T) {
 		t.Fatalf("checkpoint seconds = %d, want 45", got)
 	}
 	assertConfigValue(t, AgentAdmissionTLSCertFile, "/tls/agent.pem")
+	if !viper.GetBool("agent.features.open_market.enabled") {
+		t.Fatal("open-market feature environment was not bound")
+	}
+	if _, err := ResolveFeatures(); err == nil {
+		t.Fatal("unavailable open-market feature was accepted")
+	}
 }
 
 func resetViper(t *testing.T) {

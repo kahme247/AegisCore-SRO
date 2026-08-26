@@ -17,6 +17,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/framework/utils"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	log "github.com/sirupsen/logrus"
 )
@@ -55,10 +56,11 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 		return fmt.Errorf("character join is invalid while session is %s", session.LifecyclePhase())
 	}
 
-	charName, err := packet.ReadString()
-	if err != nil || charName == "" || packet.Remaining() != 0 {
+	request, err := (vsro188.CharacterJoinRequestCodec{}).Decode(packet)
+	if err != nil {
 		return sendJoinResult(session, ResultFalse, JOIN_ERROR_CHARACTER_NAME_STRING)
 	}
+	charName := request.Name
 	char, err := h.characters.CharacterForOwner(ctx, charName, owner.UserID, owner.ShardID)
 	if err != nil || char.ID == 0 || char.IsDeleting || char.User != int(owner.UserID) || char.Shard != int(owner.ShardID) {
 		// Unknown, foreign, and deleting characters all receive the same

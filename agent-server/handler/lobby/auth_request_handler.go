@@ -8,11 +8,12 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	MacAddressLength          = 6
+	MacAddressLength          = vsro188.AgentAuthMACLength
 	OpcodeAuthResponse uint16 = 0xA103
 )
 
@@ -53,29 +54,9 @@ func (h *AuthRequestHandler) HandlePacket(packet server.PacketChannelData) error
 		return errors.New("Agent auth request has no session")
 	}
 
-	queueID, err := packet.ReadUInt32()
+	request, err := (vsro188.AgentAuthRequestCodec{}).Decode(packet.Packet)
 	if err != nil {
 		return h.reject(packet.Session, err)
-	}
-	username, err := packet.ReadString()
-	if err != nil {
-		return h.reject(packet.Session, err)
-	}
-	// The client continues to send this field, but Gateway already validated it
-	// before issuing the QueueID. Parse for wire compatibility, then discard it
-	// without storing, comparing, or logging it.
-	if _, err := packet.ReadString(); err != nil {
-		return h.reject(packet.Session, err)
-	}
-	contentID, err := packet.ReadByte()
-	if err != nil {
-		return h.reject(packet.Session, err)
-	}
-	if _, err := packet.ReadBytes(MacAddressLength); err != nil {
-		return h.reject(packet.Session, err)
-	}
-	if packet.Remaining() != 0 {
-		return h.reject(packet.Session, errors.New("unexpected trailing Agent auth request data"))
 	}
 
 	sourceIP := auth.SourceIPFromAddr(nil)
@@ -86,9 +67,9 @@ func (h *AuthRequestHandler) HandlePacket(packet server.PacketChannelData) error
 		return h.reject(packet.Session, auth.ErrAdmissionTicketInvalid)
 	}
 	ticket, err := h.Tickets.Redeem(auth.AdmissionCredentials{
-		QueueID:      queueID,
-		Username:     username,
-		ContentID:    contentID,
+		QueueID:      request.QueueID,
+		Username:     request.Username,
+		ContentID:    request.ContentID,
 		HasContentID: true,
 		SourceIP:     sourceIP,
 	})

@@ -196,12 +196,11 @@ func (r *SQLCharacterRepository) SetCharacterDeletionForOwner(ctx context.Contex
 		return false, err
 	}
 
-	deletingValue := 0
+	query := restore_deleting_for_owner
 	if deleting {
-		deletingValue = 1
+		query = update_is_deleting_for_owner
 	}
-
-	result, err := r.shard.ExecContext(ctx, update_is_deleting_for_owner, deletingValue, charName, userID, shardID)
+	result, err := r.shard.ExecContext(ctx, query, charName, userID, shardID)
 	if err != nil {
 		return false, &CharacterRepositoryError{Operation: "update character deletion state for owner", Err: err}
 	}
@@ -277,7 +276,9 @@ func repositoryContext(ctx context.Context, operation string) (context.Context, 
 func scanOwnerCharacter(scanner characterScanner, userID uint32) (Char, error) {
 	var char Char
 	var deleting int
+	var guildRenameRequired int
 	var utime sql.NullTime
+	var deletionRequestedAt sql.NullTime
 	if err := scanner.Scan(
 		&char.ID,
 		&char.RefObjID,
@@ -294,15 +295,24 @@ func scanOwnerCharacter(scanner characterScanner, userID uint32) (Char, error) {
 		&char.MP,
 		&deleting,
 		&utime,
+		&deletionRequestedAt,
 		&char.Region,
 		&char.InventorySize,
+		&char.GuildMemberClass,
+		&guildRenameRequired,
+		&char.GuildName,
+		&char.AcademyMemberClass,
 	); err != nil {
 		return Char{}, err
 	}
 	char.User = int(userID)
 	char.IsDeleting = deleting != 0
+	char.GuildRenameRequired = guildRenameRequired != 0
 	if utime.Valid {
 		char.Utime = utime.Time
+	}
+	if deletionRequestedAt.Valid {
+		char.DeletionRequestedAt = deletionRequestedAt.Time
 	}
 	return char, nil
 }

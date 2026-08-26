@@ -1,6 +1,7 @@
 package cos
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -57,5 +58,26 @@ func TestGrowthPetCastCommandCarriesAuthoredSkill(t *testing.T) {
 	}
 	if runtime.petUID != 88 || runtime.targetUID != 99 || runtime.skillID != 3824 {
 		t.Fatalf("cast command = pet %d target %d skill %d", runtime.petUID, runtime.targetUID, runtime.skillID)
+	}
+}
+
+func TestMalformedGrowthPetCommandEchoesParsedCommandInFailure(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session}
+	handler := NewLifecycleHandler(&playerLookupFake{player: player}, &cosCommandServiceFake{})
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		response = packet
+		return nil
+	}
+	packet := network.EmptyClientPacket()
+	packet.WriteUInt32(88)
+	packet.WriteByte(13)
+	packet.WriteUInt32(3824)
+	if err := handler.handleCommand(context.Background(), session, packet); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response.Payload(), []byte{2, 13, 3, 0}) {
+		t.Fatalf("failure payload = %x", response.Payload())
 	}
 }

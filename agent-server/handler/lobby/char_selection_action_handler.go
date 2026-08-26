@@ -198,6 +198,11 @@ func characterNameRules() vsro188.TextRules {
 }
 
 func (h *CharacterSelectionHandler) handleListAction(ctx context.Context, session *server.Session, owner characterOwnerScope, action byte) error {
+	if purger, ok := h.characters.(expiredCharacterDeletionStore); ok {
+		if _, err := purger.PurgeExpiredCharacters(ctx, time.Now().UTC(), 100); err != nil {
+			return sendCharacterActionResult(session, action, ResultFalse, 0)
+		}
+	}
 	chars, err := h.characters.CharactersForOwner(ctx, owner.UserID, owner.ShardID)
 	if err != nil {
 		return sendCharacterActionResult(session, action, ResultFalse, 0)
@@ -236,15 +241,24 @@ func (h *CharacterSelectionHandler) writeCharacterListEntry(ctx context.Context,
 	p.WriteUInt32(uint32(char.MP))
 	if char.IsDeleting {
 		p.WriteByte(ResultTrue)
-		diff := char.Utime.Add(DeletionTimeInDays * 24 * time.Hour).Sub(time.Now().UTC())
-		p.WriteUInt32(uint32(int(diff.Minutes())))
+		requestedAt := char.DeletionRequestedAt
+		if requestedAt.IsZero() {
+			requestedAt = char.Utime
+		}
+		remaining := int(requestedAt.Add(DeletionTimeInDays * 24 * time.Hour).Sub(time.Now().UTC()).Minutes())
+		if remaining < 0 {
+			remaining = 0
+		}
+		p.WriteUInt32(uint32(remaining))
 	} else {
 		p.WriteByte(0)
 	}
-	// Guild and academy are not implemented yet.
-	p.WriteByte(0)
-	p.WriteByte(0)
-	p.WriteByte(0)
+	p.WriteByte(char.GuildMemberClass)
+	p.WriteBool(char.GuildRenameRequired)
+	if char.GuildRenameRequired {
+		p.WriteString(char.GuildName)
+	}
+	p.WriteByte(char.AcademyMemberClass)
 
 	inv, err := h.loadPlayerInventory(ctx, int64(char.ID))
 	if err != nil {
@@ -265,7 +279,25 @@ func (h *CharacterSelectionHandler) writeCharacterListEntry(ctx context.Context,
 		p.WriteUInt32(item.GetRefObjectID())
 		p.WriteByte(item.OptLevel)
 	}
-	p.WriteByte(0) // Avatar item count
+	avatar := model.Inventory{Items: map[byte]model.Item{}}
+	if h.avatarInventory != nil {
+		avatar, err = h.avatarInventory.GetCharacterAvatarInventory(ctx, int64(char.ID))
+		if err != nil {
+			return err
+		}
+	}
+	avatarSlots := make([]byte, 0, model.AvatarInventorySize)
+	for _, slot := range model.SortedInventorySlots(avatar.Items) {
+		if slot < model.AvatarInventorySize {
+			avatarSlots = append(avatarSlots, slot)
+		}
+	}
+	p.WriteByte(byte(len(avatarSlots)))
+	for _, slot := range avatarSlots {
+		item := avatar.Items[slot]
+		p.WriteUInt32(item.GetRefObjectID())
+		p.WriteByte(item.OptLevel)
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 type lifecycleService interface {
@@ -50,45 +51,30 @@ func RegisterLifecycleHandlers(target *server.Server, repository model.COSReposi
 }
 
 func (h *LifecycleHandler) handleCommand(_ context.Context, session *server.Session, packet network.Packet) error {
-	if h == nil || h.cos == nil || packet.Remaining() < 5 {
+	if h == nil || h.cos == nil {
 		return h.sendCommandFailure(session, 0, 3)
 	}
-	uid, err := packet.ReadUInt32()
-	if err != nil || uid == 0 {
-		return h.sendCommandFailure(session, 0, 3)
-	}
-	command, err := packet.ReadByte()
+	request, err := (vsro188.COSCommandRequestCodec{}).Decode(packet)
 	if err != nil {
-		return h.sendCommandFailure(session, 0, 3)
+		return h.sendCommandFailure(session, request.Command, 3)
 	}
 	player, err := h.resolvePlayer(session)
 	if err != nil {
 		return err
 	}
-	switch command {
-	case 2: // attack with the current reference default skill
-		if packet.Remaining() != 4 {
-			return h.sendCommandFailure(session, command, 3)
+	switch request.Command {
+	case vsro188.COSCommandAttack:
+		if h.cos.SetAttackTarget(player, request.PetUniqueID, request.TargetUniqueID, 0) != nil {
+			return h.sendCommandFailure(session, request.Command, 3)
 		}
-		targetUID, readErr := packet.ReadUInt32()
-		if readErr != nil || h.cos.SetAttackTarget(player, uid, targetUID, 0) != nil {
-			return h.sendCommandFailure(session, command, 3)
+	case vsro188.COSCommandStop:
+		if h.cos.ClearAttackTarget(player, request.PetUniqueID) != nil {
+			return h.sendCommandFailure(session, request.Command, 3)
 		}
-	case 9: // stop combat and resume owner-follow behavior
-		if packet.Remaining() != 0 || h.cos.ClearAttackTarget(player, uid) != nil {
-			return h.sendCommandFailure(session, command, 3)
+	case vsro188.COSCommandCastSkill:
+		if h.cos.SetAttackTarget(player, request.PetUniqueID, request.TargetUniqueID, request.SkillID) != nil {
+			return h.sendCommandFailure(session, request.Command, 3)
 		}
-	case 13: // cast an authored pet skill
-		if packet.Remaining() != 8 {
-			return h.sendCommandFailure(session, command, 3)
-		}
-		skillID, skillErr := packet.ReadUInt32()
-		targetUID, targetErr := packet.ReadUInt32()
-		if skillErr != nil || targetErr != nil || h.cos.SetAttackTarget(player, uid, targetUID, skillID) != nil {
-			return h.sendCommandFailure(session, command, 3)
-		}
-	default:
-		return h.sendCommandFailure(session, command, 3)
 	}
 	return nil
 }
@@ -117,13 +103,14 @@ func (h *LifecycleHandler) handleUnsummon(ctx context.Context, session *server.S
 }
 
 func (h *LifecycleHandler) handleUnsummonRequest(ctx context.Context, session *server.Session, packet network.Packet, responseOpcode uint16) error {
-	if h == nil || h.players == nil || h.cos == nil || packet.Remaining() != 4 {
+	if h == nil || h.players == nil || h.cos == nil {
 		return h.sendResult(session, responseOpcode, false)
 	}
-	uid, err := packet.ReadUInt32()
-	if err != nil || uid == 0 || packet.Remaining() != 0 {
+	request, err := (vsro188.COSUIDRequestCodec{}).Decode(packet)
+	if err != nil {
 		return h.sendResult(session, responseOpcode, false)
 	}
+	uid := request.UniqueID
 	player, err := h.resolvePlayer(session)
 	if err != nil {
 		return err
@@ -147,11 +134,7 @@ func (h *LifecycleHandler) handleUnsummonRequest(ctx context.Context, session *s
 	}
 	update := model.BuildCOSTerminatedUpdate(uid)
 	player.SendToSelfAndKnown(&update)
-	itemState := network.EmptyPacket()
-	itemState.MessageID = opcode.InventoryItemUpdate
-	itemState.WriteByte(slot)
-	itemState.WriteByte(64) // ItemUpdateFlag.State
-	itemState.WriteByte(byte(model.COSItemActive))
+	itemState := model.BuildCOSItemStateUpdate(slot, model.COSItemActive)
 	player.SendToSelf(&itemState)
 	return nil
 }

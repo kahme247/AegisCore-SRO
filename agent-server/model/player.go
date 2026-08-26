@@ -617,6 +617,30 @@ func (p *Player) CommitResurrection(hp, mp int) bool {
 	return true
 }
 
+// CommitSkillResurrection publishes the already-committed database transition
+// to both runtime aggregates under one lock order. The caster MP debit and the
+// dead target revival therefore cannot become half-visible in memory.
+func CommitSkillResurrection(caster, target *Player, expectedCasterMP, cost, hp, mp int) bool {
+	if caster == nil || target == nil || caster == target || caster.ID <= 0 || target.ID <= 0 || caster.ID == target.ID || expectedCasterMP < cost || cost < 0 || hp <= 0 || mp < 0 {
+		return false
+	}
+	first, second := caster, target
+	if target.ID < caster.ID {
+		first, second = target, caster
+	}
+	first.Mutex.Lock()
+	second.Mutex.Lock()
+	defer first.Mutex.Unlock()
+	defer second.Mutex.Unlock()
+	if caster.LifeState != Alive || caster.BaseStats.HP <= 0 || caster.BaseStats.MP != expectedCasterMP || target.LifeState != Dead || target.BaseStats.HP != 0 {
+		return false
+	}
+	caster.BaseStats.MP -= cost
+	target.BaseStats.HP, target.BaseStats.MP = hp, mp
+	target.LifeState = Alive
+	return true
+}
+
 func BuildVitalsUpdatePacket(uniqueID uint32, hp, mp int) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityUpdateStatus

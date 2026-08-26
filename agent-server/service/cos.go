@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,20 +48,26 @@ type cosAttackIntent struct {
 }
 
 type cosCompanionAI struct {
-	seed            uint32
-	formationAngle  float32
-	formationRadius float32
-	roamAngle       float32
-	roamRadius      float32
-	nextRoam        time.Time
+	seed           uint32
+	followAngle    float32
+	followRadius   float32
+	orbitAngle     float32
+	orbitRadius    float32
+	orbitDirection float32
+	nextWaypoint   time.Time
+	ownerMoving    bool
 }
 
 const (
-	cosFormationBaseRadius = float32(28)
-	cosFormationRadiusStep = float32(5)
-	cosRoamBaseRadius      = float32(6)
-	cosRoamRadiusVariance  = uint32(501) // 0.00 through 5.00 world units
-	cosArrivalRadius       = float32(3)
+	cosFollowBaseRadius      = float32(30)
+	cosFollowRadiusStep      = float32(4)
+	cosOrbitMinRadius        = float32(38)
+	cosOrbitRadiusVariance   = uint32(2001) // 0.00 through 20.00 world units
+	cosOrbitMinAngleStep     = float32(45)
+	cosOrbitAngleStepRange   = uint32(41) // 45 through 85 degrees per waypoint
+	cosArrivalRadius         = float32(3)
+	cosDestinationMatchRange = float32(2.5)
+	cosCombatLeashRadius     = float32(120)
 )
 
 // COSService owns the atomic owner/world/persistence lifecycle. Its indexes
@@ -76,12 +83,13 @@ type COSService struct {
 	companionAI map[uint32]*cosCompanionAI
 	attacks     map[uint32]cosAttackIntent
 	nextAttack  map[uint32]time.Time
+	rentalRetry map[uint32]time.Time
 	levels      *model.LevelTable
 	rewards     COSCombatRewards
 }
 
 func NewCOSService(repository model.COSRepository, world COSWorld) *COSService {
-	return &COSService{repository: repository, world: world, byUID: make(map[uint32]*model.COS), byOwnerKind: make(map[int]map[model.COSKind]*model.COS), lastFollow: make(map[uint32]time.Time), companionAI: make(map[uint32]*cosCompanionAI), attacks: make(map[uint32]cosAttackIntent), nextAttack: make(map[uint32]time.Time)}
+	return &COSService{repository: repository, world: world, byUID: make(map[uint32]*model.COS), byOwnerKind: make(map[int]map[model.COSKind]*model.COS), lastFollow: make(map[uint32]time.Time), companionAI: make(map[uint32]*cosCompanionAI), attacks: make(map[uint32]cosAttackIntent), nextAttack: make(map[uint32]time.Time), rentalRetry: make(map[uint32]time.Time)}
 }
 
 func (s *COSService) ConfigureCombat(rewards COSCombatRewards, levels *model.LevelTable) {
@@ -101,7 +109,8 @@ func (s *COSService) Summon(ctx context.Context, owner *model.Player, persistent
 	if err != nil {
 		return nil, err
 	}
-	if record.RentEndsAt != nil && !record.RentEndsAt.After(time.Now().UTC()) {
+	now := time.Now().UTC()
+	if record.Kind == model.COSAbilityPet && (record.RentEndsAt == nil || !record.RentEndsAt.After(now)) {
 		return nil, model.ErrCOSNotFound
 	}
 	ref, exists := model.RefChars[record.RefObjectID]
@@ -118,6 +127,10 @@ func (s *COSService) Summon(ctx context.Context, owner *model.Player, persistent
 	cos.HGP, cos.Satiety, cos.Settings = record.HGP, record.Satiety, record.Settings
 	if record.RentEndsAt != nil {
 		cos.RentEndsAt = record.RentEndsAt.UTC()
+	}
+	originalState := record.State
+	if originalState < model.COSItemInactive || originalState > model.COSItemDead {
+		originalState = model.COSItemActive
 	}
 
 	s.mu.Lock()
@@ -139,13 +152,18 @@ func (s *COSService) Summon(ctx context.Context, owner *model.Player, persistent
 	s.mu.Unlock()
 	if record.Kind == model.COSRideTransport {
 		if err = owner.COSState.ActivateTransport(cos.GetUniqueID(), cos.GetRefObjectID(), false); err != nil {
-			_ = s.Unsummon(ctx, owner, cos.GetUniqueID())
+			s.detachRuntime(owner, cos, originalState)
 			return nil, err
 		}
 	}
 	if !owner.SetCOSItemState(record.InventorySlot, cos, model.COSItemSummoned) {
-		_ = s.Unsummon(ctx, owner, cos.GetUniqueID())
+		s.detachRuntime(owner, cos, originalState)
 		return nil, fmt.Errorf("COS inventory item %d is no longer linked to persistent COS %d", record.InventorySlot, record.ID)
+	}
+	record = model.COSRecordFromSnapshot(cos.Snapshot())
+	if err = s.repository.Save(ctx, record); err != nil {
+		s.detachRuntime(owner, cos, originalState)
+		return nil, err
 	}
 	return cos, nil
 }
@@ -168,19 +186,31 @@ func (s *COSService) Unsummon(ctx context.Context, owner *model.Player, uid uint
 	if err != nil {
 		return err
 	}
-	if err = s.repository.Save(ctx, model.COSRecordFromSnapshot(cos.Snapshot())); err != nil {
+	record := model.COSRecordFromSnapshot(cos.Snapshot())
+	record.State = model.COSItemActive
+	if err = s.repository.Save(ctx, record); err != nil {
 		return err
 	}
+	s.detachRuntime(owner, cos, model.COSItemActive)
+	return nil
+}
+
+func (s *COSService) detachRuntime(owner *model.Player, cos *model.COS, itemState model.COSItemState) {
+	if s == nil || owner == nil || cos == nil {
+		return
+	}
+	uid := cos.GetUniqueID()
 	s.mu.Lock()
 	if current := s.byUID[uid]; current != cos {
 		s.mu.Unlock()
-		return ErrCOSNotSummoned
+		return
 	}
 	delete(s.byUID, uid)
 	delete(s.lastFollow, uid)
 	delete(s.companionAI, uid)
 	delete(s.attacks, uid)
 	delete(s.nextAttack, uid)
+	delete(s.rentalRetry, uid)
 	if kinds := s.byOwnerKind[owner.ID]; kinds != nil {
 		delete(kinds, cos.Kind)
 		if len(kinds) == 0 {
@@ -191,9 +221,8 @@ func (s *COSService) Unsummon(ctx context.Context, owner *model.Player, uid uint
 	if cos.Kind == model.COSRideTransport {
 		_ = owner.COSState.ClearTransport(uid)
 	}
-	owner.SetCOSItemState(cos.InventorySlot, cos, model.COSItemActive)
 	s.world.RemoveVisibleObject(cos)
-	return nil
+	owner.SetCOSItemState(cos.InventorySlot, cos, itemState)
 }
 
 // UpdateFollowers keeps player-owned companions attached to their owner. A
@@ -216,6 +245,9 @@ func (s *COSService) UpdateFollowers(now time.Time) {
 	for _, pet := range pets {
 		owner, err := world.GetPlayerByUniqueId(pet.OwnerUniqueID)
 		if err != nil || owner == nil || owner.ID != pet.OwnerCharID || owner.GetLifeState() == model.Spawning {
+			continue
+		}
+		if s.expireAbilityPetRental(owner, pet, now) {
 			continue
 		}
 		if s.updateGrowthPetCombat(world, pet, owner, now) {
@@ -242,6 +274,13 @@ func (s *COSService) UpdateFollowers(now time.Time) {
 			}
 			continue
 		}
+		// UpdateFollowers runs more frequently than an orbit waypoint changes.
+		// Re-registering an unchanged destination increments the authoritative
+		// movement generation and makes the client repeatedly restart the same
+		// run. Keep the active movement until the AI selects a real new target.
+		if movement := pet.GetMovementData(); movement != nil && movement.HasDestination && navmeshv2.HorizontalDistance(movement.TargetPosition, target) <= cosDestinationMatchRange {
+			continue
+		}
 		s.mu.Lock()
 		last := s.lastFollow[pet.GetUniqueID()]
 		if now.Sub(last) < 500*time.Millisecond {
@@ -254,6 +293,33 @@ func (s *COSService) UpdateFollowers(now time.Time) {
 		packet := model.BuildMovementUpdatePacket(pet, movement, petPos)
 		pet.SendToKnown(&packet)
 	}
+}
+
+// expireAbilityPetRental retires a summoned fixed-period pet through the same
+// persistence and world teardown path as a client-requested unsummon. A failed
+// save leaves the pet indexed for retry but suppresses movement and combat once
+// the authoritative expiry instant has passed.
+func (s *COSService) expireAbilityPetRental(owner *model.Player, pet *model.COS, now time.Time) bool {
+	if pet == nil || pet.Kind != model.COSAbilityPet || pet.RentEndsAt.IsZero() || pet.RentEndsAt.After(now.UTC()) {
+		return false
+	}
+	uid, slot := pet.GetUniqueID(), pet.InventorySlot
+	s.mu.Lock()
+	retryAt := s.rentalRetry[uid]
+	if now.Before(retryAt) {
+		s.mu.Unlock()
+		return true
+	}
+	s.rentalRetry[uid] = now.Add(5 * time.Second)
+	s.mu.Unlock()
+	if err := s.Unsummon(context.Background(), owner, uid); err != nil {
+		return true
+	}
+	terminated := model.BuildCOSTerminatedUpdate(uid)
+	owner.SendToSelfAndKnown(&terminated)
+	itemState := model.BuildCOSItemStateUpdate(slot, model.COSItemActive)
+	owner.SendToSelf(&itemState)
+	return true
 }
 
 func (s *COSService) SetAttackTarget(owner *model.Player, petUID, targetUID, requestedSkillID uint32) error {
@@ -292,10 +358,61 @@ func (s *COSService) SetAttackTarget(owner *model.Player, petUID, targetUID, req
 	if err != nil || !validTarget || target == nil || !target.GetTypeInfo().IsNPCMob() || target.GetLifeState() != model.Alive {
 		return model.ErrItemUseInvalidRequest
 	}
+	ownerPos, targetPos := owner.GetNavmeshPosition(), target.GetNavmeshPosition()
+	if ownerPos.Region.ID != targetPos.Region.ID || navmeshv2.HorizontalDistance(ownerPos, targetPos) > cosCombatLeashRadius {
+		return model.ErrItemUseInvalidRequest
+	}
 	s.mu.Lock()
+	previous := s.attacks[petUID]
 	s.attacks[petUID] = cosAttackIntent{targetUID: targetUID, skillID: skillID}
-	delete(s.nextAttack, petUID)
+	if previous.targetUID != targetUID || previous.skillID != skillID {
+		delete(s.nextAttack, petUID)
+	}
 	s.mu.Unlock()
+	return nil
+}
+
+// EngageOwnerTarget makes the active growth pet assist its owner with the
+// same target. Explicit COS commands and owner attacks therefore use one
+// validation, skill-selection, and leash path.
+func (s *COSService) EngageOwnerTarget(owner *model.Player, target *model.NPC) error {
+	if s == nil || owner == nil || target == nil {
+		return model.ErrItemUseInvalidRequest
+	}
+	s.mu.Lock()
+	pet := s.byOwnerKind[owner.ID][model.COSGrowthPet]
+	s.mu.Unlock()
+	if pet == nil {
+		return model.ErrCOSNotOwned
+	}
+	return s.SetAttackTarget(owner, pet.GetUniqueID(), target.GetUniqueID(), 0)
+}
+
+// AwardOwnerKillExperience gives a summoned growth pet the monster EXP when
+// its owner lands the killing blow. The pet update is persisted before the
+// vSRO 0x30C9 update is published to the owner.
+func (s *COSService) AwardOwnerKillExperience(ctx context.Context, owner *model.Player, target *model.NPC) error {
+	if s == nil || owner == nil || target == nil {
+		return model.ErrItemUseInvalidRequest
+	}
+	s.mu.Lock()
+	pet := s.byOwnerKind[owner.ID][model.COSGrowthPet]
+	levels := s.levels
+	s.mu.Unlock()
+	gained := target.ExperienceReward()
+	if pet == nil || levels == nil || gained == 0 {
+		return nil
+	}
+	_, refChanged := pet.AwardExperience(levels, gained)
+	if err := s.repository.Save(ctx, model.COSRecordFromSnapshot(pet.Snapshot())); err != nil {
+		return err
+	}
+	experience := model.BuildCOSExperienceUpdate(pet.GetUniqueID(), gained, target.GetUniqueID())
+	owner.SendToSelf(&experience)
+	if refChanged {
+		changed := model.BuildCOSRefObjectUpdate(pet.GetUniqueID(), pet.GetRefObjectID())
+		owner.SendToSelfAndKnown(&changed)
+	}
 	return nil
 }
 
@@ -329,6 +446,11 @@ func (s *COSService) updateGrowthPetCombat(followerWorld cosFollowerWorld, pet *
 		_ = s.ClearAttackTarget(owner, pet.GetUniqueID())
 		return false
 	}
+	ownerPos, targetPos := owner.GetNavmeshPosition(), target.GetNavmeshPosition()
+	if ownerPos.Region.ID != targetPos.Region.ID || navmeshv2.HorizontalDistance(ownerPos, targetPos) > cosCombatLeashRadius {
+		_ = s.ClearAttackTarget(owner, pet.GetUniqueID())
+		return false
+	}
 	skill, exists := model.RefSkills[intent.skillID]
 	if !exists || (skill.ExecutionKind() != model.SkillExecutionPhysicalAttack && skill.ExecutionKind() != model.SkillExecutionMagicalAttack) {
 		_ = s.ClearAttackTarget(owner, pet.GetUniqueID())
@@ -343,8 +465,11 @@ func (s *COSService) updateGrowthPetCombat(followerWorld cosFollowerWorld, pet *
 	if targetRefOK {
 		reach += float32(max(targetRef.BCRadius, 0))
 	}
-	petPos, targetPos := pet.GetNavmeshPosition(), target.GetNavmeshPosition()
+	petPos := pet.GetNavmeshPosition()
 	if navmeshv2.HorizontalDistance(petPos, targetPos) > reach {
+		if movement := pet.GetMovementData(); movement != nil && movement.HasDestination && navmeshv2.HorizontalDistance(movement.TargetPosition, targetPos) <= cosDestinationMatchRange {
+			return true
+		}
 		movement := world.RegisterMovingCharacter(pet, model.MovementData{StartTime: now, UpdateTime: now, TargetPosition: targetPos, HasDestination: true})
 		packet := model.BuildMovementUpdatePacket(pet, movement, petPos)
 		pet.SendToKnown(&packet)
@@ -413,12 +538,22 @@ func newCOSCompanionAI(pet *model.COS) *cosCompanionAI {
 	if seed == 0 {
 		seed = 1
 	}
-	// Stable slots spread multiple companions around the owner. Stock COS rows
-	// commonly use an 11-unit collision radius, so these distances keep the pet
-	// outside the combined owner/pet footprint while remaining nearby.
+	// Stable follow slots spread companions while the player is travelling.
+	// At rest the angle becomes only the starting point of a true orbit.
 	angle := float32(seed%360) * (2 * math.Pi / 360)
-	radius := cosFormationBaseRadius + float32((seed>>9)%4)*cosFormationRadiusStep
-	return &cosCompanionAI{seed: seed, formationAngle: angle, formationRadius: radius}
+	followRadius := cosFollowBaseRadius + float32((seed>>9)%4)*cosFollowRadiusStep
+	direction := float32(1)
+	if seed&1 != 0 {
+		direction = -1
+	}
+	return &cosCompanionAI{
+		seed:           seed,
+		followAngle:    angle,
+		followRadius:   followRadius,
+		orbitAngle:     angle,
+		orbitRadius:    cosOrbitMinRadius + float32((seed>>12)%cosOrbitRadiusVariance)/100,
+		orbitDirection: direction,
+	}
 }
 
 func usesCompanionFormation(kind model.COSKind) bool {
@@ -443,34 +578,46 @@ func (s *COSService) companionTarget(world cosFollowerWorld, pet *model.COS, own
 		ai = newCOSCompanionAI(pet)
 		s.companionAI[pet.GetUniqueID()] = ai
 	}
-	if owner.GetMotionState() != model.NoMotion {
-		ai.roamRadius = 0
-		ai.nextRoam = now.Add(3 * time.Second)
-	} else if ai.nextRoam.IsZero() || !now.Before(ai.nextRoam) {
-		ai.seed = ai.seed*1664525 + 1013904223
-		ai.roamAngle = float32(ai.seed%360) * (2 * math.Pi / 360)
-		ai.seed = ai.seed*1664525 + 1013904223
-		ai.roamRadius = cosRoamBaseRadius + float32(ai.seed%cosRoamRadiusVariance)/100
-		ai.nextRoam = now.Add(time.Duration(4+ai.seed%5) * time.Second)
+	ownerMoving := owner.GetMotionState() != model.NoMotion
+	if ownerMoving {
+		ai.ownerMoving = true
+		ai.nextWaypoint = now.Add(2 * time.Second)
+	} else if ai.ownerMoving {
+		// Resume circling promptly after the owner stops, from the pet's stable
+		// follow side rather than jumping to an unrelated point.
+		ai.ownerMoving = false
+		ai.orbitAngle = ai.followAngle
+		ai.nextWaypoint = time.Time{}
 	}
-	formationAngle, formationRadius := ai.formationAngle, ai.formationRadius
-	roamAngle, roamRadius := ai.roamAngle, ai.roamRadius
+	if !ownerMoving && (ai.nextWaypoint.IsZero() || !now.Before(ai.nextWaypoint)) {
+		ai.seed = ai.seed*1664525 + 1013904223
+		stepDegrees := cosOrbitMinAngleStep + float32(ai.seed%cosOrbitAngleStepRange)
+		ai.orbitAngle += ai.orbitDirection * stepDegrees * (2 * math.Pi / 360)
+		ai.seed = ai.seed*1664525 + 1013904223
+		ai.orbitRadius = cosOrbitMinRadius + float32(ai.seed%cosOrbitRadiusVariance)/100
+		ai.nextWaypoint = now.Add(time.Duration(2+ai.seed%3) * time.Second)
+	}
+	targetAngle, targetRadius := ai.orbitAngle, ai.orbitRadius
+	if ownerMoving {
+		targetAngle, targetRadius = ai.followAngle, ai.followRadius
+	}
+	followAngle, followRadius := ai.followAngle, ai.followRadius
 	s.mu.Unlock()
 
 	ownerGlobal := owner.GetNavmeshPosition().GetGlobalCoordinates()
 	targetGlobal := math32.NewVector3(
-		ownerGlobal.X+formationRadius*float32(math.Cos(float64(formationAngle)))+roamRadius*float32(math.Cos(float64(roamAngle))),
+		ownerGlobal.X+targetRadius*float32(math.Cos(float64(targetAngle))),
 		ownerGlobal.Y,
-		ownerGlobal.Z+formationRadius*float32(math.Sin(float64(formationAngle)))+roamRadius*float32(math.Sin(float64(roamAngle))),
+		ownerGlobal.Z+targetRadius*float32(math.Sin(float64(targetAngle))),
 	)
 	target, err := world.NewPosFromGlobalCoordinates(targetGlobal)
 	if err != nil || (requireDirect && !world.CanMoveDirectly(pet.GetNavmeshPosition(), target)) {
-		// A roaming offset may cross a wall while the stable formation slot is
-		// still valid. Retry the slot before giving up and retaining position.
+		// An orbit waypoint may cross a wall while the closer stable follow slot
+		// is still valid. Retry that slot before retaining the current position.
 		targetGlobal = math32.NewVector3(
-			ownerGlobal.X+formationRadius*float32(math.Cos(float64(formationAngle))),
+			ownerGlobal.X+followRadius*float32(math.Cos(float64(followAngle))),
 			ownerGlobal.Y,
-			ownerGlobal.Z+formationRadius*float32(math.Sin(float64(formationAngle))),
+			ownerGlobal.Z+followRadius*float32(math.Sin(float64(followAngle))),
 		)
 		target, err = world.NewPosFromGlobalCoordinates(targetGlobal)
 		if err != nil || (requireDirect && !world.CanMoveDirectly(pet.GetNavmeshPosition(), target)) {
@@ -550,4 +697,64 @@ func (s *COSService) UnsummonAll(ctx context.Context, owner *model.Player) error
 		result = errors.Join(result, s.Unsummon(ctx, owner, uid))
 	}
 	return result
+}
+
+// SnapshotOwned returns a stable persistent snapshot without changing world
+// membership. The terminal save writes these records in its caller-owned
+// transaction before DetachAll performs in-memory teardown.
+func (s *COSService) SnapshotOwned(owner *model.Player) []model.COSRecord {
+	if s == nil || owner == nil {
+		return nil
+	}
+	s.mu.Lock()
+	kinds := s.byOwnerKind[owner.ID]
+	pets := make([]*model.COS, 0, len(kinds))
+	for _, cos := range kinds {
+		if cos != nil {
+			pets = append(pets, cos)
+		}
+	}
+	s.mu.Unlock()
+	records := make([]model.COSRecord, 0, len(pets))
+	for _, cos := range pets {
+		records = append(records, model.COSRecordFromSnapshot(cos.Snapshot()))
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
+	return records
+}
+
+// DetachAll removes a character's COS runtime state without performing SQL.
+// It is called only after the atomic terminal save attempt has completed.
+func (s *COSService) DetachAll(owner *model.Player) {
+	if s == nil || owner == nil {
+		return
+	}
+	s.mu.Lock()
+	kinds := s.byOwnerKind[owner.ID]
+	pets := make([]*model.COS, 0, len(kinds))
+	for _, cos := range kinds {
+		if cos == nil {
+			continue
+		}
+		pets = append(pets, cos)
+		uid := cos.GetUniqueID()
+		delete(s.byUID, uid)
+		delete(s.lastFollow, uid)
+		delete(s.companionAI, uid)
+		delete(s.attacks, uid)
+		delete(s.nextAttack, uid)
+		delete(s.rentalRetry, uid)
+	}
+	delete(s.byOwnerKind, owner.ID)
+	s.mu.Unlock()
+	for _, cos := range pets {
+		uid := cos.GetUniqueID()
+		if cos.Kind == model.COSRideTransport {
+			_ = owner.COSState.ClearTransport(uid)
+		}
+		owner.SetCOSItemState(cos.InventorySlot, cos, model.COSItemActive)
+		if s.world != nil {
+			s.world.RemoveVisibleObject(cos)
+		}
+	}
 }

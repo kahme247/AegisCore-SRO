@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/binary"
 	"reflect"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func TestBuildCOSDataGrowthMatchesVSRO188Reader(t *testing.T) {
@@ -23,6 +25,14 @@ func TestBuildCOSDataGrowthMatchesVSRO188Reader(t *testing.T) {
 	}
 	if !reflect.DeepEqual(p.Payload(), want) {
 		t.Fatalf("30C8 payload = %x, want %x", p.Payload(), want)
+	}
+}
+
+func TestBuildCOSItemStateUpdateMatchesInventoryStateLayout(t *testing.T) {
+	p := BuildCOSItemStateUpdate(17, COSItemActive)
+	want := []byte{17, 64, byte(COSItemActive)}
+	if p.MessageID != opcode.InventoryItemUpdate || !bytes.Equal(p.Payload(), want) {
+		t.Fatalf("COS item state packet = id %04X payload % X, want %04X/% X", p.MessageID, p.Payload(), opcode.InventoryItemUpdate, want)
 	}
 }
 

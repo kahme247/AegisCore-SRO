@@ -174,7 +174,9 @@ type RefSkill struct {
 	AttackMax           int
 	BuffDuration        int
 	HealHP              int
+	HealHPPercent       int
 	HealMP              int
+	HealMPPercent       int
 	ResurrectLevel      int
 	ShockPower          int
 	ShockChance         int
@@ -240,10 +242,10 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 		return SkillExecutionPhysicalAttack
 	case s.IsMagicalAttack():
 		return SkillExecutionMagicalAttack
-	case s.HealHP > 0 || s.HealMP > 0:
-		return SkillExecutionHealing
 	case s.ResurrectLevel > 0:
 		return SkillExecutionResurrection
+	case s.HealHP > 0 || s.HealHPPercent > 0 || s.HealMP > 0 || s.HealMPPercent > 0:
+		return SkillExecutionHealing
 	case s.CureStatusMask != 0 || s.CureCurse || s.CureCount > 0:
 		return SkillExecutionCure
 	case s.AggroReduce != 0 || s.AggroIncrease != 0:
@@ -286,7 +288,7 @@ func (s RefSkill) SystemOwner() SkillSystemOwner {
 
 func (s *RefSkill) parseParameters() {
 	s.AttackType, s.AttackPercent, s.AttackMin, s.AttackMax = 0, 0, 0, 0
-	s.BuffDuration, s.HealHP, s.HealMP, s.ResurrectLevel = 0, 0, 0, 0
+	s.BuffDuration, s.HealHP, s.HealHPPercent, s.HealMP, s.HealMPPercent, s.ResurrectLevel = 0, 0, 0, 0, 0, 0
 	s.ShockPower, s.ShockChance, s.ShockDuration, s.TransferRange, s.TransferCount = 0, 0, 0, 0, 0
 	s.ImpactDamage, s.BarrierDrainMS, s.BarrierMPCost, s.BarrierHitPoints, s.BarrierAbsorption = 0, 0, 0, 0, 0
 	s.MovementDistance, s.MovementDurationMS, s.RecoveryHP, s.RecoveryMP = 0, 0, 0, 0
@@ -315,8 +317,8 @@ func (s *RefSkill) parseParameters() {
 			}
 		case skillParameterHeal:
 			if index+4 < len(s.Params) {
-				s.HealHP = s.Params[index+1]
-				s.HealMP = s.Params[index+3]
+				s.HealHP, s.HealHPPercent = s.Params[index+1], s.Params[index+2]
+				s.HealMP, s.HealMPPercent = s.Params[index+3], s.Params[index+4]
 			}
 		case skillParameterResurrection:
 			if index+2 < len(s.Params) {
@@ -519,6 +521,18 @@ func (s *RefSkill) parseParameters() {
 			}
 		}
 	}
+}
+
+// RestorationAmounts decodes the native hste tuple as fixed HP, HP percent,
+// fixed MP, and MP percent. Resurrection rows use the same tuple, including
+// Chinese percentage-only and European fixed-value variants.
+func (s RefSkill) RestorationAmounts(maxHP, maxMP int) (hp, mp int) {
+	if maxHP <= 0 || maxMP <= 0 {
+		return 0, 0
+	}
+	hp = s.HealHP + maxHP*s.HealHPPercent/100
+	mp = s.HealMP + maxMP*s.HealMPPercent/100
+	return min(max(hp, 0), maxHP), min(max(mp, 0), maxMP)
 }
 
 func (s RefSkill) abnormalEffectLevel() int {

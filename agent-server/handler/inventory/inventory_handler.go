@@ -36,16 +36,23 @@ type InventoryHandler struct {
 	objects interface {
 		GetObjectByUniqueId(uint32) (model.ISRObject, error)
 	}
-	relocator  model.InventoryRelocator
-	economy    model.EconomyRepository
-	mall       model.ItemMallRepository
-	guild      model.GuildStorageRepository
-	avatar     model.AvatarInventoryRepository
-	exchange   ExchangeOperations
-	send       func(*server.Session, network.Packet) error
-	buybackMu  sync.Mutex
-	buyback    map[int]string
-	buybackLog sync.Once
+	relocator     model.InventoryRelocator
+	economy       model.EconomyRepository
+	mall          model.ItemMallRepository
+	guild         model.GuildStorageRepository
+	avatar        model.AvatarInventoryRepository
+	exchange      ExchangeOperations
+	referenceData *model.ReferenceDataCatalog
+	send          func(*server.Session, network.Packet) error
+	buybackMu     sync.Mutex
+	buyback       map[int]string
+	buybackLog    sync.Once
+}
+
+func (h *InventoryHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) {
+	if h != nil {
+		h.referenceData = catalog
+	}
 }
 
 type ExchangeOperations interface {
@@ -113,9 +120,9 @@ func RegisterInventoryHandlerWithExchange(target *server.Server, relocator model
 	RegisterInventoryHandlerWithGuildStorage(target, relocator, exchange, economyRepository, nil, nil)
 }
 
-func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository, avatar model.AvatarInventoryRepository, mall ...model.ItemMallRepository) {
+func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator model.InventoryRelocator, exchange ExchangeOperations, economy model.EconomyRepository, guild model.GuildStorageRepository, avatar model.AvatarInventoryRepository, mall ...model.ItemMallRepository) *InventoryHandler {
 	if target == nil {
-		return
+		return nil
 	}
 	handler := NewInventoryHandler(service.GetWorldServiceInstance(), relocator, economy)
 	handler.exchange = exchange
@@ -129,6 +136,7 @@ func RegisterInventoryHandlerWithGuildStorage(target *server.Server, relocator m
 	handler.registerRepairHandler(target)
 	RegisterStorageHandler(target, economy)
 	RegisterGuildStorageHandler(target, guild)
+	return handler
 }
 
 func (h *InventoryHandler) handleNPCBuyBackPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -1013,6 +1021,9 @@ func (h *InventoryHandler) relocate(ctx context.Context, session *server.Session
 	})
 	if err != nil {
 		return nil, model.InventoryRelocationPlan{}, err
+	}
+	if plan.Action == model.InventoryRelocationEquip || plan.Action == model.InventoryRelocationUnequip {
+		player.RecalculatePassiveSkillModifiers(h.referenceData)
 	}
 	return player, plan, nil
 }

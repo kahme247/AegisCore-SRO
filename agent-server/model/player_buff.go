@@ -134,14 +134,43 @@ func (p *Player) RecalculatePassiveSkillModifiers(catalog *ReferenceDataCatalog)
 	defer p.Mutex.Unlock()
 	p.applyBuffModifiersLocked(p.PassiveSkillModifiers, -1)
 	p.PassiveSkillModifiers = BuffModifiers{}
+	inventory := p.Inventory.Snapshot()
+	avatar := p.AvatarInventory.Snapshot()
 	for skillID, enabled := range p.Skills {
 		skill, exists := catalog.Skill(skillID)
-		if enabled != 1 || !exists || !skill.IsPassive() {
+		if enabled != 1 || !exists || !skill.IsPassive() || !passiveSkillItemRequirementMet(skill, inventory, avatar) {
 			continue
 		}
 		p.PassiveSkillModifiers = addBuffModifiers(p.PassiveSkillModifiers, skill.BuffModifiers)
 	}
 	p.applyBuffModifiersLocked(p.PassiveSkillModifiers, 1)
+}
+
+func passiveSkillItemRequirementMet(skill RefSkill, inventory, avatar Inventory) bool {
+	if len(skill.RequiredItems) == 0 {
+		return true
+	}
+	for _, slot := range []byte{SlotPrimaryWeapon, SlotSecondaryWeapon} {
+		item, equipped := inventory.Items[slot]
+		if !equipped {
+			continue
+		}
+		for _, required := range skill.RequiredItems {
+			typeInfo := item.GetTypeInfo()
+			if typeInfo.TypeID3 == required.TypeID3 && typeInfo.TypeID4 == required.TypeID4 {
+				return true
+			}
+		}
+	}
+	if devil, equipped := avatar.Items[4]; equipped && devil.IsActiveDevilSpirit(time.Now()) {
+		for _, required := range skill.RequiredItems {
+			typeInfo := devil.GetTypeInfo()
+			if typeInfo.TypeID3 == required.TypeID3 && typeInfo.TypeID4 == required.TypeID4 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func addBuffModifiers(left, right BuffModifiers) BuffModifiers {

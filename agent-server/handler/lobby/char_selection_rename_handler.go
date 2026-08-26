@@ -73,8 +73,10 @@ func (h *characterRenameHandler) handlePacket(ctx context.Context, session *serv
 		if packet.Remaining() != 0 {
 			return errors.New("rename request contains trailing data")
 		}
-		if action == CharSelectionCharacterRename && h.repository != nil &&
-			modelNameValid(newName) && !strings.EqualFold(strings.TrimSpace(currentName), strings.TrimSpace(newName)) {
+		if h.repository == nil || strings.EqualFold(strings.TrimSpace(currentName), strings.TrimSpace(newName)) {
+			return sendRenameResult(session, action, ResultFalse, RENAME_SMERR_NOT_ALLOWED_CHARNAME)
+		}
+		if action == CharSelectionCharacterRename && modelNameValid(newName) {
 			err = h.repository.RenameCharacter(ctx, session.UserContext.UserID, session.UserContext.ShardID, currentName, newName)
 			if err == nil {
 				return sendRenameResult(session, action, ResultTrue, 0)
@@ -83,14 +85,38 @@ func (h *characterRenameHandler) handlePacket(ctx context.Context, session *serv
 				return sendRenameResult(session, action, ResultFalse, RENAME_MSG_ERROR_ID)
 			}
 		}
-		return sendRenameResult(session, action, ResultFalse, RENAME_SMERR_NOT_ALLOWED_CHARNAME)
+		if action == CharSelectionCharacterRename {
+			return sendRenameResult(session, action, ResultFalse, RENAME_SMERR_NOT_ALLOWED_CHARNAME)
+		}
+		if action == CharSelectionGuildRename && guildNameValid(newName) {
+			err = h.repository.RenameGuild(ctx, session.UserContext.UserID, session.UserContext.ShardID, currentName, newName)
+			if err == nil {
+				return sendRenameResult(session, action, ResultTrue, 0)
+			}
+			if errors.Is(err, model.ErrGuildRenameDuplicate) {
+				return sendRenameResult(session, action, ResultFalse, RENAME_MSG_GUILDERR_SAME_GUILDNAME_EXIST)
+			}
+		}
+		return sendRenameResult(session, action, ResultFalse, RENAME_MSG_GUILD_NOT_CREATE)
 	} else if action == CharSelectionGuildNameCheck {
 		guildName, err := packet.ReadString()
 		if err != nil {
 			return err
 		}
 
-		_ = guildName
+		if packet.Remaining() != 0 {
+			return errors.New("rename request contains trailing data")
+		}
+		if h.repository != nil && guildNameValid(guildName) {
+			available, checkErr := h.repository.GuildNameAvailable(ctx, guildName)
+			if checkErr == nil && available {
+				return sendRenameResult(session, action, ResultTrue, 0)
+			}
+			if checkErr == nil {
+				return sendRenameResult(session, action, ResultFalse, RENAME_MSG_GUILDERR_SAME_GUILDNAME_EXIST)
+			}
+		}
+		return sendRenameResult(session, action, ResultFalse, RENAME_MSG_GUILD_NOT_CREATE)
 	}
 	if packet.Remaining() != 0 {
 		return errors.New("rename request contains trailing data")
@@ -101,6 +127,10 @@ func (h *characterRenameHandler) handlePacket(ctx context.Context, session *serv
 
 func modelNameValid(name string) bool {
 	return vsro188.ValidateText(name, characterNameRules()) == nil
+}
+
+func guildNameValid(name string) bool {
+	return vsro188.ValidateText(name, vsro188.TextRules{Field: "guild name", MaxRunes: 20, RequireTrimmed: true}) == nil
 }
 
 func sendRenameResult(session *server.Session, action, result byte, code uint16) error {

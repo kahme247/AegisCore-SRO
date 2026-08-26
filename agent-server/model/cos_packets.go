@@ -74,6 +74,18 @@ func BuildCOSTerminatedUpdate(uniqueID uint32) network.Packet {
 	return p
 }
 
+// BuildCOSItemStateUpdate publishes the state byte for the inventory item that
+// owns a persistent COS. The same proven layout is used by manual unsummon and
+// automatic fixed-period rental expiry.
+func BuildCOSItemStateUpdate(slot byte, state COSItemState) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.InventoryItemUpdate
+	p.WriteByte(slot)
+	p.WriteByte(64) // ItemUpdateFlag.State
+	p.WriteByte(byte(state))
+	return p
+}
+
 func BuildCOSNameUpdate(uniqueID uint32, name string) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.COSUpdateResponse

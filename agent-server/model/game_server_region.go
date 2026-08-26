@@ -24,7 +24,11 @@ func (gsr *GameServerRegion) HasRegion(regionId int16) bool {
 }
 
 const (
-	SelectGameserverRegions string = "SELECT gr.Continent_Name, r.wRegionID FROM `SRO_SHARD`.`GAME_SERVER_REGION` gr INNER JOIN `SRO_SHARD`.`REGION_REFERENCE` AS r ON r.ContinentName = gr.Continent_Name WHERE gr.Game_Server_ID=? ORDER BY gr.Continent_Name ASC, r.wRegionID ASC"
+	// Negative wRegionID values are legacy dungeon/instance planes. They are
+	// not enabled merely because their parent overworld continent is assigned
+	// to this Agent; the dungeon runtime remains disabled until its ownership
+	// and movement contracts are recovered.
+	SelectGameserverRegions string = "SELECT gr.Continent_Name, r.wRegionID FROM `SRO_SHARD`.`GAME_SERVER_REGION` gr INNER JOIN `SRO_SHARD`.`REGION_REFERENCE` AS r ON r.ContinentName = gr.Continent_Name WHERE gr.Game_Server_ID=? AND r.wRegionID>=0 ORDER BY gr.Continent_Name ASC, r.wRegionID ASC"
 )
 
 // ErrGameServerRegionRepositoryUnavailable identifies a missing injected

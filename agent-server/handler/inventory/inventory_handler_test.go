@@ -146,6 +146,36 @@ func TestInventoryRelocationUsesSessionUniqueAndCharacterIDsNotCharacterName(t *
 	}
 }
 
+func TestInventoryEquipRecalculatesRequiredItemPassive(t *testing.T) {
+	const passiveID = uint32(39)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	shield := model.Item{
+		SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 4, TypeID4: 1}},
+		ID:       101, LevelInfo: model.LevelInfo{RequiredLevelType1: 1, RequiredLevel1: 1},
+	}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 77, RefObjectID: 1907}, ID: 44, Level: 1, Session: session,
+		Skills: map[uint32]byte{passiveID: 1}, Inventory: model.NewInventory(map[byte]model.Item{14: shield}), AvatarInventory: model.NewInventory(nil),
+	}
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		passiveID: {ID: passiveID, BasicActivity: 0, BuffModifiers: model.BuffModifiers{BlockRate: 2}, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}},
+	}})
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, &inventoryHandlerRelocatorFake{})
+	handler.ConfigureReferenceData(catalog)
+	if _, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: model.SlotSecondaryWeapon}); err != nil {
+		t.Fatalf("equip shield: %v", err)
+	}
+	if player.BonusDefenseStats.BlockRate != 2 {
+		t.Fatalf("equipped shield passive = %d, want 2", player.BonusDefenseStats.BlockRate)
+	}
+	if _, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: model.SlotSecondaryWeapon, targetSlot: 15}); err != nil {
+		t.Fatalf("unequip shield: %v", err)
+	}
+	if player.BonusDefenseStats.BlockRate != 0 {
+		t.Fatalf("unequipped shield passive = %d, want 0", player.BonusDefenseStats.BlockRate)
+	}
+}
+
 func TestInventoryMovePropagatesUnknownCommitOutcomeToCloseSession(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	player := &model.Player{

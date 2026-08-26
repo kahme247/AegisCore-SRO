@@ -236,7 +236,7 @@ func TestSQLInventoryRepositoryReadsCharacterInventory(t *testing.T) {
 	}
 }
 
-func TestSQLInventoryRepositoryActivatesLinkedLegacyCOSState(t *testing.T) {
+func TestSQLInventoryRepositoryPreservesPersistedInactiveCOSState(t *testing.T) {
 	setInventoryRepositoryRefItems(t, map[uint32]RefItem{
 		9279: {
 			RefObject: RefObject{
@@ -260,8 +260,8 @@ func TestSQLInventoryRepositoryActivatesLinkedLegacyCOSState(t *testing.T) {
 		t.Fatalf("GetCharacterInventory returned an error: %v", err)
 	}
 	item := inventory.Items[15]
-	if !item.COS.Present || item.COS.State != COSItemActive {
-		t.Fatalf("COS state = %+v, want activated linked state", item.COS)
+	if !item.COS.Present || item.COS.State != COSItemInactive {
+		t.Fatalf("COS state = %+v, want persisted inactive state", item.COS)
 	}
 }
 

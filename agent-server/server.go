@@ -13,6 +13,7 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/config"
 	"github.com/Harvi8/AegisCore/agent-server/database"
+	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/Harvi8/AegisCore/agent-server/handler/character"
 	"github.com/Harvi8/AegisCore/agent-server/handler/chat"
 	"github.com/Harvi8/AegisCore/agent-server/handler/cos"
@@ -27,7 +28,9 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/management"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	agentruntime "github.com/Harvi8/AegisCore/agent-server/runtime"
 	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/aggregate"
 	"github.com/Harvi8/AegisCore/framework/boot"
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	"github.com/Harvi8/AegisCore/framework/logging"
@@ -37,6 +40,8 @@ import (
 	"github.com/Harvi8/AegisCore/framework/security/mtls"
 	"github.com/Harvi8/AegisCore/framework/server"
 	gwHandlers "github.com/Harvi8/AegisCore/gateway-server/handler"
+	protocolregistry "github.com/Harvi8/AegisCore/protocol/registry"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -49,6 +54,8 @@ type AgentServer struct {
 	UnhandledPacketsLogger *log.Logger
 	packetContext          context.Context
 	cancelPacketHandling   context.CancelFunc
+	Lifecycle              *agentruntime.Lifecycle
+	Features               feature.Set
 	// Pools owns the long-lived account and shard connections used by the live
 	// character-selection, reference-data bootstrap, world bootstrap, and
 	// checkpoint paths. It is closed
@@ -62,8 +69,8 @@ type AgentServer struct {
 	// World is the configured singleton used by the live Agent. It is retained
 	// here so shutdown can drain its position queue before Pools is closed.
 	World *service.WorldService
-	// LevelTable is loaded from the client-matched LevelData.txt during
-	// gamedata bootstrap before any character can enter the world.
+	// LevelTable is loaded from SRO_SHARD.REF_LEVEL_DATA before any character
+	// can enter the world.
 	LevelTable *model.LevelTable
 	// Exchange owns the in-memory two-party exchange state so disconnect
 	// teardown can release the peer immediately.
@@ -74,10 +81,12 @@ type AgentServer struct {
 	Combat             *character.CombatHandler
 	Hwan               *character.HwanHandler
 	Skill              *character.SkillHandler
+	Inventory          *inventory.InventoryHandler
 	CharacterSelection *lobby.CharacterSelectionHandler
 	Vitals             model.CharacterVitalsRepository
 	GameplayRates      *manager.GameplayRateManager
 	COS                *service.COSService
+	DisconnectSaver    *service.DisconnectSaver
 	//SpawnEngine             *spawn.SpawnEngine
 }
 
@@ -85,20 +94,10 @@ type AgentServer struct {
 // until Start succeeds. TLS material is mandatory: there is no public SRO
 // 0xE000 backend-authentication fallback or shared-secret configuration.
 func NewAgentServer() (AgentServer, error) {
-	levelDataPath := viper.GetString(config.AgentLevelDataFile)
-	levelDataFile, err := os.Open(levelDataPath)
+	features, err := config.ResolveFeatures()
 	if err != nil {
-		return AgentServer{}, fmt.Errorf("open Agent level data %q: %w", levelDataPath, err)
+		return AgentServer{}, fmt.Errorf("configure Agent legacy features: %w", err)
 	}
-	levelTable, err := model.LoadLevelTable(levelDataFile)
-	closeErr := levelDataFile.Close()
-	if err != nil {
-		return AgentServer{}, fmt.Errorf("parse Agent level data %q: %w", levelDataPath, err)
-	}
-	if closeErr != nil {
-		return AgentServer{}, fmt.Errorf("close Agent level data %q: %w", levelDataPath, closeErr)
-	}
-
 	tlsConfig, err := auth.LoadAdmissionTicketServerTLSConfig(auth.MutualTLSFiles{
 		CertFile: viper.GetString(config.AgentAdmissionTLSCertFile),
 		KeyFile:  viper.GetString(config.AgentAdmissionTLSKeyFile),
@@ -125,6 +124,24 @@ func NewAgentServer() (AgentServer, error) {
 	shardPool, err := pools.Shard()
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("get Agent shard pool: %w", err)
+	}
+	levelRepository, err := model.NewLevelTableRepository(shardPool)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent level-data repository: %w", err)
+	}
+	levelContext, cancelLevelLoad := context.WithTimeout(context.Background(), 5*time.Second)
+	levelTable, err := levelRepository.Load(levelContext)
+	cancelLevelLoad()
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("load Agent level data from shard database: %w", err)
+	}
+	aggregateCoordinator, err := aggregate.NewSQLCoordinator(shardPool)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent aggregate coordinator: %w", err)
+	}
+	disconnectSaver, err := service.NewDisconnectSaver(aggregateCoordinator, service.DefaultDisconnectSaveTimeout)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent disconnect saver: %w", err)
 	}
 	repositories, err := database.NewGameplayRepositories(shardPool, accountPool)
 	if err != nil {
@@ -163,6 +180,7 @@ func NewAgentServer() (AgentServer, error) {
 		},
 	)
 	serv.ModuleID = viper.GetString(config.AgentModuleId)
+	lifecycle := agentruntime.NewLifecycle()
 	serv.SetTrafficFilter(server.TrafficFilterOptions{
 		Window:      time.Duration(viper.GetInt(config.AgentTrafficWindowMS)) * time.Millisecond,
 		PacketLimit: uint32(viper.GetUint(config.AgentTrafficPacketLimit)),
@@ -172,25 +190,26 @@ func NewAgentServer() (AgentServer, error) {
 	// it exposes lobby packets, then only loading handshake packets while a
 	// character bootstrap is pending, before admitting normal in-world traffic. In particular,
 	// legacy 0xE000 backend authentication is rejected at the listener edge.
-	serv.SetAdmissionPolicy(server.AgentLifecycleAdmissionPolicy(
-		opcode.AuthRequest,
-		[]uint16{
-			opcode.JoinLobbyRequest,
-			opcode.LobbyActionRequest,
-			opcode.LobbyRenameRequest,
-			opcode.AgentPingRequest,
-		},
-		[]uint16{opcode.TeleportReadyResponse, opcode.GameReadyRequest, opcode.AgentPingRequest},
-	))
+	registry := vsro188.ProtocolRegistry()
+	authenticationOpcodes := registry.Opcodes(protocolregistry.ServiceAgent, protocolregistry.ClientToServer, protocolregistry.AgentAuthentication)
+	if len(authenticationOpcodes) != 1 {
+		return AgentServer{}, fmt.Errorf("configure Agent protocol admission: expected one authentication opcode, got %d", len(authenticationOpcodes))
+	}
+	serv.SetAdmissionPolicy(server.AvailabilityAdmissionPolicy(lifecycle.IsReady, server.AgentLifecycleAdmissionPolicy(
+		authenticationOpcodes[0],
+		registry.Opcodes(protocolregistry.ServiceAgent, protocolregistry.ClientToServer, protocolregistry.AgentLobby),
+		registry.Opcodes(protocolregistry.ServiceAgent, protocolregistry.ClientToServer, protocolregistry.AgentCharacterLoading),
+	)))
 
 	tickets := auth.NewAdmissionTicketStore()
-	admissionServer, err := auth.NewAdmissionTicketInstallServer(
+	admissionServer, err := auth.NewAdmissionTicketInstallServerWithReadiness(
 		net.JoinHostPort(
 			viper.GetString(config.AgentAdmissionHost),
 			fmt.Sprintf("%d", viper.GetInt(config.AgentAdmissionPort)),
 		),
 		tlsConfig,
 		tickets,
+		lifecycle.IsReady,
 	)
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Gateway admission ticket listener: %w", err)
@@ -205,9 +224,15 @@ func NewAgentServer() (AgentServer, error) {
 		ReferenceData:          repositories.ReferenceData,
 		LevelTable:             levelTable,
 		GameplayRates:          gameplayRates,
+		Lifecycle:              lifecycle,
+		Features:               features,
+		DisconnectSaver:        disconnectSaver,
 	})
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("compose Agent runtime: %w", err)
+	}
+	if err := lifecycle.Transition(agentruntime.Loading, ""); err != nil {
+		return AgentServer{}, fmt.Errorf("enter Agent loading lifecycle: %w", err)
 	}
 
 	lobby.RegisterAuthRequestHandler(&serv, agentServer.AdmissionTickets)
@@ -282,6 +307,7 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Combat.ConfigureMonsterMasks(repositories.MonsterMasks)
 	agentServer.Combat.ConfigureHwan(repositories.Hwan)
 	cosLifecycle.Service().ConfigureCombat(agentServer.Combat, levelTable)
+	agentServer.Combat.ConfigureCompanions(cosLifecycle.Service())
 	movementHandler.ConfigureCombatCancellation(agentServer.Combat.CancelPlayerAttack)
 	if err := character.RegisterAttributeHandlers(&serv, repositories.CharacterAttributes); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character attribute handlers: %w", err)
@@ -313,7 +339,7 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Exchange = exchangeManager
 	agentServer.GuildStorage = repositories.GuildStorage
 	agentServer.Vitals = repositories.Vitals
-	inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.AvatarInventory, repositories.ItemMall)
+	agentServer.Inventory = inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.AvatarInventory, repositories.ItemMall)
 	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse, teleportHandler)
 	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
 	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
@@ -365,12 +391,20 @@ func (a *AgentServer) Start() error {
 	if a == nil || a.Server == nil || a.AdmissionTicketServer == nil {
 		return fmt.Errorf("Agent admission service is not configured")
 	}
+	if a.Lifecycle == nil {
+		return fmt.Errorf("Agent lifecycle is not configured")
+	}
+	if state := a.Lifecycle.Snapshot().State; state != agentruntime.Loading {
+		return fmt.Errorf("Agent cannot start from lifecycle state %s", state)
+	}
 	publicListener, err := a.Server.Listen()
 	if err != nil {
+		a.markDegraded("public listener bind failed")
 		return fmt.Errorf("bind Agent public listener: %w", err)
 	}
 	if err := a.AdmissionTicketServer.Start(); err != nil {
 		_ = a.Server.CloseListener()
+		a.markDegraded("admission listener startup failed")
 		return fmt.Errorf("start Gateway admission ticket listener: %w", err)
 	}
 	if a.ManagementServer != nil {
@@ -379,11 +413,22 @@ func (a *AgentServer) Start() error {
 			_ = a.AdmissionTicketServer.Close(rollbackCtx)
 			cancelRollback()
 			_ = a.Server.CloseListener()
+			a.markDegraded("management listener startup failed")
 			return fmt.Errorf("start Agent management listener: %w", err)
 		}
 	}
 	if a.GameplayRates != nil {
 		a.GameplayRates.Start(a.packetContext)
+	}
+	if err := a.Lifecycle.Transition(agentruntime.Ready, ""); err != nil {
+		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Second)
+		if a.ManagementServer != nil {
+			_ = a.ManagementServer.Close(rollbackCtx)
+		}
+		_ = a.AdmissionTicketServer.Close(rollbackCtx)
+		cancelRollback()
+		_ = a.Server.CloseListener()
+		return fmt.Errorf("enter Agent ready lifecycle: %w", err)
 	}
 	go func() {
 		if err := a.Server.Serve(publicListener); err != nil {
@@ -412,6 +457,17 @@ func (a *AgentServer) Close(ctx context.Context) error {
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if a.Lifecycle != nil {
+		if a.Lifecycle.Snapshot().State == agentruntime.Stopped {
+			return nil
+		}
+		if err := a.Lifecycle.Transition(agentruntime.Draining, ""); err != nil {
+			return fmt.Errorf("enter Agent draining lifecycle: %w", err)
+		}
+		defer func() {
+			_ = a.Lifecycle.Transition(agentruntime.Stopped, "")
+		}()
 	}
 	if a.cancelPacketHandling != nil {
 		a.cancelPacketHandling()
@@ -452,6 +508,22 @@ func (a *AgentServer) Close(ctx context.Context) error {
 		closeErrors = append(closeErrors, fmt.Errorf("close Agent database pools: %w", err))
 	}
 	return errors.Join(closeErrors...)
+}
+
+// Degrade immediately fails closed for public application admission and the
+// private Gateway readiness/install endpoint. Existing sessions remain alive
+// for the caller to save or drain according to the dependency failure policy.
+func (a *AgentServer) Degrade(reason string) error {
+	if a == nil || a.Lifecycle == nil {
+		return fmt.Errorf("Agent lifecycle is not configured")
+	}
+	return a.Lifecycle.Transition(agentruntime.Degraded, reason)
+}
+
+func (a *AgentServer) markDegraded(reason string) {
+	if a != nil && a.Lifecycle != nil {
+		_ = a.Lifecycle.Transition(agentruntime.Degraded, reason)
+	}
 }
 
 func (a *AgentServer) closePools() error {
@@ -505,13 +577,6 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 	if a.Exchange != nil {
 		a.Exchange.CancelPlayer(closedSession.UserContext.CharacterID)
 	}
-	if a.GuildStorage != nil && closedSession.UserContext.CharacterID > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if err := a.GuildStorage.CloseGuildStorage(ctx, int64(closedSession.UserContext.CharacterID)); err != nil {
-			log.WithError(err).Debug("release guild storage on disconnect")
-		}
-		cancel()
-	}
 	character.ClearNPCInteraction(closedSession.UserContext.UniqueID)
 	party.HandleDisconnect(closedSession.UserContext.UniqueID)
 	log.Debugf("player %s disconnected", closedSession.UserContext.CharName)
@@ -522,23 +587,53 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 		// construct AgentServer directly instead of through NewAgentServer.
 		world = service.GetWorldServiceInstance()
 	}
-	if a.Vitals != nil {
-		if player, err := world.GetPlayerByUniqueId(closedSession.UserContext.UniqueID); err == nil && player != nil {
-			hp, mp := player.CurrentVitals()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if err := a.Vitals.SaveVitals(ctx, player.ID, hp, mp); err != nil {
-				log.WithError(err).Warn("save character vitals on disconnect")
+	player, playerErr := world.GetPlayerByUniqueId(closedSession.UserContext.UniqueID)
+	if playerErr != nil || player == nil {
+		world.PlayerDisconnected(closedSession.UserContext.UniqueID, closedSession.UserContext.CharName)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), service.DefaultDisconnectSaveTimeout)
+	defer cancel()
+	atomicSaveAttempted := false
+	if a.DisconnectSaver != nil {
+		if err := world.PrepareDisconnectSave(ctx, closedSession.UserContext.UniqueID); err != nil {
+			log.WithError(err).Warn("prepare character disconnect save")
+		} else {
+			var cosRecords []model.COSRecord
+			if a.COS != nil {
+				cosRecords = a.COS.SnapshotOwned(player)
 			}
-			cancel()
+			snapshot, err := service.NewDisconnectSaveSnapshot(closedSession.ID, player, cosRecords)
+			if err == nil {
+				atomicSaveAttempted = true
+				_, err = a.DisconnectSaver.Save(ctx, snapshot)
+			}
+			if err != nil {
+				log.WithError(err).Warn("atomically save character on disconnect")
+			}
+		}
+	}
+	if a.GuildStorage != nil && closedSession.UserContext.CharacterID > 0 {
+		if err := a.GuildStorage.CloseGuildStorage(ctx, int64(closedSession.UserContext.CharacterID)); err != nil {
+			log.WithError(err).Debug("release guild storage on disconnect")
 		}
 	}
 	if a.COS != nil {
-		if player, err := world.GetPlayerByUniqueId(closedSession.UserContext.UniqueID); err == nil && player != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if err := a.COS.UnsummonAll(ctx, player); err != nil {
-				log.WithError(err).Warn("save and remove character COS on disconnect")
-			}
-			cancel()
+		if atomicSaveAttempted {
+			a.COS.DetachAll(player)
+		} else if err := a.COS.UnsummonAll(ctx, player); err != nil {
+			log.WithError(err).Warn("save and remove character COS on disconnect")
+		}
+	}
+	if atomicSaveAttempted {
+		world.PlayerDisconnectedAfterSave(closedSession.UserContext.UniqueID, closedSession.UserContext.CharName)
+		return
+	}
+	if a.Vitals != nil {
+		hp, mp := player.CurrentVitals()
+		if err := a.Vitals.SaveVitals(ctx, player.ID, hp, mp); err != nil {
+			log.WithError(err).Warn("save character vitals on disconnect")
 		}
 	}
 	world.PlayerDisconnected(closedSession.UserContext.UniqueID, closedSession.UserContext.CharName)
@@ -583,7 +678,7 @@ func main() {
 	}
 
 	loadGameData := func() {
-		log.Infof("loaded client-matched level data through level %d", agentServer.LevelTable.MaxLevel())
+		log.Infof("loaded database-backed level data through level %d", agentServer.LevelTable.MaxLevel())
 
 		if agentServer.ReferenceData == nil {
 			log.Fatal("Agent reference-data repository is not configured")
@@ -596,6 +691,7 @@ func main() {
 		}
 		referenceCatalog := model.NewReferenceDataCatalog(snapshot)
 		agentServer.Combat.ConfigureReferenceData(referenceCatalog)
+		agentServer.Inventory.ConfigureReferenceData(referenceCatalog)
 		if err := agentServer.CharacterSelection.ConfigureReferenceData(referenceCatalog); err != nil {
 			log.Fatalf("Agent character passive-skill bootstrap failed: %v", err)
 		}

@@ -12,37 +12,42 @@ import (
 )
 
 type Char struct {
-	ID               int
-	RefObjID         int
-	User             int
-	Shard            int
-	Name             string
-	Scale            byte
-	Level            int
-	MaxLevel         int
-	InventorySize    byte
-	Exp              int64
-	SkillExp         int64
-	SkillPoints      int64
-	Gold             uint64
-	Str              int
-	Int              int
-	StatPoints       int
-	HP               int
-	MP               int
-	IsDeleting       bool
-	PosX             float32
-	PosY             float32
-	PosZ             float32
-	Ctime            time.Time
-	Utime            time.Time
-	Region           int16
-	ReturnTeleportID uint32
-	IsGm             bool
+	ID                  int
+	RefObjID            int
+	User                int
+	Shard               int
+	Name                string
+	Scale               byte
+	Level               int
+	MaxLevel            int
+	InventorySize       byte
+	Exp                 int64
+	SkillExp            int64
+	SkillPoints         int64
+	Gold                uint64
+	Str                 int
+	Int                 int
+	StatPoints          int
+	HP                  int
+	MP                  int
+	IsDeleting          bool
+	DeletionRequestedAt time.Time
+	PosX                float32
+	PosY                float32
+	PosZ                float32
+	Ctime               time.Time
+	Utime               time.Time
+	Region              int16
+	ReturnTeleportID    uint32
+	IsGm                bool
+	GuildMemberClass    byte
+	GuildRenameRequired bool
+	GuildName           string
+	AcademyMemberClass  byte
 }
 
 const (
-	SelectCharsByAccountAndShard string = "SELECT ID, REF_OBJ_ID, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, UTIME, FK_REGION, INVENTORY_SIZE FROM `SRO_SHARD`.`CHAR` WHERE FK_USER=? AND FK_SHARD=? ORDER BY CTIME ASC"
+	SelectCharsByAccountAndShard string = "SELECT c.ID,c.REF_OBJ_ID,c.FK_SHARD,c.CHAR_NAME,c.CHAR_SCALE,c.CURRENT_LEVEL,c.EXP,c.SKILL_EXP,c.STRENGTH,c.INTELLECT,c.STAT_POINTS,c.HP,c.MP,c.DELETING,c.UTIME,c.DELETION_REQUESTED_AT,c.FK_REGION,c.INVENTORY_SIZE,CASE WHEN gm.FK_CHAR IS NULL THEN 0 WHEN gm.MEMBER_CLASS=0 THEN 2 ELSE 1 END,CASE WHEN gm.MEMBER_CLASS=0 THEN g.RENAME_REQUIRED ELSE 0 END,COALESCE(g.NAME,''),CASE WHEN am.FK_CHAR IS NULL THEN 0 WHEN am.MEMBER_CLASS=0 THEN 2 ELSE 1 END FROM `SRO_SHARD`.`CHAR` c LEFT JOIN `SRO_SHARD`.`GUILD_MEMBER` gm ON gm.FK_CHAR=c.ID LEFT JOIN `SRO_SHARD`.`GUILD` g ON g.ID=gm.FK_GUILD LEFT JOIN `SRO_SHARD`.`ACADEMY_MEMBER` am ON am.FK_CHAR=c.ID WHERE c.FK_USER=? AND c.FK_SHARD=? ORDER BY c.CTIME ASC"
 	// Character names use the same explicit normalized identity as the
 	// migration-backed unique key. Keep the expression in the live queries so
 	// the application remains correct both before and after that optional
@@ -50,7 +55,8 @@ const (
 	// column would make pre-migration startup fail.
 	SelectCharByNameAndOwner     string = "SELECT ID, REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, CTIME, UTIME, FK_REGION, SKILL_POINTS, GOLD, MAX_LEVEL, INVENTORY_SIZE FROM `SRO_SHARD`.`CHAR` WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) AND FK_USER=? AND FK_SHARD=? LIMIT 1"
 	select_does_charname_exist   string = "SELECT 1 FROM `SRO_SHARD`.`CHAR` WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) LIMIT 1"
-	update_is_deleting_for_owner string = "UPDATE `SRO_SHARD`.`CHAR` SET DELETING=? WHERE LOWER(TRIM(CHAR_NAME))=LOWER(TRIM(?)) AND FK_USER=? AND FK_SHARD=?"
+	update_is_deleting_for_owner string = "UPDATE `SRO_SHARD`.`CHAR` c SET c.DELETING=TRUE,c.DELETION_REQUESTED_AT=CURRENT_TIMESTAMP(6) WHERE LOWER(TRIM(c.CHAR_NAME))=LOWER(TRIM(?)) AND c.FK_USER=? AND c.FK_SHARD=? AND c.DELETING=FALSE AND NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`GUILD_MEMBER` gm WHERE gm.FK_CHAR=c.ID AND gm.MEMBER_CLASS=0) AND NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`ACADEMY_MEMBER` am WHERE am.FK_CHAR=c.ID)"
+	restore_deleting_for_owner   string = "UPDATE `SRO_SHARD`.`CHAR` c SET c.DELETING=FALSE,c.DELETION_REQUESTED_AT=NULL WHERE LOWER(TRIM(c.CHAR_NAME))=LOWER(TRIM(?)) AND c.FK_USER=? AND c.FK_SHARD=? AND c.DELETING=TRUE AND c.DELETION_REQUESTED_AT>DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY)"
 	update_character_position    string = "UPDATE `SRO_SHARD`.`CHAR` SET POS_X=?, POS_Y=?, POS_Z=?, FK_REGION=? WHERE ID=?"
 	insert_char                  string = "INSERT INTO `SRO_SHARD`.`CHAR`(REF_OBJ_ID, FK_USER, FK_SHARD, CHAR_NAME, CHAR_SCALE, CURRENT_LEVEL, EXP, SKILL_EXP, STRENGTH, INTELLECT, STAT_POINTS, HP, MP, DELETING, POS_X, POS_Y, POS_Z, FK_REGION, RETURN_TELEPORT_ID, INVENTORY_SIZE) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 	SelectIsGm                   string = "SELECT IS_GM FROM `SRO_ACCOUNT`.`USER` WHERE ID=?"

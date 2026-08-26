@@ -173,6 +173,24 @@ func TestPositionPersistenceRetriesAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestPositionPersistenceDiscardPlayerPreventsLaterCheckpoint(t *testing.T) {
+	repository := &fakePositionRepository{}
+	service := NewPositionPersistenceService(repository, time.Second)
+	player := persistenceTestPlayer(11, 42, 10)
+	if err := service.TryMarkDirty(player); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DiscardPlayer(context.Background(), player.GetUniqueID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.calls != 0 || service.Stats().Pending != 0 {
+		t.Fatalf("repository calls=%d stats=%+v", repository.calls, service.Stats())
+	}
+}
+
 func TestStalePersistenceCompletionKeepsNewerSnapshot(t *testing.T) {
 	repository := &fakePositionRepository{}
 	service := NewPositionPersistenceService(repository, time.Second)

@@ -37,7 +37,13 @@ func TestOwnerQualifiedCharacterQueriesIncludeOwnerPredicate(t *testing.T) {
 		"delete/restore": update_is_deleting_for_owner,
 	} {
 		if name == "character list" {
-			if !strings.Contains(query, "WHERE FK_USER=? AND FK_SHARD=?") {
+			if !strings.Contains(query, "WHERE c.FK_USER=? AND c.FK_SHARD=?") {
+				t.Fatalf("%s query is not owner-qualified: %s", name, query)
+			}
+			continue
+		}
+		if name == "delete/restore" {
+			if !strings.Contains(query, "LOWER(TRIM(c.CHAR_NAME))=LOWER(TRIM(?)) AND c.FK_USER=? AND c.FK_SHARD=?") {
 				t.Fatalf("%s query is not owner-qualified: %s", name, query)
 			}
 			continue
@@ -56,10 +62,23 @@ func TestCharacterNameQueriesUseOneNormalizedIdentityRule(t *testing.T) {
 	for name, query := range map[string]string{
 		"lookup":         SelectCharByNameAndOwner,
 		"availability":   select_does_charname_exist,
-		"delete/restore": update_is_deleting_for_owner,
+		"delete/restore": strings.ReplaceAll(update_is_deleting_for_owner, "c.CHAR_NAME", "CHAR_NAME"),
 	} {
 		if !strings.Contains(query, normalizedName) {
 			t.Fatalf("%s query does not use the normalized character identity: %s", name, query)
+		}
+	}
+}
+
+func TestCharacterDeletionQueriesEnforceOrganizationAndRetentionRules(t *testing.T) {
+	for _, required := range []string{"GUILD_MEMBER", "MEMBER_CLASS=0", "ACADEMY_MEMBER", "DELETION_REQUESTED_AT=CURRENT_TIMESTAMP(6)"} {
+		if !strings.Contains(update_is_deleting_for_owner, required) {
+			t.Fatalf("temporary deletion query lacks %q guard: %s", required, update_is_deleting_for_owner)
+		}
+	}
+	for _, required := range []string{"DELETING=TRUE", "DELETION_REQUESTED_AT>DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY)"} {
+		if !strings.Contains(restore_deleting_for_owner, required) {
+			t.Fatalf("restore query lacks %q guard: %s", required, restore_deleting_for_owner)
 		}
 	}
 }

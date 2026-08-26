@@ -1,6 +1,7 @@
 package config
 
 import (
+	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/Harvi8/AegisCore/framework/config"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -12,7 +13,6 @@ const (
 	AgentModuleId                  = "agent.module_id"
 	AgentDataPath                  = "agent.data_path"
 	AgentPrelinkedNavdataFile      = "agent.prelinked_navdata_file"
-	AgentLevelDataFile             = "agent.level_data_file"
 	AgentTrafficPacketLimit        = "agent.traffic_filter.packet_limit"
 	AgentTrafficWindowMS           = "agent.traffic_filter.window_ms"
 	AgentTimedBuffDuration         = "agent.client.timed_buff_duration"
@@ -55,7 +55,6 @@ func bindEnvAliases() {
 	viper.BindEnv(AgentModuleId, "AGENT_MODULE_ID")
 	viper.BindEnv(AgentDataPath, "AGENT_DATA_PATH")
 	viper.BindEnv(AgentPrelinkedNavdataFile, "AGENT_PRELINKED_NAVDATA_FILE")
-	viper.BindEnv(AgentLevelDataFile, "AGENT_LEVEL_DATA_FILE")
 	viper.BindEnv(AgentTrafficPacketLimit, "AGENT_TRAFFIC_FILTER_PACKET_LIMIT")
 	viper.BindEnv(AgentTrafficWindowMS, "AGENT_TRAFFIC_FILTER_WINDOW_MS")
 	viper.BindEnv(AgentTimedBuffDuration, "AGENT_TIMED_BUFF_DURATION")
@@ -77,6 +76,9 @@ func bindEnvAliases() {
 	viper.BindEnv(GameTimeTicksPerSecond, "GAME_TIME_TICKS_PER_SECOND")
 	viper.BindEnv(GameTimeDaySpeed, "GAME_TIME_DAY_SPEED")
 	viper.BindEnv(PositionCheckpointSeconds, "AGENT_POSITION_CHECKPOINT_SECONDS")
+	for _, definition := range feature.Definitions() {
+		viper.BindEnv(definition.ConfigKey, definition.Environment)
+	}
 }
 
 func setDefaultValues() {
@@ -85,7 +87,6 @@ func setDefaultValues() {
 	viper.SetDefault(AgentModuleId, "AgentServer")
 	viper.SetDefault(AgentDataPath, "./Data")
 	viper.SetDefault(AgentPrelinkedNavdataFile, "./prelinked_navdata.gob")
-	viper.SetDefault(AgentLevelDataFile, "./Media/server_dep/silkroad/textdata/leveldata.txt")
 	viper.SetDefault(AgentTrafficPacketLimit, 200)
 	viper.SetDefault(AgentTrafficWindowMS, 1000)
 	viper.SetDefault(AgentTimedBuffDuration, false)
@@ -103,4 +104,15 @@ func setDefaultValues() {
 	viper.SetDefault(GameTimeTicksPerSecond, 20)
 	viper.SetDefault(GameTimeDaySpeed, 1.0)
 	viper.SetDefault(PositionCheckpointSeconds, 30)
+	for _, definition := range feature.Definitions() {
+		viper.SetDefault(definition.ConfigKey, definition.DefaultEnabled)
+	}
 }
+
+func ResolveFeatures() (feature.Set, error) {
+	return feature.Resolve(viperBoolProvider{})
+}
+
+type viperBoolProvider struct{}
+
+func (viperBoolProvider) GetBool(key string) bool { return viper.GetBool(key) }

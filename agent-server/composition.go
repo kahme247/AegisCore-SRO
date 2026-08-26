@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/Harvi8/AegisCore/agent-server/handler/exchange"
 	"github.com/Harvi8/AegisCore/agent-server/management"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	agentruntime "github.com/Harvi8/AegisCore/agent-server/runtime"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
@@ -32,6 +34,9 @@ type AgentDependencies struct {
 	Exchange               *exchange.Manager
 	GuildStorage           model.GuildStorageRepository
 	GameplayRates          *manager.GameplayRateManager
+	DisconnectSaver        *service.DisconnectSaver
+	Lifecycle              *agentruntime.Lifecycle
+	Features               feature.Set
 }
 
 // NewAgentServerWithDependencies constructs the lifecycle facade without
@@ -42,6 +47,10 @@ func NewAgentServerWithDependencies(dependencies AgentDependencies) (AgentServer
 		return AgentServer{}, fmt.Errorf("Agent public server is required")
 	}
 	packetContext, cancelPacketHandling := context.WithCancel(context.Background())
+	lifecycle := dependencies.Lifecycle
+	if lifecycle == nil {
+		lifecycle = agentruntime.NewLifecycle()
+	}
 	agent := AgentServer{
 		Server:                 dependencies.Server,
 		AdmissionTickets:       dependencies.AdmissionTickets,
@@ -57,7 +66,18 @@ func NewAgentServerWithDependencies(dependencies AgentDependencies) (AgentServer
 		Exchange:               dependencies.Exchange,
 		GuildStorage:           dependencies.GuildStorage,
 		GameplayRates:          dependencies.GameplayRates,
+		DisconnectSaver:        dependencies.DisconnectSaver,
+		Lifecycle:              lifecycle,
+		Features:               cloneFeatureSet(dependencies.Features),
 	}
 	dependencies.Server.SetSessionClosedHandler(agent.playerSessionClosed)
 	return agent, nil
+}
+
+func cloneFeatureSet(source feature.Set) feature.Set {
+	result := make(feature.Set, len(source))
+	for key, enabled := range source {
+		result[key] = enabled
+	}
+	return result
 }

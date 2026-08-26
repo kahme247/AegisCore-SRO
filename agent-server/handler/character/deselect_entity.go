@@ -2,12 +2,12 @@ package character
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 // DeselectEntityHandler completes the stock client's NPC-dialog lifecycle.
@@ -31,13 +31,11 @@ func RegisterDeselectEntityHandler(target *server.Server) {
 }
 
 func (h *DeselectEntityHandler) handlePacket(_ context.Context, session *server.Session, packet network.Packet) error {
-	if packet.Remaining() != 4 {
-		return fmt.Errorf("entity deselect payload length %d, want 4", packet.Remaining())
-	}
-	targetUID, err := packet.ReadUInt32()
+	request, err := (vsro188.EntityDeselectRequestCodec{}).Decode(packet)
 	if err != nil {
-		return fmt.Errorf("read entity deselect target: %w", err)
+		return err
 	}
+	targetUID := request.UniqueID
 	world := h.world
 	if world == nil {
 		world = service.GetWorldServiceInstance()

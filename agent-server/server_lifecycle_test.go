@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	agentruntime "github.com/Harvi8/AegisCore/agent-server/runtime"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -52,7 +53,14 @@ func TestAgentCloseStopsPublicAcceptsBeforeDrainingSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
-	agent := AgentServer{Server: &engine}
+	lifecycle := agentruntime.NewLifecycle()
+	if err := lifecycle.Transition(agentruntime.Loading, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Transition(agentruntime.Ready, ""); err != nil {
+		t.Fatal(err)
+	}
+	agent := AgentServer{Server: &engine, Lifecycle: lifecycle}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -67,6 +75,23 @@ func TestAgentCloseStopsPublicAcceptsBeforeDrainingSessions(t *testing.T) {
 	}
 	if _, err := engine.Listen(); err == nil {
 		t.Fatal("Agent.Close() permitted the public listener to be reopened")
+	}
+	if got := lifecycle.Snapshot().State; got != agentruntime.Stopped {
+		t.Fatalf("lifecycle after close = %s, want %s", got, agentruntime.Stopped)
+	}
+}
+
+func TestAgentDegradeFailsReadyStateClosed(t *testing.T) {
+	lifecycle := agentruntime.NewLifecycle()
+	_ = lifecycle.Transition(agentruntime.Loading, "")
+	_ = lifecycle.Transition(agentruntime.Ready, "")
+	agent := AgentServer{Lifecycle: lifecycle}
+	if err := agent.Degrade("shard persistence unavailable"); err != nil {
+		t.Fatalf("Degrade() error = %v", err)
+	}
+	snapshot := lifecycle.Snapshot()
+	if snapshot.State != agentruntime.Degraded || snapshot.Reason != "shard persistence unavailable" || lifecycle.IsReady() {
+		t.Fatalf("degraded snapshot = %+v ready=%t", snapshot, lifecycle.IsReady())
 	}
 }
 

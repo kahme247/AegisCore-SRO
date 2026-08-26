@@ -258,13 +258,6 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 	})
 	if cosRefObjectID != 0 {
 		state := COSItemState(cosState)
-		// A linked persistent COS is an activated control item even when legacy
-		// rows retain DB state 1 from _ActivateCharCOS/import. Wire state 1 omits
-		// the identity and rental tail entirely, making a valid ability pet look
-		// expired and then appear usable without metadata.
-		if state == COSItemInactive {
-			state = COSItemActive
-		}
 		if state < COSItemInactive || state > COSItemDead {
 			state = COSItemActive
 		}

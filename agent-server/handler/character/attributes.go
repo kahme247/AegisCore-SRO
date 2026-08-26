@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 type attributeWorld interface {
@@ -44,8 +45,8 @@ func (h *AttributeHandler) increaseIntellect(ctx context.Context, session *serve
 func (h *AttributeHandler) increase(ctx context.Context, session *server.Session, packet network.Packet, attribute model.CharacterAttribute, responseOpcode uint16) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if packet.Remaining() != 0 {
-		return fmt.Errorf("character attribute payload length %d, want 0", packet.Remaining())
+	if _, err := (vsro188.CharacterAttributeIncreaseRequestCodec{}).Decode(packet); err != nil {
+		return err
 	}
 	if h == nil || h.world == nil || session == nil || session.UserContext.UniqueID == 0 {
 		return nil

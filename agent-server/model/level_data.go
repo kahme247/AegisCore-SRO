@@ -28,8 +28,9 @@ type LevelDataRow struct {
 	RequiredSkillPoints uint64
 }
 
-// LevelTable is loaded from the exact LevelData.txt shipped by the connected
-// client. Its values must never be replaced with a server-side guessed curve.
+// LevelTable is loaded from the client-matched reference rows stored in the
+// shard database. Its values must never be replaced with a server-side guessed
+// curve.
 type LevelTable struct {
 	levels map[int]LevelDataRow
 	max    int
@@ -46,7 +47,7 @@ func LoadLevelTable(reader io.Reader) (*LevelTable, error) {
 		input = transform.NewReader(buffered, unicode.UTF16(unicode.LittleEndian, unicode.ExpectBOM).NewDecoder())
 	}
 
-	table := &LevelTable{levels: make(map[int]LevelDataRow)}
+	var rows []LevelDataRow
 	scanner := bufio.NewScanner(input)
 	lineNumber := 0
 	for scanner.Scan() {
@@ -67,27 +68,43 @@ func LoadLevelTable(reader io.Reader) (*LevelTable, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w at line %d: required experience", ErrLevelDataMalformed, lineNumber)
 		}
-		if _, exists := table.levels[level]; exists {
-			return nil, fmt.Errorf("%w: level %d", ErrLevelDataDuplicate, level)
-		}
 		requiredSkillPoints, err := strconv.ParseUint(fields[2], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("%w at line %d: required skill points", ErrLevelDataMalformed, lineNumber)
 		}
-		table.levels[level] = LevelDataRow{
+		rows = append(rows, LevelDataRow{
 			Level:               level,
 			RequiredExperience:  requiredExperience,
 			RequiredSkillPoints: requiredSkillPoints,
-		}
-		if level > table.max {
-			table.max = level
-		}
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read level data: %w", err)
 	}
-	if len(table.levels) == 0 {
+	return newLevelTable(rows)
+}
+
+func newLevelTable(rows []LevelDataRow) (*LevelTable, error) {
+	if len(rows) == 0 {
 		return nil, ErrLevelDataEmpty
+	}
+	table := &LevelTable{levels: make(map[int]LevelDataRow, len(rows))}
+	for _, row := range rows {
+		if row.Level <= 0 {
+			return nil, ErrLevelDataMalformed
+		}
+		if _, exists := table.levels[row.Level]; exists {
+			return nil, fmt.Errorf("%w: level %d", ErrLevelDataDuplicate, row.Level)
+		}
+		table.levels[row.Level] = row
+		if row.Level > table.max {
+			table.max = row.Level
+		}
+	}
+	for level := 1; level <= table.max; level++ {
+		if _, exists := table.levels[level]; !exists {
+			return nil, fmt.Errorf("%w: missing level %d", ErrLevelDataMalformed, level)
+		}
 	}
 	return table, nil
 }
