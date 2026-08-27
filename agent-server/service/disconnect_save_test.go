@@ -86,7 +86,7 @@ func disconnectSnapshot() DisconnectSaveSnapshot {
 	return DisconnectSaveSnapshot{
 		SessionID: "2f9cfec7-6ec4-4c20-a4dd-28a762cd2460", CharacterID: 42,
 		HP: 100, MP: 80, RegionID: 25000, X: 1, Y: 2, Z: 3,
-		COS: []model.COSRecord{{ID: 7, OwnerCharID: 42, RefObjectID: 9002, Kind: model.COSGrowthPet, Level: 1}},
+		COS: []model.COSRecord{{ID: 7, OwnerCharID: 42, RefObjectID: 9002, Kind: model.COSGrowthPet, State: model.COSItemSummoned, Level: 1}},
 	}
 }
 

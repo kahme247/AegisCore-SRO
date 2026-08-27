@@ -63,6 +63,10 @@ const (
 	cosFollowRadiusStep      = float32(4)
 	cosOrbitMinRadius        = float32(38)
 	cosOrbitRadiusVariance   = uint32(2001) // 0.00 through 20.00 world units
+	cosPickupOrbitMinRadius  = float32(85)
+	cosPickupRadiusVariance  = uint32(7501) // 0.00 through 75.00 world units
+	cosCompanionRelocate     = float32(80)
+	cosPickupPetRelocate     = float32(190)
 	cosOrbitMinAngleStep     = float32(45)
 	cosOrbitAngleStepRange   = uint32(41) // 45 through 85 degrees per waypoint
 	cosArrivalRadius         = float32(3)
@@ -255,7 +259,7 @@ func (s *COSService) UpdateFollowers(now time.Time) {
 		}
 		petPos, ownerPos := pet.GetNavmeshPosition(), owner.GetNavmeshPosition()
 		distance := navmeshv2.HorizontalDistance(petPos, ownerPos)
-		farFromOwner := distance > 80 || petPos.Region.ID != ownerPos.Region.ID
+		farFromOwner := distance > companionRelocationRadius(pet.Kind) || petPos.Region.ID != ownerPos.Region.ID
 		target, targetOK := s.companionTarget(world, pet, owner, now, !farFromOwner)
 		if farFromOwner {
 			if !targetOK {
@@ -546,14 +550,29 @@ func newCOSCompanionAI(pet *model.COS) *cosCompanionAI {
 	if seed&1 != 0 {
 		direction = -1
 	}
+	orbitMin, orbitVariance := companionOrbitRadius(pet.Kind)
 	return &cosCompanionAI{
 		seed:           seed,
 		followAngle:    angle,
 		followRadius:   followRadius,
 		orbitAngle:     angle,
-		orbitRadius:    cosOrbitMinRadius + float32((seed>>12)%cosOrbitRadiusVariance)/100,
+		orbitRadius:    orbitMin + float32((seed>>12)%orbitVariance)/100,
 		orbitDirection: direction,
 	}
+}
+
+func companionOrbitRadius(kind model.COSKind) (float32, uint32) {
+	if kind == model.COSAbilityPet {
+		return cosPickupOrbitMinRadius, cosPickupRadiusVariance
+	}
+	return cosOrbitMinRadius, cosOrbitRadiusVariance
+}
+
+func companionRelocationRadius(kind model.COSKind) float32 {
+	if kind == model.COSAbilityPet {
+		return cosPickupPetRelocate
+	}
+	return cosCompanionRelocate
 }
 
 func usesCompanionFormation(kind model.COSKind) bool {
@@ -594,7 +613,8 @@ func (s *COSService) companionTarget(world cosFollowerWorld, pet *model.COS, own
 		stepDegrees := cosOrbitMinAngleStep + float32(ai.seed%cosOrbitAngleStepRange)
 		ai.orbitAngle += ai.orbitDirection * stepDegrees * (2 * math.Pi / 360)
 		ai.seed = ai.seed*1664525 + 1013904223
-		ai.orbitRadius = cosOrbitMinRadius + float32(ai.seed%cosOrbitRadiusVariance)/100
+		orbitMin, orbitVariance := companionOrbitRadius(pet.Kind)
+		ai.orbitRadius = orbitMin + float32(ai.seed%orbitVariance)/100
 		ai.nextWaypoint = now.Add(time.Duration(2+ai.seed%3) * time.Second)
 	}
 	targetAngle, targetRadius := ai.orbitAngle, ai.orbitRadius
@@ -627,9 +647,10 @@ func (s *COSService) companionTarget(world cosFollowerWorld, pet *model.COS, own
 	return target, true
 }
 
-// RehydratePlayer relocates and republishes active pets after the stock client
-// clears its object table during teleport loading.
-func (s *COSService) RehydratePlayer(_ context.Context, owner *model.Player) error {
+// RehydratePlayer restores persisted summoned pets on a fresh login, then
+// relocates and republishes all active pets after the stock client clears its
+// object table during login or teleport loading.
+func (s *COSService) RehydratePlayer(ctx context.Context, owner *model.Player) error {
 	if s == nil || owner == nil {
 		return nil
 	}
@@ -637,6 +658,39 @@ func (s *COSService) RehydratePlayer(_ context.Context, owner *model.Player) err
 	if !ok {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.mu.Lock()
+	restored := make(map[uint64]struct{})
+	for _, pet := range s.byOwnerKind[owner.ID] {
+		if pet != nil && pet.OwnerUniqueID == owner.GetUniqueID() {
+			restored[pet.PersistentID] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+	type persistedSummon struct {
+		slot byte
+		id   uint64
+	}
+	candidates := make([]persistedSummon, 0)
+	for slot, item := range owner.GetInventory().Items {
+		if !item.COS.Present || item.COS.State != model.COSItemSummoned || item.Data == 0 {
+			continue
+		}
+		id := uint64(item.Data)
+		if _, exists := restored[id]; !exists {
+			candidates = append(candidates, persistedSummon{slot: slot, id: id})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].slot < candidates[j].slot })
+	for _, candidate := range candidates {
+		if _, err := s.Summon(ctx, owner, candidate.id); err != nil {
+			return fmt.Errorf("restore summoned COS %d from inventory slot %d: %w", candidate.id, candidate.slot, err)
+		}
+	}
+
 	s.mu.Lock()
 	kinds := s.byOwnerKind[owner.ID]
 	pets := make([]*model.COS, 0, len(kinds))
@@ -646,6 +700,7 @@ func (s *COSService) RehydratePlayer(_ context.Context, owner *model.Player) err
 		}
 	}
 	s.mu.Unlock()
+	sort.Slice(pets, func(i, j int) bool { return pets[i].PersistentID < pets[j].PersistentID })
 	for _, pet := range pets {
 		target, ok := s.companionTarget(world, pet, owner, time.Now(), false)
 		if !ok {
@@ -721,6 +776,24 @@ func (s *COSService) SnapshotOwned(owner *model.Player) []model.COSRecord {
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
 	return records
+}
+
+// CheckpointAndDetachAll preserves the summoned state during the non-atomic
+// disconnect fallback, then removes runtime objects even when a save fails so
+// a disconnected owner cannot leave ghost pets in the world.
+func (s *COSService) CheckpointAndDetachAll(ctx context.Context, owner *model.Player) error {
+	if s == nil || owner == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var result error
+	for _, record := range s.SnapshotOwned(owner) {
+		result = errors.Join(result, s.repository.Save(ctx, record))
+	}
+	s.DetachAll(owner)
+	return result
 }
 
 // DetachAll removes a character's COS runtime state without performing SQL.

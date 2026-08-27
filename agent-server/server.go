@@ -622,7 +622,7 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 	if a.COS != nil {
 		if atomicSaveAttempted {
 			a.COS.DetachAll(player)
-		} else if err := a.COS.UnsummonAll(ctx, player); err != nil {
+		} else if err := a.COS.CheckpointAndDetachAll(ctx, player); err != nil {
 			log.WithError(err).Warn("save and remove character COS on disconnect")
 		}
 	}
