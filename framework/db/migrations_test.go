@@ -429,8 +429,8 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 62 {
-		t.Fatalf("shard migration count = %d, want 62", len(shardMigrations))
+	if len(shardMigrations) != 63 {
+		t.Fatalf("shard migration count = %d, want 63", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
@@ -525,6 +525,13 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(questExtendedKillMigration.UpSQL, "multi_target") ||
 		!strings.Contains(questExtendedKillMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("quest extended kill migration = %#v, want reversible classified/multi-target kill catalog", questExtendedKillMigration)
+	}
+	questTalismanMigration := shardMigrationByVersion[64]
+	if questTalismanMigration.Version != 64 || questTalismanMigration.Name != "quest_talisman_objectives" ||
+		!strings.Contains(questTalismanMigration.UpSQL, "REF_QUEST_TALISMAN_OBJECTIVE") ||
+		!strings.Contains(questTalismanMigration.UpSQL, "THEME_CODE") ||
+		!strings.Contains(questTalismanMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest talisman migration = %#v, want reversible talisman-collection catalog", questTalismanMigration)
 	}
 	buybackMigration := shardMigrationByVersion[38]
 	if buybackMigration.Version != 38 || buybackMigration.Name != "character_buyback" ||
