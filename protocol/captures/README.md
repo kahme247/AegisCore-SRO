@@ -43,7 +43,9 @@ Every checked-in fixture must record:
 
 The current profile model stores capture paths only; no fixture schema,
 sanitizer or corpus loader is implemented yet. Metadata enforcement must be
-added with the first fixture set.
+added with the first fixture set. Gateway also has a vSRO 1.274 negotiation
+profile, but Agent/world behavior and this priority corpus remain anchored to
+vSRO 1.188 until a separate 1.274 evidence set exists.
 
 ## Sanitization
 
@@ -102,3 +104,6 @@ go run ./cmd/sro-data verify `
 
 These commands test synthetic transport behavior and archive identity. They do
 not make the profile publication-ready or provide capture-backed compatibility.
+The full repository gate can additionally require the ignored local Media
+fixture used by `cmd/sro-data`; absence of that local tree is an environment
+limitation, not evidence that a capture fixture is valid.

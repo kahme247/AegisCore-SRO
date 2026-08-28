@@ -1,11 +1,14 @@
 # AegisCore
 
-AegisCore is a Go implementation of a Silkroad Online server stack focused on
-one compatibility boundary: **vSRO 1.188** (Gateway version `188`, profile
-`vsro188`). The current deployable
-topology is MySQL + Gateway + Agent, with an opt-in DownloadServer; game, world, chat, and shard behavior still
-lives inside those processes until the protocol and ownership boundaries are
-stable enough to justify extracting more services.
+AegisCore is a Go implementation of a Silkroad Online server stack. The
+primary runtime remains **vSRO 1.188** (Gateway version `188`, profile
+`vsro188`); Gateway can also negotiate the checked-in vSRO 1.274 profile when
+configured explicitly, while Agent, world data and maintenance importers remain
+vSRO 1.188-bound. The current deployable topology is MySQL + Gateway + Agent,
+with opt-in SMC management, patch delivery and patch administration services.
+Game, world, chat and shard behavior still lives inside the core processes until
+the protocol and ownership boundaries are stable enough to justify extracting
+more services.
 
 This repository is an active recovery and expansion effort, not a
 production-complete emulator. Code paths described as implemented have
@@ -25,8 +28,8 @@ slug. Original Ferdoran identifiers remain only where required for attribution.
 | Agent | `15882` | character lobby, world, movement, visibility, gameplay handlers | Implemented in stages; stock-client validation is incomplete |
 | Admission API | `15883` internal only | one-time Gateway-to-Agent tickets over mTLS | Implemented; intentionally not host-published |
 | Agent management API | `15884` internal only | authoritative SMC player snapshots over separate mTLS identity | Implemented; disabled until dedicated certificates are configured |
-| SMC Server | `15900` loopback by default | authenticated web management control plane and audit | Initial read-only dashboard implemented; opt-in Compose profile |
-| DownloadServer | `15880` | streams trusted, prepared legacy patch payloads by numeric file ID | Implemented; end-to-end clean-client 188→189 validation remains |
+| SMC Server | `15900` loopback by default | authenticated web management control plane and audit | Dashboard plus audited, identity-checked player disconnect command; opt-in Compose profile |
+| DownloadServer | `15880` (`15881` health) | streams trusted, prepared legacy patch payloads by numeric file ID | Implemented; opt-in patching profile; end-to-end clean-client 188-to-189 validation remains |
 
 The older six-service diagram under `_docs/architecture.puml` describes a
 possible long-term decomposition. It is not the current runtime topology.
@@ -43,11 +46,11 @@ change the Gateway/Agent wire contract.
 | Gateway | patch/profile, notices, shard list/ping, credential checks, login rate tracking, admission policy, mTLS ticket install | canonical client hash, locale, Content ID, module/version captures |
 | Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position, quick-slot and social bootstrap persistence | broader stock-client fixtures |
 | World and movement | region/spawn repositories, Data.pk2 navmesh, visibility, authoritative movement, wall/object collision, position checkpoints, teleport | dungeon/neighbour-plane support, memory reduction, broader collision corpus |
-| Entities and spawning | staged-to-active player admission, reciprocal player/NPC/mob group spawn/despawn, headings, bounded collision-aware respawn, basic mob AI | capture-backed player field validation, COS/pet/item/structure serializers and broader collision fixtures |
-| Character systems | stat allocation, combat/XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | skill casting breadth, quest lifecycle and capture-backed talk/action masks |
-| Economy and inventory | move/equip, storage, guild storage, repair, item use, elixir alchemy, exchange, stall | complete item option/rent/bind formats and transactional live testing |
-| Social | local/global/party/stall/whisper/guild/union/academy chat, party core and matching, persistent guilds, academies and jobs | capture validation for elections, guild wars, academy honor buffs, job safe-trade and stealth/invisibility rules |
-| Data and migrations | target-bound runner through shard `000047`; identity, gameplay, reference catalogs, economy, social systems and MySQL compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
+| Entities and spawning | staged-to-active player admission, reciprocal player/NPC/mob/COS group spawn/despawn, headings, collision-aware respawn and basic mob AI | capture-backed field validation for players, COS/pets/items/structures and broader collision fixtures |
+| Character systems | stat allocation, Hwan progression, combat/effects, XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | broader skill casting/effect semantics, quest lifecycle and capture-backed talk/action masks |
+| Economy and inventory | move/equip, three-page inventory, avatar inventory, storage, guild storage, repair, item use, Item Mall balances, services, alchemy, exchange and stall host state | complete item option/rent/bind formats, customer-side stalls and transactional live testing |
+| Social | rename, local/global/party/stall/whisper/guild/union/academy chat, party matching, persistent guilds, academies and jobs | capture validation for elections, guild wars, academy honor buffs, job safe-trade and stealth/invisibility rules |
+| Data and migrations | target-bound runner through shard `000064`; identity, gameplay, native quest/script/skill/item reference catalogs, economy, social, COS, equipment, Hwan, inventory, aggregate coordination, durable outbox dispatch, persistent scheduling and MySQL compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
 
 Current crash/collision safeguards include:
 
@@ -56,15 +59,17 @@ Current crash/collision safeguards include:
   a reason to swap model axes implicitly;
 - normal service NPC spawns advertise talkability with flag `2`; selected-NPC
   responses supply family-specific actions that remain capture-provisional;
-- outbound group spawn currently admits players, normal NPCs and mobs. COS and
-  specialized structures are deferred instead of emitting malformed `0x3019`
-  data that can crash the client;
+- outbound group spawn now has explicit player, normal NPC, mob and COS branches;
+  item and specialized-structure fields remain capture-provisional and are kept
+  bounded rather than guessed;
 - random respawn placement uses at most 32 same-region, collision-checked
   candidates before falling back to the authored point.
 
 Mastery upgrades are stored in `CHAR_MASTERY` and included in character join
-serialization. A valid mastery row is not itself a world-entry crash cause;
-packet alignment and spawn entity type must be checked first.
+serialization. Hwan state, active item services and owned COS state are also
+restored after `GameReady`. A valid mastery or service row is not itself a
+world-entry crash cause; packet alignment and spawn entity type must be checked
+first.
 
 ## Required local data
 
@@ -74,7 +79,8 @@ checkouts are intentionally ignored by Git.
 | Local input | Expected location | Use |
 | --- | --- | --- |
 | Canonical archive | `Data/Data.pk2` | navmesh and world files |
-| Level/skill Media | `Media/Media/server_dep/silkroad/textdata/` | XP, level, mastery and skill reference input |
+| Level/skill Media | `Media/Media/server_dep/silkroad/textdata/` | Reference-only input for explicit `sro-data` imports; Agent reads the resulting DB catalogs |
+| Database bootstrap | configured `DB_BACKUP_FILE` | Required backup containing both schemas for a new empty Compose volume; keep private |
 | Environment | `.env` | protocol identity, advertised Agent address and TLS mount paths; never commit secrets |
 | TLS material | `.local/admission-tls/` or external directories | Gateway/Agent mutual TLS |
 | Reference DBs | `VSRO_OLDDB/`, `VSRO_TestIn(EPVP)/` | offline comparison only; live AegisCore uses MySQL |
@@ -197,8 +203,9 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
   join, spawn/despawn, movement, NPC talk, mastery, combat and inventory.
 - Add golden encode/decode fixtures for group spawn `0x3019`, massive `0x600D`
   messages, character data and entity actions.
-- Implement explicit COS, pet, dropped-item and structure spawn serializers;
-  keep unsupported types fail-closed until then.
+- Finish capture validation for COS/pet spawn branches and implement the
+  remaining dropped-item and structure spawn serializers; keep unsupported
+  variants fail-closed.
 - Expand randomized-spawn and collision fixtures across authored regions,
   object meshes and boundary conditions.
 - Finish NPC talk/action masks and remove placeholder fields from entity/item
@@ -208,10 +215,11 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
 
 - Capture-validate mastery and skill-learning responses, add skill upgrade and
   broader casting flows, and expand effect/SP-rule coverage.
-- Complete damage formulas, skills, buffs, death/respawn and mob tactics.
+- Complete damage formulas, skill coverage, buffs, death/respawn and mob
+  tactics beyond the current reference-driven baseline.
 - Implement full quest accept/progress/complete/reward persistence.
 - Finish item magic options, sockets, advanced elixirs, durability, rental and
-  binding formats.
+  binding formats beyond the current validated alchemy/equipment paths.
 - Live-test exchange, storage, guild storage, stalls and party transitions under
   disconnect and concurrent-write conditions.
 
@@ -221,7 +229,8 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
   compact prepared representation; current Compose sizing expects more than
   5 GiB after Data.pk2 world load and limits Agent to 8 GiB.
 - Add dungeons, neighbour planes, robust cross-region pathing and spawn audits.
-- Add guild/academy/jobs, events, market and administrative observability.
+- Expand guild/academy/jobs, events, market and administrative observability
+  beyond the current core handlers and SMC dashboard.
 - Resolve migration numbering, document backup/restore drills, pin container
   images, and add repeatable live smoke tests.
 - Extract Game/Shard/Chat services only after ownership and protocol contracts

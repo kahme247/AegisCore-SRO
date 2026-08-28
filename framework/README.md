@@ -11,9 +11,12 @@ It remains part of this monorepo rather than a separately versioned dependency.
 | `client` | Reconnecting vSRO TCP client, handshake/module identification, encryption/EDC, massive reassembly and ordered writes |
 | `config` | Viper defaults, environment aliases and account/shard DSN construction |
 | `db` | Long-lived SQL pools plus target-bound migration catalogs, locks, checksums, dirty ledger and apply/rollback APIs |
+| `aggregate` | Serializable optimistic aggregate transactions with durable idempotency, atomic outbox writes and latest-version terminal snapshots |
+| `scheduler` | Durable timezone-aware schedule occurrences, leased execution, retry, misfire and recovery policy |
 | `network` | Packet readers/writers, incremental stream framing, Blowfish wire frames, sequence/CRC, bounded massive codec and opcode constants |
 | `security` | Legacy vSRO key/challenge helpers and Blowfish implementation |
 | `security/auth` | Bounded one-time admission tickets and private Gateway-to-Agent HTTPS/mTLS transport |
+| `security/mtls` | Shared certificate, CA and server-name validation for private management channels |
 | `security/hashing` | bcrypt password verification and cost-12 hash generation |
 | `server` | TCP listener, session registry, handshake/application admission, lifecycle gates, traffic limits, ordered sender and draining |
 | `pk2` | Bounded fail-closed PK2 indexing/reads plus retained compatibility paths |
@@ -69,8 +72,9 @@ verified mTLS channel.
 
 - Stream framing, massive assembly, handshake and encryption helpers have
   synthetic coverage but no sanitized stock-client golden corpus.
-- Actual opcodes and packet layouts are not yet consolidated under
-  `protocol/vsro188`.
+- Actual opcodes and packet layouts are still only partly consolidated under
+  `protocol/vsro188`; Agent gameplay serializers remain distributed across
+  application packages while capture baselines are pending.
 - The legacy `boot`, DB and PK2 compatibility APIs remain alongside safer paths.
 - Admission tickets and active-account reservations are lost on process restart.
 - Several older dependencies should be modernized only after protocol baselines

@@ -1,6 +1,7 @@
 # Patch administration
 
-`patch-admin` is the explicit builder and release-control tool. It never scans
+`patch-admin` is the explicit builder and release-control tool for the optional
+DownloadServer path. It never scans
 or watches a directory for publication. An administrator supplies a reviewed
 JSON build specification listing every changed file.
 

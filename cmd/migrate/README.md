@@ -36,6 +36,18 @@ The jobs wait for database health but do not start during ordinary
 `docker compose up`. The image tests migration/framework packages while building
 and runs the final binary as UID/GID 65532.
 
+Because the `db` service is long-running, `docker compose up` remains attached
+after a one-shot job exits. Inspect the migration container's exit status, or
+use a terminating invocation when scripting a gate:
+
+```powershell
+docker compose --profile maintenance up --build --abort-on-container-exit --exit-code-from migrate-account migrate-account
+```
+
+Run the corresponding command with `migrate-shard` for the shard target. The
+current fresh-install snapshot is account `000004` and shard `000053`; existing
+deployments should apply only the pending embedded files.
+
 ## Operator checklist
 
 1. Stop writes that can touch the selected schema.

@@ -2,6 +2,7 @@
 
 This service implements the launcher-facing Joymax file-transfer endpoint. It
 does not build patches, select the live release, or modify PK2 archives. The
+database/catalog decisions belong to Gateway and `cmd/patch-admin`; the
 existing launcher owns PK2 import after it downloads and decompresses each
 prepared payload.
 
@@ -18,8 +19,8 @@ It streams files rather than loading a complete patch into memory.
 
 ## Operations
 
-The protocol listener is separate from the HTTP health listener on port
-`15881` by default:
+The protocol listener is `15880` by default and is separate from the HTTP health
+listener on port `15881`:
 
 - `GET /healthz` confirms the process is alive.
 - `GET /readyz` returns `200` only after both listeners bind, and returns
@@ -37,7 +38,8 @@ shutdown deadline.
 ## Catalog
 
 DownloadServer uses a filesystem serving manifest while the database remains
-authoritative for releases, versions, hashes, and Gateway negotiation.
+authoritative for releases, versions, hashes, and Gateway negotiation. It does
+not query MySQL at runtime.
 `cmd/patch-admin build` generates and merges this serving view after assigning
 the database file IDs.
 

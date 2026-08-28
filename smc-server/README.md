@@ -6,7 +6,9 @@ management APIs, dashboard aggregation, and security auditing. Its embedded web
 application talks only to SMC Server; browsers never connect directly to MySQL,
 Gateway, Agent, or the private admission endpoint.
 
-The first implementation is intentionally read-only. It provides:
+The current implementation keeps database views read-only and exposes one
+explicitly audited live control: disconnecting a player through Agent's private
+mTLS management API. It provides:
 
 - authenticated, expiring operator sessions;
 - login rate limiting and same-origin request enforcement;
@@ -74,7 +76,8 @@ docker compose ps smc-server
 docker compose logs --tail=100 smc-server
 ```
 
-Open `http://127.0.0.1:15900`. The supplied Compose binding is loopback-only.
+Open `http://127.0.0.1:15900`. The supplied Compose binding is loopback-only;
+`SMC_PUBLIC_PORT` changes the host port without changing the container port.
 For remote administration, place SMC Server behind an authenticated HTTPS/VPN
 boundary and set `SMC_COOKIE_SECURE=1`; do not publish it directly to the
 Internet.

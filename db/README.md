@@ -8,16 +8,21 @@ AegisCore uses MySQL with two logical schemas:
   logically separate but not fully independent.
 
 Compose builds `aegiscore-db:8.4.10` from the repository-owned `db/Dockerfile`, whose
-official MySQL base is pinned by digest and whose bootstrap order is explicit.
+official MySQL base is pinned by digest. A new server restores the SQL dump
+selected by `DB_BACKUP_FILE`, then applies the application-user grants. The
+backup is bind-mounted and is not copied into an image layer.
 Development publishes classic MySQL `3306` on loopback only; production should
 remove that host binding and keep database traffic on the private network.
 
 ## Schema sources
 
 - `create_sro_account.sql` and `create_sro_shard.sql` are destructive fresh-install
-  snapshots. They include the final schema, migration-owned reference/backfill
+  reference snapshots retained for schema review and testing. They include the final schema, migration-owned reference/backfill
   data, and applied migration ledgers through account `000004` and shard
-  `000038` (with the intentional `000007` gap).
+  `000064` (with the intentional `000007` gap).
+- `DB_BACKUP_FILE` is the required Compose bootstrap source for an empty
+  `mysql-data` volume. It must be a `mysqldump --databases` backup containing
+  both `SRO_ACCOUNT` and `SRO_SHARD`.
 - The snapshots are not consumed by `cmd/migrate`; they must be loaded by a
   MySQL-capable client. Their pre-seeded ledgers let `cmd/migrate` verify the
   embedded catalog and apply only migrations added after the snapshot.
@@ -26,20 +31,25 @@ remove that host binding and keep database traffic on the private network.
 - `migrations/account` and `migrations/shard` are the embedded forward catalog.
 - `cmd/migrate` is the checked-in migration entry point.
 
-Fresh snapshots intentionally contain no login, GM, character, or inventory
-fixtures. Changing `MYSQL_PASSWORD` or these snapshots does not update an
-existing `mysql-data` volume; rotate the MySQL user and remove legacy test
-accounts explicitly in an operator-reviewed maintenance window.
+Changing `DB_BACKUP_FILE`, `MYSQL_PASSWORD`, or the reference snapshots does
+not update an existing `mysql-data` volume. Backup contents may include login,
+character, and inventory records and must remain ignored and access-controlled.
 
 The account catalog currently ends at `000004`, including the controlled patch
-release catalog. The shard catalog reaches `000038` and covers normalized identity, character limits and creation policy,
-Item Mall balances, purchases and timed services,
-inventory constraints, quests,
-economy/storage, shops, teleports, mastery/skills, guild storage, reference
-catalogs, movement settings, rental metadata, return-city recovery, progression
-and mob rates, character quick slots, durable speed effects, and MySQL 8.4
-foreign-key compatibility. Version `000007` is absent; preserve that gap until
-deployed ledgers and historical intent are reconciled.
+release catalog. The shard catalog reaches `000064` and covers normalized
+identity, character limits and creation policy, Item Mall balances and
+purchases, timed services, inventory constraints, quests, economy/storage,
+shops, teleports, mastery/skills, guild storage, reference catalogs, movement
+settings, rental metadata, return-city recovery, progression and mob rates,
+quick slots, durable speed effects, MySQL 8.4 compatibility, character
+buy-back, experience services, active buffs, COS/pets, equipment and avatar
+systems, alchemy references, Hwan progression, three-page inventory and social
+systems plus aggregate versions, command idempotency, the durable outbox and
+lease-based outbox dispatch recovery plus persistent scheduler definitions,
+leased execution and run history, character deletion lifecycle and recovered PK
+administration state.
+Version `000007` is absent; preserve that gap until deployed ledgers
+and historical intent are reconciled.
 
 Character creation enables the imported Chinese and European model ranges.
 European characters start at the Constantinople gate and select level-one

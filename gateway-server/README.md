@@ -1,9 +1,9 @@
 # AegisCore Gateway server
 
-Gateway is the public vSRO 1.188 or 1.274 entry point. It handles patch negotiation,
-notices, shard listing, login policy and one-time handoff to Agent. Runtime
-compatibility values come from explicit configuration; Gateway does not load or
-transmit the client profile JSON.
+Gateway is the public vSRO 1.188 or 1.274 entry point. It handles patch
+negotiation, notices, shard listing, login policy and one-time handoff to Agent.
+Runtime compatibility values come from explicit configuration; Gateway does not
+load or transmit the client profile JSON.
 
 ## Protocol surface
 
@@ -28,6 +28,12 @@ newer `[2,1]`, and older `[2,3]`.
 `GATEWAY_PATCH_CHANNEL` defaults to `published`. Use `testing` only on a
 separate admin-controlled Gateway while validating a testing release; never set
 the production Gateway to that channel.
+
+`GATEWAY_PROTOCOL_PROFILES` may configure multiple accepted patch tuples for
+negotiation. Patch selection is not carried through Agent admission: other
+Gateway handlers use the first configured profile, and Agent/world/importer
+behavior remains vSRO 1.188-bound. Keep the legacy single-profile fields set as
+well because Compose requires them even when the plural setting is used.
 
 Notices and shards are read from `SRO_ACCOUNT` for each request. Notices are
 capped at 255. Shards are filtered by the configured Content ID, validated and
@@ -140,8 +146,9 @@ contact Agent during construction: reachability, live certificate and readiness
 errors are discovered on readiness or ticket requests, then shards are projected
 offline and login fails closed. There is no shared-secret fallback.
 
-Compose publishes Gateway `15779`, Agent `15882`, MySQL `3306`, and MySQL X
-on loopback; only admission `15883` stays private. The supplied topology has no
+Compose publishes Gateway `15779`, Agent `15882`, and MySQL `3306`; admission
+`15883` and Agent management `15884` stay private to the Compose network. SMC
+is a separate opt-in loopback service. The supplied topology has no
 Gateway/Agent health checks and is not a complete public network perimeter.
 
 ## Known limitations
