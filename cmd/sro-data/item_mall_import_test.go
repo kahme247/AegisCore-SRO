@@ -21,8 +21,26 @@ func TestLoadItemMallPlacements(t *testing.T) {
 	if got.shopGroupID != 1051 || got.groupIndex != 0 || got.tabIndex != 0 || got.slotIndex != 7 {
 		t.Fatalf("position = %d/%d/%d/%d, want 1051/0/0/7", got.shopGroupID, got.groupIndex, got.tabIndex, got.slotIndex)
 	}
-	if got.packageID != 40000 || got.itemCode != "ITEM_MALL_TEST" || got.currency != 0 || got.price != 125 || got.optLevel != 3 || got.variance != 4 || got.data != 5 {
+	if got.packageID != 40000 || got.itemCode != "ITEM_MALL_TEST" || got.currency != 0 || got.price != 125 || got.quantity != 1 || got.optLevel != 3 || got.variance != 4 || got.data != 5 {
 		t.Fatalf("placement = %+v", got)
+	}
+}
+
+func TestStackableMallPackageUsesScrapDataAsQuantity(t *testing.T) {
+	placement := itemMallPlacement{packageCode: "PACKAGE_ITEM_MALL_REVERSE_RETURN_SCROLL", quantity: 1, data: 11}
+	if err := placement.applyStackablePackageQuantity(50); err != nil {
+		t.Fatalf("applyStackablePackageQuantity() error = %v", err)
+	}
+	if placement.quantity != 11 || placement.data != 0 {
+		t.Fatalf("placement = %+v, want quantity 11 and data 0", placement)
+	}
+
+	nonStackable := itemMallPlacement{packageCode: "PACKAGE_EQUIPMENT", quantity: 1, data: 48}
+	if err := nonStackable.applyStackablePackageQuantity(1); err != nil {
+		t.Fatalf("applyStackablePackageQuantity() non-stackable error = %v", err)
+	}
+	if nonStackable.quantity != 1 || nonStackable.data != 48 {
+		t.Fatalf("non-stackable placement = %+v, want quantity 1 and data 48", nonStackable)
 	}
 }
 

@@ -18,6 +18,14 @@ func TestItemMallStacksSplitsAtReferenceLimit(t *testing.T) {
 	}
 }
 
+func TestReverseReturnMultiBuySplitsFiftyFiveAcrossStacks(t *testing.T) {
+	got := itemMallStacks(50, 5*11)
+	want := []int{50, 5}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("stacks = %v, want %v", got, want)
+	}
+}
+
 func TestItemMallBalanceSelectsAllCurrencies(t *testing.T) {
 	balances := ItemMallBalances{Silk: 10, GiftSilk: 20, Point: 30}
 	if itemMallBalance(balances, ItemMallSilk) != 10 || itemMallBalance(balances, ItemMallGiftSilk) != 20 || itemMallBalance(balances, ItemMallPoint) != 30 {

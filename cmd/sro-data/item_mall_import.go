@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ type itemMallPlacement struct {
 	itemCode    string
 	currency    uint8
 	price       uint32
+	quantity    uint16
 	optLevel    uint8
 	variance    uint64
 	data        uint32
@@ -303,7 +305,7 @@ func loadItemMallPlacements(directory string) ([]itemMallPlacement, error) {
 			return nil, itemMallRowError(row, "duplicate target position (also package %q)", previous)
 		}
 		positions[position] = packageCode
-		placements = append(placements, itemMallPlacement{groupID, groupLinks[0].index, tab.index, uint8(slot), pkg.id, packageCode, scrap.itemCode, packagePrices[0].currency, packagePrices[0].price, scrap.optLevel, scrap.variance, scrap.data})
+		placements = append(placements, itemMallPlacement{shopGroupID: groupID, groupIndex: groupLinks[0].index, tabIndex: tab.index, slotIndex: uint8(slot), packageID: pkg.id, packageCode: packageCode, itemCode: scrap.itemCode, currency: packagePrices[0].currency, price: packagePrices[0].price, quantity: 1, optLevel: scrap.optLevel, variance: scrap.variance, data: scrap.data})
 	}
 	if len(placements) == 0 {
 		return nil, errors.New("item mall catalog contains no enabled country 15 placements with positive mapped prices")
@@ -397,38 +399,58 @@ func mapItemMallCurrency(device uint64) (uint8, bool) {
 }
 
 func resolveItemMallItems(ctx context.Context, pool *sql.DB, placements []itemMallPlacement) ([]itemMallGood, error) {
-	rows, err := pool.QueryContext(ctx, "SELECT `ItemID`,`CodeName` FROM `ITEMDATA` WHERE `CodeName` IS NOT NULL")
+	rows, err := pool.QueryContext(ctx, "SELECT `ItemID`,`CodeName`,COALESCE(NULLIF(`Stack_Size`,0),1) FROM `ITEMDATA` WHERE `CodeName` IS NOT NULL")
 	if err != nil {
 		return nil, fmt.Errorf("query ITEMDATA: %w", err)
 	}
 	defer rows.Close()
-	itemIDs := make(map[string]int32)
+	type itemReference struct {
+		id       int32
+		maxStack uint32
+	}
+	items := make(map[string]itemReference)
 	for rows.Next() {
 		var id int64
 		var code string
-		if err := rows.Scan(&id, &code); err != nil {
+		var maxStack uint32
+		if err := rows.Scan(&id, &code, &maxStack); err != nil {
 			return nil, fmt.Errorf("scan ITEMDATA: %w", err)
 		}
 		if id < -2147483648 || id > 2147483647 {
 			return nil, fmt.Errorf("ITEMDATA item %q ID %d exceeds signed INT", code, id)
 		}
-		if _, exists := itemIDs[code]; exists {
+		if _, exists := items[code]; exists {
 			return nil, fmt.Errorf("ITEMDATA contains duplicate CodeName %q", code)
 		}
-		itemIDs[code] = int32(id)
+		items[code] = itemReference{id: int32(id), maxStack: maxStack}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read ITEMDATA: %w", err)
 	}
 	goods := make([]itemMallGood, 0, len(placements))
 	for _, placement := range placements {
-		id, exists := itemIDs[placement.itemCode]
+		item, exists := items[placement.itemCode]
 		if !exists {
 			return nil, fmt.Errorf("package %q: ITEMDATA does not contain CodeName %q", placement.packageCode, placement.itemCode)
 		}
-		goods = append(goods, itemMallGood{placement, id})
+		if err := placement.applyStackablePackageQuantity(item.maxStack); err != nil {
+			return nil, err
+		}
+		goods = append(goods, itemMallGood{placement, item.id})
 	}
 	return goods, nil
+}
+
+func (placement *itemMallPlacement) applyStackablePackageQuantity(maxStack uint32) error {
+	if maxStack <= 1 || placement.data == 0 {
+		return nil
+	}
+	if placement.data > math.MaxUint16 {
+		return fmt.Errorf("package %q: stack quantity %d exceeds SMALLINT UNSIGNED", placement.packageCode, placement.data)
+	}
+	placement.quantity = uint16(placement.data)
+	placement.data = 0
+	return nil
 }
 
 func replaceItemMallGoods(ctx context.Context, pool *sql.DB, goods []itemMallGood) error {
@@ -443,13 +465,13 @@ func replaceItemMallGoods(ctx context.Context, pool *sql.DB, goods []itemMallGoo
 	if _, err := tx.ExecContext(ctx, "DELETE FROM `ITEM_MALL_GOODS`"); err != nil {
 		return fmt.Errorf("clear ITEM_MALL_GOODS: %w", err)
 	}
-	statement, err := tx.PrepareContext(ctx, "INSERT INTO `ITEM_MALL_GOODS` (`REF_SHOP_GROUP_ID`,`GROUP_INDEX`,`TAB_INDEX`,`SLOT_INDEX`,`PACKAGE_ID`,`PACKAGE_CODE_NAME`,`FK_REF_ITEM`,`CURRENCY`,`PRICE`,`QUANTITY`,`OPT_LEVEL`,`VARIANCE`,`DATA`,`ENABLED`) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,1)")
+	statement, err := tx.PrepareContext(ctx, "INSERT INTO `ITEM_MALL_GOODS` (`REF_SHOP_GROUP_ID`,`GROUP_INDEX`,`TAB_INDEX`,`SLOT_INDEX`,`PACKAGE_ID`,`PACKAGE_CODE_NAME`,`FK_REF_ITEM`,`CURRENCY`,`PRICE`,`QUANTITY`,`OPT_LEVEL`,`VARIANCE`,`DATA`,`ENABLED`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)")
 	if err != nil {
 		return fmt.Errorf("prepare item mall import: %w", err)
 	}
 	defer statement.Close()
 	for _, good := range goods {
-		if _, err := statement.ExecContext(ctx, good.shopGroupID, good.groupIndex, good.tabIndex, good.slotIndex, good.packageID, good.packageCode, good.itemID, good.currency, good.price, good.optLevel, good.variance, good.data); err != nil {
+		if _, err := statement.ExecContext(ctx, good.shopGroupID, good.groupIndex, good.tabIndex, good.slotIndex, good.packageID, good.packageCode, good.itemID, good.currency, good.price, good.quantity, good.optLevel, good.variance, good.data); err != nil {
 			return fmt.Errorf("insert item mall package %q: %w", good.packageCode, err)
 		}
 	}
