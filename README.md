@@ -115,6 +115,89 @@ advertised Agent address is loopback. The development topology publishes MySQL
 `3306` on loopback, Gateway `15779`, and Agent `15882`; admission `15883` remains on
 the Compose network.
 
+### Admission TLS layout
+
+The legacy client connections on `15779` and `15882` do not use TLS. mTLS
+protects the private Gateway-to-Agent admission API on `15883`: Agent presents a
+server certificate and accepts only a Gateway client certificate issued by the
+trusted Gateway CA. Gateway, in turn, verifies both the Agent's issuing CA and
+its DNS identity. There is no shared-secret or plaintext fallback.
+
+Prepare two private host directories. The filenames are part of the Compose
+contract and must match exactly:
+
+```text
+<SRO_AGENT_TLS_DIR>/
+|-- agent-cert.pem       # Agent server certificate, with serverAuth usage
+|-- agent-key.pem        # private key for agent-cert.pem
+`-- gateway-ca.pem       # CA that issued gateway-cert.pem
+
+<SRO_GATEWAY_TLS_DIR>/
+|-- agent-ca.pem         # CA that issued agent-cert.pem
+|-- gateway-cert.pem     # Gateway client certificate, with clientAuth usage
+`-- gateway-key.pem      # private key for gateway-cert.pem
+```
+
+The Agent certificate must contain a DNS SAN matching
+`AGENT_ADMISSION_TLS_SERVER_NAME`. For the supplied Compose network,
+`agent-server` is the natural identity because Gateway connects to that service
+name; use the same value when issuing the certificate and in `.env`. Certificates
+and unencrypted PEM private keys must be readable by their containers. Keep the
+directories outside Git (the `.local/` examples are ignored), restrict private-key
+permissions, and use certificates from an operator-controlled CA. The CA files
+may contain the issuing chain, but must not contain a private key.
+
+For example, a local layout and the corresponding `.env` entries can be:
+
+```dotenv
+SRO_AGENT_TLS_DIR=./.local/admission-tls/agent
+SRO_GATEWAY_TLS_DIR=./.local/admission-tls/gateway
+AGENT_ADMISSION_TLS_SERVER_NAME=agent-server
+```
+
+The optional SMC-to-Agent management API on `15884` uses a separate certificate
+identity and separate directories (`SRO_AGENT_MANAGEMENT_TLS_DIR` and
+`SRO_SMC_TLS_DIR`). It is disabled by default; do not reuse the admission keys
+when enabling it.
+
+### Database bootstrap configuration
+
+`DB_BACKUP_FILE` must point to a private, plain SQL `mysqldump --databases`
+backup containing both `SRO_ACCOUNT` and `SRO_SHARD`. Compose mounts that file
+read-only as `/docker-entrypoint-initdb.d/10-aegiscore-backup.sql`; the image then
+runs `30-grant-user-permissions.sql` to grant the `sro` application user access
+to both schemas. `MYSQL_PASSWORD` becomes that user's password. The MySQL root
+password is generated randomly and is not the application password.
+
+Use an absolute host path when the dump is outside the repository. On Windows,
+forward slashes avoid ambiguity in Compose volume syntax:
+
+```dotenv
+MYSQL_PASSWORD=replace-with-a-long-random-password
+DB_BACKUP_FILE=C:/private/aegiscore/bootstrap.sql
+MYSQL_DATA_VOLUME=aegiscore-mysql-data-84
+```
+
+Bootstrap scripts run only when the named `mysql-data` volume is empty. Changing
+the dump path, its contents, `MYSQL_PASSWORD`, or the image and then restarting
+containers does **not** reinitialize an existing volume. Confirm the selected
+configuration before the first start:
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d db
+docker compose ps
+docker compose logs --tail=200 db
+```
+
+After the database is healthy, start Gateway and Agent with
+`docker compose up --build -d`. To intentionally bootstrap again, first back up
+anything that must be retained, stop the stack, and use a new
+`MYSQL_DATA_VOLUME` name. Removing the existing volume permanently deletes its
+database and must never be used as a routine restart or migration step. Normal
+service startup does not run migrations, and a newer bootstrap snapshot may
+still require the profile-gated migration jobs described below.
+
 Fresh database initialization creates no login or GM accounts. Provision the
 first administrator explicitly after startup; never add credentials to the
 checked-in snapshots or `.env` examples.
