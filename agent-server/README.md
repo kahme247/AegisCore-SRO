@@ -176,6 +176,23 @@ inventory item, and notice/NPC chat is not implemented.
 - Players are staged during character bootstrap, become active only after
   `GameReady`, and are then delivered through reciprocal visibility queues.
 
+## Item Mall purchase quantities
+
+Item Mall purchases use the shared item-operation request/response opcodes
+`0x7034`/`0xB034`. The modern mall operation is `0x18`. Its request quantity is
+the number of packages being bought, not the number of individual items inside
+each package. The success response must echo that package count. The delivered
+item count comes from `ITEM_MALL_GOODS.QUANTITY` and the matching client Media
+package definition.
+
+For example, `PACKAGE_ITEM_MALL_REVERSE_RETURN_SCROLL` contains 11 scrolls.
+Buying one package persists a stack count of 11 but returns package count `1`;
+buying five persists 55 scrolls, split at the reference item's stack limit,
+and returns package count `5`. Do not write the expanded counts `11` or `55`
+into the response package-count field. The vSRO 1.188 client uses that field
+while walking the destination list and can terminate with an access violation
+when the expanded item count is supplied.
+
 ## Persistence and resources
 
 Apply account migrations and shard migrations through `000053` before runtime.

@@ -62,9 +62,25 @@ Silk Point (device `16`) prices are imported. Source order defines group and
 tab indices. Item IDs are resolved by exact `ITEMDATA.CodeName`; unresolved or
 duplicate joins, ambiguous mapped prices, out-of-range values and an empty
 result abort without changing the existing catalog. A successful import
-deletes and inserts `ITEM_MALL_GOODS` in one transaction. `QUANTITY` and
-`ENABLED` are set to `1`, while opt level, variance and data come from the
-package scrap row.
+deletes and inserts `ITEM_MALL_GOODS` in one transaction. For stackable items,
+the package scrap data field becomes `QUANTITY` (for example, the reverse-return
+scroll package contains 11); non-stackable items retain it as item data.
+`ENABLED` is set to `1`, and opt level and variance come from the scrap row.
+
+The scrap `Data` column is a union in the Media format. When the resolved
+`ITEMDATA.Stack_Size` is greater than one, a positive scrap value is the
+package's delivered stack quantity and is imported as `QUANTITY` with item
+`DATA=0`. For non-stackable items it remains item data (for example, equipment
+durability) and `QUANTITY` remains one. This distinction prevents the client
+from displaying a Media count that disagrees with the persisted stack count.
+
+Re-run the import after changing this mapping; editing the importer does not
+update an existing catalog. Restart Agent after a successful import:
+
+```powershell
+go run ./cmd/sro-data import-item-mall --media Media/Media
+docker compose restart agent-server
+```
 
 Shard migration `000030` provides `ITEM_MALL_GOODS`.
 
