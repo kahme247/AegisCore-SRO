@@ -45,6 +45,20 @@ func TestItemMallPacketsMatchVSRO188Layouts(t *testing.T) {
 	}
 }
 
+func TestModernItemMallResponseEchoesPackageCount(t *testing.T) {
+	purchase := buildItemMallPurchaseSuccess(itemMallPurchaseRequest{
+		operation:     BuyItemFromModernMallOperation,
+		purchaseCount: 1,
+	}, model.ItemMallPurchaseResult{
+		Position:         model.ItemMallPosition{RefShopGroupID: 1051, GroupIndex: 2, TabIndex: 1, SlotIndex: 13},
+		DestinationSlots: []byte{14},
+		Quantity:         11,
+	})
+	if got, want := hex.EncodeToString(purchase.Payload()), "01181b0402010d010e010000000000"; got != want {
+		t.Fatalf("modern purchase payload = %s, want %s", got, want)
+	}
+}
+
 func TestItemMallPurchaseRejectsTrailingDataBeforeRepository(t *testing.T) {
 	mall := &itemMallRepositoryFake{}
 	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{}, nil)

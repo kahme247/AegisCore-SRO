@@ -945,7 +945,11 @@ func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.
 	for _, slot := range result.DestinationSlots {
 		packet.WriteByte(slot)
 	}
-	packet.WriteUInt16(result.Quantity)
+	// The mall response echoes the number of packages requested. The package's
+	// delivered item quantity is already defined by the client Media catalog;
+	// sending that expanded quantity here makes the client walk past the
+	// destination list for multi-item packages.
+	packet.WriteUInt16(request.purchaseCount)
 	for range result.DestinationSlots {
 		model.WriteRentInfo(&packet, result.Item)
 	}
