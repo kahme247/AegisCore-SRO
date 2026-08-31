@@ -24,7 +24,7 @@
 /db/DB_BKUP/
 /main.obj
 /tmp_read_minidump.go
-
+/nul
 
 # Test binary, build with `go test -c`
 *.test

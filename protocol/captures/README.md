@@ -41,11 +41,55 @@ Every checked-in fixture must record:
 12. External source revisions and a reviewer confirmation that secrets and
     personal data are absent.
 
-The current profile model stores capture paths only; no fixture schema,
-sanitizer or corpus loader is implemented yet. Metadata enforcement must be
-added with the first fixture set. Gateway also has a vSRO 1.274 negotiation
+The current profile model stores capture paths only; fixture schema and replay
+validation are implemented in `protocol/captures`, while a sanitizer and raw
+capture corpus are intentionally not included. Metadata enforcement applies to
+the first fixture set. Gateway also has a vSRO 1.274 negotiation
 profile, but Agent/world behavior and this priority corpus remain anchored to
 vSRO 1.188 until a separate 1.274 evidence set exists.
+
+## Fixture schema and replay
+
+The `protocol/captures` package now provides the metadata-validated JSON
+envelope and deterministic replay boundary. Decode or load a fixture with
+`DecodeFixture`/`LoadFixture`, then call `Replay` with a codec callback. The
+callback receives each validated logical payload and returns the payload
+produced by the typed protocol codec. When `expected_payload_hex` is present,
+replay requires an exact byte-for-byte match.
+
+The minimum checked-in shape is:
+
+```json
+{
+  "schema_version": "1",
+  "fixture_id": "stable-id",
+  "behavior": "modern-mall-purchase",
+  "evidence_status": "reconstructed-sanitized-wire",
+  "client": { "executable_name": "sro_Client.exe", "sha256": "...", "file_version": "...", "locale": "...", "content_id": "..." },
+  "data_pk2": { "path": "Data/Data.pk2", "size": 0, "sha256": "...", "format": "pk2", "profile": "vsro188" },
+  "connection": { "branch": "agent", "target_service": "game-server" },
+  "representation": "logical-payload",
+  "private_source_capture_sha256": "...",
+  "public_fixture_sha256": "...",
+  "sanitizer": "tool/version",
+  "sanitized_fields": ["field names or none"],
+  "reconstruction": { "details": "how lengths and security fields were rebuilt" },
+  "frames": [{
+    "index": 0, "direction": "client->server", "opcode": 28724,
+    "logical_length": 0, "payload_hex": "...", "expected_payload_hex": "...",
+    "encryption_state": "none", "edc_state": "none", "massive_role": "none"
+  }],
+  "expected": [{ "state_transition": "...", "rejected": false }],
+  "external_sources": ["evidence reference"],
+  "reviewer_confirmed": true
+}
+```
+
+The package validates metadata, frame ordering, directions, hex payloads and
+logical lengths. It intentionally does not assign SQL meanings, infer item
+state, or treat a synthetic unit test as stock evidence. A fixture should be
+marked `synthetic` until executable/archive provenance and sanitized capture
+review are complete.
 
 ## Sanitization
 
