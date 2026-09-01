@@ -8,7 +8,7 @@ explicit maintenance operation; Agent and Gateway never start the runner.
 | Target | Required database | Versions |
 | --- | --- | --- |
 | `account` | exactly `SRO_ACCOUNT` | `000001` normalized username; `000002` Silk, Gift Silk and Silk Point balances; `000003` per-shard/default character limits; `000004` controlled patch releases, files, hashes and DownloadServer endpoints |
-| `shard` | exactly `SRO_SHARD` | `000001`-`000053` core history; `000054`-`000064` native quest catalogs, declarations, objectives and rewards (with intentional `000007` gap) |
+| `shard` | exactly `SRO_SHARD` | `000001`-`000053` core history; `000054`-`000066` native quest catalogs, declarations, objectives and rewards; `000067`-`000081` runtime/reference extensions, including drop catalogs, alchemy-merit, ferry teleport data, event rewards, Media text catalogs, and the separate party EXP rate (with intentional `000007` gap) |
 
 The catalog may be non-contiguous, so a clean ledger proceeds from `000006` to
 `000008`. A ledger row for missing version `000007` is rejected as unknown

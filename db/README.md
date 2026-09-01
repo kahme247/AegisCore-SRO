@@ -19,7 +19,7 @@ remove that host binding and keep database traffic on the private network.
 - `create_sro_account.sql` and `create_sro_shard.sql` are destructive fresh-install
   reference snapshots retained for schema review and testing. They include the final schema, migration-owned reference/backfill
   data, and applied migration ledgers through account `000004` and shard
-  `000064` (with the intentional `000007` gap).
+  `000066` (with the intentional `000007` gap).
 - `DB_BACKUP_FILE` is the required Compose bootstrap source for an empty
   `mysql-data` volume. It must be a `mysqldump --databases` backup containing
   both `SRO_ACCOUNT` and `SRO_SHARD`.
@@ -29,6 +29,9 @@ remove that host binding and keep database traffic on the private network.
 - `grant_user_permissions.sql` grants the application user access to both
   schemas.
 - `migrations/account` and `migrations/shard` are the embedded forward catalog.
+- Shard migration `000071_database_chat_abuse_filter` adds the runtime-owned
+  abuse-term catalog used by Agent chat. Update its rows through explicit
+  database maintenance; Agent refreshes enabled terms without a restart.
 - `cmd/migrate` is the checked-in migration entry point.
 
 Changing `DB_BACKUP_FILE`, `MYSQL_PASSWORD`, or the reference snapshots does
@@ -36,7 +39,7 @@ not update an existing `mysql-data` volume. Backup contents may include login,
 character, and inventory records and must remain ignored and access-controlled.
 
 The account catalog currently ends at `000004`, including the controlled patch
-release catalog. The shard catalog reaches `000064` and covers normalized
+release catalog. The shard catalog reaches `000066` and covers normalized
 identity, character limits and creation policy, Item Mall balances and
 purchases, timed services, inventory constraints, quests, economy/storage,
 shops, teleports, mastery/skills, guild storage, reference catalogs, movement
@@ -81,10 +84,17 @@ Reference-data importers are separate maintenance tools, not migrations:
 
 ```powershell
 go run ./cmd/sro-data import-reference --media Media/Media
+go run ./cmd/sro-data import-media-catalogs --media Media/Media
 go run ./cmd/sro-data import-vsro-skills --export-dir <export-directory>
 go run ./cmd/sro-data import-vsro-items --export-dir <export-directory>
 go run ./cmd/sro-data import-item-mall --media Media/Media
+go run ./cmd/sro-data import-event-rewards --media Media/Media
+go run ./cmd/sro-data export-media --output .local/media-export-189
 ```
+
+The reference import requires the client-matched `levelgold.txt` catalog and
+stores its `GoldMin`/`GoldMax` values in `REF_LEVEL_DATA`. Agent uses `GoldMin`
+at the character's historical maximum level for paid skill/mastery restoration.
 
 Local MSSQL backups under `VSRO_OLDDB/` and `VSRO_TestIn(EPVP)/` are ignored
 comparison inputs, not the live AegisCore database.

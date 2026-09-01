@@ -112,8 +112,11 @@ func TestFreshShardSnapshotEnablesSupportedContinents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(shard), "('Constantinople',1),('DELTA',1),('Donwhang',1),('Hotan',1),('Jangan',1),('Samarkand',1)") {
-		t.Fatal("shard snapshot does not enable the supported continent set")
+	contents := string(shard)
+	for _, continent := range []string{"Constantinople", "DELTA", "Donwhang", "Hotan", "Jangan", "Samarkand", "SD", "KingsValley", "Roc", "TQ", "TEMPLE"} {
+		if !strings.Contains(contents, "'"+continent+"',1") {
+			t.Fatalf("shard snapshot does not enable continent %q", continent)
+		}
 	}
 }
 
@@ -205,6 +208,15 @@ func TestFreshShardSnapshotContainsQuestReferenceCatalog(t *testing.T) {
 		"CREATE TABLE `REF_QUEST_EXTENDED_KILL_OBJECTIVE`",
 		"CREATE TABLE `REF_QUEST_EXTENDED_KILL_TARGET`",
 		"CREATE TABLE `REF_QUEST_TALISMAN_OBJECTIVE`",
+		"CREATE TABLE `REF_QUEST_START_CONDITION`",
+		"CREATE TABLE `REF_QUEST_START_METHOD`",
+		"CREATE TABLE `REF_QUEST_START_NPC`",
+		"CREATE TABLE `REF_QUEST_DEPENDENCY_GROUP`",
+		"CREATE TABLE `REF_QUEST_DEPENDENCY_ENTRY`",
+		"CREATE TABLE `REF_QUEST_COMPLETION_POLICY`",
+		"CREATE TABLE `REF_QUEST_JOB_START_CONDITION`",
+		"CREATE TABLE `REF_QUEST_RACE_START_CONDITION`",
+		"CREATE TABLE `REF_QUEST_SCRIPT_POINT_REWARD`",
 		"CREATE TABLE `REF_QUEST_SCRIPT_REWARD`",
 		"CREATE TABLE `REF_QUEST_SCRIPT_REWARD_ITEM`",
 		"CONSTRAINT `FK_REF_QUEST_REWARD_QUEST`",
@@ -222,6 +234,12 @@ func TestFreshShardSnapshotContainsQuestReferenceCatalog(t *testing.T) {
 		"CONSTRAINT `FK_REF_QUEST_EXTENDED_KILL_TARGET_OBJECTIVE`",
 		"CONSTRAINT `FK_REF_QUEST_EXTENDED_KILL_TARGET_OBJECT`",
 		"CONSTRAINT `FK_REF_QUEST_TALISMAN_NPC`",
+		"CONSTRAINT `FK_REF_QUEST_START_NPC_OBJECT`",
+		"CONSTRAINT `FK_REF_QUEST_DEPENDENCY_ENTRY_GROUP`",
+		"CONSTRAINT `FK_REF_QUEST_DEPENDENCY_ENTRY_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_COMPLETION_POLICY_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_JOB_START_CONDITION_QUEST`",
+		"CONSTRAINT `FK_REF_QUEST_SCRIPT_POINT_REWARD_QUEST`",
 		"CONSTRAINT `FK_REF_QUEST_SCRIPT_REWARD_ITEM_REWARD`",
 	} {
 		if !strings.Contains(contents, required) {
@@ -247,5 +265,39 @@ func TestFreshShardSnapshotContainsRuntimeMediaCatalogData(t *testing.T) {
 	}
 	if count := strings.Count(contents, "CREATE TABLE `REF_MAGIC_OPTION`"); count != 1 {
 		t.Fatalf("REF_MAGIC_OPTION table definitions = %d, want 1", count)
+	}
+}
+
+func TestFreshShardSnapshotContainsDropCatalogTables(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, table := range []string{
+		"CREATE TABLE `REF_DROP_GOLD`",
+		"CREATE TABLE `REF_DROP_ITEM_GROUP`",
+		"CREATE TABLE `REF_MONSTER_ASSIGNED_ITEM_RND_DROP`",
+		"CREATE TABLE `REF_MONSTER_ASSIGNED_ITEM_DROP`",
+	} {
+		if !strings.Contains(contents, table) {
+			t.Fatalf("shard snapshot lacks drop catalog table %q", table)
+		}
+	}
+	if !strings.Contains(contents, "(78,'drop_reference_catalog','29b2660fb35dbc3df74acb7a37af523bf14d46ce74e6918bb33445ad08aeb316','applied'") {
+		t.Fatal("shard snapshot lacks drop catalog migration ledger entry")
+	}
+	if !strings.Contains(contents, "CREATE TABLE `REF_SERVER_EVENT_REWARD`") ||
+		!strings.Contains(contents, "CREATE TABLE `REF_SERVER_EVENT_REWARD_EVENT`") {
+		t.Fatal("shard snapshot lacks server-event reward catalog tables")
+	}
+	if !strings.Contains(contents, "(79,'server_event_reward_catalog','837f3c1dcb0c4477e3c512d386375f12adce7a9b17b3e064a3102001af05caaa','applied'") {
+		t.Fatal("shard snapshot lacks server-event reward migration ledger entry")
+	}
+	if !strings.Contains(contents, "`REF_MAGIC_GROUP_ID` int unsigned NOT NULL DEFAULT '0'") {
+		t.Fatal("shard snapshot lacks drop-item magic-group column")
+	}
+	if !strings.Contains(contents, "(80,'drop_item_group_magic_reference','f7492f77c353bfcd30a132a72ad594cbb84b116939dc61b34dae656b07655077','applied'") {
+		t.Fatal("shard snapshot lacks drop-item magic-group migration ledger entry")
 	}
 }

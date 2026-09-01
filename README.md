@@ -47,10 +47,10 @@ change the Gateway/Agent wire contract.
 | Character lifecycle | list/create/delete scheduling and restoration, join, inventory/configuration serialization, position, quick-slot and social bootstrap persistence | broader stock-client fixtures |
 | World and movement | region/spawn repositories, Data.pk2 navmesh, visibility, authoritative movement, wall/object collision, position checkpoints, teleport | dungeon/neighbour-plane support, memory reduction, broader collision corpus |
 | Entities and spawning | staged-to-active player admission, reciprocal player/NPC/mob/COS group spawn/despawn, headings, collision-aware respawn and basic mob AI | capture-backed field validation for players, COS/pets/items/structures and broader collision fixtures |
-| Character systems | stat allocation, Hwan progression, combat/effects, XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, quest abandon and NPC interaction/talk | broader skill casting/effect semantics, quest lifecycle and capture-backed talk/action masks |
+| Character systems | stat allocation, Hwan progression, combat/effects, XP/level progression, mastery and skill learning/persistence, death recovery, resurrection, data-driven safe quest discovery/accept/kill progress/completion, quest abandon and NPC interaction/talk | non-kill quest objectives, conditional/selectable rewards and broader capture-backed talk/action masks |
 | Economy and inventory | move/equip, three-page inventory, avatar inventory, storage, guild storage, repair, item use, Item Mall balances, services, alchemy, exchange and stall host state | complete item option/rent/bind formats, customer-side stalls and transactional live testing |
 | Social | rename, local/global/party/stall/whisper/guild/union/academy chat, party matching, persistent guilds, academies and jobs | capture validation for elections, guild wars, academy honor buffs, job safe-trade and stealth/invisibility rules |
-| Data and migrations | target-bound runner through shard `000064`; identity, gameplay, native quest/script/skill/item reference catalogs, economy, social, COS, equipment, Hwan, inventory, aggregate coordination, durable outbox dispatch, persistent scheduling and MySQL compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
+| Data and migrations | target-bound runner through shard `000066`; identity, gameplay, native quest/script/skill/item reference catalogs, economy, social, COS, equipment, Hwan, inventory, aggregate coordination, durable outbox dispatch, persistent scheduling and MySQL compatibility schemas | reconcile version gap `000007`, production backup/restore runbook and importer provenance |
 
 Current crash/collision safeguards include:
 
@@ -229,8 +229,11 @@ current shard schema first:
 
 ```powershell
 go run ./cmd/sro-data import-reference --media Media/Media
+go run ./cmd/sro-data import-media-catalogs --media Media/Media
+go run ./cmd/sro-data import-drop-catalog --data-dir <drop-table-directory>
 go run ./cmd/sro-data import-vsro-skills --export-dir <export-directory>
 go run ./cmd/sro-data import-vsro-items --export-dir <export-directory>
+go run ./cmd/sro-data export-media --output .local/media-export-189
 ```
 
 `GAMEPLAY_PROGRESSION_RATES` and `GAMEPLAY_MOB_RATES` refresh every five
@@ -298,8 +301,10 @@ and sources that are leads only—is maintained in [REFERENCES.md](REFERENCES.md
 
 - Capture-validate mastery and skill-learning responses, add skill upgrade and
   broader casting flows, and expand effect/SP-rule coverage.
-- Complete damage formulas, skill coverage, buffs, death/respawn and mob
-  tactics beyond the current reference-driven baseline.
+- Complete damage modifiers, skill coverage, buffs, death/respawn and mob
+  tactics beyond the current reference-driven baseline. Attack/parry range
+  variance is already binary-confirmed and documented in
+  [`_docs/sr-gameserver-combat-variance.md`](_docs/sr-gameserver-combat-variance.md).
 - Implement full quest accept/progress/complete/reward persistence.
 - Finish item magic options, sockets, advanced elixirs, durability, rental and
   binding formats beyond the current validated alchemy/equipment paths.

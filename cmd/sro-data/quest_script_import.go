@@ -38,6 +38,34 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	if err != nil {
 		return err
 	}
+	startConditions, err := questscript.StartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	startMethods, err := questscript.StartMethods(definitions)
+	if err != nil {
+		return err
+	}
+	dependencies, err := questscript.Dependencies(definitions)
+	if err != nil {
+		return err
+	}
+	completionPolicies, err := questscript.CompletionPolicies(definitions)
+	if err != nil {
+		return err
+	}
+	jobStartConditions, err := questscript.JobStartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	raceStartConditions, err := questscript.RaceStartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	pointRewards, err := questscript.PointRewards(definitions)
+	if err != nil {
+		return err
+	}
 	killObjectives, err := questscript.KillMonsterObjectives(definitions)
 	if err != nil {
 		return err
@@ -73,6 +101,49 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	rewards, err := questscript.RewardDeclarations(definitions)
 	if err != nil {
 		return err
+	}
+	type objectiveKey struct {
+		quest   string
+		variant int
+	}
+	objectiveCounts := make(map[objectiveKey]int)
+	for _, objective := range killObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range deliverObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range standardDeliverObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range dialogObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range killPlayerObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range collectionObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range extendedKillObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	for _, objective := range talismanObjectives {
+		objectiveCounts[objectiveKey{objective.QuestCodeName, objective.Variant}]++
+	}
+	safeKillQuests := make(map[objectiveKey]bool)
+	for _, objective := range killObjectives {
+		key := objectiveKey{objective.QuestCodeName, objective.Variant}
+		if objective.Variant == 0 && objective.MissionIndex == 0 && objectiveCounts[key] == 1 {
+			safeKillQuests[key] = true
+		}
+	}
+	safeDeliveryQuests := make(map[objectiveKey]bool)
+	for _, objective := range standardDeliverObjectives {
+		key := objectiveKey{objective.QuestCodeName, objective.Variant}
+		if objective.Variant == 0 && objective.MissionIndex == 0 && objectiveCounts[key] == 1 {
+			safeDeliveryQuests[key] = true
+		}
 	}
 	digest := sha256.Sum256(contents)
 	scriptHash := hex.EncodeToString(digest[:])
@@ -123,6 +194,33 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_TALISMAN_OBJECTIVE`"); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DEPENDENCY_ENTRY`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DEPENDENCY_GROUP`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_NPC`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_METHOD`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_CONDITION`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_SCRIPT_POINT_REWARD`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_RACE_START_CONDITION`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_JOB_START_CONDITION`"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_COMPLETION_POLICY`"); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DELIVER_ITEM_EX`"); err != nil {
 		return err
 	}
@@ -153,6 +251,199 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			return fmt.Errorf("quest %s does not resolve exactly once in REF_QUEST", definition.CodeName)
 		}
 	}
+	startConditionStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_START_CONDITION
+		(QUEST_ID,VARIANT_INDEX,CONDITION_COUNT,LEVEL_LOWER,LEVEL_UPPER,SYSTEM_REQUIRED,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,?,CAST(? AS JSON),0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer startConditionStatement.Close()
+	for _, condition := range startConditions {
+		parameters, marshalErr := json.Marshal(condition.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := startConditionStatement.ExecContext(ctx, condition.Variant, condition.ConditionCount,
+			condition.LevelLower, condition.LevelUpper, condition.SystemRequired, parameters, scriptHash, condition.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import start condition %s/%d: %w", condition.QuestCodeName, condition.Variant, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("start condition %s/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant)
+		}
+	}
+	startMethodStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_START_METHOD
+		(QUEST_ID,VARIANT_INDEX,METHOD_KEY,NPC_COUNT,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer startMethodStatement.Close()
+	startNPCStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_START_NPC
+		(QUEST_ID,VARIANT_INDEX,NPC_INDEX,NPC_REF_OBJECT_ID,NPC_CODE_NAME)
+		SELECT quest.ID,?,?,npc.ID,npc.CODE_NAME FROM REF_QUEST quest
+		JOIN REF_OBJ_COMMON_VSRO npc ON npc.CODE_NAME=? WHERE quest.CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer startNPCStatement.Close()
+	for _, method := range startMethods {
+		parameters, marshalErr := json.Marshal(method.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := startMethodStatement.ExecContext(ctx, method.Variant, method.MethodKey, len(method.NPCs), parameters, scriptHash, method.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import start method %s/%d: %w", method.QuestCodeName, method.Variant, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("start method %s/%d does not resolve exactly once", method.QuestCodeName, method.Variant)
+		}
+		for index, npc := range method.NPCs {
+			result, execErr = startNPCStatement.ExecContext(ctx, method.Variant, index, npc, method.QuestCodeName)
+			if execErr != nil {
+				return fmt.Errorf("import start NPC %s/%d/%d: %w", method.QuestCodeName, method.Variant, index, execErr)
+			}
+			affected, rowsErr = result.RowsAffected()
+			if rowsErr != nil || affected != 1 {
+				return fmt.Errorf("start NPC %s/%d/%d does not resolve exactly once", method.QuestCodeName, method.Variant, index)
+			}
+		}
+	}
+	dependencyGroupStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_DEPENDENCY_GROUP
+		(QUEST_ID,VARIANT_INDEX,GROUP_INDEX,DEPENDENCY_MODE,DEPENDENCY_COUNT,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,CAST(? AS JSON),0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer dependencyGroupStatement.Close()
+	dependencyEntryStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_DEPENDENCY_ENTRY
+		(QUEST_ID,VARIANT_INDEX,GROUP_INDEX,DEPENDENCY_INDEX,DEPENDENCY_QUEST_ID,DEPENDENCY_CODE_NAME)
+		SELECT owner.ID,?,?,?,dependency.ID,dependency.CODE_NAME FROM REF_QUEST owner
+		JOIN REF_QUEST dependency ON dependency.CODE_NAME=? WHERE owner.CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer dependencyEntryStatement.Close()
+	for _, dependency := range dependencies {
+		parameters, marshalErr := json.Marshal(dependency.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := dependencyGroupStatement.ExecContext(ctx, dependency.Variant, dependency.GroupIndex,
+			dependency.Mode, len(dependency.QuestCodes), parameters, scriptHash, dependency.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import dependency group %s/%d/%d: %w", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("dependency group %s/%d/%d does not resolve exactly once", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex)
+		}
+		for index, dependencyCode := range dependency.QuestCodes {
+			result, execErr = dependencyEntryStatement.ExecContext(ctx, dependency.Variant, dependency.GroupIndex,
+				index, dependencyCode, dependency.QuestCodeName)
+			if execErr != nil {
+				return fmt.Errorf("import dependency %s/%d/%d/%d: %w", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, index, execErr)
+			}
+			affected, rowsErr = result.RowsAffected()
+			if rowsErr != nil || affected != 1 {
+				return fmt.Errorf("dependency %s/%d/%d/%d does not resolve exactly once", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, index)
+			}
+		}
+	}
+	completionPolicyStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_COMPLETION_POLICY
+		(QUEST_ID,VARIANT_INDEX,MISSION_COMPLETE_NUM,ACHIEVEMENT_LIMIT,DIVIDE_TYPE,REAL_TIME,
+		 DAY_LIMIT,DAY_OR_NIGHT,LIMIT_TIME,HWAN_LEVEL,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,?,?,?,?,?,CAST(? AS JSON),0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer completionPolicyStatement.Close()
+	for _, policy := range completionPolicies {
+		parameters, marshalErr := json.Marshal(policy.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := completionPolicyStatement.ExecContext(ctx, policy.Variant, policy.MissionCompleteNum,
+			nullableQuestUint(policy.AchievementLimit), nullableQuestUint(policy.DivideType), policy.RealTime,
+			nullableQuestUint(policy.DayLimit), nullableQuestUint(policy.DayOrNight), nullableQuestUint(policy.LimitTime),
+			nullableQuestUint(policy.HwanLevel), parameters, scriptHash, policy.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import completion policy %s/%d: %w", policy.QuestCodeName, policy.Variant, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("completion policy %s/%d does not resolve exactly once", policy.QuestCodeName, policy.Variant)
+		}
+	}
+	jobConditionStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_JOB_START_CONDITION
+		(QUEST_ID,VARIANT_INDEX,CONDITION_INDEX,PARAMETER_0,JOB_STATE_KEY,PARAMETER_2,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,?,CAST(? AS JSON),0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer jobConditionStatement.Close()
+	for _, condition := range jobStartConditions {
+		parameters, marshalErr := json.Marshal(condition.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := jobConditionStatement.ExecContext(ctx, condition.Variant, condition.ConditionIndex,
+			condition.Parameter0, condition.JobStateKey, condition.Parameter2, parameters, scriptHash, condition.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import job condition %s/%d/%d: %w", condition.QuestCodeName, condition.Variant, condition.ConditionIndex, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("job condition %s/%d/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant, condition.ConditionIndex)
+		}
+	}
+	raceConditionStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_RACE_START_CONDITION
+		(QUEST_ID,VARIANT_INDEX,CONDITION_KEY,COUNTRY_KEY,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer raceConditionStatement.Close()
+	for _, condition := range raceStartConditions {
+		parameters, marshalErr := json.Marshal(condition.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := raceConditionStatement.ExecContext(ctx, condition.Variant, condition.ConditionKey,
+			condition.CountryKey, parameters, scriptHash, condition.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import race condition %s/%d: %w", condition.QuestCodeName, condition.Variant, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("race condition %s/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant)
+		}
+	}
+	pointRewardStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_SCRIPT_POINT_REWARD
+		(QUEST_ID,VARIANT_INDEX,REWARD_INDEX,REWARD_KIND,AMOUNT,POINT_KEY,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
+		SELECT ID,?,?,?,?,?,CAST(? AS JSON),0,? FROM REF_QUEST WHERE CODE_NAME=?`)
+	if err != nil {
+		return err
+	}
+	defer pointRewardStatement.Close()
+	for _, reward := range pointRewards {
+		parameters, marshalErr := json.Marshal(reward.Parameters)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, execErr := pointRewardStatement.ExecContext(ctx, reward.Variant, reward.RewardIndex,
+			reward.Kind, reward.Amount, reward.PointKey, parameters, scriptHash, reward.QuestCodeName)
+		if execErr != nil {
+			return fmt.Errorf("import point reward %s/%d/%d: %w", reward.QuestCodeName, reward.Variant, reward.RewardIndex, execErr)
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil || affected != 1 {
+			return fmt.Errorf("point reward %s/%d/%d does not resolve exactly once", reward.QuestCodeName, reward.Variant, reward.RewardIndex)
+		}
+	}
 	killStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_KILL_OBJECTIVE
 		(QUEST_ID,VARIANT_INDEX,MISSION_INDEX,OBJECTIVE_KEY,PARAMETER_4,TARGET_REF_OBJECT_ID,TARGET_CODE_NAME,
 		 PARAMETER_6,TARGET_CLASS,REQUIRED_COUNT,PARAMETER_9,RUNTIME_ENABLED,SCRIPT_SHA256)
@@ -164,7 +455,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	}
 	defer killStatement.Close()
 	for _, objective := range killObjectives {
-		enabled := objective.QuestCodeName == "QNO_CH_SMITH_2" && objective.Variant == 0 && objective.MissionIndex == 0
+		enabled := safeKillQuests[objectiveKey{objective.QuestCodeName, objective.Variant}]
 		result, execErr := killStatement.ExecContext(ctx, objective.Variant, objective.MissionIndex, objective.ObjectiveKey,
 			objective.Parameter4, objective.Parameter6, objective.TargetClass, objective.RequiredCount, objective.Parameter9,
 			enabled, scriptHash, objective.TargetCode, objective.QuestCodeName)
@@ -207,7 +498,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	standardDeliverStatement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_DELIVER_ITEM
 		(QUEST_ID,VARIANT_INDEX,MISSION_INDEX,OBJECTIVE_KEY,TARGET_NPC_REF_OBJECT_ID,TARGET_NPC_CODE_NAME,
 		 ITEM_COUNT,TRAILING_PARAMETER,DIALOGUE_KEY,PARAMETERS,RUNTIME_ENABLED,SCRIPT_SHA256)
-		SELECT quest.ID,?,?,?,npc.ID,npc.CODE_NAME,?,?,?,CAST(? AS JSON),0,?
+		SELECT quest.ID,?,?,?,npc.ID,npc.CODE_NAME,?,?,?,CAST(? AS JSON),?,?
 		FROM REF_QUEST quest JOIN REF_OBJ_COMMON_VSRO npc ON npc.CODE_NAME=? WHERE quest.CODE_NAME=?`)
 	if err != nil {
 		return err
@@ -226,9 +517,10 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if marshalErr != nil {
 			return marshalErr
 		}
+		enabled := safeDeliveryQuests[objectiveKey{objective.QuestCodeName, objective.Variant}]
 		result, execErr := standardDeliverStatement.ExecContext(ctx, objective.Variant, objective.MissionIndex,
 			objective.ObjectiveKey, len(objective.Items), objective.TrailingParameter, objective.DialogueKey,
-			parameters, scriptHash, objective.TargetNPCCode, objective.QuestCodeName)
+			parameters, enabled, scriptHash, objective.TargetNPCCode, objective.QuestCodeName)
 		if execErr != nil {
 			return fmt.Errorf("import deliver objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
@@ -448,7 +740,8 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if marshalErr != nil {
 			return marshalErr
 		}
-		enabled := (reward.QuestCodeName == "QNO_CH_SMITH_1" || reward.QuestCodeName == "QNO_CH_SMITH_2") && reward.Variant == 0
+		key := objectiveKey{reward.QuestCodeName, reward.Variant}
+		enabled := reward.Variant == 0 && (reward.QuestCodeName == "QNO_CH_SMITH_1" || safeKillQuests[key] || safeDeliveryQuests[key])
 		result, execErr := rewardStatement.ExecContext(ctx, reward.Variant, reward.Experience, reward.SkillExperience,
 			reward.Gold, len(reward.Items), parameters, enabled, scriptHash, reward.QuestCodeName)
 		if execErr != nil {
@@ -472,6 +765,13 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d declarations, %d kill objectives, %d deliver-item EX objectives, %d standard deliver-item objectives, %d dialog objectives, %d kill-player objectives, %d collection-item objectives, %d extended kill objectives, %d talisman objectives, and %d rewards (sha256 %s)\n", len(definitions), len(killObjectives), len(deliverObjectives), len(standardDeliverObjectives), len(dialogObjectives), len(killPlayerObjectives), len(collectionObjectives), len(extendedKillObjectives), len(talismanObjectives), len(rewards), scriptHash)
+	_, err = fmt.Fprintf(output, "imported %d declarations, %d start conditions, %d start methods, %d dependency groups, %d completion policies, %d job conditions, %d race conditions, %d point rewards, %d kill objectives, %d deliver-item EX objectives, %d standard deliver-item objectives, %d dialog objectives, %d kill-player objectives, %d collection-item objectives, %d extended kill objectives, %d talisman objectives, and %d rewards (sha256 %s)\n", len(definitions), len(startConditions), len(startMethods), len(dependencies), len(completionPolicies), len(jobStartConditions), len(raceStartConditions), len(pointRewards), len(killObjectives), len(deliverObjectives), len(standardDeliverObjectives), len(dialogObjectives), len(killPlayerObjectives), len(collectionObjectives), len(extendedKillObjectives), len(talismanObjectives), len(rewards), scriptHash)
 	return err
+}
+
+func nullableQuestUint(value *uint32) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }

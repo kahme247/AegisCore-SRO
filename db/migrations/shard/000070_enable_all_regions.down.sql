@@ -1,0 +1,7 @@
+DELETE FROM `GAME_SERVER_REGION`
+WHERE `Game_Server_ID`=1 AND `Continent_Name` IN (
+    'Am','ARENA_FLAG','ARENA_OCCUPY','ARENA_SCORE','FORT_BJ_AREA','FORT_HT_AREA',
+    'FORT_JA_AREA','GM_EVENT','GOD_FLAME','GOD_TOGUI','GOD_WRECK_IN','GOD_WRECK_OUT',
+    'JUPITER','KingsValley','Pharaoh','PRISON','Roc','SIEGE_DUNGEON','TEMPLE',
+    'Thief Village','TQ'
+);

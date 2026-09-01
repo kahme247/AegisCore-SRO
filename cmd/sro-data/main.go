@@ -19,7 +19,7 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
-var errUsage = errors.New("usage: sro-data <verify|import-reference|import-item-mall|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
+var errUsage = errors.New("usage: sro-data <verify|export-media|import-media-catalogs|import-reference|import-drop-catalog|import-event-rewards|import-server-event-rewards|import-item-mall|import-optional-teleports|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -43,11 +43,29 @@ func runWithCanonicalProfile(ctx context.Context, arguments []string, output io.
 	if len(arguments) == 0 {
 		return errUsage
 	}
+	if arguments[0] == "export-media" {
+		return exportMedia(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-media-catalogs" {
+		return importMediaCatalogs(ctx, arguments[1:], output)
+	}
 	if arguments[0] == "import-reference" {
 		return importReferenceData(ctx, arguments[1:], output)
 	}
+	if arguments[0] == "import-drop-catalog" {
+		return importDropCatalog(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-event-rewards" {
+		return importEventRewardData(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-server-event-rewards" {
+		return importServerEventRewardData(ctx, arguments[1:], output)
+	}
 	if arguments[0] == "import-item-mall" {
 		return importItemMall(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-optional-teleports" {
+		return importOptionalTeleports(ctx, arguments[1:], output)
 	}
 	if arguments[0] == "import-vsro-skills" {
 		return importVSROSkillReference(ctx, arguments[1:], output)

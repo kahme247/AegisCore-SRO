@@ -23,6 +23,20 @@ go run ./cmd/patch-admin scan-media --archive .\VSRO_Client\Media.pk2 `
 The scanner excludes `SV.T`, reports non-ASCII names that the legacy launcher
 cannot safely parse, and does not create a release. Review every detected file.
 
+For an `sro-data export-media` result, verify and scan only its manifest-listed
+files:
+
+```powershell
+go run ./cmd/patch-admin scan-media --archive .\VSRO_Client\Media.pk2 `
+  --target-root .\.local\media-export-189 `
+  --export-manifest .\.local\media-export-189\media-export-manifest.json `
+  --output .\PatchSource\188-to-189.json
+```
+
+The command checks every exported file's size and SHA-256 before creating the
+review specification. It never includes `media-export-manifest.json` in the
+client patch.
+
 2. Review the generated specification (or the checked-in example); every
    target path must be explicit and administrator-approved.
 3. Build immutable payloads and create a database draft:
@@ -34,6 +48,9 @@ go run ./cmd/patch-admin build `
   --storage-root .\Patch\files `
   --manifest .\Patch\manifest.json
 ```
+
+When the specification came from `--export-manifest`, set `--source-root` to
+that Media export directory instead of `PatchSource`.
 
 The command prints the new release ID. It creates the launcher-compatible
 payload wrapper, both SHA-256 hashes, database release/file rows, numeric file

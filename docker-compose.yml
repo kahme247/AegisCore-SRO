@@ -102,6 +102,7 @@ services:
           # Data.pk2 world loading settles above 5 GiB before any players join.
           memory: 8G
     environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       DB_ACCOUNT_HOST: db
       DB_ACCOUNT_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       DB_SHARD_HOST: db
@@ -114,7 +115,11 @@ services:
       AGENT_GIANT_MONSTER_SPAWN_RATIO: ${AGENT_GIANT_MONSTER_SPAWN_RATIO:-1000}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
       AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
-      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-1}
+      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
+      SRO_COMBAT_TRACE: ${SRO_COMBAT_TRACE:-0}
+      SRO_SESSION_TRACE_DIR: /var/log/aegis/session-traces
+      SRO_SESSION_TRACE_CAPACITY: ${SRO_SESSION_TRACE_CAPACITY:-256}
+      SRO_SESSION_TRACE_PREFIX_BYTES: ${SRO_SESSION_TRACE_PREFIX_BYTES:-0}
       # Modes: 0/off, players/characters, mobs, or all/everything/1.
       # Prefer players for client-crash diagnostics; all can emit substantial
       # output in a populated world.
@@ -133,6 +138,7 @@ services:
       AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore-management/smc-ca.pem
     volumes:
     - ./Data:/etc/aegiscore/Data:ro
+    - ./.local/session-traces/agent:/var/log/aegis/session-traces
     - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
     - "${SRO_AGENT_MANAGEMENT_TLS_DIR:-./.local/smc-agent-tls}:/run/secrets/aegiscore-management:ro"
 
@@ -159,6 +165,9 @@ services:
       DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
       SRO_SESSION_TRACE: ${GATEWAY_SESSION_TRACE:-0}
+      SRO_SESSION_TRACE_DIR: /var/log/aegis/session-traces
+      SRO_SESSION_TRACE_CAPACITY: ${SRO_SESSION_TRACE_CAPACITY:-256}
+      SRO_SESSION_TRACE_PREFIX_BYTES: ${SRO_SESSION_TRACE_PREFIX_BYTES:-0}
       # Gateway will not invent stock-client identifiers or advertise a
       # loopback/private Agent endpoint in production. Supply the values from
       # an approved capture and the externally reachable Agent address.
@@ -180,6 +189,7 @@ services:
       GATEWAY_ADMISSION_TLS_KEY_FILE: /run/secrets/aegiscore/gateway-key.pem
     volumes:
     - "${SRO_GATEWAY_TLS_DIR:?Set SRO_GATEWAY_TLS_DIR to the Gateway certificate directory}:/run/secrets/aegiscore:ro"
+    - ./.local/session-traces/gateway:/var/log/aegis/session-traces
 
   # Dedicated browser-facing management control plane. It is opt-in until an
   # operator credential is configured and binds to host loopback by default.
@@ -260,8 +270,12 @@ services:
       DOWNLOAD_HEALTH_HOST: "0.0.0.0"
       DOWNLOAD_HEALTH_PORT: "15881"
       SRO_SESSION_TRACE: "${DOWNLOAD_SESSION_TRACE:-0}"
+      SRO_SESSION_TRACE_DIR: /var/log/aegis/session-traces
+      SRO_SESSION_TRACE_CAPACITY: ${SRO_SESSION_TRACE_CAPACITY:-256}
+      SRO_SESSION_TRACE_PREFIX_BYTES: ${SRO_SESSION_TRACE_PREFIX_BYTES:-0}
     volumes:
       - "${SRO_PATCH_DIR:-./Patch}:/etc/aegiscore/patches:ro"
+      - ./.local/session-traces/download:/var/log/aegis/session-traces
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:15881/readyz >/dev/null"]
       interval: 5s

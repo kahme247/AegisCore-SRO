@@ -27,6 +27,8 @@ var errImportUsage = errors.New("usage: sro-data import-reference --media <Media
 type levelReferenceRow struct {
 	Level, SkillPoints int
 	Experience         uint64
+	DropGoldMin        uint64
+	DropGoldMax        uint64
 	Unknown1, Unknown2 int64
 	JobExperience      [3]int64
 	Raw                string
@@ -64,11 +66,22 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err != nil {
 		return err
 	}
+	dropGold, err := loadDropGoldReferenceData(filepath.Join(textDataDirectory, "levelgold.txt"))
+	if err != nil {
+		return err
+	}
+	if err := mergeDropGoldReferenceData(levels, dropGold); err != nil {
+		return err
+	}
 	skills, err := loadSkillReferenceData(textDataDirectory)
 	if err != nil {
 		return err
 	}
 	magicOptions, err := loadMagicOptionReferenceData(filepath.Join(textDataDirectory, "magicoption.txt"))
+	if err != nil {
+		return err
+	}
+	eventRewards, eventRewardItems, err := loadEventRewardReferenceData(textDataDirectory)
 	if err != nil {
 		return err
 	}
@@ -82,7 +95,10 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, and %d magic-option rows\n", len(levels), len(skills), len(magicOptions))
+	if err := importEventRewardRows(ctx, pool, eventRewards, eventRewardItems); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, %d magic-option rows, %d event rewards, and %d event reward items\n", len(levels), len(skills), len(magicOptions), len(eventRewards), len(eventRewardItems))
 	return err
 }
 
@@ -175,7 +191,10 @@ func loadLevelReferenceData(path string) ([]levelReferenceRow, error) {
 			}
 		}
 		raw, _ := json.Marshal(fields)
-		rows = append(rows, levelReferenceRow{level, sp, experience, unknown1, unknown2, job, string(raw)})
+		rows = append(rows, levelReferenceRow{
+			Level: level, SkillPoints: sp, Experience: experience,
+			Unknown1: unknown1, Unknown2: unknown2, JobExperience: job, Raw: string(raw),
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read level data: %w", err)
@@ -184,6 +203,59 @@ func loadLevelReferenceData(path string) ([]levelReferenceRow, error) {
 		return nil, errors.New("level data contains no rows")
 	}
 	return rows, nil
+}
+
+type dropGoldReferenceRow struct {
+	Level int
+	Min   uint64
+	Max   uint64
+}
+
+func loadDropGoldReferenceData(path string) (map[int]dropGoldReferenceRow, error) {
+	contents, err := readClientTextFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open level gold data %q: %w", path, err)
+	}
+	rows := make(map[int]dropGoldReferenceRow)
+	scanner := bufio.NewScanner(strings.NewReader(contents))
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("level gold line %d: want 3 fields, got %d", lineNumber, len(fields))
+		}
+		level, levelErr := positiveInt(fields[0])
+		minimum, minimumErr := positiveUint(fields[1])
+		maximum, maximumErr := positiveUint(fields[2])
+		if err := errors.Join(levelErr, minimumErr, maximumErr); err != nil || level == 0 || minimum == 0 || maximum < minimum || rows[level].Level != 0 {
+			return nil, fmt.Errorf("level gold line %d is invalid or duplicated: %w", lineNumber, err)
+		}
+		rows[level] = dropGoldReferenceRow{Level: level, Min: minimum, Max: maximum}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read level gold data %q: %w", path, err)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("level gold data contains no rows")
+	}
+	return rows, nil
+}
+
+func mergeDropGoldReferenceData(levels []levelReferenceRow, dropGold map[int]dropGoldReferenceRow) error {
+	if len(levels) != len(dropGold) {
+		return fmt.Errorf("level/drop-gold row count mismatch: %d/%d", len(levels), len(dropGold))
+	}
+	for index := range levels {
+		gold, exists := dropGold[levels[index].Level]
+		if !exists {
+			return fmt.Errorf("level %d has no drop-gold row", levels[index].Level)
+		}
+		levels[index].DropGoldMin = gold.Min
+		levels[index].DropGoldMax = gold.Max
+	}
+	return nil
 }
 
 func loadSkillReferenceData(directory string) ([]skillReferenceRow, error) {
@@ -289,13 +361,13 @@ func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelRefere
 		return fmt.Errorf("begin reference import: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	levelStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_LEVEL_DATA` (`LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,`UNKNOWN_1`,`UNKNOWN_2`,`REQUIRED_JOB_EXPERIENCE`,`REQUIRED_JOB_EXPERIENCE_2`,`REQUIRED_JOB_EXPERIENCE_3`,`RAW_FIELDS`) VALUES (?,?,?,?,?,?,?,?,CAST(? AS JSON)) ON DUPLICATE KEY UPDATE `REQUIRED_EXPERIENCE`=VALUES(`REQUIRED_EXPERIENCE`),`REQUIRED_SKILL_POINTS`=VALUES(`REQUIRED_SKILL_POINTS`),`UNKNOWN_1`=VALUES(`UNKNOWN_1`),`UNKNOWN_2`=VALUES(`UNKNOWN_2`),`REQUIRED_JOB_EXPERIENCE`=VALUES(`REQUIRED_JOB_EXPERIENCE`),`REQUIRED_JOB_EXPERIENCE_2`=VALUES(`REQUIRED_JOB_EXPERIENCE_2`),`REQUIRED_JOB_EXPERIENCE_3`=VALUES(`REQUIRED_JOB_EXPERIENCE_3`),`RAW_FIELDS`=VALUES(`RAW_FIELDS`)")
+	levelStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_LEVEL_DATA` (`LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,`DROP_GOLD_MIN`,`DROP_GOLD_MAX`,`UNKNOWN_1`,`UNKNOWN_2`,`REQUIRED_JOB_EXPERIENCE`,`REQUIRED_JOB_EXPERIENCE_2`,`REQUIRED_JOB_EXPERIENCE_3`,`RAW_FIELDS`) VALUES (?,?,?,?,?,?,?,?,?,?,CAST(? AS JSON)) ON DUPLICATE KEY UPDATE `REQUIRED_EXPERIENCE`=VALUES(`REQUIRED_EXPERIENCE`),`REQUIRED_SKILL_POINTS`=VALUES(`REQUIRED_SKILL_POINTS`),`DROP_GOLD_MIN`=VALUES(`DROP_GOLD_MIN`),`DROP_GOLD_MAX`=VALUES(`DROP_GOLD_MAX`),`UNKNOWN_1`=VALUES(`UNKNOWN_1`),`UNKNOWN_2`=VALUES(`UNKNOWN_2`),`REQUIRED_JOB_EXPERIENCE`=VALUES(`REQUIRED_JOB_EXPERIENCE`),`REQUIRED_JOB_EXPERIENCE_2`=VALUES(`REQUIRED_JOB_EXPERIENCE_2`),`REQUIRED_JOB_EXPERIENCE_3`=VALUES(`REQUIRED_JOB_EXPERIENCE_3`),`RAW_FIELDS`=VALUES(`RAW_FIELDS`)")
 	if err != nil {
 		return fmt.Errorf("prepare level import: %w", err)
 	}
 	defer levelStatement.Close()
 	for _, row := range levels {
-		if _, err := levelStatement.ExecContext(ctx, row.Level, row.Experience, row.SkillPoints, row.Unknown1, row.Unknown2, row.JobExperience[0], row.JobExperience[1], row.JobExperience[2], row.Raw); err != nil {
+		if _, err := levelStatement.ExecContext(ctx, row.Level, row.Experience, row.SkillPoints, row.DropGoldMin, row.DropGoldMax, row.Unknown1, row.Unknown2, row.JobExperience[0], row.JobExperience[1], row.JobExperience[2], row.Raw); err != nil {
 			return fmt.Errorf("import level %d: %w", row.Level, err)
 		}
 	}

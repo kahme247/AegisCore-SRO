@@ -52,6 +52,7 @@ func runScanMedia(arguments []string) error {
 	flags := flag.NewFlagSet("scan-media", flag.ContinueOnError)
 	archive := flags.String("archive", "VSRO_Client/Media.pk2", "deployed baseline Media.pk2")
 	targetRoot := flags.String("target-root", "Media/Media", "approved extracted target Media tree")
+	exportManifest := flags.String("export-manifest", "", "optional sro-data Media export manifest")
 	output := flags.String("output", "PatchSource/188-to-189.json", "reviewable output build specification")
 	divisionID := flags.Uint("division-id", 22, "legacy division ID")
 	contentID := flags.Uint("content-id", 22, "client content ID")
@@ -70,7 +71,13 @@ func runScanMedia(arguments []string) error {
 	if *baseVersion == 0 || *targetVersion == 0 || uint64(*baseVersion) > uint64(^uint32(0)) || uint64(*targetVersion) > uint64(^uint32(0)) {
 		return errors.New("base-version and target-version must be uint32 values")
 	}
-	result, err := builder.ScanPK2(*archive, *targetRoot, "media")
+	var result builder.ScanResult
+	var err error
+	if *exportManifest == "" {
+		result, err = builder.ScanPK2(*archive, *targetRoot, "media")
+	} else {
+		result, err = builder.ScanPK2Export(*archive, *targetRoot, *exportManifest, "media")
+	}
 	if err != nil {
 		return err
 	}

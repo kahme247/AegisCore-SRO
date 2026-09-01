@@ -37,6 +37,34 @@ func inspectVSROQuestScript(arguments []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	startConditions, err := questscript.StartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	startMethods, err := questscript.StartMethods(definitions)
+	if err != nil {
+		return err
+	}
+	dependencies, err := questscript.Dependencies(definitions)
+	if err != nil {
+		return err
+	}
+	completionPolicies, err := questscript.CompletionPolicies(definitions)
+	if err != nil {
+		return err
+	}
+	jobStartConditions, err := questscript.JobStartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	raceStartConditions, err := questscript.RaceStartConditions(definitions)
+	if err != nil {
+		return err
+	}
+	pointRewards, err := questscript.PointRewards(definitions)
+	if err != nil {
+		return err
+	}
 	killObjectives, err := questscript.KillMonsterObjectives(definitions)
 	if err != nil {
 		return err
@@ -97,7 +125,7 @@ func inspectVSROQuestScript(arguments []string, output io.Writer) error {
 		functions = append(functions, name)
 	}
 	sort.Strings(functions)
-	if _, err = fmt.Fprintf(output, "decoded %d prototypes, %d quest definitions, %d kill-monster objectives, %d deliver-item EX objectives, %d standard deliver-item objectives, %d dialog objectives, %d kill-player objectives, %d collection-item objectives, %d extended kill objectives, %d talisman objectives, %d rewards, and %d declarative calls\n", len(prototypes), len(definitions), len(killObjectives), len(deliverObjectives), len(standardDeliverObjectives), len(dialogObjectives), len(killPlayerObjectives), len(collectionObjectives), len(extendedKillObjectives), len(talismanObjectives), len(rewards), totalCalls); err != nil {
+	if _, err = fmt.Fprintf(output, "decoded %d prototypes, %d quest definitions, %d start conditions, %d start methods, %d dependency groups, %d completion policies, %d job conditions, %d race conditions, %d point rewards, %d kill-monster objectives, %d deliver-item EX objectives, %d standard deliver-item objectives, %d dialog objectives, %d kill-player objectives, %d collection-item objectives, %d extended kill objectives, %d talisman objectives, %d rewards, and %d declarative calls\n", len(prototypes), len(definitions), len(startConditions), len(startMethods), len(dependencies), len(completionPolicies), len(jobStartConditions), len(raceStartConditions), len(pointRewards), len(killObjectives), len(deliverObjectives), len(standardDeliverObjectives), len(dialogObjectives), len(killPlayerObjectives), len(collectionObjectives), len(extendedKillObjectives), len(talismanObjectives), len(rewards), totalCalls); err != nil {
 		return err
 	}
 	for _, name := range functions {
