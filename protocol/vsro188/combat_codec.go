@@ -39,6 +39,100 @@ type CombatAttackEndSuccessPrefix struct {
 type CombatAttackBeginSuccessPrefixCodec struct{}
 type CombatAttackEndSuccessPrefixCodec struct{}
 
+// CombatAttackBeginResponse is the exact prefix consumed by the stock B070
+// handler. The remainder is delegated to the action-state subsystem; it is
+// deliberately retained as opaque bytes until that continuation is fully
+// recovered.
+type CombatAttackBeginResponse struct {
+	Result       byte
+	FailureCode  uint16
+	ResultFamily uint16
+	SkillID      uint32
+	SourceUID    uint32
+	CastUID      uint32
+	TargetUID    uint32
+	Remainder    []byte
+}
+
+// CombatAttackEndResponse is the exact prefix consumed by the stock B071
+// handler. Its success body is delegated to the action-state subsystem.
+type CombatAttackEndResponse struct {
+	Result      byte
+	FailureCode uint16
+	CastUID     uint32
+	Remainder   []byte
+}
+
+func DecodeCombatAttackBeginResponse(packet network.Packet) (CombatAttackBeginResponse, error) {
+	result, err := packet.ReadByte()
+	if err != nil {
+		return CombatAttackBeginResponse{}, fmt.Errorf("read B070 result: %w", err)
+	}
+	if result != 1 {
+		if packet.Remaining() != 2 {
+			return CombatAttackBeginResponse{}, fmt.Errorf("B070 failure payload length %d, want 2", packet.Remaining())
+		}
+		code, err := packet.ReadUInt16()
+		if err != nil {
+			return CombatAttackBeginResponse{}, fmt.Errorf("read B070 failure code: %w", err)
+		}
+		return CombatAttackBeginResponse{Result: result, FailureCode: code}, nil
+	}
+	if packet.Remaining() < 18 {
+		return CombatAttackBeginResponse{}, fmt.Errorf("B070 success payload length %d, want at least 18", packet.Remaining())
+	}
+	family, err := packet.ReadUInt16()
+	if err != nil {
+		return CombatAttackBeginResponse{}, fmt.Errorf("read B070 result family: %w", err)
+	}
+	if family != 0x3000 && family != 0x3002 {
+		return CombatAttackBeginResponse{}, fmt.Errorf("B070 result family 0x%04X is not 0x3000 or 0x3002", family)
+	}
+	values := [4]uint32{}
+	for index := range values {
+		values[index], err = packet.ReadUInt32()
+		if err != nil {
+			return CombatAttackBeginResponse{}, fmt.Errorf("read B070 direct field %d: %w", index, err)
+		}
+	}
+	remainder, err := packet.ReadBytes(packet.Remaining())
+	if err != nil {
+		return CombatAttackBeginResponse{}, fmt.Errorf("read B070 delegated remainder: %w", err)
+	}
+	return CombatAttackBeginResponse{Result: result, ResultFamily: family, SkillID: values[0], SourceUID: values[1], CastUID: values[2], TargetUID: values[3], Remainder: remainder}, nil
+}
+
+func DecodeCombatAttackEndResponse(packet network.Packet) (CombatAttackEndResponse, error) {
+	result, err := packet.ReadByte()
+	if err != nil {
+		return CombatAttackEndResponse{}, fmt.Errorf("read B071 result: %w", err)
+	}
+	if result != 1 {
+		if packet.Remaining() < 6 {
+			return CombatAttackEndResponse{}, fmt.Errorf("B071 non-success payload length %d, want at least 6", packet.Remaining())
+		}
+		code, err := packet.ReadUInt16()
+		if err != nil {
+			return CombatAttackEndResponse{}, fmt.Errorf("read B071 failure code: %w", err)
+		}
+		cast, err := packet.ReadUInt32()
+		if err != nil {
+			return CombatAttackEndResponse{}, fmt.Errorf("read B071 action ID: %w", err)
+		}
+		remainder, _ := packet.ReadBytes(packet.Remaining())
+		return CombatAttackEndResponse{Result: result, FailureCode: code, CastUID: cast, Remainder: remainder}, nil
+	}
+	if packet.Remaining() < 4 {
+		return CombatAttackEndResponse{}, fmt.Errorf("B071 success payload length %d, want at least 4", packet.Remaining())
+	}
+	cast, err := packet.ReadUInt32()
+	if err != nil {
+		return CombatAttackEndResponse{}, fmt.Errorf("read B071 cast ID: %w", err)
+	}
+	remainder, _ := packet.ReadBytes(packet.Remaining())
+	return CombatAttackEndResponse{Result: result, CastUID: cast, Remainder: remainder}, nil
+}
+
 func (CombatCandidateActionRequestCodec) Decode(packet network.Packet) (CombatCandidateActionRequest, error) {
 	if packet.Remaining() != 7 {
 		return CombatCandidateActionRequest{}, fmt.Errorf("combat candidate payload length %d, want 7", packet.Remaining())

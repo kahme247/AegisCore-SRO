@@ -58,3 +58,51 @@ func TestCOSCommandCodecPreservesCommandOnFailure(t *testing.T) {
 		t.Fatalf("malformed Decode() = %+v, %v", request, err)
 	}
 }
+
+func TestCOSCommandCodecDecodesStockMovePickupAndFollow(t *testing.T) {
+	move := network.EmptyClientPacket()
+	move.WriteUInt32(88)
+	move.WriteByte(COSCommandMove)
+	move.WriteByte(1)
+	move.WriteUInt16(25000)
+	move.WriteUInt16(100)
+	move.WriteUInt16(20)
+	move.WriteUInt16(300)
+	request, err := (COSCommandRequestCodec{}).Decode(move)
+	if err != nil || !request.Movement.HasDestination || request.Movement.Destination.RegionID != 25000 || request.Movement.Destination.X != 100 || request.Movement.Destination.Y != 20 || request.Movement.Destination.Z != 300 {
+		t.Fatalf("move Decode() = %+v, %v", request, err)
+	}
+	pickup := network.EmptyClientPacket()
+	pickup.WriteUInt32(88)
+	pickup.WriteByte(COSCommandPickup)
+	pickup.WriteUInt32(99)
+	request, err = (COSCommandRequestCodec{}).Decode(pickup)
+	if err != nil || request.TargetUniqueID != 99 {
+		t.Fatalf("pickup Decode() = %+v, %v", request, err)
+	}
+	follow := network.EmptyClientPacket()
+	follow.WriteUInt32(88)
+	follow.WriteByte(COSCommandFollow)
+	request, err = (COSCommandRequestCodec{}).Decode(follow)
+	if err != nil || request.Command != COSCommandFollow {
+		t.Fatalf("follow Decode() = %+v, %v", request, err)
+	}
+}
+
+func TestCOSNameAndSettingsCodecs(t *testing.T) {
+	name := network.EmptyClientPacket()
+	name.WriteUInt32(88)
+	name.WriteString("Wolf")
+	nameRequest, err := (COSNameRequestCodec{}).Decode(name)
+	if err != nil || nameRequest.PetUniqueID != 88 || nameRequest.Name != "Wolf" {
+		t.Fatalf("name Decode() = %+v, %v", nameRequest, err)
+	}
+	settings := network.EmptyClientPacket()
+	settings.WriteUInt32(88)
+	settings.WriteByte(1)
+	settings.WriteUInt32(0x11)
+	settingsRequest, err := (COSSettingsRequestCodec{}).Decode(settings)
+	if err != nil || settingsRequest.PetUniqueID != 88 || settingsRequest.Setting != 1 || settingsRequest.Settings != 0x11 {
+		t.Fatalf("settings Decode() = %+v, %v", settingsRequest, err)
+	}
+}

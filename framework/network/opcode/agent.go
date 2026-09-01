@@ -16,9 +16,13 @@ const (
 	AgentPingRequest          uint16 = 0x7F00
 	AgentPingResponse         uint16 = 0xBF00
 
-	CharacterDataBegin uint16 = 0x34A5
-	CharacterDataBody  uint16 = 0x3013
-	CharacterDataEnd   uint16 = 0x34A6
+	CharacterDataBegin         uint16 = 0x34A5
+	CharacterDataBody          uint16 = 0x3013
+	CharacterDataEnd           uint16 = 0x34A6
+	AlchemyAvatarRequest       uint16 = 0x34A7
+	AlchemyAvatarResponse      uint16 = 0x34A8
+	AlchemyAvatarGrantRequest  uint16 = 0x34A9
+	AlchemyAvatarGrantResponse uint16 = 0x34AA
 
 	ItemOperationRequest     uint16 = 0x7034
 	ItemOperationResponse    uint16 = 0xB034
@@ -27,16 +31,22 @@ const (
 	ItemRepairRequest        uint16 = 0x703E
 	ItemRepairResponse       uint16 = 0xB03E
 	ItemDurabilityUpdate     uint16 = 0x3052
+	InventorySizeUpdate      uint16 = 0x3092
 	InventoryItemUseRequest  uint16 = 0x704C
 	InventoryItemUseResponse uint16 = 0xB04C
 	AlchemyElixirRequest     uint16 = 0x7150
 	AlchemyElixirResponse    uint16 = 0xB150
 	AlchemyStoneRequest      uint16 = 0x7151
 	AlchemyStoneResponse     uint16 = 0xB151
+	AlchemyMaterialRequest   uint16 = 0x7155
+	AlchemyMaterialResponse  uint16 = 0xB155
+	AlchemyDismantleRequest  uint16 = 0x7157
+	AlchemyDismantleResponse uint16 = 0xB157
 	AlchemySocketRequest     uint16 = 0x716A
 	AlchemySocketResponse    uint16 = 0xB16A
 	InventoryItemUpdate      uint16 = 0x3040
 	ItemMallBalanceUpdate    uint16 = 0x3153
+	ItemMallCashNotification uint16 = 0x3154
 	PremiumDailyAdd          uint16 = 0x3159
 	PremiumDailyRemove       uint16 = 0x315B
 	PremiumDailyUseRequest   uint16 = 0x715F
@@ -139,12 +149,32 @@ const (
 	SkillLearnResponse        uint16 = 0xB0A1
 	SkillMasteryLearnRequest  uint16 = 0x70A2
 	SkillMasteryLearnResponse uint16 = 0xB0A2
+	SkillWithdrawRequest      uint16 = 0x7202
+	SkillWithdrawResponse     uint16 = 0xB202
+	MasteryWithdrawRequest    uint16 = 0x7203
+	MasteryWithdrawResponse   uint16 = 0xB203
 
-	QuestTalk            uint16 = 0x30D4
-	QuestUpdate          uint16 = 0x30D5
-	QuestScript          uint16 = 0x3CA2
-	QuestAbandonRequest  uint16 = 0x70D9
-	QuestAbandonResponse uint16 = 0xB0D9
+	QuestTalk                    uint16 = 0x30D4
+	QuestUpdate                  uint16 = 0x30D5
+	QuestMarkAdd                 uint16 = 0x30D6
+	QuestMarkRemove              uint16 = 0x30D7
+	QuestGatherResult            uint16 = 0x30DA
+	QuestCatchResult             uint16 = 0x30DC
+	QuestNotification            uint16 = 0x30EC
+	QuestRewardPrompt            uint16 = 0x3514
+	GlobalEventUpdate            uint16 = 0x3CA2
+	QuestInteractionRequest      uint16 = 0x70D8
+	QuestInteractionResponse     uint16 = 0xB0D8
+	QuestAbandonRequest          uint16 = 0x70D9
+	QuestAbandonResponse         uint16 = 0xB0D9
+	QuestLocalActionRequest      uint16 = 0x70DB
+	QuestLocalActionResponse     uint16 = 0xB0DB
+	QuestRewardSelectionRequest  uint16 = 0x7515
+	QuestRewardSelectionResponse uint16 = 0xB515
+
+	// QuestScript is retained as a source-compatibility alias. Binary analysis
+	// identifies 0x3CA2 as an adjacent global-event update, not a quest packet.
+	QuestScript = GlobalEventUpdate
 
 	COSDataResponse             uint16 = 0x30C8
 	COSUpdateResponse           uint16 = 0x30C9

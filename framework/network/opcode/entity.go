@@ -37,6 +37,7 @@ const (
 	EntityMovementTurnRequest    uint16 = 0x7024
 	EntityMovementResponse       uint16 = 0xB021
 	MovementPositionUpdate       uint16 = 0xB023
+	EntityMovementTurnResponse   uint16 = 0xB024
 
 	EntitySelectRequest  uint16 = 0x7045
 	EntitySelectResponse uint16 = 0xB045
@@ -52,8 +53,12 @@ const (
 	CharacterIncreaseIntellectResponse uint16 = 0xB051
 	CharacterBodyStateRequest          uint16 = 0x70A7
 	CharacterBodyStateResponse         uint16 = 0xB0A7
+	TeleportDesignateRequest           uint16 = 0x7059
+	TeleportDesignateResponse          uint16 = 0xB059
 	TeleportUseRequest                 uint16 = 0x705A
 	TeleportUseResponse                uint16 = 0xB05A
+	TeleportCancelRequest              uint16 = 0x705B
+	TeleportCancelResponse             uint16 = 0xB05B
 	TeleportReadyRequest               uint16 = 0x34B5
 	TeleportReadyResponse              uint16 = 0x34B6
 )

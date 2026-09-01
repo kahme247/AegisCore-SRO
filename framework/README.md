@@ -47,6 +47,53 @@ Optional frontends use separate build tags: `raylib && cgo`, `gtk && cgo`, or
   configured terminal domain hook runs once after inbound work and sender drain.
   The legacy `ConnectionClosed` channel is best-effort only.
 
+### Session flight recorder
+
+Set `SRO_SESSION_TRACE=1` to retain a bounded structured timeline for every
+accepted connection. The recorder observes decoded inbound packets, admission
+and dispatch outcomes, handler duration, outbound logical packets, lifecycle
+state, and errors. It writes one JSONL artifact only after the session drains;
+the default destination is `.local/session-traces`. Gateway's session ID is
+carried through the private admission ticket as diagnostic-only metadata, so
+the reader can merge the later Agent connection under the same trace ID.
+
+Every completed trace is analyzed automatically. The service writes
+`*.analysis.json` for tooling and `*.analysis.md` for immediate reading beside
+the JSONL file. If a probable failure is found, the service log emits one
+`SESSION_TRACE probable_failure` line containing its trace ID, kind, service,
+opcode, handler and report path. A clean heuristic result is reported as
+`no_anomaly_detected`; it is not proof that the session was semantically valid.
+
+Credential, authentication, ticket and handshake opcodes are always fully
+redacted. Other payloads receive a SHA-256 fingerprint; plaintext prefixes are
+disabled unless `SRO_SESSION_TRACE_PREFIX_BYTES` is explicitly set. Never move
+unsanitized local traces into `protocol/captures`.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `SRO_SESSION_TRACE` | `0` | Enable legacy trace logs and structured session artifacts |
+| `SRO_SESSION_TRACE_DIR` | `.local/session-traces` | Artifact directory |
+| `SRO_SESSION_TRACE_CAPACITY` | `256` | Newest events retained per session; capped at 4,096 |
+| `SRO_SESSION_TRACE_PREFIX_BYTES` | `0` | Non-sensitive payload prefix bytes; capped at 64 |
+
+Merge and inspect all locally persisted service traces with:
+
+```powershell
+go run ./cmd/session-trace .local/session-traces
+go run ./cmd/session-trace -errors-only .local/session-traces
+go run ./cmd/session-trace -session <session-id-prefix> .local/session-traces
+go run ./cmd/session-trace analyze .local/session-traces
+go run ./cmd/session-trace analyze -slow 250ms -repeat 8 .local/session-traces
+go run ./cmd/session-trace diff <healthy-trace-or-directory> <failed-trace-or-directory>
+```
+
+The automatic report and `analyze` command use the same shared rules to rank
+operation errors, rejected packets, unhandled opcodes, slow dispatches,
+overwritten evidence and repeated-packet loops. `diff` removes timestamps and
+connection IDs from comparison and reports the first change in service,
+direction, stage, opcode, payload size, handler or outcome. Add `diff -check`
+when a divergence should produce a nonzero exit status in automation.
+
 These limits are defensive implementation defaults, not capture-proven protocol
 constants. Server outbound EDC fields are currently zero and automatic
 post-handshake encryption excludes `0x600D` wrappers; both assumptions need

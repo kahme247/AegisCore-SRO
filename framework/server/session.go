@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,9 @@ type Session struct {
 	handlers            *HandlerRegistry
 	admissionPolicy     PacketAdmissionPolicy
 	trafficFilter       *sessionTrafficFilter
+	flightRecorder      *sessionFlightRecorder
+	traceCorrelationMu  sync.RWMutex
+	traceCorrelationID  string
 	handshakePhase      atomic.Uint32
 	moduleIdentified    atomic.Bool
 	authenticated       atomic.Bool
@@ -91,6 +95,31 @@ func (s *Session) IsAuthenticated() bool {
 	return s.authenticated.Load()
 }
 
+// SetTraceCorrelationID links this connection to the Gateway session that
+// issued its one-time admission ticket. It is diagnostic metadata only and is
+// never consulted for authentication or packet admission.
+func (s *Session) SetTraceCorrelationID(correlationID string) {
+	correlationID = strings.TrimSpace(correlationID)
+	if s == nil || correlationID == "" {
+		return
+	}
+	s.traceCorrelationMu.Lock()
+	s.traceCorrelationID = correlationID
+	s.traceCorrelationMu.Unlock()
+	s.flightRecorder.setCorrelationID(correlationID, s.HandshakePhase(), s.IsAuthenticated())
+}
+
+// TraceCorrelationID identifies one Gateway-to-Agent client journey while ID
+// remains the identity of this specific TCP connection.
+func (s *Session) TraceCorrelationID() string {
+	if s == nil {
+		return ""
+	}
+	s.traceCorrelationMu.RLock()
+	defer s.traceCorrelationMu.RUnlock()
+	return s.traceCorrelationID
+}
+
 func NewSession(
 	conn net.Conn,
 	options network.EncodingOptions,
@@ -115,7 +144,17 @@ func NewSession(
 		packetChannel:       make(chan network.Packet, 1024),
 		massive:             newInboundMassive(),
 		lifetime:            newSessionLifetime(),
+		traceCorrelationID:  sessionId.String(),
 	}
+	remote := ""
+	if conn != nil && conn.RemoteAddr() != nil {
+		remote = conn.RemoteAddr().String()
+	}
+	session.flightRecorder = newSessionFlightRecorder(
+		flightRecorderConfigFromEnvironment(),
+		flightRecorderMetadata{SessionID: session.ID, CorrelationID: session.TraceCorrelationID(), Module: serverModuleId, Remote: remote},
+		time.Now(),
+	)
 	session.Sender = NewSender(conn, func(packet network.Packet) ([]byte, error) {
 		return session.encodeOutboundPacket(packet)
 	})
@@ -143,6 +182,7 @@ func (s *Session) StartHandling() {
 	if sessionTraceEnabled() {
 		log.Infof("SESSION_TRACE connected module=%s remote=%s", s.ServerModuleID, s.Conn.RemoteAddr())
 	}
+	s.flightRecorder.recordLifecycle("connected", "accepted", nil, s.HandshakePhase(), s.IsAuthenticated())
 	if s.HandshakePhase() == HandshakeNew {
 		s.initialize()
 	}
@@ -263,6 +303,7 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 	//log.Debugf("Received Packet: %s\n", p.String())
 	pDec, err := p.DecryptChecked(s.inboundCipher())
 	if err != nil {
+		s.flightRecorder.recordPacket("inbound", "decode", p, "", "rejected", err, s.HandshakePhase(), s.IsAuthenticated())
 		log.Errorf("Failed to decrypt packet: %v", err)
 		s.Close()
 		return
@@ -270,10 +311,12 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 	if sessionTraceEnabled() {
 		log.Infof("SESSION_TRACE received-decoded module=%s remote=%s opcode=0x%04X size=%d", s.ServerModuleID, s.Conn.RemoteAddr(), pDec.MessageID, pDec.DataSize)
 	}
+	s.flightRecorder.recordPacket("inbound", "decoded", pDec, "", "accepted", nil, s.HandshakePhase(), s.IsAuthenticated())
 	// 2. Check Sequence & CRC
 	if s.EncodingOptions.EDC {
 		err = s.validateEDC(pDec)
 		if err != nil {
+			s.flightRecorder.recordPacket("inbound", "edc", pDec, "", "rejected", err, s.HandshakePhase(), s.IsAuthenticated())
 			log.Errorf("Error: %v\n", err)
 			s.Close()
 			return
@@ -284,6 +327,7 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 	// the application admission policy.
 	if s.trafficFilter != nil {
 		if err := s.trafficFilter.Admit(); err != nil {
+			s.flightRecorder.recordPacket("inbound", "traffic_filter", pDec, "", "rejected", err, s.HandshakePhase(), s.IsAuthenticated())
 			remote := "unknown"
 			if s.Conn != nil && s.Conn.RemoteAddr() != nil {
 				remote = s.Conn.RemoteAddr().String()
@@ -300,6 +344,7 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 	// retaining its aggregate until another 0x600D arrives.
 	complete, done, massiveErr := s.massive.process(pDec)
 	if massiveErr != nil {
+		s.flightRecorder.recordPacket("inbound", "massive_reassembly", pDec, "", "rejected", massiveErr, s.HandshakePhase(), s.IsAuthenticated())
 		log.Errorf("Rejecting malformed massive packet: %v", massiveErr)
 		s.Close()
 		return
@@ -321,12 +366,14 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 		// here rather than delegated only to listener policies, so a newly added
 		// listener cannot accidentally reopen a pre-authentication opcode path.
 		if s.HandshakePhase() != HandshakeEstablished || !s.ModuleIdentified() {
+			s.flightRecorder.recordPacket("inbound", "admission", pDec, "", "rejected", errors.New("application packet before session admission"), s.HandshakePhase(), s.IsAuthenticated())
 			log.Errorf("Rejecting application packet 0x%04X before session admission", pDec.MessageID)
 			s.Close()
 			return
 		}
 		if s.admissionPolicy != nil {
 			if err := s.admissionPolicy(s, pDec.MessageID); err != nil {
+				s.flightRecorder.recordPacket("inbound", "admission", pDec, "", "rejected", err, s.HandshakePhase(), s.IsAuthenticated())
 				log.Errorf("Rejecting packet 0x%04X: %v", pDec.MessageID, err)
 				s.Close()
 				return
@@ -334,7 +381,16 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 		}
 	}
 	if s.handlers != nil {
+		handlerName := ""
+		dispatchStartedAt := time.Time{}
+		if s.flightRecorder != nil {
+			handlerName = s.handlers.HandlerName(pDec.MessageID)
+			dispatchStartedAt = time.Now()
+		}
 		handled, handlerErr := s.handlers.Dispatch(s.lifetime.ctx, s, pDec)
+		if s.flightRecorder != nil {
+			s.flightRecorder.recordDispatch(pDec, handlerName, handled, handlerErr, time.Since(dispatchStartedAt), s.HandshakePhase(), s.IsAuthenticated())
+		}
 		if handlerErr != nil {
 			log.Errorf("Rejecting packet 0x%04X: %v", pDec.MessageID, handlerErr)
 			s.Close()
@@ -345,6 +401,7 @@ func (s *Session) handleIncomingPacket(p network.Packet) {
 		}
 	}
 	log.Tracef("Unknown packet received opcode=0x%04X size=%d", pDec.MessageID, pDec.PayloadLen())
+	s.flightRecorder.recordPacket("inbound", "fallback", pDec, "", "unhandled", nil, s.HandshakePhase(), s.IsAuthenticated())
 	select {
 	case s.ServerPacketChannel <- PacketChannelData{Session: s, Packet: pDec}:
 	case <-s.lifetime.ctx.Done():
@@ -408,6 +465,29 @@ func (s *Session) finishDrain() {
 		case s.ConnectionClosed <- s:
 		default:
 			log.Debugf("session close notification queue is full; session %s was already cleaned up", s.ID)
+		}
+	}
+	s.flightRecorder.recordLifecycle("closed", "drained", nil, s.HandshakePhase(), s.IsAuthenticated())
+	if path, err := s.flightRecorder.flush(); err != nil {
+		log.Warnf("failed to flush session trace for %s: %v", s.ID, err)
+	} else if path != "" {
+		log.Infof("SESSION_TRACE artifact session=%s path=%s", s.ID, path)
+		analysis, analysisErr := analyzeCompletedSessionTrace(path)
+		if analysisErr != nil {
+			log.Warnf("failed to analyze session trace for %s: %v", s.ID, analysisErr)
+		} else if analysis.Probable != nil {
+			log.Warnf(
+				"SESSION_TRACE probable_failure session=%s trace=%s kind=%s module=%s opcode=%s handler=%s report=%s",
+				s.ID,
+				s.TraceCorrelationID(),
+				analysis.Probable.Kind,
+				analysis.Probable.Event.Module,
+				analysis.Probable.Event.OpcodeHex,
+				analysis.Probable.Event.Handler,
+				analysis.Reports.Markdown,
+			)
+		} else {
+			log.Infof("SESSION_TRACE analysis session=%s status=no_anomaly_detected report=%s", s.ID, analysis.Reports.Markdown)
 		}
 	}
 	s.lifetime.finishDrain()
@@ -496,6 +576,11 @@ func (s *Session) Send(packet network.Packet) error {
 	}
 	packet.ServerPacket = true
 	err := s.Sender.Send(packet)
+	outcome := "sent"
+	if err != nil {
+		outcome = "error"
+	}
+	s.flightRecorder.recordPacket("outbound", "send", packet, "", outcome, err, s.HandshakePhase(), s.IsAuthenticated())
 	if sessionTraceEnabled() {
 		log.Infof("SESSION_TRACE sent module=%s remote=%s opcode=0x%04X size=%d", s.ServerModuleID, s.Conn.RemoteAddr(), packet.MessageID, packet.DataSize)
 	}
@@ -513,7 +598,15 @@ func (s *Session) SendBatch(packets []network.Packet) error {
 	for index := range packets {
 		packets[index].ServerPacket = true
 	}
-	return s.Sender.SendBatch(packets)
+	err := s.Sender.SendBatch(packets)
+	outcome := "sent"
+	if err != nil {
+		outcome = "error"
+	}
+	for _, packet := range packets {
+		s.flightRecorder.recordPacket("outbound", "send_batch", packet, "", outcome, err, s.HandshakePhase(), s.IsAuthenticated())
+	}
+	return err
 }
 
 // SendMassive writes a complete 0x600D header/body batch without allowing
@@ -524,6 +617,11 @@ func (s *Session) SendMassive(packet network.Packet) error {
 	}
 	packet.ServerPacket = true
 	err := s.Sender.SendMassive(packet)
+	outcome := "sent"
+	if err != nil {
+		outcome = "error"
+	}
+	s.flightRecorder.recordPacket("outbound", "send_massive", packet, "", outcome, err, s.HandshakePhase(), s.IsAuthenticated())
 	if sessionTraceEnabled() {
 		log.Infof("SESSION_TRACE sent-massive module=%s remote=%s opcode=0x%04X size=%d", s.ServerModuleID, s.Conn.RemoteAddr(), packet.MessageID, packet.DataSize)
 	}
@@ -539,6 +637,12 @@ func (s *Session) SendBytes(bytes []byte) error {
 		return ErrSenderClosed
 	}
 	err := s.Sender.SendBytes(bytes)
+	outcome := "sent"
+	if err != nil {
+		outcome = "error"
+	}
+	packet := network.NewPacket(bytes)
+	s.flightRecorder.recordPacket("outbound", "send_raw", packet, "", outcome, err, s.HandshakePhase(), s.IsAuthenticated())
 	if err != nil {
 		log.Errorf("failed to send raw bytes for session %s: %v", s.ID, err)
 	}

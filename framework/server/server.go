@@ -90,6 +90,13 @@ func (e *Server) RegisterHandler(opcode uint16, handler SessionHandler) {
 	e.handlers.Register(opcode, handler)
 }
 
+func (e *Server) DispatchMetrics() DispatchMetrics {
+	if e == nil {
+		return DispatchMetrics{}
+	}
+	return e.handlers.Metrics()
+}
+
 // SetAdmissionPolicy installs the listener-specific gate used by newly
 // accepted sessions. It should be configured during server construction;
 // existing sessions retain the policy snapshot they were accepted with.

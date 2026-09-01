@@ -49,3 +49,17 @@ func TestServerRegisterHandlerIsEngineScopedAndOrdered(t *testing.T) {
 		t.Fatal("handler leaked into another engine registry")
 	}
 }
+
+func TestHandlerRegistryRecordsDispatchMetrics(t *testing.T) {
+	registry := NewHandlerRegistry()
+	registry.Register(0x7777, func(context.Context, *Session, network.Packet) error { return nil })
+	packet := network.EmptyPacket()
+	packet.MessageID = 0x7777
+	if handled, err := registry.Dispatch(context.Background(), nil, packet); err != nil || !handled {
+		t.Fatalf("Dispatch() = %t, %v", handled, err)
+	}
+	metrics := registry.Metrics()
+	if metrics.Count != 1 || metrics.TotalDuration < 0 || metrics.MaxDuration < 0 {
+		t.Fatalf("Metrics() = %+v", metrics)
+	}
+}
