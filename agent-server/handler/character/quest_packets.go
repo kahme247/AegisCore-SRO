@@ -2,10 +2,10 @@ package character
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -20,29 +20,10 @@ const (
 // followed by that many strings. The values deliberately remain semantic-free
 // until capture evidence identifies their game meaning.
 func buildQuestTalkPacket(messageType byte, value string, entries []string) (network.Packet, error) {
-	extended := messageType >= questTalkExtendedTypeMin && messageType <= questTalkExtendedTypeMax
-	if !extended && len(entries) != 0 {
+	if (messageType < questTalkExtendedTypeMin || messageType > questTalkExtendedTypeMax) && len(entries) != 0 {
 		return network.Packet{}, fmt.Errorf("quest talk type %d does not accept repeated strings", messageType)
 	}
-	if len(entries) > math.MaxUint8 {
-		return network.Packet{}, fmt.Errorf("quest talk repeated string count %d exceeds 255", len(entries))
-	}
-
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.QuestTalk
-	packet.WriteByte(messageType)
-	if err := packet.WriteString(value); err != nil {
-		return network.Packet{}, fmt.Errorf("write quest talk value: %w", err)
-	}
-	if extended {
-		packet.WriteByte(byte(len(entries)))
-		for index, entry := range entries {
-			if err := packet.WriteString(entry); err != nil {
-				return network.Packet{}, fmt.Errorf("write quest talk entry %d: %w", index, err)
-			}
-		}
-	}
-	return packet, nil
+	return vsro188.BuildQuestTalk(vsro188.QuestTalkMessage{Type: messageType, Text: value, Selections: entries})
 }
 
 // buildQuestUpdatePacket encodes the one-byte selector and four-byte value

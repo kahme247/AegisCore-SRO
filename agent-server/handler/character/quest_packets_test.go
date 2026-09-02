@@ -5,7 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 func TestBuildQuestTalkPacketBaseLayout(t *testing.T) {
@@ -42,7 +45,7 @@ func TestBuildQuestTalkPacketRejectsInvalidShape(t *testing.T) {
 	if _, err := buildQuestTalkPacket(3, "QUEST_A", []string{"unexpected"}); err == nil {
 		t.Fatal("non-extended type accepted repeated strings")
 	}
-	entries := make([]string, 256)
+	entries := make([]string, vsro188.QuestDialogueSelectionLimit+1)
 	if _, err := buildQuestTalkPacket(5, "QUEST_A", entries); err == nil {
 		t.Fatal("extended type accepted more than 255 repeated strings")
 	}
@@ -63,6 +66,33 @@ func TestBuildQuestUpdatePacketLayoutAndRange(t *testing.T) {
 		if _, err := buildQuestUpdatePacket(invalid, 1); err == nil {
 			t.Fatalf("type %d was accepted", invalid)
 		}
+	}
+}
+
+func TestBuildQuestAddAndStatePacketsPreserveActiveRecordAlignment(t *testing.T) {
+	quest := model.CharacterQuest{QuestID: model.QuestChulsanAngerID, Status: model.QuestProgressed, AchievementCount: 1, Data1: 7}
+	active := []byte{1, 0, 0x18, byte(model.QuestProgressed), 1, 1, 1, 21, 0}
+	active = append(active, "SN_CON_QNO_CH_SMITH_2"...)
+	active = append(active, 1, 7, 0, 0, 0)
+	for _, test := range []struct {
+		name       string
+		build      func(model.CharacterQuest) (network.Packet, error)
+		updateType byte
+	}{
+		{name: "add", build: buildQuestAddPacket, updateType: 1},
+		{name: "state", build: buildQuestStatePacket, updateType: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet, err := test.build(quest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []byte{test.updateType, byte(quest.QuestID), 0, 0, 0}
+			want = append(want, active...)
+			if got := packet.Payload(); !bytes.Equal(got, want) {
+				t.Fatalf("payload = % X, want % X", got, want)
+			}
+		})
 	}
 }
 

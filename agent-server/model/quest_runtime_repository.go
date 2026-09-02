@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -45,6 +46,13 @@ type questRewardReference struct {
 	Param3           int64
 	ItemRefID        uint32
 	ItemQuantity     int
+	Items            []questRewardItemReference
+}
+
+type questRewardItemReference struct {
+	RefID      uint32
+	Quantity   int
+	RewardType uint8
 }
 
 type QuestItemMutation struct {
@@ -63,6 +71,17 @@ type QuestItemGrantResult struct {
 	Added     QuestItemMutation
 }
 
+type QuestDeliveryResult struct {
+	Quest       CharacterQuest
+	DialogueKey string
+}
+
+type QuestDeliveryBatch struct {
+	Results      []QuestDeliveryResult
+	Inventory    Inventory
+	ChangedSlots []byte
+}
+
 type QuestCompletionResult struct {
 	Quest       CharacterQuest
 	Inventory   Inventory
@@ -70,13 +89,15 @@ type QuestCompletionResult struct {
 	Progress    ProgressionResult
 	Experience  uint64
 	SkillExp    uint64
-	Added       *QuestItemMutation
+	AddedItems  []QuestItemMutation
 	RemovedSlot *byte
 }
 
 type QuestRuntimeRepository interface {
 	GrantMissionItem(context.Context, int, int) (QuestItemGrantResult, error)
 	RecordMobKill(context.Context, int, uint32) ([]QuestProgressResult, error)
+	RecordCollectedItem(context.Context, int, uint32, uint32) ([]QuestProgressResult, error)
+	DeliverItemsAtNPC(context.Context, int, uint32) (QuestDeliveryBatch, error)
 	Complete(context.Context, int, int) (QuestCompletionResult, error)
 }
 
@@ -113,8 +134,12 @@ func (r *SQLQuestRuntimeRepository) GrantMissionItem(ctx context.Context, charac
 		return QuestItemGrantResult{}, err
 	}
 	quest, err := lockCharacterQuest(ctx, tx, characterID, questID)
-	if err != nil || quest.Status != QuestStartedByUser {
+	if err != nil {
 		return QuestItemGrantResult{}, ErrQuestStateConflict
+	}
+	nextStatus, err := TransitionQuest(quest.Status, QuestTransitionRewardReady)
+	if err != nil {
+		return QuestItemGrantResult{}, err
 	}
 	missionItemRefID, err := lockDeliverItemReference(ctx, tx, questID)
 	if err != nil {
@@ -135,9 +160,10 @@ func (r *SQLQuestRuntimeRepository) GrantMissionItem(ctx context.Context, charac
 	if err != nil {
 		return QuestItemGrantResult{}, err
 	}
-	quest.Status = QuestReadyToTurnInByUser
+	previousStatus := quest.Status
+	quest.Status = nextStatus
 	quest.Data1 = 1
-	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, questID, QuestStartedByUser)
+	update, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, quest.Data1, characterID, questID, previousStatus)
 	if err != nil {
 		return QuestItemGrantResult{}, err
 	}
@@ -159,7 +185,33 @@ func (r *SQLQuestRuntimeRepository) GrantMissionItem(ctx context.Context, charac
 }
 
 func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, characterID int, mobRefObjectID uint32) ([]QuestProgressResult, error) {
-	if r == nil || r.shard == nil || characterID <= 0 {
+	if r == nil || r.shard == nil || characterID <= 0 || mobRefObjectID == 0 {
+		return nil, ErrQuestStateConflict
+	}
+	return r.recordObjectiveProgress(ctx, characterID, 1, `SELECT quest.QUEST_ID,quest.STATUS,quest.ACHIEVEMENT_COUNT,quest.STARTED_AT,
+		quest.COMPLETED_AT,quest.QUEST_DATA_1,quest.QUEST_DATA_2,objective.REQUIRED_COUNT,objective.OBJECTIVE_KEY
+		FROM CHAR_QUEST quest JOIN REF_QUEST_KILL_OBJECTIVE objective ON objective.QUEST_ID=quest.QUEST_ID
+		WHERE quest.FK_CHAR=? AND quest.STATUS IN (?,?) AND objective.RUNTIME_ENABLED=1 AND objective.TARGET_REF_OBJECT_ID=?
+		ORDER BY quest.QUEST_ID FOR UPDATE`, characterID, QuestActive, QuestProgressed, mobRefObjectID)
+}
+
+// RecordCollectedItem advances only explicitly runtime-enabled collection
+// objectives whose authored item identity matches the committed pickup. It
+// does not treat ordinary delivery objectives as collection quests: those
+// require their separate NPC/item-consumption event path.
+func (r *SQLQuestRuntimeRepository) RecordCollectedItem(ctx context.Context, characterID int, itemRefObjectID, quantity uint32) ([]QuestProgressResult, error) {
+	if r == nil || r.shard == nil || characterID <= 0 || itemRefObjectID == 0 || quantity == 0 {
+		return nil, ErrQuestStateConflict
+	}
+	return r.recordObjectiveProgress(ctx, characterID, uint64(quantity), `SELECT quest.QUEST_ID,quest.STATUS,quest.ACHIEVEMENT_COUNT,quest.STARTED_AT,
+		quest.COMPLETED_AT,quest.QUEST_DATA_1,quest.QUEST_DATA_2,objective.REQUIRED_COUNT,objective.OBJECTIVE_KEY
+		FROM CHAR_QUEST quest JOIN REF_QUEST_COLLECTION_ITEM_OBJECTIVE objective ON objective.QUEST_ID=quest.QUEST_ID
+		WHERE quest.FK_CHAR=? AND quest.STATUS IN (?,?) AND objective.RUNTIME_ENABLED=1 AND objective.ITEM_REF_OBJECT_ID=?
+		ORDER BY quest.QUEST_ID FOR UPDATE`, characterID, QuestActive, QuestProgressed, itemRefObjectID)
+}
+
+func (r *SQLQuestRuntimeRepository) recordObjectiveProgress(ctx context.Context, characterID int, amount uint64, query string, arguments ...any) ([]QuestProgressResult, error) {
+	if r == nil || r.shard == nil || characterID <= 0 || amount == 0 || query == "" {
 		return nil, ErrQuestStateConflict
 	}
 	ctx = normalizeEconomyContext(ctx)
@@ -173,11 +225,7 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 			_ = tx.Rollback()
 		}
 	}()
-	rows, err := tx.QueryContext(ctx, `SELECT quest.QUEST_ID,quest.STATUS,quest.ACHIEVEMENT_COUNT,quest.STARTED_AT,
-		quest.COMPLETED_AT,quest.QUEST_DATA_1,quest.QUEST_DATA_2,objective.REQUIRED_COUNT
-		FROM CHAR_QUEST quest JOIN REF_QUEST_KILL_OBJECTIVE objective ON objective.QUEST_ID=quest.QUEST_ID
-		WHERE quest.FK_CHAR=? AND quest.STATUS=? AND objective.RUNTIME_ENABLED=1 AND objective.TARGET_REF_OBJECT_ID=?
-		ORDER BY quest.QUEST_ID FOR UPDATE`, characterID, QuestStartedByUser, mobRefObjectID)
+	rows, err := tx.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -190,9 +238,10 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 	for rows.Next() {
 		var entry pendingProgress
 		if err = rows.Scan(&entry.quest.QuestID, &entry.quest.Status, &entry.quest.AchievementCount, &entry.quest.StartedAt,
-			&entry.quest.CompletedAt, &entry.quest.Data1, &entry.quest.Data2, &entry.goal); err != nil {
+			&entry.quest.CompletedAt, &entry.quest.Data1, &entry.quest.Data2, &entry.goal, &entry.quest.ObjectiveKey); err != nil {
 			return nil, err
 		}
+		entry.quest.TaskCount = 1
 		pending = append(pending, entry)
 	}
 	if err = rows.Err(); err != nil {
@@ -207,12 +256,16 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 			continue
 		}
 		previous := entry.quest.Data1
-		entry.quest.Data1++
-		if entry.quest.Data1 >= entry.goal {
-			entry.quest.Data1 = entry.goal
-			entry.quest.Status = QuestReadyToTurnInByUser
+		previousStatus := entry.quest.Status
+		updated, changed, updateErr := advanceQuestObjective(entry.quest, entry.goal, amount)
+		if updateErr != nil {
+			return nil, updateErr
 		}
-		update, updateErr := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=? AND `QUEST_DATA_1`=?", entry.quest.Status, entry.quest.Data1, characterID, entry.quest.QuestID, QuestStartedByUser, previous)
+		if !changed {
+			continue
+		}
+		entry.quest = updated
+		update, updateErr := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`QUEST_DATA_1`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=? AND `QUEST_DATA_1`=?", entry.quest.Status, entry.quest.Data1, characterID, entry.quest.QuestID, previousStatus, previous)
 		if updateErr != nil {
 			return nil, updateErr
 		}
@@ -228,8 +281,234 @@ func (r *SQLQuestRuntimeRepository) RecordMobKill(ctx context.Context, character
 	return results, nil
 }
 
+func advanceQuestObjective(quest CharacterQuest, goal, amount uint64) (CharacterQuest, bool, error) {
+	if goal == 0 || amount == 0 || quest.Data1 >= goal {
+		return quest, false, nil
+	}
+	next := quest.Data1 + amount
+	if next < quest.Data1 || next >= goal {
+		next = goal
+	}
+	transition := QuestTransitionProgress
+	if next == goal {
+		transition = QuestTransitionRewardReady
+	}
+	status, err := TransitionQuest(quest.Status, transition)
+	if err != nil {
+		return CharacterQuest{}, false, err
+	}
+	quest.Data1 = next
+	quest.Status = status
+	return quest, true, nil
+}
+
+// DeliverItemsAtNPC implements the standard LuaSetDeliverMissionData shape.
+// Every eligible quest and all required inventory stacks are locked together;
+// only objectives with sufficient authored items are consumed and promoted.
+func (r *SQLQuestRuntimeRepository) DeliverItemsAtNPC(ctx context.Context, characterID int, npcRefObjectID uint32) (QuestDeliveryBatch, error) {
+	if r == nil || r.shard == nil || characterID <= 0 || npcRefObjectID == 0 {
+		return QuestDeliveryBatch{}, ErrQuestStateConflict
+	}
+	ctx = normalizeEconomyContext(ctx)
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return QuestDeliveryBatch{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	type deliveryObjective struct {
+		quest       CharacterQuest
+		variant     uint16
+		mission     uint32
+		dialogueKey string
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT quest.QUEST_ID,quest.STATUS,quest.ACHIEVEMENT_COUNT,quest.STARTED_AT,
+		quest.COMPLETED_AT,quest.QUEST_DATA_1,quest.QUEST_DATA_2,objective.VARIANT_INDEX,objective.MISSION_INDEX,
+		objective.OBJECTIVE_KEY,objective.DIALOGUE_KEY
+		FROM CHAR_QUEST quest JOIN REF_QUEST_DELIVER_ITEM objective ON objective.QUEST_ID=quest.QUEST_ID
+		WHERE quest.FK_CHAR=? AND quest.STATUS IN (?,?) AND objective.RUNTIME_ENABLED=1
+		AND objective.TARGET_NPC_REF_OBJECT_ID=? ORDER BY quest.QUEST_ID,objective.VARIANT_INDEX,objective.MISSION_INDEX FOR UPDATE`,
+		characterID, QuestActive, QuestProgressed, npcRefObjectID)
+	if err != nil {
+		return QuestDeliveryBatch{}, err
+	}
+	objectives := make([]deliveryObjective, 0)
+	for rows.Next() {
+		var objective deliveryObjective
+		if err = rows.Scan(&objective.quest.QuestID, &objective.quest.Status, &objective.quest.AchievementCount,
+			&objective.quest.StartedAt, &objective.quest.CompletedAt, &objective.quest.Data1, &objective.quest.Data2,
+			&objective.variant, &objective.mission, &objective.quest.ObjectiveKey, &objective.dialogueKey); err != nil {
+			_ = rows.Close()
+			return QuestDeliveryBatch{}, err
+		}
+		objectives = append(objectives, objective)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return QuestDeliveryBatch{}, err
+	}
+	if err = rows.Close(); err != nil {
+		return QuestDeliveryBatch{}, err
+	}
+	if len(objectives) == 0 {
+		if err = tx.Commit(); err != nil {
+			return QuestDeliveryBatch{}, errors.Join(ErrQuestOutcomeUnknown, err)
+		}
+		committed = true
+		return QuestDeliveryBatch{}, nil
+	}
+	items, err := lockQuestInventory(ctx, tx, characterID)
+	if err != nil {
+		return QuestDeliveryBatch{}, err
+	}
+	changed := make(map[byte]struct{})
+	result := QuestDeliveryBatch{Results: make([]QuestDeliveryResult, 0, len(objectives))}
+	for _, objective := range objectives {
+		requiredRows, queryErr := tx.QueryContext(ctx, `SELECT ITEM_REF_OBJECT_ID,QUANTITY FROM REF_QUEST_DELIVER_ITEM_ENTRY
+			WHERE QUEST_ID=? AND VARIANT_INDEX=? AND MISSION_INDEX=? ORDER BY ITEM_INDEX FOR SHARE`,
+			objective.quest.QuestID, objective.variant, objective.mission)
+		if queryErr != nil {
+			return QuestDeliveryBatch{}, queryErr
+		}
+		required := make(map[uint32]uint64)
+		for requiredRows.Next() {
+			var refID uint32
+			var quantity uint64
+			if queryErr = requiredRows.Scan(&refID, &quantity); queryErr != nil {
+				_ = requiredRows.Close()
+				return QuestDeliveryBatch{}, queryErr
+			}
+			if refID == 0 || quantity == 0 || required[refID] > math.MaxUint64-quantity {
+				_ = requiredRows.Close()
+				return QuestDeliveryBatch{}, ErrQuestReferenceUnsupported
+			}
+			required[refID] += quantity
+		}
+		if queryErr = requiredRows.Err(); queryErr != nil {
+			_ = requiredRows.Close()
+			return QuestDeliveryBatch{}, queryErr
+		}
+		if queryErr = requiredRows.Close(); queryErr != nil {
+			return QuestDeliveryBatch{}, queryErr
+		}
+		if len(required) == 0 || !questInventoryContains(items, required) {
+			continue
+		}
+		referenceIDs := make([]uint32, 0, len(required))
+		for refID := range required {
+			referenceIDs = append(referenceIDs, refID)
+		}
+		sort.Slice(referenceIDs, func(left, right int) bool { return referenceIDs[left] < referenceIDs[right] })
+		for _, refID := range referenceIDs {
+			if err = consumeQuestInventoryReference(ctx, tx, characterID, items, refID, required[refID], changed); err != nil {
+				return QuestDeliveryBatch{}, err
+			}
+		}
+		previousStatus := objective.quest.Status
+		objective.quest.Status, err = TransitionQuest(previousStatus, QuestTransitionRewardReady)
+		if err != nil {
+			return QuestDeliveryBatch{}, err
+		}
+		objective.quest.TaskCount = 0
+		update, updateErr := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?",
+			objective.quest.Status, characterID, objective.quest.QuestID, previousStatus)
+		if updateErr != nil {
+			return QuestDeliveryBatch{}, updateErr
+		}
+		if updateErr = requireQuestRow(update, "deliver quest items"); updateErr != nil {
+			return QuestDeliveryBatch{}, updateErr
+		}
+		result.Results = append(result.Results, QuestDeliveryResult{Quest: objective.quest, DialogueKey: objective.dialogueKey})
+	}
+	if err = tx.Commit(); err != nil {
+		return QuestDeliveryBatch{}, errors.Join(ErrQuestOutcomeUnknown, err)
+	}
+	committed = true
+	if len(result.Results) == 0 {
+		return result, nil
+	}
+	result.Inventory, err = loadQuestInventory(ctx, r.shard, characterID)
+	if err != nil {
+		return QuestDeliveryBatch{}, errors.Join(ErrQuestOutcomeUnknown, err)
+	}
+	for slot := byte(0); slot < math.MaxUint8; slot++ {
+		if _, exists := changed[slot]; exists {
+			result.ChangedSlots = append(result.ChangedSlots, slot)
+		}
+	}
+	return result, nil
+}
+
+func questInventoryContains(items map[byte]questInventoryItem, required map[uint32]uint64) bool {
+	totals := make(map[uint32]uint64, len(required))
+	for _, item := range items {
+		if _, wanted := required[item.refID]; wanted && item.stack > 0 {
+			amount := uint64(item.stack)
+			if totals[item.refID] > math.MaxUint64-amount {
+				return false
+			}
+			totals[item.refID] += amount
+		}
+	}
+	for refID, quantity := range required {
+		if totals[refID] < quantity {
+			return false
+		}
+	}
+	return true
+}
+
+func consumeQuestInventoryReference(ctx context.Context, tx *sql.Tx, characterID int, items map[byte]questInventoryItem, refID uint32, quantity uint64, changed map[byte]struct{}) error {
+	for slot := byte(13); slot < math.MaxUint8 && quantity > 0; slot++ {
+		item, exists := items[slot]
+		if !exists || item.refID != refID || item.stack <= 0 {
+			continue
+		}
+		available := uint64(item.stack)
+		if available <= quantity {
+			removed, err := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `FK_ITEM`=? AND `SLOT`=?", characterID, item.id, slot)
+			if err != nil {
+				return err
+			}
+			if err = requireQuestRow(removed, "unlink delivered quest item"); err != nil {
+				return err
+			}
+			removed, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", item.id)
+			if err != nil {
+				return err
+			}
+			if err = requireQuestRow(removed, "delete delivered quest item"); err != nil {
+				return err
+			}
+			delete(items, slot)
+			quantity -= available
+		} else {
+			remaining := available - quantity
+			updated, err := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", remaining, item.id, item.stack)
+			if err != nil {
+				return err
+			}
+			if err = requireQuestRow(updated, "decrement delivered quest item"); err != nil {
+				return err
+			}
+			item.stack = int(remaining)
+			items[slot] = item
+			quantity = 0
+		}
+		changed[slot] = struct{}{}
+	}
+	if quantity != 0 {
+		return ErrQuestRequiredItem
+	}
+	return nil
+}
+
 func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, questID int) (QuestCompletionResult, error) {
-	if r == nil || r.shard == nil || r.levels == nil || characterID <= 0 || (questID != QuestWeaponListID && questID != QuestChulsanAngerID) {
+	if r == nil || r.shard == nil || r.levels == nil || characterID <= 0 || questID <= 0 {
 		return QuestCompletionResult{}, ErrQuestStateConflict
 	}
 	ctx = normalizeEconomyContext(ctx)
@@ -249,8 +528,12 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, err
 	}
 	quest, err := lockCharacterQuest(ctx, tx, characterID, questID)
-	if err != nil || quest.Status != QuestReadyToTurnInByUser {
+	if err != nil {
 		return QuestCompletionResult{}, ErrQuestStateConflict
+	}
+	closedStatus, err := TransitionQuest(quest.Status, QuestTransitionClose)
+	if err != nil {
+		return QuestCompletionResult{}, err
 	}
 	items, err := lockQuestInventory(ctx, tx, characterID)
 	if err != nil {
@@ -264,8 +547,7 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, err
 	}
 	result := QuestCompletionResult{Quest: quest, Gold: state.gold}
-	switch questID {
-	case QuestWeaponListID:
+	if questID == QuestWeaponListID {
 		missionItemRefID, referenceErr := lockDeliverItemReference(ctx, tx, questID)
 		if referenceErr != nil {
 			return QuestCompletionResult{}, referenceErr
@@ -289,11 +571,8 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 			return QuestCompletionResult{}, err
 		}
 		result.RemovedSlot = &slot
-		if state.gold > math.MaxUint64-reward.Gold {
-			return QuestCompletionResult{}, ErrQuestStateConflict
-		}
-		state.gold += reward.Gold
-	case QuestChulsanAngerID:
+	}
+	if reward.IsItemReward {
 		slot, ok := freeQuestInventorySlot(items, state.inventorySize)
 		if !ok {
 			return QuestCompletionResult{}, ErrQuestInventoryFull
@@ -302,8 +581,12 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		if insertErr != nil {
 			return QuestCompletionResult{}, insertErr
 		}
-		result.Added = &QuestItemMutation{Slot: slot, Item: item}
+		result.AddedItems = append(result.AddedItems, QuestItemMutation{Slot: slot, Item: item})
 	}
+	if state.gold > math.MaxUint64-reward.Gold {
+		return QuestCompletionResult{}, ErrQuestStateConflict
+	}
+	state.gold += reward.Gold
 
 	progress := ApplyExperience(r.levels, state.level, state.experience, state.skillExperience, reward.Experience, reward.SkillExperience, state.skillPoints, state.statPoints)
 	updatedCharacter, err := tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=?,`CURRENT_LEVEL`=?,`EXP`=?,`SKILL_EXP`=?,`SKILL_POINTS`=?,`STAT_POINTS`=?,`MAX_LEVEL`=GREATEST(`MAX_LEVEL`,?) WHERE `id`=?", state.gold, progress.Level, progress.Experience, progress.SkillExperience, progress.SkillPoints, progress.StatPoints, progress.Level, characterID)
@@ -314,7 +597,7 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, err
 	}
 	now := time.Now().UTC()
-	completed, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`COMPLETED_AT`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", QuestCompleted, now, characterID, questID, QuestReadyToTurnInByUser)
+	completed, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`COMPLETED_AT`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", closedStatus, now, characterID, questID, quest.Status)
 	if err != nil {
 		return QuestCompletionResult{}, err
 	}
@@ -325,7 +608,7 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 		return QuestCompletionResult{}, errors.Join(ErrQuestOutcomeUnknown, err)
 	}
 	committed = true
-	result.Quest.Status = QuestCompleted
+	result.Quest.Status = closedStatus
 	result.Quest.CompletedAt = &now
 	result.Gold = state.gold
 	result.Progress = progress
@@ -335,12 +618,166 @@ func (r *SQLQuestRuntimeRepository) Complete(ctx context.Context, characterID, q
 	if err != nil {
 		return QuestCompletionResult{}, errors.Join(ErrQuestOutcomeUnknown, err)
 	}
-	if result.Added != nil {
-		if persisted, exists := result.Inventory.Items[result.Added.Slot]; exists {
-			result.Added.Item = persisted
+	for index := range result.AddedItems {
+		if persisted, exists := result.Inventory.Items[result.AddedItems[index].Slot]; exists {
+			result.AddedItems[index].Item = persisted
 		}
 	}
 	return result, nil
+}
+
+// SelectQuestReward commits the 0x7515 quest-reward path. The stock client
+// sends resolved reference item IDs, so every requested ID is resolved again
+// under the transaction against this quest's authored reward rows.
+func (r *SQLQuestRuntimeRepository) SelectQuestReward(ctx context.Context, characterID int, rewardID uint32, entryIDs []uint32) (QuestCompletionResult, error) {
+	// The binary uses rewardID >= 10000 for the separate RefEventReward
+	// catalog. That catalog carries server-event context and is intentionally
+	// not coerced into a quest ID here; accepting it would make a valid-looking
+	// but semantically wrong CHAR_QUEST mutation.
+	if r == nil || r.shard == nil || r.levels == nil || characterID <= 0 || rewardID == 0 || rewardID >= 10000 {
+		return QuestCompletionResult{}, ErrQuestStateConflict
+	}
+	questID := int(rewardID)
+	ctx = normalizeEconomyContext(ctx)
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	state, err := lockQuestCharacter(ctx, tx, characterID)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	quest, err := lockCharacterQuest(ctx, tx, characterID, questID)
+	if err != nil {
+		return QuestCompletionResult{}, ErrQuestStateConflict
+	}
+	closedStatus, err := TransitionQuest(quest.Status, QuestTransitionClose)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	items, err := lockQuestInventory(ctx, tx, characterID)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	reward, err := lockQuestRewardReference(ctx, tx, questID)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	selected, err := selectQuestRewardItems(questID, reward, entryIDs)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+
+	result := QuestCompletionResult{Quest: quest, Gold: state.gold}
+	for _, selectedItem := range selected {
+		ref, exists := RefItems[selectedItem.RefID]
+		if !exists || selectedItem.Quantity <= 0 {
+			return QuestCompletionResult{}, fmt.Errorf("%w: quest %d item %d", ErrQuestReferenceUnsupported, questID, selectedItem.RefID)
+		}
+		maxStack := ref.StackSize
+		if maxStack <= 0 {
+			maxStack = 1
+		}
+		remaining := selectedItem.Quantity
+		for remaining > 0 {
+			stack := min(remaining, maxStack)
+			slot, ok := freeQuestInventorySlot(items, state.inventorySize)
+			if !ok {
+				return QuestCompletionResult{}, ErrQuestInventoryFull
+			}
+			item, insertErr := insertQuestItemStack(ctx, tx, characterID, slot, selectedItem.RefID, stack)
+			if insertErr != nil {
+				return QuestCompletionResult{}, insertErr
+			}
+			items[slot] = questInventoryItem{id: int64(item.ID), refID: selectedItem.RefID, stack: stack}
+			result.AddedItems = append(result.AddedItems, QuestItemMutation{Slot: slot, Item: item})
+			remaining -= stack
+		}
+	}
+	if state.gold > math.MaxUint64-reward.Gold {
+		return QuestCompletionResult{}, ErrQuestStateConflict
+	}
+	state.gold += reward.Gold
+	progress := ApplyExperience(r.levels, state.level, state.experience, state.skillExperience, reward.Experience, reward.SkillExperience, state.skillPoints, state.statPoints)
+	updatedCharacter, err := tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=?,`CURRENT_LEVEL`=?,`EXP`=?,`SKILL_EXP`=?,`SKILL_POINTS`=?,`STAT_POINTS`=?,`MAX_LEVEL`=GREATEST(`MAX_LEVEL`,?) WHERE `id`=?", state.gold, progress.Level, progress.Experience, progress.SkillExperience, progress.SkillPoints, progress.StatPoints, progress.Level, characterID)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	if err = requireQuestRow(updatedCharacter, "apply selected quest rewards"); err != nil {
+		return QuestCompletionResult{}, err
+	}
+	now := time.Now().UTC()
+	completed, err := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=?,`COMPLETED_AT`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", closedStatus, now, characterID, questID, quest.Status)
+	if err != nil {
+		return QuestCompletionResult{}, err
+	}
+	if err = requireQuestRow(completed, "complete selected-reward quest"); err != nil {
+		return QuestCompletionResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return QuestCompletionResult{}, errors.Join(ErrQuestOutcomeUnknown, err)
+	}
+	committed = true
+	result.Quest.Status = closedStatus
+	result.Quest.CompletedAt = &now
+	result.Gold = state.gold
+	result.Progress = progress
+	result.Experience = reward.Experience
+	result.SkillExp = reward.SkillExperience
+	result.Inventory, err = loadQuestInventory(ctx, r.shard, characterID)
+	if err != nil {
+		return QuestCompletionResult{}, errors.Join(ErrQuestOutcomeUnknown, err)
+	}
+	for index := range result.AddedItems {
+		if persisted, exists := result.Inventory.Items[result.AddedItems[index].Slot]; exists {
+			result.AddedItems[index].Item = persisted
+		}
+	}
+	return result, nil
+}
+
+func selectQuestRewardItems(questID int, reward questRewardReference, entryIDs []uint32) ([]questRewardItemReference, error) {
+	unsupported := !reward.IsBasicReward || !reward.IsItemReward || reward.SelectionCount == 0 ||
+		reward.IsCheckCondition || reward.IsCheckCountry || reward.IsCheckClass || reward.IsCheckGender ||
+		reward.SkillPoints != 0 || reward.AcademyPoints != 0 || reward.Hwan != 0 || reward.InventorySlots != 0 ||
+		reward.Param1 != 0 || reward.Param2 != 0 || reward.Param3 != 0
+	if unsupported || len(reward.Items) == 0 {
+		return nil, fmt.Errorf("%w: quest %d", ErrQuestReferenceUnsupported, questID)
+	}
+	if len(entryIDs) != int(reward.SelectionCount) {
+		return nil, fmt.Errorf("%w: quest %d selected %d entries, want %d", ErrQuestStateConflict, questID, len(entryIDs), reward.SelectionCount)
+	}
+	options := make(map[uint32]questRewardItemReference, len(reward.Items))
+	for _, item := range reward.Items {
+		if item.RefID == 0 || item.Quantity <= 0 {
+			return nil, fmt.Errorf("%w: quest %d has an invalid reward item", ErrQuestReferenceUnsupported, questID)
+		}
+		if _, duplicate := options[item.RefID]; duplicate {
+			return nil, fmt.Errorf("%w: quest %d has ambiguous item %d", ErrQuestReferenceUnsupported, questID, item.RefID)
+		}
+		options[item.RefID] = item
+	}
+	selected := make([]questRewardItemReference, 0, len(entryIDs))
+	seen := make(map[uint32]struct{}, len(entryIDs))
+	for _, entryID := range entryIDs {
+		if _, duplicate := seen[entryID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate reward item %d", ErrQuestStateConflict, entryID)
+		}
+		item, exists := options[entryID]
+		if !exists {
+			return nil, fmt.Errorf("%w: quest %d does not offer item %d", ErrQuestStateConflict, questID, entryID)
+		}
+		seen[entryID] = struct{}{}
+		selected = append(selected, item)
+	}
+	return selected, nil
 }
 
 func lockDeliverItemReference(ctx context.Context, tx *sql.Tx, questID int) (uint32, error) {
@@ -402,7 +839,8 @@ func lockQuestRewardReference(ctx context.Context, tx *sql.Tx, questID int) (que
 	if !reward.IsItemReward {
 		return reward, nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT item.ItemID,rewards.ACHIEVE_QUANTITY,scriptItem.ITEM_REF_OBJECT_ID,scriptItem.QUANTITY
+	rows, err := tx.QueryContext(ctx, `SELECT item.ItemID,rewards.ACHIEVE_QUANTITY,rewards.REWARD_TYPE,
+		scriptItem.ITEM_REF_OBJECT_ID,scriptItem.QUANTITY
 		FROM REF_QUEST_REWARD_ITEM rewards
 		JOIN ITEMDATA item ON item.CodeName=rewards.ITEM_CODE_NAME
 		JOIN REF_QUEST_SCRIPT_REWARD script ON script.QUEST_ID=rewards.QUEST_ID AND script.RUNTIME_ENABLED=1
@@ -416,21 +854,28 @@ func lockQuestRewardReference(ctx context.Context, tx *sql.Tx, questID int) (que
 	count := 0
 	for rows.Next() {
 		count++
+		var itemReference questRewardItemReference
 		var scriptItemRefID uint32
 		var scriptQuantity int
-		if err = rows.Scan(&reward.ItemRefID, &reward.ItemQuantity, &scriptItemRefID, &scriptQuantity); err != nil {
+		if err = rows.Scan(&itemReference.RefID, &itemReference.Quantity, &itemReference.RewardType, &scriptItemRefID, &scriptQuantity); err != nil {
 			return questRewardReference{}, err
 		}
-		if reward.ItemRefID != scriptItemRefID || reward.ItemQuantity != scriptQuantity {
+		if itemReference.RefID != scriptItemRefID || itemReference.Quantity != scriptQuantity {
 			return questRewardReference{}, fmt.Errorf("%w: quest %d SQL and script reward items disagree", ErrQuestReferenceUnsupported, questID)
 		}
+		reward.Items = append(reward.Items, itemReference)
 	}
 	if err = rows.Err(); err != nil {
 		return questRewardReference{}, err
 	}
 	if count != 1 {
-		return questRewardReference{}, fmt.Errorf("%w: quest %d resolved %d reward items", ErrQuestReferenceUnsupported, questID, count)
+		if reward.SelectionCount == 0 {
+			return questRewardReference{}, fmt.Errorf("%w: quest %d resolved %d reward items", ErrQuestReferenceUnsupported, questID, count)
+		}
+		return reward, nil
 	}
+	reward.ItemRefID = reward.Items[0].RefID
+	reward.ItemQuantity = reward.Items[0].Quantity
 	return reward, nil
 }
 
@@ -441,17 +886,12 @@ func validateQuestRewardReference(questID int, reward questRewardReference) erro
 	if unsupported {
 		return fmt.Errorf("%w: quest %d", ErrQuestReferenceUnsupported, questID)
 	}
-	switch questID {
-	case QuestWeaponListID:
-		if reward.IsItemReward || reward.ItemRefID != 0 || reward.ItemQuantity != 0 {
-			return fmt.Errorf("%w: quest %d unexpected item reward", ErrQuestReferenceUnsupported, questID)
-		}
-	case QuestChulsanAngerID:
-		if !reward.IsItemReward || reward.ItemRefID == 0 || reward.ItemQuantity != 1 {
+	if reward.IsItemReward {
+		if reward.ItemRefID == 0 || reward.ItemQuantity != 1 {
 			return fmt.Errorf("%w: quest %d requires one exact item reward", ErrQuestReferenceUnsupported, questID)
 		}
-	default:
-		return fmt.Errorf("%w: quest %d has no verified completion flow", ErrQuestReferenceUnsupported, questID)
+	} else if reward.ItemRefID != 0 || reward.ItemQuantity != 0 {
+		return fmt.Errorf("%w: quest %d has inconsistent item reward", ErrQuestReferenceUnsupported, questID)
 	}
 	return nil
 }
@@ -531,10 +971,17 @@ func freeQuestInventorySlot(items map[byte]questInventoryItem, capacity byte) (b
 }
 
 func insertQuestItem(ctx context.Context, tx *sql.Tx, characterID int, slot byte, refID uint32) (Item, error) {
+	return insertQuestItemStack(ctx, tx, characterID, slot, refID, 1)
+}
+
+func insertQuestItemStack(ctx context.Context, tx *sql.Tx, characterID int, slot byte, refID uint32, quantity int) (Item, error) {
 	if _, ok := RefItems[refID]; !ok {
 		return Item{}, fmt.Errorf("%w: %d", ErrInventoryReferenceItemNotFound, refID)
 	}
-	insert, err := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (0,?,1,0,0,0,0,0,0,0,0,0)", refID)
+	if quantity <= 0 {
+		return Item{}, ErrQuestStateConflict
+	}
+	insert, err := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (0,?,?,0,0,0,0,0,0,0,0,0)", refID, quantity)
 	if err != nil {
 		return Item{}, err
 	}
@@ -545,7 +992,7 @@ func insertQuestItem(ctx context.Context, tx *sql.Tx, characterID int, slot byte
 	if _, err = tx.ExecContext(ctx, "INSERT INTO `INVENTORY` (`FK_CHAR`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", characterID, slot, itemID); err != nil {
 		return Item{}, err
 	}
-	return economyItem(itemID, refID, 0, 1, 0, 0, RentInfo{})
+	return economyItem(itemID, refID, 0, quantity, 0, 0, RentInfo{})
 }
 
 func loadQuestInventory(ctx context.Context, shard *sql.DB, characterID int) (Inventory, error) {

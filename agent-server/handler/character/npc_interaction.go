@@ -9,12 +9,13 @@ import (
 // services. It prevents a later shop, repair, teleport, or quest packet from
 // naming an arbitrary NPC that the player did not just interact with.
 type NPCInteraction struct {
-	PlayerUniqueID uint32
-	NPCUniqueID    uint32
-	NPCRefObjectID uint32
-	Action         byte
-	PendingQuestID int
-	OpenedAt       time.Time
+	PlayerUniqueID  uint32
+	NPCUniqueID     uint32
+	NPCRefObjectID  uint32
+	Action          byte
+	PendingQuestID  int
+	OfferedQuestIDs []int
+	OpenedAt        time.Time
 }
 
 // NPCInteractionRegistry deliberately keeps only the most-recent interaction
@@ -72,6 +73,22 @@ func (r *NPCInteractionRegistry) SelectQuest(playerUID uint32, questID int) bool
 		return false
 	}
 	interaction.PendingQuestID = questID
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) SetQuestOffers(playerUID uint32, questIDs []int) bool {
+	if r == nil || playerUID == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.OfferedQuestIDs = append([]int(nil), questIDs...)
+	interaction.PendingQuestID = 0
 	r.entries[playerUID] = interaction
 	return true
 }

@@ -46,8 +46,8 @@ func TestCharacterQuestRepositoryRequiresCompletionTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCharacterQuestRepository: %v", err)
 	}
-	if err := repository.Save(context.Background(), 77, CharacterQuest{QuestID: 101, Status: QuestCompleted}); err == nil {
-		t.Fatal("Save accepted completed quest without completion time")
+	if err := repository.Save(context.Background(), 77, CharacterQuest{QuestID: 101, Status: QuestClosed}); err == nil {
+		t.Fatal("Save accepted closed quest without completion time")
 	}
 }
 
@@ -58,7 +58,7 @@ func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewCharacterQuestRepository: %v", err)
 		}
-		quest := CharacterQuest{QuestID: 3, Status: QuestStartedByUser, AchievementCount: 1}
+		quest := CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1}
 		activated, err := repository.Activate(context.Background(), 77, quest)
 		if err != nil {
 			t.Fatalf("Activate affected=%d: %v", affected, err)
@@ -66,13 +66,13 @@ func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
 		if database.query != activateCharacterQuest {
 			t.Fatalf("query = %q", database.query)
 		}
-		wantArgs := []any{77, 3, QuestStartedByUser, uint16(1), uint64(0), uint64(0),
-			QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned,
-			QuestActive, QuestAbandoned, QuestActive, QuestAbandoned, QuestActive, QuestAbandoned}
+		wantArgs := []any{77, 3, QuestActive, uint16(1), uint64(0), uint64(0),
+			QuestInactive, QuestAborted, QuestInactive, QuestAborted, QuestInactive, QuestAborted,
+			QuestInactive, QuestAborted, QuestInactive, QuestAborted, QuestInactive, QuestAborted}
 		if !reflect.DeepEqual(database.args, wantArgs) {
 			t.Fatalf("args = %#v, want %#v", database.args, wantArgs)
 		}
-		if activated.QuestID != 3 || activated.Status != QuestStartedByUser || activated.StartedAt.IsZero() {
+		if activated.QuestID != 3 || activated.Status != QuestActive || activated.StartedAt.IsZero() {
 			t.Fatalf("activated quest = %#v", activated)
 		}
 	}
@@ -83,7 +83,7 @@ func TestCharacterQuestRepositoryDoesNotOverwriteUnavailableQuest(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewCharacterQuestRepository: %v", err)
 	}
-	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestStartedByUser, AchievementCount: 1})
+	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1})
 	if !errors.Is(err, ErrCharacterQuestNotAvailable) {
 		t.Fatalf("Activate error = %v, want ErrCharacterQuestNotAvailable", err)
 	}
@@ -101,7 +101,7 @@ func TestCharacterQuestRepositoryAbandonIsCompareAndSwap(t *testing.T) {
 	if database.query != abandonCharacterQuest {
 		t.Fatalf("query = %q", database.query)
 	}
-	want := []any{QuestAbandoned, 77, 101, QuestActive, QuestReadyToTurnIn, QuestStartedByUser, QuestReadyToTurnInByUser}
+	want := []any{QuestAborted, 77, 101, QuestActive, QuestProgressed, QuestRewardReady}
 	if !reflect.DeepEqual(database.args, want) {
 		t.Fatalf("args = %#v, want %#v", database.args, want)
 	}
@@ -114,5 +114,25 @@ func TestCharacterQuestRepositoryAbandonRejectsInactiveQuest(t *testing.T) {
 	}
 	if err := repository.Abandon(context.Background(), 77, 101); !errors.Is(err, ErrCharacterQuestNotActive) {
 		t.Fatalf("Abandon error = %v, want ErrCharacterQuestNotActive", err)
+	}
+}
+
+func TestCharacterQuestRepositoryLoadsProtocolMetadataForBootstrap(t *testing.T) {
+	resetCatalogRepositoryTestState()
+	now := time.Now()
+	setCatalogRepositoryTestResponse(selectCharacterQuests, catalogRepositoryTestResponse{
+		columns: []string{"QUEST_ID", "STATUS", "ACHIEVEMENT_COUNT", "STARTED_AT", "COMPLETED_AT", "QUEST_DATA_1", "QUEST_DATA_2", "OBJECTIVE_KEY", "TASK_COUNT"},
+		rows:    [][]driver.Value{{int64(101), int64(QuestProgressed), int64(1), now, nil, int64(4), int64(0), "SN_CON_QUEST", int64(1)}},
+	})
+	repository, err := NewCharacterQuestRepository(openCatalogRepositoryTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quests, err := repository.List(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quests) != 1 || quests[0].ObjectiveKey != "SN_CON_QUEST" || quests[0].TaskCount != 1 || quests[0].Data1 != 4 {
+		t.Fatalf("quests = %#v", quests)
 	}
 }

@@ -77,6 +77,13 @@ func isTeleportServiceCodeName(codeName string) bool {
 		(strings.HasPrefix(codeName, "STORE_") && strings.HasSuffix(codeName, "_GATE"))
 }
 
+// IsTeleportServiceCodeName exposes the catalog classification to handlers
+// that need to admit ferry/teleport NPCs through the generic 0x7059/0x705A
+// path without duplicating string heuristics.
+func IsTeleportServiceCodeName(codeName string) bool {
+	return isTeleportServiceCodeName(strings.ToUpper(strings.TrimSpace(codeName)))
+}
+
 func npcSelectionInfoWord(codeName string) (uint16, bool) {
 	withInfo := map[string]uint16{
 		"NPC_CH_SMITH":     0,

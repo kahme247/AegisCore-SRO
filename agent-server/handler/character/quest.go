@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 type QuestHandler struct {
@@ -33,10 +34,11 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 	if session == nil || session.UserContext.CharacterID <= 0 {
 		return fmt.Errorf("quest abandon requires a selected character")
 	}
-	questID, err := packet.ReadUInt32()
-	if err != nil || questID == 0 || packet.Remaining() != 0 {
+	request, err := vsro188.DecodeQuestIDRequest(&packet)
+	if err != nil {
 		return fmt.Errorf("malformed quest abandon request")
 	}
+	questID := request.QuestID
 	err = h.repository.Abandon(ctx, session.UserContext.CharacterID, int(questID))
 	if err != nil && !errors.Is(err, model.ErrCharacterQuestNotActive) {
 		return err
@@ -45,7 +47,7 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 	if success && session.UserContext.UniqueID != 0 {
 		if object, lookupErr := service.GetWorldServiceInstance().GetObjectByUniqueId(session.UserContext.UniqueID); lookupErr == nil {
 			if player, ok := object.(*model.Player); ok {
-				player.MarkQuestAbandoned(int(questID))
+				player.MarkQuestAborted(int(questID))
 			}
 		}
 	}
@@ -57,13 +59,10 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 }
 
 func buildQuestAbandonResponse(success bool, questID uint32) network.Packet {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.QuestAbandonResponse
-	if success {
-		packet.WriteByte(1)
-		packet.WriteUInt32(questID)
-	} else {
-		packet.WriteByte(2)
+	packet, err := vsro188.BuildQuestResponse(opcode.QuestAbandonResponse, success, questID, 2)
+	if err != nil {
+		// The handler validates non-zero request IDs before reaching this point.
+		return network.Packet{}
 	}
 	return packet
 }

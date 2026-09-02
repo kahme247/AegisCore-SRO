@@ -33,8 +33,11 @@ func (r *questRepositoryStub) Abandon(_ context.Context, characterID, questID in
 func TestQuestAbandonUsesSelectedCharacterAndReturnsStockSuccess(t *testing.T) {
 	repository := &questRepositoryStub{}
 	handler := &QuestHandler{repository: repository}
-	var response network.Packet
-	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	var responses []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		responses = append(responses, packet)
+		return nil
+	}
 	session := &server.Session{}
 	session.UserContext.CharacterID = 77
 	request := network.EmptyClientPacket()
@@ -45,10 +48,33 @@ func TestQuestAbandonUsesSelectedCharacterAndReturnsStockSuccess(t *testing.T) {
 	if repository.characterID != 77 || repository.questID != 123 {
 		t.Fatalf("abandon identity = (%d,%d)", repository.characterID, repository.questID)
 	}
-	if response.MessageID != opcode.QuestAbandonResponse {
-		t.Fatalf("response opcode = 0x%04X", response.MessageID)
+	if len(responses) != 1 {
+		t.Fatalf("responses = %#v, want only the abandon acknowledgement", responses)
 	}
-	if got, want := response.Payload(), []byte{1, 123, 0, 0, 0}; string(got) != string(want) {
+	if responses[0].MessageID != opcode.QuestAbandonResponse {
+		t.Fatalf("response opcode = 0x%04X", responses[0].MessageID)
+	}
+	if got, want := responses[0].Payload(), []byte{1, 123, 0, 0, 0}; string(got) != string(want) {
+		t.Fatalf("response = %v, want %v", got, want)
+	}
+}
+
+func TestQuestAbandonReturnsLegacyFailureReason(t *testing.T) {
+	repository := &questRepositoryStub{err: model.ErrCharacterQuestNotActive}
+	handler := &QuestHandler{repository: repository}
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		response = packet
+		return nil
+	}
+	session := &server.Session{}
+	session.UserContext.CharacterID = 77
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(123)
+	if err := handler.handleAbandon(context.Background(), session, request); err != nil {
+		t.Fatalf("handleAbandon: %v", err)
+	}
+	if got, want := response.Payload(), []byte{2, 2}; string(got) != string(want) {
 		t.Fatalf("response = %v, want %v", got, want)
 	}
 }
