@@ -86,6 +86,7 @@ func (h *AuthRequestHandler) HandlePacket(packet server.PacketChannelData) error
 	// now established, so downstream admission policy may safely allow lobby
 	// opcodes for this session.
 	packet.Session.MarkAuthenticated()
+	packet.Session.SetTraceCorrelationID(ticket.TraceID)
 	return h.respond(packet.Session, ResultTrue)
 }
 

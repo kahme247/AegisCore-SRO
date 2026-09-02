@@ -34,6 +34,7 @@ func TestAuthRequestHandlerKeepsWrongUserTicketAndRedeemsOnce(t *testing.T) {
 	store := auth.NewAdmissionTicketStore()
 	ticket := auth.AdmissionTicket{
 		QueueID:      0x10203040,
+		TraceID:      "gateway-session-123",
 		AccountID:    77,
 		Username:     "Alice",
 		ShardID:      1,
@@ -64,6 +65,9 @@ func TestAuthRequestHandlerKeepsWrongUserTicketAndRedeemsOnce(t *testing.T) {
 	}
 	if !validSession.IsAuthenticated() {
 		t.Fatal("valid admission did not mark the session authenticated")
+	}
+	if got := validSession.TraceCorrelationID(); got != ticket.TraceID {
+		t.Fatalf("trace correlation ID = %q, want %q", got, ticket.TraceID)
 	}
 	if got, want := validSession.UserContext.UserID, ticket.AccountID; got != want {
 		t.Fatalf("authenticated user ID = %d, want %d", got, want)

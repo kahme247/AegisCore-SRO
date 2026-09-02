@@ -13,7 +13,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 )
 
-func TestPlayerSessionClosedReleasesAdmissionBeforeCharacterJoin(t *testing.T) {
+func TestPlayerSessionClosedReleasesAdmissionBeforeCharacterTeardown(t *testing.T) {
 	store := auth.NewAdmissionTicketStore()
 	ticket := auth.AdmissionTicket{
 		QueueID:      1,

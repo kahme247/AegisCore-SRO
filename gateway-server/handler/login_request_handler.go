@@ -219,7 +219,7 @@ func (h *LoginRequestHandler) handlePacket(ctx context.Context, packet server.Pa
 		return
 	}
 
-	queueID, issueErr := h.issueAgentTicket(ctx, request)
+	queueID, issueErr := h.issueAgentTicket(ctx, request, packet.Session.ID)
 	if issueErr != nil {
 		// A successful A102 is forbidden until the private Agent endpoint
 		// acknowledges the installation. This remains a failure response even
@@ -259,11 +259,12 @@ func (h *LoginRequestHandler) handlePacket(ctx context.Context, packet server.Pa
 	h.sendLoginResponse(packet.Session, response)
 }
 
-func (h *LoginRequestHandler) issueAgentTicket(ctx context.Context, request LoginAdmissionRequest) (uint32, error) {
+func (h *LoginRequestHandler) issueAgentTicket(ctx context.Context, request LoginAdmissionRequest, traceID string) (uint32, error) {
 	if h == nil || h.TicketIssuer == nil || h.TicketInstaller == nil || !request.SourceIP.IsValid() {
 		return 0, auth.ErrAdmissionTicketInvalid
 	}
 	ticket, err := h.TicketIssuer.Issue(auth.AdmissionTicket{
+		TraceID:      traceID,
 		AccountID:    request.AccountID,
 		Username:     request.Username,
 		ShardID:      request.ShardID,

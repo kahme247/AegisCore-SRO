@@ -55,9 +55,11 @@ var (
 //
 // Passwords never belong in this type. Gateway authentication is complete
 // before a ticket is issued; Agent only parses the stock password field for
-// wire compatibility and discards it.
+// wire compatibility and discards it. TraceID is diagnostic-only correlation
+// metadata and is never consulted for ticket identity or admission decisions.
 type AdmissionTicket struct {
 	QueueID      uint32
+	TraceID      string
 	AccountID    uint32
 	Username     string
 	ShardID      uint16
@@ -404,10 +406,26 @@ func (s *AdmissionTicketStore) deleteTicketLocked(queueID uint32, stored storedA
 }
 
 func validateAdmissionTicket(ticket AdmissionTicket, requireQueueID bool) error {
-	if (requireQueueID && ticket.QueueID == 0) || ticket.AccountID == 0 || ticket.ShardID == 0 || NormalizeUsername(ticket.Username) == "" || !ticket.HasContentID || !ticket.SourceIP.IsValid() {
+	if (requireQueueID && ticket.QueueID == 0) || ticket.AccountID == 0 || ticket.ShardID == 0 || NormalizeUsername(ticket.Username) == "" || !ticket.HasContentID || !ticket.SourceIP.IsValid() || !validAdmissionTraceID(ticket.TraceID) {
 		return ErrAdmissionTicketInvalid
 	}
 	return nil
+}
+
+func validAdmissionTraceID(traceID string) bool {
+	if traceID == "" {
+		return true
+	}
+	if len(traceID) > 64 {
+		return false
+	}
+	for _, character := range traceID {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func cloneTicket(ticket AdmissionTicket) AdmissionTicket {

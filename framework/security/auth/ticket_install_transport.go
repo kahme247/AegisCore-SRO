@@ -395,6 +395,7 @@ func (c *HTTPSAdmissionTicketInstaller) Install(ctx context.Context, ticket Admi
 
 type admissionTicketInstallPayload struct {
 	QueueID   uint32 `json:"queue_id"`
+	TraceID   string `json:"trace_id,omitempty"`
 	AccountID uint32 `json:"account_id"`
 	Username  string `json:"username"`
 	ShardID   uint16 `json:"shard_id"`
@@ -413,6 +414,7 @@ func newAdmissionTicketInstallPayload(ticket AdmissionTicket) admissionTicketIns
 	}
 	return admissionTicketInstallPayload{
 		QueueID:   ticket.QueueID,
+		TraceID:   ticket.TraceID,
 		AccountID: ticket.AccountID,
 		Username:  ticket.Username,
 		ShardID:   ticket.ShardID,
@@ -435,6 +437,7 @@ func (payload admissionTicketInstallPayload) ticket() (AdmissionTicket, error) {
 	}
 	return AdmissionTicket{
 		QueueID:      payload.QueueID,
+		TraceID:      payload.TraceID,
 		AccountID:    payload.AccountID,
 		Username:     payload.Username,
 		ShardID:      payload.ShardID,

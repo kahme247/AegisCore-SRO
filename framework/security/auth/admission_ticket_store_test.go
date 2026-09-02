@@ -22,6 +22,23 @@ func TestAdmissionTicketStoreRejectsUnknownAndZeroValueAdmissions(t *testing.T) 
 	}
 }
 
+func TestAdmissionTicketStoreRejectsInvalidTraceCorrelationID(t *testing.T) {
+	store := NewAdmissionTicketStore()
+	ticket := AdmissionTicket{
+		QueueID:      7,
+		TraceID:      "invalid trace id\n",
+		AccountID:    1,
+		Username:     "alice",
+		ShardID:      1,
+		ContentID:    56,
+		HasContentID: true,
+		SourceIP:     testAdmissionSourceIP,
+	}
+	if err := store.Install(ticket); !errors.Is(err, ErrAdmissionTicketInvalid) {
+		t.Fatalf("Install(invalid trace ID) error = %v, want ErrAdmissionTicketInvalid", err)
+	}
+}
+
 func TestAdmissionTicketStoreRedeemsOnlyMatchingTicketOnce(t *testing.T) {
 	store := NewAdmissionTicketStore()
 	ticket := AdmissionTicket{

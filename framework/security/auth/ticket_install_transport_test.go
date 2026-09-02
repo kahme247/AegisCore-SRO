@@ -37,17 +37,22 @@ func TestAdmissionTicketInstallerUsesMutualTLSAndAcknowledgesInstall(t *testing.
 		t.Fatalf("NewHTTPSAdmissionTicketInstaller() error = %v", err)
 	}
 	ticket := validTransportTicket(0x10203040)
+	ticket.TraceID = "gateway-session-123"
 	if err := installer.Install(context.Background(), ticket); err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	if _, err := store.Redeem(AdmissionCredentials{
+	redeemed, err := store.Redeem(AdmissionCredentials{
 		QueueID:      ticket.QueueID,
 		Username:     ticket.Username,
 		ContentID:    ticket.ContentID,
 		HasContentID: true,
 		SourceIP:     ticket.SourceIP,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Redeem(installed ticket) error = %v", err)
+	}
+	if redeemed.TraceID != ticket.TraceID {
+		t.Fatalf("redeemed trace ID = %q, want %q", redeemed.TraceID, ticket.TraceID)
 	}
 
 	if err := performTLSInstallRequest(server.URL, material.missingClientTLS); err == nil {
