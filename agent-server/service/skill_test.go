@@ -49,6 +49,24 @@ func TestSkillServiceUpgradesOnlyImmediateLevelAfterRequirements(t *testing.T) {
 	}
 }
 
+func TestSkillServiceResolvesGroupPrerequisiteBeforeCollidingSkillID(t *testing.T) {
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		638:   {ID: 638, GroupID: 189, BasicGroup: "UNRELATED", BasicLevel: 18},
+		9975:  {ID: 9975, GroupID: 638, BasicGroup: "WIZARD_SPIRIT", BasicLevel: 1},
+		9978:  {ID: 9978, GroupID: 638, BasicGroup: "WIZARD_SPIRIT", BasicLevel: 4},
+		10033: {ID: 10033, GroupID: 640, BasicGroup: "WIZARD_SKILL", BasicLevel: 1, RequiredSkill1: 638, RequiredLevel1: 4, RequiredRace: 1},
+	}})
+	repository := &skillLearningRepositoryFake{result: model.SkillLearnResult{Skill: model.CharacterSkill{ID: 10033, Enabled: 1}}}
+	player := &model.Player{SRObject: model.SRObject{RefObjectID: 14875}, ID: 9, Skills: map[uint32]byte{9978: 1}}
+
+	if _, err := NewSkillService(repository, catalog).LearnSkill(context.Background(), player, 10033); err != nil {
+		t.Fatalf("LearnSkill with group prerequisite: %v", err)
+	}
+	if repository.command.RequiredOwnedSkillIDs[0] != 9978 {
+		t.Fatalf("resolved prerequisite = %d, want 9978", repository.command.RequiredOwnedSkillIDs[0])
+	}
+}
+
 func TestSkillServiceRejectsSkippedLevelWithoutMutation(t *testing.T) {
 	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
 		100: {ID: 100, BasicGroup: "FIRE", BasicOriginal: 100, BasicLevel: 1},
@@ -58,7 +76,7 @@ func TestSkillServiceRejectsSkippedLevelWithoutMutation(t *testing.T) {
 	player := &model.Player{SRObject: model.SRObject{RefObjectID: 1907}, ID: 9, Skills: map[uint32]byte{100: 1}, Masteries: map[uint32]byte{}}
 
 	_, err := NewSkillService(repository, catalog).LearnSkill(context.Background(), player, 102)
-	if !errors.Is(err, model.ErrSkillPrerequisiteRequired) || repository.calls != 0 {
+	if !errors.Is(err, model.ErrSkillLevelChainInvalid) || repository.calls != 0 {
 		t.Fatalf("LearnSkill error/calls = %v/%d", err, repository.calls)
 	}
 }
@@ -71,7 +89,7 @@ func TestSkillServiceEnforcesMasteryAttributesRaceAndSP(t *testing.T) {
 		player *model.Player
 		want   error
 	}{
-		{"race", &model.Player{SRObject: model.SRObject{RefObjectID: 14875}, ID: 1}, model.ErrSkillInvalid},
+		{"race", &model.Player{SRObject: model.SRObject{RefObjectID: 14875}, ID: 1}, model.ErrSkillRaceMismatch},
 		{"mastery", &model.Player{SRObject: model.SRObject{RefObjectID: 1907}, ID: 1, Masteries: map[uint32]byte{257: 4}}, model.ErrSkillMasteryRequired},
 		{"strength", &model.Player{SRObject: model.SRObject{RefObjectID: 1907}, ID: 1, Masteries: map[uint32]byte{257: 5}, BaseStats: model.BaseStats{Str: 19, Int: 20}}, model.ErrSkillStrengthRequired},
 		{"intellect", &model.Player{SRObject: model.SRObject{RefObjectID: 1907}, ID: 1, Masteries: map[uint32]byte{257: 5}, BaseStats: model.BaseStats{Str: 20, Int: 19}}, model.ErrSkillIntellectRequired},

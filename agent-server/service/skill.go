@@ -24,8 +24,11 @@ func (s *SkillService) LearnSkill(ctx context.Context, player *model.Player, ski
 		return model.SkillLearnResult{}, model.ErrSkillConflict
 	}
 	skill, exists := s.catalog.Skill(skillID)
-	if !exists || skill.BasicLevel == 0 || !skillRaceAllowed(player, skill.RequiredRace) {
+	if !exists || skill.BasicLevel == 0 {
 		return model.SkillLearnResult{}, model.ErrSkillInvalid
+	}
+	if !skillRaceAllowed(player, skill.RequiredRace) {
+		return model.SkillLearnResult{}, model.ErrSkillRaceMismatch
 	}
 
 	owned := player.SkillSnapshot()
@@ -52,7 +55,7 @@ func (s *SkillService) LearnSkill(ctx context.Context, player *model.Player, ski
 	if skill.BasicLevel > 1 {
 		command.ReplacedSkillID = s.ownedSkillAtLevel(owned, skill, skill.BasicLevel-1)
 		if command.ReplacedSkillID == 0 {
-			return model.SkillLearnResult{}, model.ErrSkillPrerequisiteRequired
+			return model.SkillLearnResult{}, model.ErrSkillLevelChainInvalid
 		}
 	} else if s.ownedSkillInLine(owned, skill) != 0 {
 		return model.SkillLearnResult{}, model.ErrSkillAlreadyLearned
@@ -64,7 +67,7 @@ func (s *SkillService) LearnSkill(ctx context.Context, player *model.Player, ski
 		if requiredID == 0 {
 			continue
 		}
-		required, ok := s.catalog.Skill(requiredID)
+		required, ok := resolveSkillRequirement(s.catalog, requiredID)
 		if !ok {
 			return model.SkillLearnResult{}, model.ErrSkillInvalid
 		}
@@ -102,6 +105,27 @@ func (s *SkillService) ownedSkillInLine(owned []model.CharacterSkill, target mod
 		}
 	}
 	return 0
+}
+
+// resolveSkillRequirement follows the native REF_SKILL contract: REQLEARN_SKILL
+// normally names a skill GROUP_ID, not a concrete skill ID. Group lookup must
+// win when the two numeric namespaces collide (which they do for Wizard skill
+// groups); the ID fallback preserves imported/legacy catalogs that stored a
+// concrete skill ID instead.
+func resolveSkillRequirement(catalog *model.ReferenceDataCatalog, requirement uint32) (model.RefSkill, bool) {
+	var groupSkill model.RefSkill
+	for _, skill := range catalog.SkillSnapshot() {
+		if skill.GroupID != requirement || skill.BasicLevel == 0 {
+			continue
+		}
+		if groupSkill.ID == 0 || skill.BasicLevel < groupSkill.BasicLevel || skill.BasicLevel == groupSkill.BasicLevel && skill.ID < groupSkill.ID {
+			groupSkill = skill
+		}
+	}
+	if groupSkill.ID != 0 {
+		return groupSkill, true
+	}
+	return catalog.Skill(requirement)
 }
 
 func (s *SkillService) ownedSkillAtLevel(owned []model.CharacterSkill, target model.RefSkill, level byte) uint32 {

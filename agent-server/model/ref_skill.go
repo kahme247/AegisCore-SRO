@@ -1,6 +1,10 @@
 package model
 
-import "strings"
+import (
+	"math"
+	"strings"
+	"time"
+)
 
 type SkillExecutionKind byte
 
@@ -78,6 +82,7 @@ const (
 	skillParameterStun           = 29556
 	skillParameterAggroBlock     = 1886350433
 	skillParameterRecovery       = 1769105251
+	skillParameterRecoveryStatus = 1919246700 // `real`
 	skillParameterRequiredItem   = 1919250793
 	skillParameterCureStatus     = 1668641396
 	skillParameterCureLevel      = 1668641388
@@ -89,6 +94,15 @@ const (
 	skillParameterAbsoluteDamage = 1885629799
 	skillParameterDamageToMP     = 1684891508
 	skillParameterTransformMask  = 1835229552
+	skillParameterOverlap2       = 1870031922
+	skillParameterDamageType     = 1685353584
+	skillParameterLinkedSame     = 1818981170
+	skillParameterMatch          = 1836278632
+	skillParameterKnockOver      = 27503
+	skillParameterKnockback      = 27490
+	skillParameterLinkedDamage   = 1818977394
+	skillParameterDetection      = 6583412
+	skillParameterHide           = 1751737445
 )
 
 type SkillRequiredItem struct {
@@ -103,6 +117,15 @@ type SkillStatusEffect struct {
 	Payload    int
 	Chance     int
 	DurationMS int
+}
+
+// RecoveryStatusDescriptor is the actor-owned form of a binary `real` tuple.
+// Its mask/value/grade are preserved independently of ordinary cast recovery.
+type RecoveryStatusDescriptor struct {
+	SkillID uint32
+	Mask    uint32
+	Value   int
+	Grade   int
 }
 
 type BuffModifiers struct {
@@ -167,54 +190,159 @@ type RefSkill struct {
 	ActionDuration      int
 	ReuseDelay          int
 	CoolTime            int
-	ActionRange         int
-	AttackType          int
-	AttackPercent       int
-	AttackMin           int
-	AttackMax           int
-	BuffDuration        int
-	HealHP              int
-	HealHPPercent       int
-	HealMP              int
-	HealMPPercent       int
-	ResurrectLevel      int
-	ShockPower          int
-	ShockChance         int
-	ShockDuration       int
-	TransferRange       int
-	TransferCount       int
-	StatusEffects       []SkillStatusEffect
-	ImpactDamage        int
-	BarrierDrainMS      int
-	BarrierMPCost       int
-	BarrierHitPoints    int
-	BarrierAbsorption   int
-	BarrierPhysical     bool
-	MovementDistance    int
-	MovementDurationMS  int
-	AggroSuppression    bool
-	RecoveryHP          int
-	RecoveryMP          int
-	RequiredItems       []SkillRequiredItem
-	CureStatusMask      uint32
-	CureStatusMaxLevel  int
-	CureCurse           bool
-	CureCurseChance     int
-	CureCurseMaxLevel   int
-	CureCount           int
-	AggroReduce         int
-	AggroAbsorbPercent  int
-	AggroIncrease       int
-	AbsoluteDamage      int
-	DamageToHPPercent   int
-	DamageToMPPercent   int
-	TransformMaxLevel   int
-	TransformItemRefID  uint32
-	BuffModifiers       BuffModifiers
-	Params              [50]int
+	// ActionFlyingSpeed and ActionInterruptible are native REF_SKILL
+	// controller fields. They are retained even though the common traced
+	// execution path does not yet prove their runtime semantics.
+	ActionFlyingSpeed      int
+	ActionInterruptible    bool
+	ActionRange            int
+	ActionOverlap          int
+	AttackType             int
+	AttackPercent          int
+	AttackMin              int
+	AttackMax              int
+	BuffDuration           int
+	HealHP                 int
+	HealHPPercent          int
+	HealMP                 int
+	HealMPPercent          int
+	ResurrectLevel         int
+	ShockPower             int
+	ShockChance            int
+	ShockDuration          int
+	TransferRange          int
+	TransferCount          int
+	TransferType           int
+	TransferFalloffPercent int
+	TransferTargetMask     uint32
+	StatusEffects          []SkillStatusEffect
+	ImpactDamage           int
+	BarrierDrainMS         int
+	BarrierMPCost          int
+	UpkeepIntervalMS       int
+	UpkeepMPCost           int
+	BarrierHitPoints       int
+	BarrierAbsorption      int
+	BarrierPhysical        bool
+	MovementDistance       int
+	MovementDurationMS     int
+	AggroSuppression       bool
+	RecoveryHP             int
+	RecoveryMP             int
+	RecoveryStatusMask     uint32
+	RecoveryStatusValue    int
+	RecoveryStatusGrade    int
+	RequiredItems          []SkillRequiredItem
+	CureStatusMask         uint32
+	CureStatusMaxLevel     int
+	CureCurse              bool
+	CureCurseChance        int
+	CureCurseMaxLevel      int
+	CureCount              int
+	AggroReduce            int
+	AggroAbsorbPercent     int
+	AggroIncrease          int
+	AggroIncreasePercent   int
+	AbsoluteDamage         int
+	DamageToHPPercent      int
+	DamageToMPPercent      int
+	TransformMaxLevel      int
+	TransformItemRefID     uint32
+	SecondaryOverlap       int
+	DamageTypeFamily       int
+	DamageTypePrecedence   int
+	LinkedSameGroup        bool
+	ReferenceDescriptors   [4][6]int
+	ReferenceRadius        int
+	MatchMode              int
+	KnockOverKey           int
+	KnockOverChance        int
+	KnockbackChance        int
+	KnockbackDistance      int
+	LinkedDamageMask       uint32
+	LinkedDamagePercent    int
+	LinkedDamageUseLimit   int
+	DetectionType          int
+	DetectionLevel         int
+	HideType               int
+	HideLevel              int
+	HideChance             int
+	BuffModifiers          BuffModifiers
+	Params                 [50]int
 }
 
 func (s RefSkill) IsPassive() bool { return s.BasicActivity == 0 }
+
+// RuntimeCastingDuration is the post-load Action_CastingTime used by the
+// vSRO GameServer: authored preparation plus authored casting time.
+func (s RefSkill) RuntimeCastingDuration() time.Duration {
+	return s.RuntimeCastingDurationAt(100)
+}
+
+// RuntimeCastingDurationAt scales the authored active cast phases by the
+// native action-time percentage. A value of 100 preserves the catalog timing;
+// callers may supply an actor-specific runtime value when one is available.
+func (s RefSkill) RuntimeCastingDurationAt(actionTimePercent float64) time.Duration {
+	if actionTimePercent < 0 {
+		actionTimePercent = 0
+	}
+	milliseconds := max(0, s.ActionPreparingTime) + max(0, s.ActionCastingTime)
+	scaled := int(math.Round(actionTimePercent * float64(milliseconds) / 100))
+	return time.Duration(max(0, scaled)) * time.Millisecond
+}
+
+// RuntimeImpactDurationAt returns the complete authored attack-animation
+// lifecycle. Damage-bearing B071 packets must not be emitted after only the
+// preparation/casting phases because physical skills commonly store their
+// visible swing or shot animation exclusively in ACTION_DURATION.
+func (s RefSkill) RuntimeImpactDurationAt(actionTimePercent float64) time.Duration {
+	if actionTimePercent < 0 {
+		actionTimePercent = 0
+	}
+	milliseconds := max(0, s.ActionPreparingTime) + max(0, s.ActionCastingTime) + max(0, s.ActionDuration)
+	scaled := int(math.Round(actionTimePercent * float64(milliseconds) / 100))
+	return time.Duration(max(0, scaled)) * time.Millisecond
+}
+
+// ReuseDuration reproduces SR_GameServer's ordinary activity-2 cooldown
+// registration. Cast/action speed scales only the active lifecycle; an
+// authored reuse tail beyond that lifecycle remains unscaled.
+func (s RefSkill) ReuseDuration(actionTimePercent float64) time.Duration {
+	if s.BasicActivity != 2 || s.ActionDuration <= 0 {
+		return time.Duration(max(0, s.ReuseDelay)) * time.Millisecond
+	}
+	if actionTimePercent < 0 {
+		actionTimePercent = 0
+	}
+	lifecycle := max(0, s.ActionPreparingTime) + max(0, s.ActionCastingTime) + max(0, s.ActionDuration)
+	tail := max(0, s.ReuseDelay-lifecycle)
+	scaled := int(math.Round(actionTimePercent * float64(lifecycle) / 100))
+	return time.Duration(max(0, scaled+tail)) * time.Millisecond
+}
+
+func (s RefSkill) CoolTimeDuration() time.Duration {
+	return time.Duration(max(0, s.CoolTime)) * time.Millisecond
+}
+
+// ResourceCosts resolves the REF_SKILL consume tuple. Fixed costs and the
+// authored percentage costs are additive and percentage values are based on
+// the caster's current derived maximum pool, matching the server's
+// pre-engage resource gate. Negative catalog values are treated as absent.
+func (s RefSkill) ResourceCosts(maxHP, maxMP int) (hp, mp int) {
+	hp = max(0, s.ConsumeHP)
+	mp = max(0, s.ConsumeMP)
+	if maxHP > 0 && s.ConsumeHPRatio > 0 {
+		hp += maxHP * s.ConsumeHPRatio / 100
+	}
+	if maxMP > 0 && s.ConsumeMPRatio > 0 {
+		mp += maxMP * s.ConsumeMPRatio / 100
+	}
+	return hp, mp
+}
+
+func (s RefSkill) HasReferenceDescriptor(discriminator int) bool {
+	return discriminator >= 1 && discriminator < len(s.ReferenceDescriptors) && s.ReferenceDescriptors[discriminator][0] == discriminator
+}
 
 func (s RefSkill) IsMagicalAttack() bool {
 	return s.AttackType == 8 || s.AttackType == 9 || s.AttackType == 10
@@ -260,7 +388,7 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 		return SkillExecutionBarrier
 	case s.MovementDistance > 0:
 		return SkillExecutionMovement
-	case s.BuffDuration > 0:
+	case s.BuffDuration > 0 || s.UpkeepIntervalMS > 0:
 		return SkillExecutionBuff
 	default:
 		return SkillExecutionUnsupported
@@ -290,17 +418,28 @@ func (s *RefSkill) parseParameters() {
 	s.AttackType, s.AttackPercent, s.AttackMin, s.AttackMax = 0, 0, 0, 0
 	s.BuffDuration, s.HealHP, s.HealHPPercent, s.HealMP, s.HealMPPercent, s.ResurrectLevel = 0, 0, 0, 0, 0, 0
 	s.ShockPower, s.ShockChance, s.ShockDuration, s.TransferRange, s.TransferCount = 0, 0, 0, 0, 0
+	s.TransferType, s.TransferFalloffPercent, s.TransferTargetMask = 0, 0, 0
 	s.ImpactDamage, s.BarrierDrainMS, s.BarrierMPCost, s.BarrierHitPoints, s.BarrierAbsorption = 0, 0, 0, 0, 0
+	s.UpkeepIntervalMS, s.UpkeepMPCost = 0, 0
 	s.MovementDistance, s.MovementDurationMS, s.RecoveryHP, s.RecoveryMP = 0, 0, 0, 0
+	s.RecoveryStatusMask, s.RecoveryStatusValue, s.RecoveryStatusGrade = 0, 0, 0
 	s.AggroSuppression, s.BarrierPhysical = false, false
 	s.StatusEffects = nil
 	s.RequiredItems = nil
 	s.CureStatusMask, s.CureStatusMaxLevel = 0, 0
 	s.CureCurse = false
 	s.CureCurseChance, s.CureCurseMaxLevel, s.CureCount = 0, 0, 0
-	s.AggroReduce, s.AggroAbsorbPercent, s.AggroIncrease = 0, 0, 0
+	s.AggroReduce, s.AggroAbsorbPercent, s.AggroIncrease, s.AggroIncreasePercent = 0, 0, 0, 0
 	s.AbsoluteDamage, s.DamageToHPPercent, s.DamageToMPPercent, s.TransformMaxLevel = 0, 0, 0, 0
 	s.TransformItemRefID = 0
+	s.SecondaryOverlap, s.DamageTypeFamily, s.DamageTypePrecedence = 0, 0, 0
+	s.LinkedSameGroup = false
+	s.ReferenceRadius, s.MatchMode = 0, 0
+	s.ReferenceDescriptors = [4][6]int{}
+	s.KnockOverKey, s.KnockOverChance, s.KnockbackChance, s.KnockbackDistance = 0, 0, 0, 0
+	s.LinkedDamageMask, s.LinkedDamagePercent, s.LinkedDamageUseLimit = 0, 0, 0
+	s.DetectionType, s.DetectionLevel = 0, 0
+	s.HideType, s.HideLevel, s.HideChance = 0, 0, 0
 	s.BuffModifiers = BuffModifiers{}
 	for index, parameter := range s.Params {
 		switch parameter {
@@ -422,19 +561,39 @@ func (s *RefSkill) parseParameters() {
 				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusHidden, Chance: s.Params[index+1], Level: s.Params[index+2], Payload: s.Params[index+3], DurationMS: duration})
 			}
 		case skillParameterTransfer:
-			if index+4 < len(s.Params) {
-				s.TransferRange = s.Params[index+3]
-				s.TransferCount = s.Params[index+4]
+			var descriptor [6]int
+			for payload := range descriptor {
+				if index+1+payload < len(s.Params) {
+					descriptor[payload] = s.Params[index+1+payload]
+				}
+			}
+			if descriptor[0] >= 1 && descriptor[0] <= 3 {
+				s.ReferenceDescriptors[descriptor[0]] = descriptor
+			}
+			if descriptor[0] == 1 {
+				s.TransferType = descriptor[1]
+				s.TransferRange, s.TransferCount = descriptor[2], descriptor[3]
+				s.TransferFalloffPercent = descriptor[4]
+				if descriptor[5] > 0 {
+					s.TransferTargetMask = uint32(descriptor[5])
+				}
+			}
+			if descriptor[0] == 2 {
+				s.ReferenceRadius = descriptor[2]
 			}
 		case skillParameterImpact:
 			if index+1 < len(s.Params) {
 				s.ImpactDamage = s.Params[index+1]
 			}
 		case skillParameterBarrier:
-			if index+7 < len(s.Params) {
-				s.BarrierDrainMS = s.Params[index+1]
-				s.BarrierMPCost = s.Params[index+2]
-				s.BarrierPhysical = s.Params[index+3] == 28791
+			if index+2 < len(s.Params) {
+				s.UpkeepIntervalMS = s.Params[index+1]
+				s.UpkeepMPCost = s.Params[index+2]
+			}
+			if index+7 < len(s.Params) && s.Params[index+3] == 28791 {
+				s.BarrierDrainMS = s.UpkeepIntervalMS
+				s.BarrierMPCost = s.UpkeepMPCost
+				s.BarrierPhysical = true
 				s.BarrierHitPoints = s.Params[index+5]
 				s.BarrierAbsorption = s.Params[index+7]
 			}
@@ -474,6 +633,12 @@ func (s *RefSkill) parseParameters() {
 			if index+2 < len(s.Params) {
 				s.RecoveryHP, s.RecoveryMP = s.Params[index+1], s.Params[index+2]
 			}
+		case skillParameterRecoveryStatus:
+			if index+3 < len(s.Params) {
+				s.RecoveryStatusMask = uint32(s.Params[index+1])
+				s.RecoveryStatusValue = s.Params[index+2]
+				s.RecoveryStatusGrade = s.Params[index+3]
+			}
 		case skillParameterRequiredItem:
 			if index+2 < len(s.Params) && s.Params[index+1] > 0 && s.Params[index+2] > 0 {
 				s.RequiredItems = append(s.RequiredItems, SkillRequiredItem{TypeID3: s.Params[index+1], TypeID4: s.Params[index+2]})
@@ -505,6 +670,9 @@ func (s *RefSkill) parseParameters() {
 			if index+1 < len(s.Params) {
 				s.AggroIncrease = s.Params[index+1]
 			}
+			if index+2 < len(s.Params) {
+				s.AggroIncreasePercent = s.Params[index+2]
+			}
 		case skillParameterAbsoluteDamage:
 			if index+1 < len(s.Params) {
 				s.AbsoluteDamage = s.Params[index+1]
@@ -519,8 +687,81 @@ func (s *RefSkill) parseParameters() {
 				s.TransformMaxLevel = s.Params[index+1]
 				s.TransformItemRefID = uint32(s.Params[index+2])
 			}
+		case skillParameterOverlap2:
+			if index+1 < len(s.Params) {
+				s.SecondaryOverlap = s.Params[index+1]
+			}
+		case skillParameterDamageType:
+			if index+2 < len(s.Params) {
+				s.DamageTypeFamily, s.DamageTypePrecedence = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterLinkedSame:
+			s.LinkedSameGroup = true
+		case skillParameterMatch:
+			if index+1 < len(s.Params) {
+				s.MatchMode = s.Params[index+1]
+			}
+		case skillParameterKnockOver:
+			if index+1 < len(s.Params) {
+				s.KnockOverKey = s.Params[index+1]
+			}
+			if index+2 < len(s.Params) {
+				s.KnockOverChance = s.Params[index+2]
+			}
+		case skillParameterKnockback:
+			if index+2 < len(s.Params) {
+				// Native kb descriptors store probability before distance.
+				s.KnockbackChance = s.Params[index+1]
+				s.KnockbackDistance = s.Params[index+2]
+			}
+		case skillParameterLinkedDamage:
+			if index+1 < len(s.Params) {
+				s.LinkedDamageMask = normalizeLinkedDamageMask(uint32(s.Params[index+1]))
+			}
+			if index+2 < len(s.Params) {
+				s.LinkedDamagePercent = s.Params[index+2]
+			}
+			if index+3 < len(s.Params) {
+				s.LinkedDamageUseLimit = s.Params[index+3]
+			}
+		case skillParameterDetection:
+			if index+2 < len(s.Params) {
+				s.DetectionType, s.DetectionLevel = s.Params[index+1], s.Params[index+2]
+			}
+		case skillParameterHide:
+			if index+3 < len(s.Params) {
+				s.HideType, s.HideLevel, s.HideChance = s.Params[index+1], s.Params[index+2], s.Params[index+3]
+			}
 		}
 	}
+}
+
+func normalizeLinkedDamageMask(mask uint32) uint32 {
+	switch mask {
+	case 4, 8, 12:
+		return mask | 1 | 2
+	case 1, 2, 3:
+		return mask | 4 | 8
+	default:
+		return mask
+	}
+}
+
+func (s RefSkill) LinkedDamageAmount(damage int, magical bool) int {
+	if damage <= 0 || s.LinkedDamagePercent <= 0 {
+		return 0
+	}
+	classMask := uint32(8)
+	if magical {
+		classMask = 4
+	}
+	if s.LinkedDamageMask&classMask == 0 {
+		return 0
+	}
+	if s.LinkedDamagePercent == 100 {
+		return damage
+	}
+	return min(damage, int(math.Round(float64(damage)*float64(s.LinkedDamagePercent)/100)))
 }
 
 // RestorationAmounts decodes the native hste tuple as fixed HP, HP percent,

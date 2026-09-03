@@ -26,6 +26,13 @@ type combatWorldFake struct {
 	blocked  bool
 }
 
+func TestBuildServerInventoryItemAddedMatchesStockB034Layout(t *testing.T) {
+	packet := buildServerInventoryItemAdded(0x0D, model.Item{})
+	if got, want := packet.Payload(), []byte{1, 0x0E, 0x0D, 0x3C}; !bytes.Equal(got, want) {
+		t.Fatalf("server inventory item-added payload = % X, want % X", got, want)
+	}
+}
+
 type combatVitalsFake struct {
 	spendCalls        int
 	expectedMP        int
@@ -45,6 +52,21 @@ type growthPetCombatFake struct {
 	engagedTarget *model.NPC
 	engagements   int
 	awards        int
+}
+
+type rangedAmmoCombatFake struct {
+	remaining []uint16
+	calls     [][2]int64
+}
+
+func (f *rangedAmmoCombatFake) ConsumeEquippedRangedAmmo(_ context.Context, characterID, itemID int64) (uint16, error) {
+	f.calls = append(f.calls, [2]int64{characterID, itemID})
+	if len(f.remaining) == 0 {
+		return 0, model.ErrRangedAmmoUnavailable
+	}
+	remaining := f.remaining[0]
+	f.remaining = f.remaining[1:]
+	return remaining, nil
 }
 
 func (f *growthPetCombatFake) EngageOwnerTarget(player *model.Player, target *model.NPC) error {
@@ -71,6 +93,9 @@ func (f *combatVitalsFake) SpendMP(_ context.Context, _ int, expectedMP, cost in
 	f.expectedMP = expectedMP
 	f.cost = cost
 	return f.spent, nil
+}
+func (*combatVitalsFake) SpendHP(context.Context, int, int, int) (bool, error) {
+	return true, nil
 }
 func (f *combatVitalsFake) CastResurrection(_ context.Context, casterID, targetID, expectedMP, cost, hp, mp int) (bool, error) {
 	f.resurrectionCalls++
@@ -135,6 +160,7 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 	t.Cleanup(func() { model.RefItems = previous })
 	model.RefItems = map[uint32]model.RefItem{
 		179: {RefObject: model.RefObject{ID: 179}, Range: 18},
+		180: {RefObject: model.RefObject{ID: 180}, Range: 180},
 	}
 	player := &model.Player{
 		SRObject:  model.SRObject{RefObjectID: 1907},
@@ -155,11 +181,18 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 	if got, want := handler.baseAttackReach(player, target), float32(33); got != want {
 		t.Fatalf("glaive attack reach = %g, want %g", got, want)
 	}
-	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 150}), float32(150); got != want {
-		t.Fatalf("15m skill reach = %g, want %g independent of weapon", got, want)
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 150}), float32(183); got != want {
+		t.Fatalf("skill reach with authored addition = %g, want %g", got, want)
 	}
-	if got, want := handler.skillAttackReach(player, target, model.RefSkill{TransferRange: 100}), float32(100); got != want {
-		t.Fatalf("transfer-authored skill reach = %g, want %g independent of weapon", got, want)
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{TransferRange: 100}), float32(133); got != want {
+		t.Fatalf("transfer-authored skill reach = %g, want %g", got, want)
+	}
+	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{
+		RefObjectID: 180,
+		TypeInfo:    model.TypeInfo{TypeID1: model.TypeID1Item, TypeID2: model.TypeID2Wearable, TypeID3: model.TypeID3Weapon, TypeID4: 6},
+	}}
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 10}), float32(205); got != want {
+		t.Fatalf("bow skill reach with small authored addition = %g, want %g", got, want)
 	}
 }
 
@@ -177,8 +210,9 @@ func TestCombatGhostWalkMovesForwardByReferenceDistance(t *testing.T) {
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
 			skillID: {ID: skillID, BasicActivity: 2, MovementDistance: 245},
 		}}),
-		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
-		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+		send:       func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast:  func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+		damageRoll: midpointDamageRoll(),
 	}
 	// The stock client sends Ghost Walk as the seven-byte no-target form even
 	// though REF_SKILL marks the row as target-required.
@@ -203,8 +237,8 @@ func TestCombatGhostWalkMovesForwardByReferenceDistance(t *testing.T) {
 			break
 		}
 	}
-	if completion == nil || completion.DataSize != 24 || completion.Payload()[9] != 0x08 {
-		t.Fatalf("ghost walk completion = %#v, want 24-byte B071 teleport state", completion)
+	if completion == nil || completion.DataSize != 10 || completion.Payload()[9] != 0 {
+		t.Fatalf("ghost walk completion = %#v, want 10-byte B071 completion", completion)
 	}
 }
 
@@ -239,18 +273,43 @@ func TestCombatGhostWalkAcceptsStockAreaTargetPacket(t *testing.T) {
 	if err := handler.handlePacket(context.Background(), session, packet); err != nil {
 		t.Fatalf("stock area-target Ghost Walk disconnected session: %v", err)
 	}
-	if got, want := player.GetNavmeshPosition().Offset.X, float32(100); got != want {
-		t.Fatalf("Ghost Walk moved before animation completed: X=%g, want %g", got, want)
-	}
-	if completion == nil || completionDelay != 500*time.Millisecond {
-		t.Fatalf("Ghost Walk completion = callback:%t delay:%s", completion != nil, completionDelay)
-	}
-	if got := packetOpcodesForCombat(sent); reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd}) {
-		t.Fatalf("Ghost Walk emitted B071 before movement phase: %04X", got)
-	}
-	completion()
 	if got, want := player.GetNavmeshPosition().Offset.X, float32(200); got != want {
 		t.Fatalf("Ghost Walk endpoint X = %g, want %g", got, want)
+	}
+	if completion != nil || completionDelay != 0 {
+		t.Fatalf("Ghost Walk scheduled a delayed endpoint: callback:%t delay:%s", completion != nil, completionDelay)
+	}
+}
+
+func TestCombatGhostWalkCancellationDoesNotCommitEndpoint(t *testing.T) {
+	player := &model.Player{SRObject: model.SRObject{
+		UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100),
+	}, ID: 42}
+	player.SetLifeState(model.Alive)
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:     &combatWorldFake{player: player},
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+	}
+	skill := model.RefSkill{ID: 8142, BasicActivity: 2, MovementDurationMS: 500, MovementDistance: 245}
+	session := &server.Session{UserContext: server.UserContext{UniqueID: player.GetUniqueID()}}
+	if err := handler.executeMovementSkill(context.Background(), session, player, skill); err != nil {
+		t.Fatalf("ghost walk failed: %v", err)
+	}
+	handler.CancelPlayerAttack(nil, player.GetUniqueID())
+	if got := player.GetNavmeshPosition().Offset.X; got != 345 {
+		t.Fatalf("instant Ghost Walk endpoint = %g, want 345", got)
+	}
+	foundEnd := false
+	for _, packet := range sent {
+		if packet.MessageID == opcode.EntitySkillCastEnd {
+			foundEnd = true
+			break
+		}
+	}
+	if !foundEnd {
+		t.Fatalf("cancelled ghost walk packets = %v, want B071 interruption", packetOpcodesForCombat(sent))
 	}
 }
 
@@ -366,7 +425,7 @@ func TestCombatNormalAttackAppliesToAllNearbyFieldMobReferences(t *testing.T) {
 			if err := handler.handlePacket(context.Background(), session, packet); err != nil {
 				t.Fatalf("normal attack failed: %v", err)
 			}
-			if len(sent) != 3 || sent[0].MessageID != opcode.EntityActionResponse || sent[1].MessageID != opcode.EntitySkillCastBegin || sent[2].MessageID != opcode.EntityActionResponse {
+			if len(sent) != 4 || sent[0].MessageID != opcode.EntityMovementTurnResponse || sent[1].MessageID != opcode.EntityActionResponse || sent[2].MessageID != opcode.EntitySkillCastBegin || sent[3].MessageID != opcode.EntityActionResponse {
 				opcodes := make([]uint16, len(sent))
 				for i := range sent {
 					opcodes[i] = sent[i].MessageID
@@ -566,7 +625,7 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	handler := &CombatHandler{
 		world: &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{200: mob}},
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-			skillID: {ID: skillID, BasicActivity: 2, BasicChainCode: 323, ActionDuration: 428, ReuseDelay: 8000, AttackType: 5, AttackPercent: 30, AttackMin: 21, AttackMax: 26},
+			skillID: {ID: skillID, BasicActivity: 2, BasicChainCode: 323, ActionDuration: 428, ReuseDelay: 8000, AttackType: 5, AttackPercent: 30, AttackMin: 21, AttackMax: 26, TargetEnemyMob: true, TargetEnemyPVP: true},
 			323:     {ID: 323, BasicActivity: 2, BasicChainCode: 331, ActionDuration: 612, AttackType: 5, AttackPercent: 53, AttackMin: 21, AttackMax: 26},
 			331:     {ID: 331, BasicActivity: 2, ActionDuration: 993, AttackType: 5, AttackPercent: 120, AttackMin: 21, AttackMax: 26},
 		}}),
@@ -585,10 +644,10 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	if mob.CurrentHitPoints() >= 1000 {
 		t.Fatal("targeted skill cast did not damage mob")
 	}
-	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntityActionResponse}) {
-		t.Fatalf("skill cast packets = %04X, want B074 B070 B074", got)
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntityActionResponse}) {
+		t.Fatalf("skill cast packets = %04X, want turn B074 B070 B074", got)
 	}
-	cast := sent[1]
+	cast := sent[2]
 	if _, err := cast.ReadByte(); err != nil {
 		t.Fatal(err)
 	}
@@ -601,10 +660,13 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	if got, _ := cast.ReadUInt32(); got != skillID {
 		t.Fatalf("B070 skill ID = %d, want %d", got, skillID)
 	}
-	for range 3 {
+	for range 2 {
 		if _, err := cast.ReadUInt32(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if delegated, err := cast.ReadUInt32(); err != nil || delegated != mob.GetUniqueID() {
+		t.Fatalf("B070 target UID = %d, want %d: %v", delegated, mob.GetUniqueID(), err)
 	}
 	if hasDamage, _ := cast.ReadBool(); !hasDamage {
 		t.Fatal("combo B070 has no damage block")
@@ -662,8 +724,8 @@ func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.
 		t.Fatal("failed to arrange the authored damage buff")
 	}
 	stats := player.DerivedStats()
-	if stats.PhyAttackMin != 200 || stats.PhyAttackMax != 330 || stats.MagAttackMin != 125 || stats.MagAttackMax != 192 || stats.CriticalRate != 10 {
-		t.Fatalf("equipment/buff derived stats = %+v, want physical 200-330 magical 125-192 critical 10", stats)
+	if stats.PhyAttackMin != 160 || stats.PhyAttackMax != 264 || stats.MagAttackMin != 100 || stats.MagAttackMax != 154 || stats.CriticalRate != 10 || player.ActiveCombatDamagePercent() != 25 {
+		t.Fatalf("equipment/buff stats = %+v damage=%d, want physical 160-264 magical 100-154 damage 25 critical 10", stats, player.ActiveCombatDamagePercent())
 	}
 
 	newMob := func(uid, refID uint32) *model.NPC {
@@ -714,6 +776,7 @@ func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.
 		},
 		blockRoll:   func(rate int) bool { return rate == 100 },
 		rollPercent: func(int) bool { return true },
+		damageRoll:  midpointDamageRoll(),
 		send:        func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
 		broadcast:   func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
 	}
@@ -721,12 +784,12 @@ func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.
 	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(physicalSkillID, physicalTarget.GetUniqueID())); err != nil {
 		t.Fatal(err)
 	}
-	if got := physicalTarget.CurrentHitPoints(); got != 4000 {
-		t.Fatalf("physical critical target HP = %d, want 4000", got)
+	if got := physicalTarget.CurrentHitPoints(); got != 4340 {
+		t.Fatalf("physical critical target HP = %d, want 4340", got)
 	}
 	physicalRecord := combatBeginDamageRecord(t, sent, physicalSkillID)
-	if physicalRecord.attackState != model.DamageAttackStateNormal || physicalRecord.damageState != model.DamageStateCritical|model.DamageStateStatus || physicalRecord.damage != 1000 || physicalRecord.effectMask == 0 {
-		t.Fatalf("physical critical B070 = %+v, want critical/status damage 1000", physicalRecord)
+	if physicalRecord.attackState != model.DamageAttackStateNormal || physicalRecord.damageState != model.DamageStateCritical|model.DamageStateStatus || physicalRecord.damage != 660 || physicalRecord.effectMask == 0 {
+		t.Fatalf("physical critical B070 = %+v, want critical/status damage 660", physicalRecord)
 	}
 	if _, active := physicalTarget.CombatStatus(model.CombatStatusBurn, time.Unix(100, 0)); !active {
 		t.Fatal("landed physical skill did not connect its authored status")
@@ -735,12 +798,12 @@ func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.
 	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(magicalSkillID, magicalTarget.GetUniqueID())); err != nil {
 		t.Fatal(err)
 	}
-	if got := magicalTarget.CurrentHitPoints(); got != 4800 {
-		t.Fatalf("magical target HP = %d, want 4800", got)
+	if got := magicalTarget.CurrentHitPoints(); got != 4850 {
+		t.Fatalf("magical target HP = %d, want 4850", got)
 	}
 	magicalRecord := combatBeginDamageRecord(t, sent, magicalSkillID)
-	if magicalRecord.attackState != model.DamageAttackStateNormal || magicalRecord.damageState != model.DamageStateNormal || magicalRecord.damage != 200 || magicalRecord.effectMask != 0 {
-		t.Fatalf("magical B070 = %+v, want normal magical damage 200", magicalRecord)
+	if magicalRecord.attackState != model.DamageAttackStateNormal || magicalRecord.damageState != model.DamageStateNormal || magicalRecord.damage != 150 || magicalRecord.effectMask != 0 {
+		t.Fatalf("magical B070 = %+v, want normal magical damage 150", magicalRecord)
 	}
 	if criticalRolls != 1 {
 		t.Fatalf("physical/magical critical rolls = %d, want only the physical skill to roll", criticalRolls)
@@ -768,6 +831,16 @@ func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.
 	wantCooldown := time.Unix(103, 0)
 	if got := handler.nextSkill[skillCooldownKey{playerUID: 100, skillID: blockedSkillID}]; !got.Equal(wantCooldown) {
 		t.Fatalf("blocked skill cooldown = %v, want %v", got, wantCooldown)
+	}
+}
+
+func midpointDamageRoll() func() int {
+	rolls := [...]int{13106, 32767, 32767, 0}
+	index := 0
+	return func() int {
+		roll := rolls[index%len(rolls)]
+		index++
+		return roll
 	}
 }
 
@@ -808,6 +881,9 @@ func TestCombatCastTimeSkillAppliesDamageAtAuthoredImpact(t *testing.T) {
 		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
 		ID:       42, Session: session, BaseStats: model.BaseStats{Int: 100}, Skills: map[uint32]byte{skillID: 1},
 	}
+	playerPosition := player.GetNavmeshPosition()
+	playerPosition.Heading = 32768
+	player.SetNavmeshPosition(playerPosition)
 	player.SetLifeState(model.Alive)
 	player.KnownObjectList = model.NewKnownObjectList(player)
 	mob := &model.NPC{SRObject: model.SRObject{
@@ -836,15 +912,89 @@ func TestCombatCastTimeSkillAppliesDamageAtAuthoredImpact(t *testing.T) {
 	if mob.CurrentHitPoints() != 100000 || callback == nil || delay != 2*time.Second {
 		t.Fatalf("pre-impact state: hp=%d callback=%t delay=%s", mob.CurrentHitPoints(), callback != nil, delay)
 	}
-	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
 		t.Fatalf("cast start packets = %04X", got)
+	}
+	if heading := player.GetNavmeshPosition().Heading; heading != 0 {
+		t.Fatalf("cast heading = %g, want target-facing east heading 0", heading)
 	}
 	callback()
 	if mob.CurrentHitPoints() >= 100000 {
 		t.Fatal("cast-time impact did not damage mob")
 	}
-	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse}) {
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse}) {
 		t.Fatalf("completed cast packets = %04X", got)
+	}
+}
+
+func TestCombatPhysicalSkillWaitsForActionAnimationBeforeDamage(t *testing.T) {
+	const skillID = uint32(7899)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session,
+		BaseStats: model.BaseStats{Str: 100}, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	mob := &model.NPC{SRObject: model.SRObject{UniqueID: 200}, Mutex: &sync.Mutex{}}
+	mob.ConfigureCombat(10000, 10)
+	mob.SetLifeState(model.Alive)
+	var callback func()
+	var delay time.Duration
+	handler := &CombatHandler{
+		nextSkill: make(map[skillCooldownKey]time.Time),
+		schedule:  func(got time.Duration, fn func()) { delay, callback = got, fn },
+		send:      func(*server.Session, network.Packet) error { return nil },
+		broadcast: func(*model.Player, *network.Packet) {},
+	}
+	skill := model.RefSkill{ID: skillID, BasicActivity: 2, AttackType: 5, AttackMin: 100, AttackMax: 100, ActionDuration: 600}
+	if err := handler.executeSkillAttack(context.Background(), session, player, mob, skill); err != nil {
+		t.Fatal(err)
+	}
+	if callback == nil || delay != 600*time.Millisecond {
+		t.Fatalf("physical-skill impact schedule = callback:%t delay:%s, want 600ms", callback != nil, delay)
+	}
+	if got := mob.CurrentHitPoints(); got != 10000 {
+		t.Fatalf("mob HP before animation impact = %d, want 10000", got)
+	}
+	callback()
+	if got := mob.CurrentHitPoints(); got >= 10000 {
+		t.Fatalf("mob HP after animation impact = %d, want damage", got)
+	}
+}
+
+func TestCombatCastTimeSkillEndsWhenTargetDiesBeforeImpact(t *testing.T) {
+	const skillID = uint32(8084)
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 100, 0, 100)},
+		ID:       42, Session: session, BaseStats: model.BaseStats{Int: 100}, Skills: map[uint32]byte{skillID: 1},
+	}
+	player.SetLifeState(model.Alive)
+	mob := &model.NPC{SRObject: model.SRObject{
+		UniqueID: 200, RefObjectID: 1933, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+		RtNavmeshPosition: combatTestPosition(24231, 104, 0, 100),
+	}, Type: "NPC", Mutex: &sync.Mutex{}}
+	mob.ConfigureCombat(1000, 10)
+	mob.SetLifeState(model.Alive)
+	var callback func()
+	var sent []network.Packet
+	handler := &CombatHandler{
+		schedule:  func(_ time.Duration, fn func()) { callback = fn },
+		send:      func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+		broadcast: func(_ *model.Player, packet *network.Packet) { sent = append(sent, *packet) },
+		nextSkill: make(map[skillCooldownKey]time.Time),
+	}
+	skill := model.RefSkill{ID: skillID, BasicActivity: 2, AttackType: 10, AttackMin: 100, AttackMax: 100, ActionCastingTime: 25}
+	if err := handler.executeSkillAttack(context.Background(), session, player, mob, skill); err != nil {
+		t.Fatal(err)
+	}
+	if callback == nil {
+		t.Fatal("cast did not schedule its delayed impact")
+	}
+	mob.SetLifeState(model.Dead)
+	callback()
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.EntityActionResponse}) {
+		t.Fatalf("dead-target completion packets = %04X", got)
 	}
 }
 
@@ -1024,8 +1174,8 @@ func TestCombatMagicalSkillRequiresWeaponAndSpendsMP(t *testing.T) {
 	if _, mp := player.CurrentVitals(); mp != 50 {
 		t.Fatalf("player MP = %d, want 50", mp)
 	}
-	if len(sent) != 4 || sent[3].MessageID != opcode.EntityUpdateStatus {
-		t.Fatalf("magical cast packets = %04X, want action, damage, end, vitals", packetOpcodesForCombat(sent))
+	if len(sent) != 5 || sent[4].MessageID != opcode.EntityUpdateStatus {
+		t.Fatalf("magical cast packets = %04X, want turn, action, damage, end, vitals", packetOpcodesForCombat(sent))
 	}
 
 	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2}}}
@@ -1089,7 +1239,7 @@ func TestCombatSelfBuffPublishesLifecycleAndExpires(t *testing.T) {
 		world:  &combatWorldFake{player: player},
 		vitals: vitals,
 		referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-			skillID: {ID: skillID, BasicActivity: 2, BuffDuration: 15000, ReuseDelay: 30000, RequiredWeapon1: 6, RequiredWeapon2: 255, ConsumeMP: 10, BuffModifiers: model.BuffModifiers{HP: 50, Strength: 5, PhysicalDefense: 12}},
+			skillID: {ID: skillID, BasicActivity: 2, BuffDuration: 15000, UpkeepIntervalMS: 5000, UpkeepMPCost: 41, ReuseDelay: 30000, RequiredWeapon1: 6, RequiredWeapon2: 255, ConsumeMP: 10, BuffModifiers: model.BuffModifiers{HP: 50, Strength: 5, PhysicalDefense: 12}},
 		}}),
 		nextSkill: make(map[skillCooldownKey]time.Time),
 		schedule: func(delay time.Duration, callback func()) {
@@ -1218,7 +1368,7 @@ func TestCombatTargetedResurrectionCommitsMPAndRevivalAtomically(t *testing.T) {
 		t.Fatalf("persistent resurrection = calls:%d args:%v, want 1 %v", vitals.resurrectionCalls, vitals.resurrectionArgs, wantArgs)
 	}
 	wantOpcodes := []uint16{
-		opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd,
+		opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd,
 		opcode.EntityActionResponse, opcode.EntityUpdateStatus, opcode.EntityUpdateMovementState, opcode.EntityUpdateStatus,
 	}
 	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, wantOpcodes) {
@@ -1273,7 +1423,7 @@ func TestCombatRightClickCancelsOwnedActiveBuff(t *testing.T) {
 	if err := handler.handlePacket(context.Background(), session, combatCancelBuffPacket(skillID)); err != nil {
 		t.Fatalf("cancel buff: %v", err)
 	}
-	if len(player.ActiveBuffs) != 0 || player.BonusAttackStats.PhyAttackPercent != 0 {
+	if len(player.ActiveBuffs) != 0 || player.ActiveCombatDamagePercent() != 0 {
 		t.Fatalf("active buff was not rolled back: %#v", player.ActiveBuffs)
 	}
 	if got, want := packetOpcodesForCombat(sent), []uint16{opcode.EntityBuffRemove, opcode.EntityUpdateStats}; !reflect.DeepEqual(got, want) {
@@ -1353,6 +1503,9 @@ func TestPlayerMeetsSkillCastRequirements(t *testing.T) {
 	if playerMeetsSkillCastRequirements(player, model.RefSkill{RequiredWeapon1: 6, RequiredWeapon2: 255}) {
 		t.Fatal("bow skill without equipped arrows was allowed")
 	}
+	if reason, rejected := skillCastRejection(player, model.RefSkill{RequiredWeapon1: 6, RequiredWeapon2: 255}); !rejected || reason != skillCastErrorInvalidAmmo {
+		t.Fatalf("bow skill without arrows rejection = (%02X, %t), want ammunition error", reason, rejected)
+	}
 	shieldSkill := model.RefSkill{RequiredWeapon1: 255, RequiredWeapon2: 255, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}}
 	if playerMeetsSkillCastRequirements(player, shieldSkill) {
 		t.Fatal("shield-required skill without an equipped shield was allowed")
@@ -1360,6 +1513,111 @@ func TestPlayerMeetsSkillCastRequirements(t *testing.T) {
 	player.Inventory.Items[model.SlotSecondaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 4, TypeID4: 1}}}
 	if !playerMeetsSkillCastRequirements(player, shieldSkill) {
 		t.Fatal("shield-required skill rejected an equipped Chinese shield")
+	}
+}
+
+func TestPlayerCanBaseAttackRequiresRangedAmmunition(t *testing.T) {
+	player := &model.Player{Inventory: model.NewInventory(nil)}
+	equipWeapon := func(typeID4 int) {
+		player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{
+			TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: typeID4,
+		}}}
+		delete(player.Inventory.Items, model.SlotSecondaryWeapon)
+	}
+	equipAmmo := func(typeID4 int) {
+		player.Inventory.Items[model.SlotSecondaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{
+			TypeID1: 3, TypeID2: 3, TypeID3: 4, TypeID4: typeID4,
+		}}, StackSize: 20}
+	}
+
+	equipWeapon(6)
+	if playerCanBaseAttack(player) {
+		t.Fatal("bow base attack was admitted without arrows")
+	}
+	equipAmmo(1)
+	if !playerCanBaseAttack(player) {
+		t.Fatal("bow base attack was rejected with arrows")
+	}
+	equipWeapon(12)
+	if playerCanBaseAttack(player) {
+		t.Fatal("crossbow base attack was admitted without bolts")
+	}
+	equipAmmo(2)
+	if !playerCanBaseAttack(player) {
+		t.Fatal("crossbow base attack was rejected with bolts")
+	}
+	equipWeapon(2)
+	if !playerCanBaseAttack(player) {
+		t.Fatal("melee base attack unexpectedly required ammunition")
+	}
+}
+
+func TestBowBaseAttackWithoutArrowsReturnsStockAmmunitionError(t *testing.T) {
+	player := &model.Player{Inventory: model.NewInventory(nil)}
+	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{TypeInfo: model.TypeInfo{
+		TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6,
+	}}}
+	mob := &model.NPC{}
+	mob.ConfigureCombat(100, 0)
+	var sent []network.Packet
+	handler := &CombatHandler{send: func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}}
+	if err := handler.executeAttack(context.Background(), &server.Session{}, player, mob); err != nil {
+		t.Fatal(err)
+	}
+	if mob.CurrentHitPoints() != 100 {
+		t.Fatalf("ammo-less bow attack changed mob HP to %d", mob.CurrentHitPoints())
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.EntitySkillCastBegin || !bytes.Equal(sent[0].Payload(), []byte{2, skillCastErrorInvalidAmmo, skillCastErrorCategory}) {
+		t.Fatalf("ammo-less bow response = %#v, want B070 02 0E 30", sent)
+	}
+}
+
+func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 42}}
+	player := &model.Player{ID: 42, Inventory: model.NewInventory(map[byte]model.Item{
+		model.SlotPrimaryWeapon: {
+			SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6}},
+		},
+		model.SlotSecondaryWeapon: {
+			ID:        77,
+			StackSize: 2,
+			SRObject:  model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 4, TypeID4: 1}},
+		},
+	})}
+	ammo := &rangedAmmoCombatFake{remaining: []uint16{1, 0}}
+	var sent []network.Packet
+	handler := &CombatHandler{
+		rangedAmmo: ammo,
+		send: func(_ *server.Session, packet network.Packet) error {
+			sent = append(sent, packet)
+			return nil
+		},
+	}
+
+	if err := handler.consumeRangedAmmo(context.Background(), session, player); err != nil {
+		t.Fatal(err)
+	}
+	if got := player.GetInventory().Items[model.SlotSecondaryWeapon].StackSize; got != 1 {
+		t.Fatalf("arrow stack after first shot = %d, want 1", got)
+	}
+	if len(ammo.calls) != 1 || ammo.calls[0] != [2]int64{42, 77} {
+		t.Fatalf("ammunition persistence calls = %#v, want character 42 item 77", ammo.calls)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.InventoryItemUpdate || !bytes.Equal(sent[0].Payload(), []byte{model.SlotSecondaryWeapon, 0x08, 0x01, 0x00}) {
+		t.Fatalf("first arrow update = %#v, want 3040 quantity slot 7 count 1", sent)
+	}
+
+	if err := handler.consumeRangedAmmo(context.Background(), session, player); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := player.GetInventory().Items[model.SlotSecondaryWeapon]; exists {
+		t.Fatal("exhausted arrow stack remained equipped")
+	}
+	if len(sent) != 2 || sent[1].MessageID != opcode.ItemOperationResponse || !bytes.Equal(sent[1].Payload(), []byte{1, 0x0F, model.SlotSecondaryWeapon}) {
+		t.Fatalf("last arrow update = %#v, want B034 server delete slot 7", sent)
 	}
 }
 
@@ -1476,8 +1734,8 @@ func TestCombatNormalAttackRepeatsAtEquippedWeaponCooldown(t *testing.T) {
 	if len(callbacks) != 1 || delays[0] != time.Second {
 		t.Fatalf("first repeat schedule = callbacks:%d delays:%v, want one at 1s", len(callbacks), delays)
 	}
-	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
-		t.Fatalf("recurring first-hit packets = %04X, want B074 active then B070 without end", got)
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
+		t.Fatalf("recurring first-hit packets = %04X, want turn, B074 active, then B070 without end", got)
 	}
 	now = now.Add(time.Second)
 	callbacks[0]()
@@ -1519,6 +1777,9 @@ func TestChineseSwordDamageStartsAsTwoHitB070(t *testing.T) {
 	mob.KnownObjectList = model.NewKnownObjectList(mob)
 	player.GetKnownObjectList().AddObject(mob)
 
+	if got := player.BaseAttackHitCount(); got != 2 {
+		t.Fatalf("configured Chinese sword hit count = %d, want 2", got)
+	}
 	var delays []time.Duration
 	var callbacks []func()
 	var sent []network.Packet
@@ -1546,17 +1807,20 @@ func TestChineseSwordDamageStartsAsTwoHitB070(t *testing.T) {
 	if got := mob.CurrentHitPoints(); got >= 1000 {
 		t.Fatalf("HP after immediate sword attack = %d, want damage", got)
 	}
-	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
-		t.Fatalf("sword start packets = %04X, want B074 B070", got)
+	if got := packetOpcodesForCombat(sent); !reflect.DeepEqual(got, []uint16{opcode.EntityMovementTurnResponse, opcode.EntityActionResponse, opcode.EntitySkillCastBegin}) {
+		t.Fatalf("sword start packets = %04X, want turn, B074, B070", got)
 	}
 	if len(callbacks) != 1 || delays[0] != 1200*time.Millisecond {
 		t.Fatalf("repeat schedule = callbacks:%d delays:%v, want one at 1.2s", len(callbacks), delays)
 	}
-	attack := sent[1]
-	for range 20 {
+	attack := sent[2]
+	for range 19 {
 		if _, err := attack.ReadByte(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if hasDamage, _ := attack.ReadBool(); !hasDamage {
+		t.Fatal("B070 has no damage block")
 	}
 	if hitCount, _ := attack.ReadByte(); hitCount != 2 {
 		t.Fatalf("B070 hit count = %d, want 2", hitCount)
@@ -1631,8 +1895,8 @@ func TestCombatOutOfRangeAttackPursuesThenHitsOnArrival(t *testing.T) {
 	if len(scheduled) != 1 {
 		t.Fatalf("scheduled pursuit polls = %d, want 1", len(scheduled))
 	}
-	if got := destination.GetGlobalCoordinates().X; math32.Abs(got-(mob.GetNavmeshPosition().GetGlobalCoordinates().X-10)) > 0.01 {
-		t.Fatalf("pursuit destination x = %g, want target minus 10", got)
+	if got := destination.GetGlobalCoordinates().X; math32.Abs(got-mob.GetNavmeshPosition().GetGlobalCoordinates().X) > 0.01 {
+		t.Fatalf("pursuit destination x = %g, want target position", got)
 	}
 
 	// Repeated client clicks refresh the destination of the same queued task,
@@ -1658,7 +1922,7 @@ func TestCombatOutOfRangeAttackPursuesThenHitsOnArrival(t *testing.T) {
 		t.Fatal("failed to finalize pursuit movement")
 	}
 	scheduled[1]()
-	if len(sent) != 3 || sent[0].MessageID != opcode.EntityActionResponse || sent[1].MessageID != opcode.EntitySkillCastBegin || sent[2].MessageID != opcode.EntityActionResponse {
+	if len(sent) != 4 || sent[0].MessageID != opcode.EntityMovementTurnResponse || sent[1].MessageID != opcode.EntityActionResponse || sent[2].MessageID != opcode.EntitySkillCastBegin || sent[3].MessageID != opcode.EntityActionResponse {
 		t.Fatalf("arrival combat sequence = %#v", sent)
 	}
 	if mob.CurrentHitPoints() >= 100 {
@@ -1870,8 +2134,8 @@ func TestBuildAttackBeginSerializesNormalAndLethalDamage(t *testing.T) {
 			if cast, _ := packet.ReadUInt32(); cast != 30 {
 				t.Fatalf("cast = %d", cast)
 			}
-			if target, _ := packet.ReadUInt32(); target != 20 {
-				t.Fatalf("target = %d", target)
+			if delegated, _ := packet.ReadUInt32(); delegated != 20 {
+				t.Fatalf("target UID = %d, want 20", delegated)
 			}
 			hasDamage, _ := packet.ReadBool()
 			if !hasDamage {

@@ -1,11 +1,150 @@
 package model
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestRefSkillBinaryTimingLifecycle(t *testing.T) {
+	skill := RefSkill{BasicActivity: 2, ActionPreparingTime: 200, ActionCastingTime: 600, ActionDuration: 2400, ReuseDelay: 5000, CoolTime: 750}
+	if got := skill.RuntimeCastingDuration(); got != 800*time.Millisecond {
+		t.Fatalf("runtime casting duration = %s, want 800ms", got)
+	}
+	if got := skill.RuntimeCastingDurationAt(50); got != 400*time.Millisecond {
+		t.Fatalf("runtime casting duration at 50%% = %s, want 400ms", got)
+	}
+	if got := skill.RuntimeImpactDurationAt(100); got != 3200*time.Millisecond {
+		t.Fatalf("runtime impact duration = %s, want 3.2s", got)
+	}
+	if got := skill.RuntimeImpactDurationAt(50); got != 1600*time.Millisecond {
+		t.Fatalf("runtime impact duration at 50%% = %s, want 1.6s", got)
+	}
+	if got := skill.ReuseDuration(100); got != 5*time.Second {
+		t.Fatalf("reuse duration at 100%% = %s, want 5s", got)
+	}
+	// The 1.8 second authored tail is not scaled; only the 3.2 second active
+	// lifecycle is halved.
+	if got := skill.ReuseDuration(50); got != 3400*time.Millisecond {
+		t.Fatalf("reuse duration at 50%% = %s, want 3.4s", got)
+	}
+	if got := skill.CoolTimeDuration(); got != 750*time.Millisecond {
+		t.Fatalf("cool-time duration = %s, want 750ms", got)
+	}
+}
+
+func TestRefSkillParsesGenericOnffWithoutInventingBarrier(t *testing.T) {
+	skill := RefSkill{Params: [50]int{skillParameterBarrier, 5000, 41}}
+	skill.parseParameters()
+	if skill.UpkeepIntervalMS != 5000 || skill.UpkeepMPCost != 41 {
+		t.Fatalf("upkeep = %d/%d, want 5000/41", skill.UpkeepIntervalMS, skill.UpkeepMPCost)
+	}
+	if skill.BarrierHitPoints != 0 || skill.BarrierDrainMS != 0 {
+		t.Fatalf("non-pw onff classified as barrier: %+v", skill)
+	}
+}
+
+func TestRefSkillParsesActiveEffectPrecedenceMetadata(t *testing.T) {
+	skill := RefSkill{Params: [50]int{
+		skillParameterOverlap2, 700,
+		skillParameterDamageType, 12, 4,
+		skillParameterLinkedSame,
+		skillParameterTransfer, 2, 9900, 125, 0, 0, 1,
+		skillParameterMatch, 1,
+	}}
+	skill.parseParameters()
+	if skill.SecondaryOverlap != 700 || skill.DamageTypeFamily != 12 || skill.DamageTypePrecedence != 4 || !skill.LinkedSameGroup || skill.ReferenceDescriptors[2] != [6]int{2, 9900, 125, 0, 0, 1} || skill.ReferenceRadius != 125 || skill.MatchMode != 1 {
+		t.Fatalf("active-effect metadata = %+v", skill)
+	}
+}
+
+func TestRefSkillParsesProductionTransferDescriptor(t *testing.T) {
+	skill := RefSkill{Params: [50]int{skillParameterTransfer, 1, 2, 20, 3, 35, 24}}
+	skill.parseParameters()
+	if skill.ReferenceDescriptors[1] != [6]int{1, 2, 20, 3, 35, 24} {
+		t.Fatalf("reference descriptor = %v", skill.ReferenceDescriptors[1])
+	}
+	if skill.TransferType != 2 || skill.TransferRange != 20 || skill.TransferCount != 3 || skill.TransferFalloffPercent != 35 || skill.TransferTargetMask != 24 {
+		t.Fatalf("transfer metadata = type:%d range:%d count:%d falloff:%d mask:%d", skill.TransferType, skill.TransferRange, skill.TransferCount, skill.TransferFalloffPercent, skill.TransferTargetMask)
+	}
+}
+
+func TestRefSkillParsesDetectionActorMetadata(t *testing.T) {
+	skill := RefSkill{Params: [50]int{skillParameterDetection, 5, 9, skillParameterTransfer, 2, 1, 150, 0, 0, 10}}
+	skill.parseParameters()
+	if skill.DetectionType != 5 || skill.DetectionLevel != 9 || skill.ReferenceRadius != 150 || !skill.HasReferenceDescriptor(2) {
+		t.Fatalf("detection metadata = type:%d level:%d radius:%d descriptor:%v", skill.DetectionType, skill.DetectionLevel, skill.ReferenceRadius, skill.ReferenceDescriptors[2])
+	}
+}
+
+func TestRefSkillParsesRealRecoveryDescriptor(t *testing.T) {
+	skill := RefSkill{Params: [50]int{3, skillParameterRecoveryStatus, 0x400, 50, 11}}
+	skill.parseParameters()
+	if skill.RecoveryStatusMask != 0x400 || skill.RecoveryStatusValue != 50 || skill.RecoveryStatusGrade != 11 {
+		t.Fatalf("real descriptor = mask:%X value:%d grade:%d", skill.RecoveryStatusMask, skill.RecoveryStatusValue, skill.RecoveryStatusGrade)
+	}
+}
+
+func TestRefSkillParsesHideBodyStateMetadata(t *testing.T) {
+	skill := RefSkill{Params: [50]int{skillParameterHide, 2, 9, 50}}
+	skill.parseParameters()
+	if skill.HideType != 2 || skill.HideLevel != 9 || skill.HideChance != 50 {
+		t.Fatalf("hide metadata = type:%d level:%d chance:%d", skill.HideType, skill.HideLevel, skill.HideChance)
+	}
+}
+
+func TestRefSkillParsesKnockOverAndKnockbackDescriptors(t *testing.T) {
+	knockOver := RefSkill{Params: [50]int{skillParameterKnockOver, 17, 50}}
+	knockOver.parseParameters()
+	if knockOver.KnockOverKey != 17 || knockOver.KnockOverChance != 50 || knockOver.KnockbackDistance != 0 {
+		t.Fatalf("ko metadata = %+v", knockOver)
+	}
+	knockback := RefSkill{Params: [50]int{skillParameterKnockback, 30, 20}}
+	knockback.parseParameters()
+	if knockback.KnockbackChance != 30 || knockback.KnockbackDistance != 20 || knockback.KnockOverKey != 0 {
+		t.Fatalf("kb metadata = %+v", knockback)
+	}
+}
+
+func TestRefSkillNormalizesLinkedDamageDescriptor(t *testing.T) {
+	magical := RefSkill{Params: [50]int{skillParameterLinkedDamage, 4, 35, 3}}
+	magical.parseParameters()
+	if magical.LinkedDamageMask != 7 || magical.LinkedDamagePercent != 35 || magical.LinkedDamageUseLimit != 3 {
+		t.Fatalf("magical lkdr = mask:%d percent:%d limit:%d", magical.LinkedDamageMask, magical.LinkedDamagePercent, magical.LinkedDamageUseLimit)
+	}
+	if got := magical.LinkedDamageAmount(200, true); got != 70 {
+		t.Fatalf("magical linked amount = %d, want 70", got)
+	}
+	if got := magical.LinkedDamageAmount(200, false); got != 0 {
+		t.Fatalf("physical amount through magical mask = %d, want 0", got)
+	}
+	physicalAndMagical := RefSkill{Params: [50]int{skillParameterLinkedDamage, 3, 100, 0}}
+	physicalAndMagical.parseParameters()
+	if physicalAndMagical.LinkedDamageMask != 15 || physicalAndMagical.LinkedDamageAmount(200, false) != 200 || physicalAndMagical.LinkedDamageAmount(200, true) != 200 {
+		t.Fatalf("combined lkdr = %+v", physicalAndMagical)
+	}
+}
+
+func TestRefSkillResourceCostsCombineFixedAndPercentagePools(t *testing.T) {
+	skill := RefSkill{ConsumeHP: 25, ConsumeMP: 10, ConsumeHPRatio: 5, ConsumeMPRatio: 10}
+	hp, mp := skill.ResourceCosts(1000, 500)
+	if hp != 75 || mp != 60 {
+		t.Fatalf("resource costs = hp:%d mp:%d, want hp:75 mp:60", hp, mp)
+	}
+}
 
 func TestNASRUNMallSkillExecutesAsBuff(t *testing.T) {
 	skill := RefSkill{CodeName: "SKILL_MALL_NASRUN_ECCENTRICDEMON_01", BasicActivity: 2, BuffDuration: 600000}
 	if skill.SystemOwner() != SkillSystemNone || skill.ExecutionKind() != SkillExecutionBuff {
 		t.Fatalf("NASRUN classification = owner %d execution %d", skill.SystemOwner(), skill.ExecutionKind())
+	}
+}
+
+func TestRefSkillParsesRecoveredAggroIncreaseFlatAndPercent(t *testing.T) {
+	skill := RefSkill{}
+	copy(skill.Params[:], []int{skillParameterAggroIncrease, 320, 45})
+	skill.parseParameters()
+	if skill.AggroIncrease != 320 || skill.AggroIncreasePercent != 45 {
+		t.Fatalf("aggro increase = flat:%d percent:%d, want 320 and 45", skill.AggroIncrease, skill.AggroIncreasePercent)
 	}
 }
 
@@ -199,6 +338,7 @@ func TestRefSkillParsesCatalogWideAbnormalStatesAndTeleportVariants(t *testing.T
 		{"sleep", []int{skillParameterSleep, 5000, 80, 11}, SkillStatusEffect{Kind: CombatStatusSleep, Chance: 80, Level: 11, DurationMS: 5000}},
 		{"darkness", []int{skillParameterDarkness, 30000, 75, 10, 122}, SkillStatusEffect{Kind: CombatStatusDarkness, Power: 122, Chance: 75, Level: 10, DurationMS: 30000}},
 		{"bleed", []int{skillParameterBleed, 12000, 0, 9, 72, 65}, SkillStatusEffect{Kind: CombatStatusBleed, Power: 72, Chance: 65, Level: 9, DurationMS: 12000}},
+		{"division", []int{skillParameterDamageTaken, 30000, 80, 11, 35}, SkillStatusEffect{Kind: CombatStatusDamageTakenUp, Power: 35, Chance: 80, Level: 11, DurationMS: 30000}},
 		{"panic", []int{skillParameterPanic, 8000, 60, 7}, SkillStatusEffect{Kind: CombatStatusPanic, Chance: 60, Level: 7, DurationMS: 8000}},
 	}
 	for _, test := range tests {

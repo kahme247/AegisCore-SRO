@@ -111,7 +111,9 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 			// its tax rate. The client rejects both a missing active tax and an
 			// unexpected tax on an inactive fortress gate.
 			selectionData = teleportGateSelectionData(gate)
-			npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), 8)
+		}
+		if model.IsTeleportServiceCodeName(object.GetName()) {
+			npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), teleportTaskUse)
 		}
 		logrus.Infof("NPC_SELECT player=%s uid=%d code=%s selectionData=%x", player.CharName, uniqueID, object.GetName(), selectionData)
 		return session.Send(buildNPCSelectionResponse(uniqueID, selectionData))

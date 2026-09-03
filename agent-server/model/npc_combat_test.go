@@ -47,6 +47,93 @@ func TestNPCCombatStatusMovesAndRestoresFrostbite(t *testing.T) {
 	}
 }
 
+func TestNPCStackableCombatStatusesRetainIndependentTokens(t *testing.T) {
+	now := time.Unix(1000, 0)
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.ConfigureCombat(1000, 1)
+	npc.SetLifeState(Alive)
+	first := CombatStatus{Kind: CombatStatusBurn, Token: 11, SourceUID: 101, SkillID: 1001, Level: 3, Payload: 40, ExpiresAt: now.Add(time.Minute), Stackable: true}
+	second := CombatStatus{Kind: CombatStatusBurn, Token: 12, SourceUID: 102, SkillID: 1002, Level: 5, Payload: 60, ExpiresAt: now.Add(2 * time.Minute), Stackable: true}
+	if !npc.ApplyCombatStatus(first) || !npc.ApplyCombatStatus(second) {
+		t.Fatal("stackable statuses were rejected")
+	}
+	if got, ok := npc.CombatStatusByToken(first.Kind, first.Token, now); !ok || got.SkillID != first.SkillID {
+		t.Fatalf("first token = %+v active=%t", got, ok)
+	}
+	if got, ok := npc.CombatStatusByToken(second.Kind, second.Token, now); !ok || got.SkillID != second.SkillID {
+		t.Fatalf("second token = %+v active=%t", got, ok)
+	}
+	if selected, ok := npc.CombatStatus(CombatStatusBurn, now); !ok || selected.Token != second.Token {
+		t.Fatalf("representative status = %+v active=%t, want higher-level token 12", selected, ok)
+	}
+	if !npc.RemoveCombatStatus(first.Kind, first.Token) {
+		t.Fatal("remove first stacked token")
+	}
+	if _, ok := npc.CombatStatusByToken(first.Kind, first.Token, now); ok {
+		t.Fatal("removed stacked token remains active")
+	}
+	if got, ok := npc.CombatStatusByToken(second.Kind, second.Token, now); !ok || got.Token != second.Token {
+		t.Fatalf("sibling token removed with first: %+v active=%t", got, ok)
+	}
+}
+
+func TestNPCDamageTakenUpDoesNotStackOrReplace(t *testing.T) {
+	now := time.Now()
+	npc := &NPC{LifeState: Alive}
+	npc.combat.hitPoints = 1
+	first := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 1, SkillID: 8414, Power: 35, ExpiresAt: now.Add(time.Minute)}
+	second := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 2, SkillID: 8415, Power: 80, ExpiresAt: now.Add(time.Minute)}
+	if !npc.ApplyCombatStatus(first) {
+		t.Fatal("first tisc status was rejected")
+	}
+	if npc.ApplyCombatStatus(second) {
+		t.Fatal("equal-class tisc status replaced the active record")
+	}
+	if got, active := npc.CombatStatus(CombatStatusDamageTakenUp, now); !active || got.Token != first.Token || got.Power != first.Power {
+		t.Fatalf("active tisc status = %+v, active=%v; want first record", got, active)
+	}
+}
+
+func TestNPCDamageTakenUpSurvivesDeathUntilExpiry(t *testing.T) {
+	now := time.Now()
+	npc := &NPC{LifeState: Alive, Mutex: &sync.Mutex{}}
+	npc.combat.hitPoints = 10
+	status := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 1, SkillID: 8414, Power: 35, ExpiresAt: now.Add(time.Minute)}
+	if !npc.ApplyCombatStatus(status) {
+		t.Fatal("failed to apply tisc status")
+	}
+	if applied, killed := npc.ApplyDamage(10); applied != 10 || !killed {
+		t.Fatalf("lethal damage = (%d, %v), want (10, true)", applied, killed)
+	}
+	if got, active := npc.CombatStatus(CombatStatusDamageTakenUp, now); !active || got.Token != status.Token {
+		t.Fatalf("post-death tisc status = %+v, active=%v; want preserved", got, active)
+	}
+}
+
+func TestNPCDamageTakenUpDispelAndExpiryAllowReapplication(t *testing.T) {
+	now := time.Now()
+	npc := &NPC{LifeState: Alive}
+	npc.combat.hitPoints = 1
+	first := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 1, SkillID: 8414, Power: 35, Level: 11, ExpiresAt: now.Add(time.Minute)}
+	if !npc.ApplyCombatStatus(first) {
+		t.Fatal("failed to apply initial tisc status")
+	}
+	if removed := npc.CureCombatStatusesWithCurse(0, 0, true, 11, 100, 1, now, func(int) bool { return true }); removed != 1 {
+		t.Fatalf("dispelled statuses = %d, want 1", removed)
+	}
+	second := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 2, SkillID: 8415, Power: 40, Level: 12, ExpiresAt: now.Add(2 * time.Minute)}
+	if !npc.ApplyCombatStatus(second) {
+		t.Fatal("tisc reapplication after dispel was rejected")
+	}
+	if _, active := npc.CombatStatus(CombatStatusDamageTakenUp, second.ExpiresAt); active {
+		t.Fatal("tisc remained active at its expiry boundary")
+	}
+	third := CombatStatus{Kind: CombatStatusDamageTakenUp, Token: 3, SkillID: 8416, Power: 45, ExpiresAt: time.Now().Add(time.Minute)}
+	if !npc.ApplyCombatStatus(third) {
+		t.Fatal("tisc reapplication after expiry was rejected")
+	}
+}
+
 func TestNPCFreezeStopsAndRestoresMovement(t *testing.T) {
 	npc := &NPC{Mutex: &sync.Mutex{}}
 	npc.SetLifeState(Alive)

@@ -86,6 +86,31 @@ func TestMobAIStationaryPlantDoesNotPursueOrWander(t *testing.T) {
 	}
 }
 
+func TestMobAIKnockbackInterruptsPendingAttackAndResumesPursuit(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(10)
+	npc.ConfigureAI(5, true, 150)
+	npc.SetAggroTarget(player.GetUniqueID())
+	manager := mobAIManagerForTest()
+	manager.setPendingAttack(npc.GetUniqueID(), mobPendingAttack{
+		npc: npc, targetUID: player.GetUniqueID(), skillID: 160,
+		castUID: 77, damage: 100, readyAt: now.Add(time.Second),
+	})
+
+	manager.InterruptAttack(npc)
+	if _, exists, _ := manager.pendingAttack(npc.GetUniqueID(), now); exists {
+		t.Fatal("pending attack survived forced displacement")
+	}
+
+	// Model the authoritative endpoint written by the combat displacement path.
+	npc.SetNavmeshPosition(mobAIPosition(40, 100))
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	manager.tick(world, now)
+	if world.moves != 1 || npc.GetMotionState() != model.Running {
+		t.Fatalf("post-knockback pursuit = moves %d state %d, want 1/running", world.moves, npc.GetMotionState())
+	}
+}
+
 func TestMobAIRejectsObstructedPursuitBeforeMovement(t *testing.T) {
 	now := time.Now()
 	npc, _ := mobAIFixture(100)
@@ -286,6 +311,9 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	_, _ = end.ReadByte()
 	endActionUID, _ := end.ReadUInt32()
 	endTargetUID, _ := end.ReadUInt32()
+	_, _ = end.ReadBool()
+	_, _ = end.ReadByte()
+	_, _ = end.ReadByte()
 	if beginActionUID == 0 || endActionUID != beginActionUID || endTargetUID != player.GetUniqueID() {
 		t.Fatalf("delayed action IDs = begin:%d end:%d target:%d", beginActionUID, endActionUID, endTargetUID)
 	}
@@ -303,7 +331,9 @@ func TestMobAIPhysicalCriticalAndPlayerBlockUseStockDamageStates(t *testing.T) {
 	criticalSpawned := criticalTarget.GetCharKnownObjectList().GetObjectsToSpawn()
 	criticalTarget.GetCharKnownObjectList().MarkSpawned(criticalSpawned)
 	manager := mobAIManagerForTest()
-	manager.hitRollPercent = func(int) bool { return true }
+	// Attack/parry rating must not turn a normal SRO attack into a synthetic
+	// miss. Only the independent shield block roll suppresses damage.
+	manager.hitRollPercent = func(int) bool { return false }
 	manager.criticalRoll = func(int) bool { return true }
 	manager.blockRoll = func(int) bool { return false }
 	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
@@ -335,6 +365,48 @@ func TestMobAIPhysicalCriticalAndPlayerBlockUseStockDamageStates(t *testing.T) {
 	}
 }
 
+func TestMobAITiscFinalFactorAppliesToPhysicalAndMagicalDamage(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		magical    bool
+		critical   bool
+		wantDamage int
+	}{
+		{name: "physical", wantDamage: 135},
+		{name: "physical critical", critical: true, wantDamage: 270},
+		{name: "magical", magical: true, critical: true, wantDamage: 135},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			npc, target := mobAIFixture(10)
+			target.BaseStats.HP = 1000
+			status := model.CombatStatus{
+				Kind: model.CombatStatusDamageTakenUp, Token: 1, SkillID: 8414,
+				Power: 35, ExpiresAt: time.Now().Add(time.Minute),
+			}
+			if !target.ApplyCombatStatus(status) {
+				t.Fatal("failed to apply tisc status")
+			}
+			conn := &mobAICaptureConn{}
+			target.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-tisc-test")
+			defer target.Session.Close()
+			spawned := target.GetCharKnownObjectList().GetObjectsToSpawn()
+			target.GetCharKnownObjectList().MarkSpawned(spawned)
+
+			manager := mobAIManagerForTest()
+			manager.criticalRoll = func(int) bool { return test.critical }
+			manager.blockRoll = func(int) bool { return false }
+			manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+				npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}, CriticalHitRate: 100},
+			}}))
+			manager.applyAttackDamage(&mobAIWorldFake{}, npc, target, 10, 100, false, test.magical)
+
+			if got := 1000 - target.CurrentHP(); got != test.wantDamage {
+				t.Fatalf("damage = %d, want %d", got, test.wantDamage)
+			}
+		})
+	}
+}
+
 func TestMobAIShockDoesNotBehaveLikeStun(t *testing.T) {
 	now := time.Now()
 	npc, _ := mobAIFixture(100)
@@ -351,6 +423,226 @@ func TestMobAIShockDoesNotBehaveLikeStun(t *testing.T) {
 	}
 }
 
+func TestMobAINPCSkillAppliesDirectStatusActor(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	const skillID = 161
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.hitRollPercent = func(int) bool { return true }
+	var scheduled []func()
+	manager.schedule = func(_ time.Duration, callback func()) { scheduled = append(scheduled, callback) }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{
+			npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}},
+		},
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusStun, Chance: 100, Level: 2, DurationMS: 1000}}},
+		},
+	}))
+	manager.applyAttackDamageWithSkill(&mobAIWorldFake{}, npc, target, 12, 1, false, skillID, true, false)
+	if status, active := target.CombatStatus(model.CombatStatusStun, time.Now()); !active || status.SkillID != skillID || status.Level != 2 {
+		t.Fatalf("NPC skill status = %+v, active=%t", status, active)
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("scheduled NPC status callbacks = %d, want 1", len(scheduled))
+	}
+	scheduled[0]()
+	if _, active := target.CombatStatus(model.CombatStatusStun, time.Now().Add(2*time.Second)); active {
+		t.Fatal("expired NPC status remained active after scheduler callback")
+	}
+}
+
+func TestMobAINPCSkillAppliesAuthoredKnockbackAndInterruptsPlayer(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	const skillID = 165
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.hitRollPercent = func(chance int) bool { return chance == 30 }
+	interrupted := uint32(0)
+	manager.ConfigurePlayerAttackInterrupter(func(player *model.Player) { interrupted = player.GetUniqueID() })
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}}},
+		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, KnockbackChance: 30, KnockbackDistance: 20}},
+	}))
+	world := &mobAIWorldFake{}
+	targets := manager.applyAttackDamageWithSkillResult(world, npc, target, 16, 1, false, skillID, true, false, false)
+	if len(targets) != 1 || len(targets[0].Records) != 1 {
+		t.Fatalf("mob knockback targets = %+v", targets)
+	}
+	record := targets[0].Records[0]
+	if record.AttackState != model.DamageResultKnockback || record.EndpointX != 130 {
+		t.Fatalf("mob knockback record = %+v, want endpoint x=130", record)
+	}
+	if target.GetNavmeshPosition().Offset.X != 130 || interrupted != target.GetUniqueID() || world.stops != 1 {
+		t.Fatalf("mob knockback target x=%v interrupted=%d stops=%d", target.GetNavmeshPosition().Offset.X, interrupted, world.stops)
+	}
+}
+
+func TestMobAINPCSkillFailedKnockbackRollDoesNotMoveOrInterruptPlayer(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	const skillID = 166
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.hitRollPercent = func(int) bool { return false }
+	interrupted := false
+	manager.ConfigurePlayerAttackInterrupter(func(*model.Player) { interrupted = true })
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}}},
+		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, KnockbackChance: 30, KnockbackDistance: 20}},
+	}))
+	world := &mobAIWorldFake{}
+	start := target.GetNavmeshPosition()
+	manager.applyAttackDamageWithSkill(world, npc, target, 17, 1, false, skillID, true, false)
+	position := target.GetNavmeshPosition()
+	if position.Region.ID != start.Region.ID || navmeshv2.HorizontalDistance(position, start) > 0.01 || interrupted || world.stops != 0 {
+		t.Fatalf("failed mob knockback moved/interrupted target: position=%v interrupted=%t stops=%d", target.GetNavmeshPosition(), interrupted, world.stops)
+	}
+}
+
+func TestMobAINPCSkillAggregatesOrdinaryTransferTargets(t *testing.T) {
+	npc, primary := mobAIFixture(10)
+	secondary := &model.Player{
+		ID: 2, CharName: "secondary", SRObject: model.NewSRObject(),
+		BaseStats: model.BaseStats{HP: 100, Str: 20},
+	}
+	secondary.SetUniqueID(201)
+	secondary.RefObjectID = primary.RefObjectID
+	secondary.SetNavmeshPosition(mobAIPosition(115, 100))
+	secondary.SetLifeState(model.Alive)
+	npc.GetKnownObjectList().AddObject(secondary)
+	const skillID = 162
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{
+			npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}},
+		},
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, TransferType: 2, TransferRange: 20, TransferCount: 1, TransferFalloffPercent: 50},
+		},
+	}))
+	manager.applyMobSkillAttack(&mobAIWorldFake{}, npc, primary, 13, 100, false, skillID, false)
+	if primary.CurrentHP() != 0 || secondary.CurrentHP() != 50 {
+		t.Fatalf("ordinary transfer damage = primary:%d secondary:%d, want 0/50", primary.CurrentHP(), secondary.CurrentHP())
+	}
+}
+
+func TestMobAINPCSkillOwnerTransferUsesExplicitProvider(t *testing.T) {
+	npc, primary := mobAIFixture(10)
+	secondary := &model.Player{ID: 2, CharName: "owner-target", SRObject: model.NewSRObject(), BaseStats: model.BaseStats{HP: 100, Str: 20}}
+	secondary.SetUniqueID(202)
+	secondary.RefObjectID = primary.RefObjectID
+	secondary.SetLifeState(model.Alive)
+	const skillID = 163
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}}},
+		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, TransferType: 5, TransferRange: 1, TransferCount: 1}},
+	}))
+	manager.ConfigureSkillOwnerTargetProvider(func(_ *model.NPC, _ *model.Player, _ model.RefSkill, _ int) []*model.Player {
+		return []*model.Player{primary, secondary, secondary}
+	})
+	manager.applyMobSkillAttack(&mobAIWorldFake{}, npc, primary, 14, 100, false, skillID, false)
+	if secondary.CurrentHP() != 0 {
+		t.Fatalf("owner-provided transfer did not apply damage: hp=%d", secondary.CurrentHP())
+	}
+}
+
+func TestMobAINPCSkillChainTransferUsesProgressiveNearestTargets(t *testing.T) {
+	npc, primary := mobAIFixture(10)
+	makePlayer := func(id uint32, x float32) *model.Player {
+		player := &model.Player{ID: int(id), SRObject: model.NewSRObject(), BaseStats: model.BaseStats{HP: 100, Str: 20}}
+		player.SetUniqueID(id)
+		player.SetLifeState(model.Alive)
+		player.SetNavmeshPosition(mobAIPosition(x, 100))
+		npc.GetKnownObjectList().AddObject(player)
+		return player
+	}
+	first := makePlayer(203, 115)
+	second := makePlayer(204, 122)
+	makePlayer(205, 140)
+	manager := mobAIManagerForTest()
+	got := manager.mobSkillTransferTargets(npc, primary, model.RefSkill{TransferType: 6, TransferRange: 10, TransferCount: 2})
+	if len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("chain targets = %v, want [%d %d]", got, first.GetUniqueID(), second.GetUniqueID())
+	}
+}
+
+func TestMobAINPCSkillSchedulesPeriodicAbnormalDamage(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	const skillID = 164
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.hitRollPercent = func(int) bool { return true }
+	var scheduled []func()
+	manager.schedule = func(_ time.Duration, callback func()) { scheduled = append(scheduled, callback) }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}}},
+		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusBurn, Power: 20, Payload: 20, Chance: 100, DurationMS: 11000}}}},
+	}))
+	manager.applyAttackDamageWithSkill(&mobAIWorldFake{}, npc, target, 15, 1, false, skillID, true, false)
+	if len(scheduled) != 2 {
+		t.Fatalf("scheduled callbacks = %d, want expiry and first tick", len(scheduled))
+	}
+	scheduled[1]()
+	if target.CurrentHP() != 79 {
+		t.Fatalf("periodic NPC damage hp = %d, want 79", target.CurrentHP())
+	}
+	if len(scheduled) != 3 {
+		t.Fatalf("scheduled callbacks after first tick = %d, want next tick", len(scheduled))
+	}
+	if status, active := target.CombatStatus(model.CombatStatusBurn, time.Now()); !active || status.Token == 0 {
+		t.Fatal("periodic tick removed or failed to preserve parent status")
+	}
+}
+
+func TestMobAILinkedDamageRedirectsAuthoredShareAndConsumesUseLimit(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	target.BaseStats.HP = 1000
+	linked := &model.Player{ID: 2, SRObject: model.NewSRObject(), BaseStats: model.BaseStats{HP: 1000}}
+	linked.SetUniqueID(201)
+	linked.SetLifeState(model.Alive)
+	linked.CharKnownObjectList = model.NewCharKnownObjectList(linked)
+	linked.KnownObjectList = linked.CharKnownObjectList
+	npc.KnownObjectList.AddObject(linked)
+	const skillID = uint32(901)
+	if _, ok := target.CommitActiveBuffFrom(skillID, 77, linked.GetUniqueID(), time.Minute, model.BuffModifiers{}); !ok {
+		t.Fatal("failed to arrange linked-damage buff")
+	}
+	manager := &MobAIManager{referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		skillID: {ID: skillID, LinkedDamageMask: 15, LinkedDamagePercent: 35, LinkedDamageUseLimit: 2},
+	}})}
+
+	remaining, first := manager.interceptLinkedDamage(npc, target, 200, false)
+	if remaining != 130 || first.player != linked || first.application.AppliedDamage != 70 || first.removedBuff != 0 || linked.CurrentHP() != 930 {
+		t.Fatalf("first linked interception = remaining:%d result:%+v linkedHP:%d", remaining, first, linked.CurrentHP())
+	}
+	remaining, second := manager.interceptLinkedDamage(npc, target, 200, false)
+	if remaining != 130 || second.application.AppliedDamage != 70 || second.removedBuff != 77 || linked.CurrentHP() != 860 {
+		t.Fatalf("second linked interception = remaining:%d result:%+v linkedHP:%d", remaining, second, linked.CurrentHP())
+	}
+	if len(target.ActiveBuffSnapshot()) != 0 {
+		t.Fatalf("limited linked buff remained active: %+v", target.ActiveBuffSnapshot())
+	}
+}
+
+func TestMobAILinkedResultAlignmentPadsStateOnlySuppression(t *testing.T) {
+	targets := alignMobDamageTargets([]model.CombatDamageTarget{
+		{TargetUID: 1, Records: []model.CombatDamageRecord{{Damage: 50}}},
+		{TargetUID: 2, Records: []model.CombatDamageRecord{{AttackState: model.DamageResultBarrier}, {Damage: 25}}},
+	})
+	if len(targets[0].Records) != 2 || targets[0].Records[1].AttackState != model.DamageResultSuppressed || len(targets[1].Records) != 2 {
+		t.Fatalf("aligned linked targets = %+v", targets)
+	}
+}
+
 func TestMobAIStunStopsMovementAndAttack(t *testing.T) {
 	now := time.Now()
 	npc, _ := mobAIFixture(100)
@@ -362,6 +654,38 @@ func TestMobAIStunStopsMovementAndAttack(t *testing.T) {
 	mobAIManagerForTest().tick(world, now)
 	if npc.GetMotionState() != model.NoMotion || world.stops != 1 || world.moves != 0 {
 		t.Fatalf("stunned state=%d stops=%d moves=%d", npc.GetMotionState(), world.stops, world.moves)
+	}
+}
+
+func TestMobAISleepBypassIsLimitedToThreeBinaryConfirmedSkills(t *testing.T) {
+	manager := &MobAIManager{referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		1: {ID: 1, CodeName: "MSKILL_SD_HAROERIS_ATTACK04"},
+		2: {ID: 2, CodeName: "MSKILL_SD_SETH_ATTACK04"},
+		3: {ID: 3, CodeName: "MSKILL_SD_SETH_ATTACK10"},
+		4: {ID: 4, CodeName: "MSKILL_SD_SETH_ATTACK11"},
+	}})}
+	for _, skillID := range []uint32{1, 2, 3} {
+		if !manager.skillBypassesSleepRejection(skillID) {
+			t.Fatalf("confirmed Sand Dungeon skill %d did not bypass sleep", skillID)
+		}
+	}
+	if manager.skillBypassesSleepRejection(4) || manager.skillBypassesSleepRejection(999) {
+		t.Fatal("unconfirmed skill received broad sleep bypass")
+	}
+}
+
+func TestMobAISealStoneSleepBypassUsesExactActorCode(t *testing.T) {
+	manager := &MobAIManager{referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+		100: {RefObject: model.RefObject{ID: 100, CodeName: "MOB_RM_SEALSTONE"}},
+		101: {RefObject: model.RefObject{ID: 101, CodeName: "MOB_RM_SEALSTONE_2"}},
+	}})}
+	exact := &model.NPC{SRObject: model.SRObject{RefObjectID: 100}}
+	variant := &model.NPC{SRObject: model.SRObject{RefObjectID: 101}}
+	if !manager.isExactSealStone(exact) {
+		t.Fatal("binary-confirmed seal stone actor did not receive exception")
+	}
+	if manager.isExactSealStone(variant) {
+		t.Fatal("numbered seal-stone variant received prefix-based exception")
 	}
 }
 
@@ -384,8 +708,8 @@ func TestVitalSpotHitDownChangesMonsterHitChance(t *testing.T) {
 	if !manager.mobAttackLands(npc, player, now) {
 		t.Fatal("hit-down monster hit rejected")
 	}
-	if len(chances) != 2 || chances[0] != 90 || chances[1] != 50 {
-		t.Fatalf("monster hit chances = %v, want [90 50]", chances)
+	if len(chances) != 2 || chances[0] != 98 || chances[1] != 90 {
+		t.Fatalf("monster hit chances = %v, want [98 90]", chances)
 	}
 }
 

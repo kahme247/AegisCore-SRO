@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -44,14 +45,19 @@ type mobAIWorld interface {
 
 type MobAIManager struct {
 	Manager
-	stateMu        sync.Mutex
-	referenceData  *model.ReferenceDataCatalog
-	vitals         model.CharacterVitalsRepository
-	pending        map[uint32]mobPendingAttack
-	nextTrace      time.Time
-	hitRollPercent func(int) bool
-	criticalRoll   func(int) bool
-	blockRoll      func(int) bool
+	stateMu         sync.Mutex
+	referenceData   *model.ReferenceDataCatalog
+	vitals          model.CharacterVitalsRepository
+	pending         map[uint32]mobPendingAttack
+	nextTrace       time.Time
+	hitRollPercent  func(int) bool
+	criticalRoll    func(int) bool
+	blockRoll       func(int) bool
+	damageRoll      func() int
+	now             func() time.Time
+	schedule        func(time.Duration, func())
+	ownerTargets    func(*model.NPC, *model.Player, model.RefSkill, int) []*model.Player
+	interruptPlayer func(*model.Player)
 }
 
 func (m *MobAIManager) ConfigureVitals(repository model.CharacterVitalsRepository) {
@@ -75,10 +81,17 @@ type mobAttackProfile struct {
 type mobPendingAttack struct {
 	npc       *model.NPC
 	targetUID uint32
+	skillID   uint32
 	castUID   uint32
 	damage    int
 	magical   bool
 	readyAt   time.Time
+}
+
+type mobLinkedDamage struct {
+	player      *model.Player
+	application model.PlayerDamageApplication
+	removedBuff uint32
 }
 
 var mobAIManagerInstance *MobAIManager
@@ -91,6 +104,9 @@ func GetMobAIManagerInstance() *MobAIManager {
 			hitRollPercent: func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
 			criticalRoll:   func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
 			blockRoll:      func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
+			damageRoll:     func() int { return rand.Intn(32768) },
+			now:            time.Now,
+			schedule:       func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) },
 		}
 		mobAIManagerInstance.Name = "MobAIManager"
 		mobAIManagerInstance.initialDelay = time.Second
@@ -101,7 +117,8 @@ func GetMobAIManagerInstance() *MobAIManager {
 }
 
 // ConfigureReferenceData supplies the immutable character and skill catalogs
-// used to derive collision-aware reach, action delay, and cooldown.
+// used to derive collision-aware reach, action delay, cooldown, and direct
+// NPC abnormal-effect descriptors.
 func (m *MobAIManager) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) {
 	if m == nil {
 		return
@@ -109,6 +126,57 @@ func (m *MobAIManager) ConfigureReferenceData(catalog *model.ReferenceDataCatalo
 	m.stateMu.Lock()
 	m.referenceData = catalog
 	m.stateMu.Unlock()
+}
+
+// ConfigureSkillOwnerTargetProvider supplies the native-owned collection used
+// by NPC transfer types 5 and 7. Without it, MobAI never widens those skills
+// to arbitrary visible players.
+func (m *MobAIManager) ConfigureSkillOwnerTargetProvider(provider func(*model.NPC, *model.Player, model.RefSkill, int) []*model.Player) {
+	if m == nil {
+		return
+	}
+	m.stateMu.Lock()
+	m.ownerTargets = provider
+	m.stateMu.Unlock()
+}
+
+// ConfigurePlayerAttackInterrupter connects NPC-authored forced movement to
+// the player combat runtime so casts and repeating attacks cannot complete
+// from the position occupied before displacement.
+func (m *MobAIManager) ConfigurePlayerAttackInterrupter(interrupt func(*model.Player)) {
+	if m == nil {
+		return
+	}
+	m.stateMu.Lock()
+	m.interruptPlayer = interrupt
+	m.stateMu.Unlock()
+}
+
+func (m *MobAIManager) combatNow() time.Time {
+	if m == nil {
+		return time.Now()
+	}
+	m.stateMu.Lock()
+	now := m.now
+	m.stateMu.Unlock()
+	if now == nil {
+		return time.Now()
+	}
+	return now()
+}
+
+func (m *MobAIManager) scheduleAfter(delay time.Duration, callback func()) {
+	if m == nil || callback == nil {
+		return
+	}
+	m.stateMu.Lock()
+	schedule := m.schedule
+	m.stateMu.Unlock()
+	if schedule == nil {
+		time.AfterFunc(max(0, delay), callback)
+		return
+	}
+	schedule(max(0, delay), callback)
 }
 
 func (m *MobAIManager) run() {
@@ -206,6 +274,9 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	_, asleep := npc.CombatStatus(model.CombatStatusSleep, now)
 	_, bound := npc.CombatStatus(model.CombatStatusBind, now)
 	_, petrified := npc.CombatStatus(model.CombatStatusPetrify, now)
+	if asleep && (m.skillBypassesSleepRejection(npc.AttackSkillID()) || m.isExactSealStone(npc)) {
+		asleep = false
+	}
 	if frozen || stunned || asleep || bound || petrified {
 		m.clearPendingAttack(npc.GetUniqueID())
 		if npc.GetMotionState() != model.NoMotion {
@@ -296,11 +367,34 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	}
 	damage := level * 2
 	if profile.attackMin > 0 && profile.attackMax >= profile.attackMin {
+		attackRate := 0
+		varianceAvailable := false
+		m.stateMu.Lock()
+		catalog := m.referenceData
+		roll := m.damageRoll
+		m.stateMu.Unlock()
+		if catalog != nil {
+			if character, exists := catalog.Character(npc.GetRefObjectID()); exists {
+				attackRate = character.HitRate
+				varianceAvailable = character.HitRate > 0
+			}
+		}
+		var rolls [4]int
+		if roll != nil {
+			for index := range rolls {
+				rolls[index] = roll()
+			}
+		}
+		if varianceAvailable {
+			damage = model.CombatVarianceDamage(profile.attackMin, profile.attackMax, attackRate, target.DerivedStats().ParryRate, level, target.Level, rolls)
+		} else {
+			damage = (profile.attackMin + profile.attackMax) / 2
+		}
 		defense := target.DerivedStats().PhyDef
 		if profile.magical {
 			defense = target.DerivedStats().MagDef
 		}
-		damage = (profile.attackMin+profile.attackMax)/2 - defense
+		damage -= defense
 	}
 	if damage < 1 {
 		damage = 1
@@ -317,6 +411,7 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		m.setPendingAttack(npc.GetUniqueID(), mobPendingAttack{
 			npc:       npc,
 			targetUID: target.GetUniqueID(),
+			skillID:   skillID,
 			castUID:   castUID,
 			damage:    damage,
 			magical:   profile.magical,
@@ -326,7 +421,43 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		npc.SendToKnown(&begin)
 		return
 	}
-	m.applyAttackDamage(world, npc, target, castUID, damage, false, profile.magical)
+	m.applyMobSkillAttack(world, npc, target, castUID, damage, false, skillID, profile.magical)
+}
+
+func (m *MobAIManager) isExactSealStone(npc *model.NPC) bool {
+	if m == nil || npc == nil {
+		return false
+	}
+	m.stateMu.Lock()
+	catalog := m.referenceData
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return false
+	}
+	character, exists := catalog.Character(npc.GetRefObjectID())
+	return exists && character.CodeName == "MOB_RM_SEALSTONE"
+}
+
+func (m *MobAIManager) skillBypassesSleepRejection(skillID uint32) bool {
+	if m == nil || skillID == 0 {
+		return false
+	}
+	m.stateMu.Lock()
+	catalog := m.referenceData
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return false
+	}
+	skill, exists := catalog.Skill(skillID)
+	if !exists {
+		return false
+	}
+	switch skill.CodeName {
+	case "MSKILL_SD_HAROERIS_ATTACK04", "MSKILL_SD_SETH_ATTACK04", "MSKILL_SD_SETH_ATTACK10":
+		return true
+	default:
+		return false
+	}
 }
 
 func mobDamageAfterAttackDown(npc *model.NPC, damage int, now time.Time) int {
@@ -468,6 +599,16 @@ func (m *MobAIManager) clearPendingAttack(npcUID uint32) {
 	m.stateMu.Unlock()
 }
 
+// InterruptAttack cancels damage committed by an NPC before forced
+// displacement. The next AI tick can then pursue its target from the NPC's
+// new authoritative position instead of resolving a melee hit at range.
+func (m *MobAIManager) InterruptAttack(npc *model.NPC) {
+	if m == nil || npc == nil {
+		return
+	}
+	m.clearPendingAttack(npc.GetUniqueID())
+}
+
 func (m *MobAIManager) resolvePendingAttack(world mobAIWorld, npc *model.NPC, now time.Time) bool {
 	pending, exists, due := m.pendingAttack(npc.GetUniqueID(), now)
 	if !exists {
@@ -484,7 +625,7 @@ func (m *MobAIManager) resolvePendingAttack(world mobAIWorld, npc *model.NPC, no
 		npc.ClearAggroTarget(pending.targetUID)
 		return true
 	}
-	m.applyAttackDamage(world, npc, target, pending.castUID, pending.damage, true, pending.magical)
+	m.applyMobSkillAttack(world, npc, target, pending.castUID, pending.damage, true, pending.skillID, pending.magical)
 	return true
 }
 
@@ -496,27 +637,250 @@ func (m *MobAIManager) knownPlayer(npc *model.NPC, targetUID uint32) *model.Play
 	return target
 }
 
-func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool, magical ...bool) {
-	isMagical := len(magical) > 0 && magical[0]
-	record := model.CombatDamageRecord{DamageState: model.DamageStateNormal}
-	applied, killed := 0, false
-	landed := m.mobAttackLands(npc, target, time.Now())
-	if landed {
-		if m.mobAttackBlocked(target) {
-			record.AttackState = model.DamageAttackStateBlock
-		} else {
-			critical := !isMagical && m.mobAttackCritical(npc)
-			if critical {
-				damage = min(damage*2, maximumMobWireDamage)
-				record.DamageState = model.DamageStateCritical
+// applyMobSkillAttack aggregates ordinary discriminator-1 NPC transfers into
+// one native-style result packet. Owner-bound types 5/7 intentionally fall
+// through to the primary target only until their runtime collections exist.
+func (m *MobAIManager) applyMobSkillAttack(world mobAIWorld, npc *model.NPC, primary *model.Player, castUID uint32, damage int, delayed bool, skillID uint32, magical bool) {
+	if m == nil || npc == nil || primary == nil {
+		return
+	}
+	m.stateMu.Lock()
+	catalog := m.referenceData
+	m.stateMu.Unlock()
+	if catalog == nil {
+		m.applyAttackDamageWithSkill(world, npc, primary, castUID, damage, delayed, skillID, true, magical)
+		return
+	}
+	skill, exists := catalog.Skill(skillID)
+	if !exists || skill.TransferCount <= 0 || (skill.TransferRange <= 0 && skill.TransferType != 5 && skill.TransferType != 7) {
+		m.applyAttackDamageWithSkill(world, npc, primary, castUID, damage, delayed, skillID, true, magical)
+		return
+	}
+	secondaries := m.mobSkillTransferTargets(npc, primary, skill)
+	if len(secondaries) == 0 {
+		m.applyAttackDamageWithSkill(world, npc, primary, castUID, damage, delayed, skillID, true, magical)
+		return
+	}
+
+	allTargets := make([]model.CombatDamageTarget, 0, len(secondaries)+1)
+	appendTargets := func(targets []model.CombatDamageTarget) {
+		for _, candidate := range targets {
+			merged := false
+			for index := range allTargets {
+				if allTargets[index].TargetUID == candidate.TargetUID {
+					allTargets[index].Records = append(allTargets[index].Records, candidate.Records...)
+					merged = true
+					break
+				}
 			}
-			application := target.ApplyCombatDamage(damage, isMagical)
-			record.Damage = uint32(min(application.WireDamage, maximumMobWireDamage))
-			applied, killed = application.AppliedDamage, application.Killed
-			if killed {
-				record.AttackState |= model.DamageAttackStateDead
+			if !merged {
+				allTargets = append(allTargets, candidate)
 			}
 		}
+	}
+	appendTargets(m.applyAttackDamageWithSkillResult(world, npc, primary, castUID, damage, delayed, skillID, true, false, magical))
+	factor := 100
+	for _, secondary := range secondaries {
+		factor = mobNextTransferFactor(factor, skill.TransferFalloffPercent)
+		appendTargets(m.applyAttackDamageWithSkillResult(world, npc, secondary, castUID, mobScaleTransferAmount(damage, factor), delayed, skillID, true, false, magical))
+	}
+	allTargets = alignMobDamageTargets(allTargets)
+	if len(allTargets) == 0 {
+		return
+	}
+	var attack network.Packet
+	if delayed {
+		attack = model.BuildAttackEndDamageTargets(castUID, allTargets)
+	} else {
+		attack = model.BuildAttackBeginWithSkillDamageTargets(skillID, npc.GetUniqueID(), castUID, allTargets)
+	}
+	npc.SendToKnown(&attack)
+	primary.SendVitalsUpdate()
+	for _, secondary := range secondaries {
+		secondary.SendVitalsUpdate()
+	}
+}
+
+func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Player, skill model.RefSkill) []*model.Player {
+	if m == nil || npc == nil || primary == nil || skill.TransferCount <= 0 {
+		return nil
+	}
+	if skill.TransferType == 5 || skill.TransferType == 7 {
+		m.stateMu.Lock()
+		provider := m.ownerTargets
+		m.stateMu.Unlock()
+		if provider == nil {
+			return nil
+		}
+		provided := provider(npc, primary, skill, skill.TransferCount)
+		result := make([]*model.Player, 0, min(skill.TransferCount, len(provided)))
+		seen := make(map[uint32]struct{}, len(provided))
+		for _, candidate := range provided {
+			if candidate == nil || candidate == primary || candidate.GetLifeState() != model.Alive {
+				continue
+			}
+			if _, exists := seen[candidate.GetUniqueID()]; exists {
+				continue
+			}
+			seen[candidate.GetUniqueID()] = struct{}{}
+			result = append(result, candidate)
+			if len(result) == skill.TransferCount {
+				break
+			}
+		}
+		return result
+	}
+	if npc.GetKnownObjectList() == nil {
+		return nil
+	}
+	pool := make([]*model.Player, 0)
+	for _, object := range npc.GetKnownObjectList().GetKnownObjects() {
+		candidate, ok := object.(*model.Player)
+		if ok && candidate != nil && candidate != primary && candidate.GetLifeState() == model.Alive {
+			pool = append(pool, candidate)
+		}
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].GetUniqueID() < pool[j].GetUniqueID() })
+	radius := float32(skill.TransferRange)
+	if skill.TransferType == 6 {
+		result := make([]*model.Player, 0, min(skill.TransferCount, len(pool)))
+		current := primary.GetNavmeshPosition()
+		for len(result) < skill.TransferCount {
+			selected, selectedIndex, best := (*model.Player)(nil), -1, float32(math.MaxFloat32)
+			for index, candidate := range pool {
+				distance := navmeshv2.HorizontalDistance(current, candidate.GetNavmeshPosition())
+				if distance <= radius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
+					selected, selectedIndex, best = candidate, index, distance
+				}
+			}
+			if selected == nil {
+				break
+			}
+			result = append(result, selected)
+			pool = append(pool[:selectedIndex], pool[selectedIndex+1:]...)
+			current = selected.GetNavmeshPosition()
+		}
+		return result
+	}
+	center := npc.GetNavmeshPosition()
+	if skill.TransferType == 2 {
+		center = primary.GetNavmeshPosition()
+	}
+	type candidateMetric struct {
+		player *model.Player
+		metric float32
+	}
+	candidates := make([]candidateMetric, 0, len(pool))
+	if skill.TransferType == 3 || skill.TransferType == 4 {
+		source := npc.GetNavmeshPosition().GetGlobalCoordinates()
+		primaryPosition := primary.GetNavmeshPosition().GetGlobalCoordinates()
+		dx, dz := primaryPosition.X-source.X, primaryPosition.Z-source.Z
+		length := float32(math.Hypot(float64(dx), float64(dz)))
+		if length <= 0 {
+			return nil
+		}
+		ux, uz := dx/length, dz/length
+		forwardLimit := max(length, float32(max(skill.ActionRange, skill.TransferRange)))
+		for _, candidate := range pool {
+			position := candidate.GetNavmeshPosition().GetGlobalCoordinates()
+			cx, cz := position.X-source.X, position.Z-source.Z
+			projection := cx*ux + cz*uz
+			lateral := float32(math.Abs(float64(cx*uz - cz*ux)))
+			if projection >= 0 && projection <= forwardLimit && lateral <= radius {
+				candidates = append(candidates, candidateMetric{player: candidate, metric: projection})
+			}
+		}
+	} else {
+		for _, candidate := range pool {
+			distance := navmeshv2.HorizontalDistance(center, candidate.GetNavmeshPosition())
+			if distance <= radius {
+				candidates = append(candidates, candidateMetric{player: candidate, metric: distance})
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].metric < candidates[j].metric || candidates[i].metric == candidates[j].metric && candidates[i].player.GetUniqueID() < candidates[j].player.GetUniqueID()
+	})
+	if len(candidates) > skill.TransferCount {
+		candidates = candidates[:skill.TransferCount]
+	}
+	result := make([]*model.Player, len(candidates))
+	for index := range candidates {
+		result[index] = candidates[index].player
+	}
+	return result
+}
+
+func mobNextTransferFactor(current, falloff int) int {
+	current = min(max(current, 0), 100)
+	falloff = min(max(falloff, 0), 100)
+	return int(math.Round(float64(current*(100-falloff)) / 100))
+}
+
+func mobScaleTransferAmount(amount, factor int) int {
+	if amount <= 0 || factor <= 0 {
+		return 0
+	}
+	return int(math.Round(float64(amount*min(factor, 100)) / 100))
+}
+
+func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool, magical ...bool) {
+	m.applyAttackDamageWithSkill(world, npc, target, castUID, damage, delayed, 0, true, magical...)
+}
+
+// applyAttackDamageWithSkill keeps the legacy mob damage API available to
+// tests and callers while allowing the timed skill path to retain the
+// authored REF_SKILL ID. Periodic abnormal ticks deliberately pass
+// applyEffects=false so a poison/burn tick cannot re-admit its parent status.
+func (m *MobAIManager) applyAttackDamageWithSkill(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool, skillID uint32, applyEffects bool, magical ...bool) {
+	_ = m.applyAttackDamageWithSkillResult(world, npc, target, castUID, damage, delayed, skillID, applyEffects, true, magical...)
+}
+
+// applyAttackDamageWithSkillResult applies one target's damage/effects and
+// returns the target/result records. emit controls only the attack/vitals
+// packet emission; state mutation and persistence remain authoritative either
+// way so a caller can aggregate native multi-target result blocks.
+func (m *MobAIManager) applyAttackDamageWithSkillResult(world mobAIWorld, npc *model.NPC, target *model.Player, castUID uint32, damage int, delayed bool, skillID uint32, applyEffects bool, emit bool, magical ...bool) []model.CombatDamageTarget {
+	isMagical := len(magical) > 0 && magical[0]
+	record := model.CombatDamageRecord{DamageState: model.DamageStateNormal}
+	var records []model.CombatDamageRecord
+	var linked mobLinkedDamage
+	applied, killed := 0, false
+	effectMask := uint32(0)
+	if m.mobAttackBlocked(target) {
+		record.AttackState = model.DamageAttackStateBlock
+	} else {
+		critical := !isMagical && m.mobAttackCritical(npc)
+		if critical {
+			damage = min(damage*2, maximumMobWireDamage)
+			record.DamageState = model.DamageStateCritical
+		}
+		if status, active := target.CombatStatus(model.CombatStatusDamageTakenUp, m.combatNow()); active {
+			// SR_GameServer abnormal type 0x14 writes the same tisc magnitude
+			// to physical 0xB4 and magical 0xB5 after critical processing.
+			damage = model.CombatFinalDamageFactor(damage, status.Power)
+		}
+		damage, linked = m.interceptLinkedDamage(npc, target, damage, isMagical)
+		application := target.ApplyCombatDamage(damage, isMagical)
+		record.Damage = uint32(min(application.WireDamage, maximumMobWireDamage))
+		applied, killed = application.AppliedDamage, application.Killed
+		if applyEffects && !killed {
+			effectMask = m.applyNPCSkillStatuses(world, npc, target, skillID, isMagical, m.combatNow())
+			record.EffectMask = effectMask
+		}
+		if applyEffects && applied > 0 && !killed {
+			m.applyNPCSkillDisplacement(world, npc, target, skillID, &record)
+		}
+		if killed {
+			record.AttackState |= model.DamageAttackStateDead
+		}
+		if linked.player != nil && damage <= 0 {
+			record.AttackState = model.DamageResultSuppressed
+		}
+		records = mobPlayerDamageRecords(application, record)
+	}
+	if len(records) == 0 {
+		records = []model.CombatDamageRecord{record}
 	}
 	if mobAITraceEnabled() {
 		log.Infof("MOB_AI_TRACE damage npc=%d target=%d cast=%d requested=%d applied=%d killed=%t delayed=%t hp=%d", npc.GetUniqueID(), target.GetUniqueID(), castUID, damage, applied, killed, delayed, target.CurrentHP())
@@ -533,14 +897,59 @@ func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, targe
 			log.WithError(err).Warnf("persist mob damage for character %d", target.ID)
 		}
 	}
-	var attack network.Packet
-	if delayed {
-		attack = model.BuildAttackEndDamageRecords(target.GetUniqueID(), castUID, []model.CombatDamageRecord{record})
-	} else {
-		attack = model.BuildAttackBeginWithSkillDamageRecords(npc.AttackSkillID(), npc.GetUniqueID(), target.GetUniqueID(), castUID, []model.CombatDamageRecord{record})
+	if vitals != nil && linked.player != nil && linked.application.AppliedDamage > 0 {
+		hp, mp := linked.player.CurrentVitals()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := vitals.SaveVitals(ctx, linked.player.ID, hp, mp)
+		cancel()
+		if err != nil {
+			log.WithError(err).Warnf("persist linked mob damage for character %d", linked.player.ID)
+		}
 	}
-	npc.SendToKnown(&attack)
-	target.SendVitalsUpdate()
+	damageTargets := []model.CombatDamageTarget{{TargetUID: target.GetUniqueID(), Records: records}}
+	if linked.player != nil {
+		linkedRecord := model.CombatDamageRecord{DamageState: record.DamageState, Damage: uint32(min(linked.application.WireDamage, maximumMobWireDamage))}
+		if linked.application.Killed {
+			linkedRecord.AttackState |= model.DamageAttackStateDead
+		}
+		linkedRecords := mobPlayerDamageRecords(linked.application, linkedRecord)
+		damageTargets = append(damageTargets, model.CombatDamageTarget{TargetUID: linked.player.GetUniqueID(), Records: linkedRecords})
+	}
+	damageTargets = alignMobDamageTargets(damageTargets)
+	var attack network.Packet
+	packetSkillID := skillID
+	if packetSkillID == 0 {
+		packetSkillID = npc.AttackSkillID()
+	}
+	if delayed {
+		attack = model.BuildAttackEndDamageTargets(castUID, damageTargets)
+	} else {
+		attack = model.BuildAttackBeginWithSkillDamageTargets(packetSkillID, npc.GetUniqueID(), castUID, damageTargets)
+	}
+	if emit {
+		npc.SendToKnown(&attack)
+		target.SendVitalsUpdate()
+	}
+	if linked.player != nil {
+		if emit {
+			linked.player.SendVitalsUpdate()
+		}
+		if linked.removedBuff != 0 {
+			removed := model.BuildBuffRemove(linked.removedBuff)
+			target.SendToSelfAndKnown(&removed)
+			stats := target.BuildStatsUpdatePacket()
+			target.SendToSelf(&stats)
+		}
+		if linked.application.Killed {
+			if linked.player.RemoveCharacterMask(0) {
+				mask := model.BuildCharacterMaskPacket(linked.player.GetUniqueID(), model.CharacterMask{})
+				linked.player.SendToSelfAndKnown(&mask)
+			}
+			state := model.BuildLifeStateUpdatePacket(linked.player.GetUniqueID(), model.Dead)
+			linked.player.SendToSelfAndKnown(&state)
+			world.StopMovingCharacter(linked.player, linked.player.GetNavmeshPosition(), "linked-mob-damage-killed-player", true)
+		}
+	}
 	if killed {
 		if target.RemoveCharacterMask(0) {
 			mask := model.BuildCharacterMaskPacket(target.GetUniqueID(), model.CharacterMask{})
@@ -551,6 +960,268 @@ func (m *MobAIManager) applyAttackDamage(world mobAIWorld, npc *model.NPC, targe
 		npc.ClearAggroTarget(target.GetUniqueID())
 		world.StopMovingCharacter(target, target.GetNavmeshPosition(), "mob-killed-player", true)
 	}
+	return damageTargets
+}
+
+func (m *MobAIManager) applyNPCSkillDisplacement(world mobAIWorld, npc *model.NPC, target *model.Player, skillID uint32, record *model.CombatDamageRecord) bool {
+	if m == nil || world == nil || npc == nil || target == nil || record == nil || skillID == 0 {
+		return false
+	}
+	m.stateMu.Lock()
+	catalog, roll, interrupt := m.referenceData, m.hitRollPercent, m.interruptPlayer
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return false
+	}
+	skill, exists := catalog.Skill(skillID)
+	if !exists {
+		return false
+	}
+	distance, chance, kind := float32(0), 0, byte(0)
+	if skill.KnockOverKey != 0 {
+		distance, chance, kind = 20, skill.KnockOverChance, model.DamageResultKnockOver
+	} else if skill.KnockbackDistance > 0 {
+		distance, chance, kind = float32(skill.KnockbackDistance), skill.KnockbackChance, model.DamageResultKnockback
+	}
+	if distance <= 0 || chance > 0 && (roll == nil || !roll(chance)) {
+		return false
+	}
+	sourceGlobal := npc.GetNavmeshPosition().GetGlobalCoordinates()
+	targetPosition := target.GetNavmeshPosition()
+	targetGlobal := targetPosition.GetGlobalCoordinates()
+	dx, dz := targetGlobal.X-sourceGlobal.X, targetGlobal.Z-sourceGlobal.Z
+	length := float32(math.Hypot(float64(dx), float64(dz)))
+	if length <= 0 {
+		dx, dz, length = 1, 0, 1
+	}
+	destination, err := world.NewPosFromGlobalCoordinates(math32.NewVector3(
+		targetGlobal.X+dx/length*distance,
+		targetGlobal.Y,
+		targetGlobal.Z+dz/length*distance,
+	))
+	if err != nil || !world.CanMoveDirectly(targetPosition, destination) {
+		return false
+	}
+	world.StopMovingCharacter(target, destination, "mob-skill-displacement", false)
+	target.SetNavmeshPosition(destination)
+	if interrupt != nil {
+		interrupt(target)
+	}
+	record.AttackState = record.AttackState&model.DamageAttackStateDead | kind
+	record.EndpointRegion = uint16(destination.Region.ID)
+	record.EndpointX = destination.Offset.X
+	record.EndpointY = destination.Offset.Y
+	record.EndpointZ = destination.Offset.Z
+	return true
+}
+
+// applyNPCSkillStatuses applies only the direct target abnormal actors
+// represented by REF_SKILL. Owner-list transfer families remain outside this
+// path because the native producer enumerates a runtime-owned collection, not
+// the observer list.
+func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, target *model.Player, skillID uint32, magical bool, now time.Time) uint32 {
+	if m == nil || npc == nil || target == nil || target.GetLifeState() != model.Alive || skillID == 0 {
+		return 0
+	}
+	m.stateMu.Lock()
+	catalog, roll := m.referenceData, m.hitRollPercent
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return 0
+	}
+	skill, ok := catalog.Skill(skillID)
+	if !ok {
+		return 0
+	}
+	effects := skill.StatusEffects
+	if len(effects) == 0 && skill.ShockPower > 0 {
+		effects = []model.SkillStatusEffect{{Kind: model.CombatStatusShock, Power: skill.ShockPower, Chance: skill.ShockChance, DurationMS: skill.ShockDuration}}
+	}
+	if len(effects) == 0 {
+		return 0
+	}
+	if roll == nil {
+		roll = func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance }
+	}
+	if now.IsZero() {
+		now = m.combatNow()
+	}
+	var badMask uint32
+	for _, effect := range effects {
+		if effect.Kind == 0 || effect.Chance <= 0 || effect.DurationMS <= 0 || !roll(effect.Chance) {
+			continue
+		}
+		status := model.CombatStatus{
+			Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: npc.GetUniqueID(), SkillID: skill.ID,
+			Power: effect.Power, Level: effect.Level, Payload: effect.Payload,
+			ExpiresAt: now.Add(time.Duration(effect.DurationMS) * time.Millisecond), Stackable: skill.LinkedSameGroup,
+		}
+		if !target.ApplyCombatStatusAt(status, now) {
+			continue
+		}
+		if npcStatusRestrainsMovement(effect.Kind) && world != nil {
+			world.StopMovingCharacter(target, target.GetNavmeshPosition(), "mob-skill-control", true)
+		}
+		bit := model.CombatStatusBadEffectBit(effect.Kind)
+		if bit != 0 {
+			badMask |= bit
+		} else {
+			packet := model.BuildTimedBuffAdd(target.GetUniqueID(), skill.ID, status.Token, uint32(effect.DurationMS))
+			target.SendToSelfAndKnown(&packet)
+		}
+		m.scheduleNPCStatusExpiry(target, status, bit != 0)
+		if effect.Kind == model.CombatStatusBurn || effect.Kind == model.CombatStatusPoison || effect.Kind == model.CombatStatusBleed {
+			m.scheduleNPCStatusDamageTick(world, npc, target, status, magical, now.Add(5*time.Second))
+		}
+	}
+	if badMask != 0 {
+		mask, levels := target.CombatBadEffectState(now)
+		packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
+		target.SendToSelfAndKnown(&packet)
+	}
+	return badMask
+}
+
+func npcStatusRestrainsMovement(kind model.CombatStatusKind) bool {
+	switch kind {
+	case model.CombatStatusFreeze, model.CombatStatusStun, model.CombatStatusSleep,
+		model.CombatStatusBind, model.CombatStatusPetrify:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *MobAIManager) scheduleNPCStatusExpiry(target *model.Player, expected model.CombatStatus, badEffect bool) {
+	if target == nil || expected.ExpiresAt.IsZero() {
+		return
+	}
+	delay := time.Until(expected.ExpiresAt)
+	if delay < 0 {
+		delay = 0
+	}
+	m.scheduleAfter(delay, func() {
+		_, active := target.CombatStatus(expected.Kind, time.Now())
+		if active {
+			return
+		}
+		if badEffect {
+			mask, levels := target.CombatBadEffectState(time.Now())
+			packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
+			target.SendToSelfAndKnown(&packet)
+			return
+		}
+		packet := model.BuildBuffRemove(expected.Token)
+		target.SendToSelfAndKnown(&packet)
+	})
+}
+
+// scheduleNPCStatusDamageTick follows the binary-confirmed five-second
+// abnormal cadence. The tick is routed through the existing mob damage/result
+// producer with status admission disabled, so the parent effect is not
+// reapplied on every tick.
+func (m *MobAIManager) scheduleNPCStatusDamageTick(world mobAIWorld, npc *model.NPC, target *model.Player, expected model.CombatStatus, magical bool, tickAt time.Time) {
+	if m == nil || world == nil || npc == nil || target == nil || !tickAt.Before(expected.ExpiresAt) {
+		return
+	}
+	delay := time.Until(tickAt)
+	if delay < 0 {
+		delay = 0
+	}
+	m.scheduleAfter(delay, func() {
+		now := m.combatNow()
+		status, active := target.CombatStatus(expected.Kind, now)
+		if !active || status.Token != expected.Token || target.GetLifeState() != model.Alive {
+			return
+		}
+		amount := status.Payload
+		if amount <= 0 {
+			amount = status.Power
+		}
+		m.applyAttackDamageWithSkill(world, npc, target, model.NextActionUID(), max(1, amount), true, status.SkillID, false, magical)
+		m.scheduleNPCStatusDamageTick(world, npc, target, expected, magical, now.Add(5*time.Second))
+	})
+}
+
+func alignMobDamageTargets(targets []model.CombatDamageTarget) []model.CombatDamageTarget {
+	maximum := 0
+	for _, target := range targets {
+		maximum = max(maximum, len(target.Records))
+	}
+	for index := range targets {
+		for len(targets[index].Records) < maximum {
+			targets[index].Records = append(targets[index].Records, model.CombatDamageRecord{AttackState: model.DamageResultSuppressed})
+		}
+	}
+	return targets
+}
+
+func mobPlayerDamageRecords(application model.PlayerDamageApplication, record model.CombatDamageRecord) []model.CombatDamageRecord {
+	if application.BarrierDamage <= 0 {
+		return []model.CombatDamageRecord{record}
+	}
+	barrierState := model.DamageResultBarrier
+	if application.BarrierExhausted {
+		barrierState |= model.DamageAttackStateDead
+	}
+	barrierRecord := model.CombatDamageRecord{
+		AttackState:      barrierState,
+		DamageState:      model.DamageStateNormal,
+		Damage:           uint32(min(application.BarrierDamage, maximumMobWireDamage)),
+		BarrierRemaining: uint16(min(max(application.BarrierRemaining, 0), 65535)),
+		BarrierMaximum:   uint16(min(max(application.BarrierMaximum, 0), 65535)),
+	}
+	result := []model.CombatDamageRecord{barrierRecord}
+	if application.WireDamage > 0 {
+		result = append(result, record)
+	}
+	return result
+}
+
+func (m *MobAIManager) interceptLinkedDamage(npc *model.NPC, target *model.Player, damage int, magical bool) (int, mobLinkedDamage) {
+	if m == nil || npc == nil || target == nil || damage <= 0 {
+		return damage, mobLinkedDamage{}
+	}
+	m.stateMu.Lock()
+	catalog := m.referenceData
+	m.stateMu.Unlock()
+	if catalog == nil {
+		return damage, mobLinkedDamage{}
+	}
+	buffs := target.ActiveBuffSnapshot()
+	sort.Slice(buffs, func(i, j int) bool { return buffs[i].Token < buffs[j].Token })
+	now := time.Now()
+	for _, buff := range buffs {
+		if buff.SourceUID == 0 || buff.SourceUID == target.GetUniqueID() || !buff.ExpiresAt.IsZero() && !buff.ExpiresAt.After(now) {
+			continue
+		}
+		skill, exists := catalog.Skill(buff.SkillID)
+		if !exists {
+			continue
+		}
+		amount := skill.LinkedDamageAmount(damage, magical)
+		if amount <= 0 {
+			continue
+		}
+		linked := m.knownPlayer(npc, buff.SourceUID)
+		if linked == nil || linked.GetLifeState() != model.Alive {
+			continue
+		}
+		application := linked.ApplyCombatDamage(amount, magical)
+		if application.WireDamage == 0 && application.BarrierDamage == 0 {
+			continue
+		}
+		removed, committed := target.CommitActiveBuffUse(buff.Token, skill.LinkedDamageUseLimit)
+		if !committed {
+			continue
+		}
+		removedToken := uint32(0)
+		if removed {
+			removedToken = buff.Token
+		}
+		return damage - amount, mobLinkedDamage{player: linked, application: application, removedBuff: removedToken}
+	}
+	return damage, mobLinkedDamage{}
 }
 
 func (m *MobAIManager) mobAttackBlocked(target *model.Player) bool {

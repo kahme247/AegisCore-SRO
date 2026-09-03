@@ -1,11 +1,12 @@
 package model
 
 type ActiveBarrier struct {
-	SkillID    uint32
-	Token      uint32
-	HitPoints  int
-	Absorption int
-	Physical   bool
+	SkillID      uint32
+	Token        uint32
+	HitPoints    int
+	MaxHitPoints int
+	Absorption   int
+	Physical     bool
 }
 
 func (p *Player) CommitBarrier(barrier ActiveBarrier) bool {
@@ -13,6 +14,9 @@ func (p *Player) CommitBarrier(barrier ActiveBarrier) bool {
 		return false
 	}
 	p.Mutex.Lock()
+	if barrier.MaxHitPoints <= 0 {
+		barrier.MaxHitPoints = barrier.HitPoints
+	}
 	p.activeBarrier = barrier
 	p.Mutex.Unlock()
 	return true
@@ -61,24 +65,24 @@ func (p *Player) RemoveBarrier(token uint32) bool {
 	return true
 }
 
-func (p *Player) absorbPhysicalDamageLocked(damage int) int {
+func (p *Player) absorbPhysicalDamageLocked(damage int) (int, int, ActiveBarrier) {
 	barrier := &p.activeBarrier
 	return absorbBarrierDamage(barrier, damage, true)
 }
 
-func (p *Player) absorbMagicalDamageLocked(damage int) int {
+func (p *Player) absorbMagicalDamageLocked(damage int) (int, int, ActiveBarrier) {
 	return absorbBarrierDamage(&p.activeBarrier, damage, false)
 }
 
-func absorbBarrierDamage(barrier *ActiveBarrier, damage int, physical bool) int {
+func absorbBarrierDamage(barrier *ActiveBarrier, damage int, physical bool) (remaining, absorbed int, snapshot ActiveBarrier) {
 	if barrier == nil || damage <= 0 || barrier.Physical != physical || barrier.HitPoints <= 0 || barrier.Absorption <= 0 {
-		return damage
+		return damage, 0, ActiveBarrier{}
 	}
 	percent := min(barrier.Absorption, 100)
-	absorbed := damage * percent / 100
+	absorbed = damage * percent / 100
 	if absorbed > barrier.HitPoints {
 		absorbed = barrier.HitPoints
 	}
 	barrier.HitPoints -= absorbed
-	return damage - absorbed
+	return damage - absorbed, absorbed, *barrier
 }

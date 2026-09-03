@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"sync/atomic"
 
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
@@ -13,8 +14,14 @@ var nextActionUID atomic.Uint32
 
 const (
 	DamageAttackStateNormal byte = 0x00
+	DamageResultSourceState byte = 0x01
 	DamageAttackStateBlock  byte = 0x02
+	DamageResultTargetState byte = 0x03
 	DamageAttackStateDead   byte = 0x80
+	DamageResultKnockOver   byte = 0x04
+	DamageResultKnockback   byte = 0x05
+	DamageResultBarrier     byte = 0x07
+	DamageResultSuppressed  byte = 0x08
 
 	DamageStateNormal   byte = 0x01
 	DamageStateCritical byte = 0x02
@@ -25,10 +32,21 @@ const (
 // only AttackState on the wire; successful hits also carry DamageState, the
 // 24-bit damage value, and the abnormal-effect mask.
 type CombatDamageRecord struct {
-	AttackState byte
-	DamageState byte
-	Damage      uint32
-	EffectMask  uint32
+	AttackState      byte
+	DamageState      byte
+	Damage           uint32
+	EffectMask       uint32
+	BarrierRemaining uint16
+	BarrierMaximum   uint16
+	EndpointRegion   uint16
+	EndpointX        float32
+	EndpointY        float32
+	EndpointZ        float32
+}
+
+type CombatDamageTarget struct {
+	TargetUID uint32
+	Records   []CombatDamageRecord
 }
 
 // NextActionUID allocates one process-wide action identifier. Player and NPC
@@ -70,6 +88,12 @@ func BuildAttackBeginWithSkillDamageRecords(skillID, sourceUID, targetUID, castU
 	return p
 }
 
+func BuildAttackBeginWithSkillDamageTargets(skillID, sourceUID, castUID uint32, targets []CombatDamageTarget) network.Packet {
+	p := buildAttackBeginHeader(skillID, sourceUID, 0, castUID)
+	WriteDamageTargetRecords(&p, targets)
+	return p
+}
+
 // BuildDelayedAttackBegin starts a reference skill whose damage is resolved
 // later by EntitySkillCastEnd. A stock vSRO client uses the false action flag
 // to distinguish this animation-only B070 from an immediate hit.
@@ -80,16 +104,17 @@ func BuildDelayedAttackBegin(skillID, sourceUID, targetUID, castUID uint32) netw
 }
 
 func BuildBuffCastBegin(skillID, sourceUID, targetUID, castUID uint32) network.Packet {
-	p := buildAttackBeginHeaderWithType(0, skillID, sourceUID, targetUID, castUID)
+	p := buildAttackBeginHeader(skillID, sourceUID, targetUID, castUID)
 	p.WriteBool(false)
 	return p
 }
 
-// BuildMovementCastBegin publishes the authoritative endpoint in B070. The
-// stock client uses this position while playing Ghost Walk; sending it only in
-// B071 leaves the actor stationary during the animation and then snaps it.
+// BuildMovementCastBegin starts Ghost Walk with its position continuation.
+// B070's delegated grammar begins with a four-byte value before the flags;
+// omitting it makes the client interpret coordinate bytes as flags and causes
+// destination-dependent NetProcessInNavAndSkill.cpp:246 assertion faults.
 func BuildMovementCastBegin(skillID, sourceUID, targetUID, castUID uint32, position navmeshv2.RtNavmeshPosition) network.Packet {
-	p := buildAttackBeginHeaderWithType(0, skillID, sourceUID, targetUID, castUID)
+	p := buildAttackBeginHeader(skillID, sourceUID, targetUID, castUID)
 	writeActionPosition(&p, position)
 	return p
 }
@@ -126,10 +151,12 @@ func BuildBuffAdd(targetUID, skillID, token uint32) network.Packet {
 	return p
 }
 
-func BuildTimedBuffAdd(targetUID, skillID, token uint32, remainingMilliseconds uint32) network.Packet {
-	p := BuildBuffAdd(targetUID, skillID, token)
-	p.WriteUInt32(remainingMilliseconds)
-	return p
+func BuildTimedBuffAdd(targetUID, skillID, token uint32, _ uint32) network.Packet {
+	// Stock vSRO 1.188 B0BD is the fixed 12-byte UID/skill/token tuple. The
+	// client does not accept an appended duration; sending one triggers its
+	// deliberate packet-contract access violation. Duration remains an
+	// authoritative server concern used to schedule B0BE removal.
+	return BuildBuffAdd(targetUID, skillID, token)
 }
 
 // BuildBadEffectUpdate publishes the aggregate abnormal-state mask. Unlike
@@ -174,7 +201,6 @@ func buildAttackBeginHeaderWithType(actionType byte, skillID, sourceUID, targetU
 	p.WriteUInt32(skillID)
 	p.WriteUInt32(sourceUID)
 	p.WriteUInt32(castUID)
-	p.WriteUInt32(targetUID)
 	return p
 }
 
@@ -194,6 +220,16 @@ func BuildAttackEndHitsAndEffect(targetUID, castUID uint32, damage []uint32, kil
 func BuildAttackEndDamageRecords(targetUID, castUID uint32, records []CombatDamageRecord) network.Packet {
 	p := buildAttackEndHeader(targetUID, castUID)
 	WriteDamageBlockRecords(&p, targetUID, records)
+	return p
+}
+
+func BuildAttackEndDamageTargets(castUID uint32, targets []CombatDamageTarget) network.Packet {
+	var targetUID uint32
+	if len(targets) > 0 {
+		targetUID = targets[0].TargetUID
+	}
+	p := buildAttackEndHeader(targetUID, castUID)
+	WriteDamageTargetRecords(&p, targets)
 	return p
 }
 
@@ -255,18 +291,36 @@ func normalDamageRecords(damage []uint32, killed bool, effectMask uint32) []Comb
 }
 
 func WriteDamageBlockRecords(p *network.Packet, targetUID uint32, records []CombatDamageRecord) {
+	WriteDamageTargetRecords(p, []CombatDamageTarget{{TargetUID: targetUID, Records: records}})
+}
+
+func WriteDamageTargetRecords(p *network.Packet, targets []CombatDamageTarget) {
+	if len(targets) == 0 || len(targets[0].Records) == 0 {
+		p.WriteBool(false)
+		return
+	}
+	hitCount := len(targets[0].Records)
+	for _, target := range targets {
+		if target.TargetUID == 0 || len(target.Records) != hitCount {
+			p.WriteBool(false)
+			return
+		}
+	}
 	p.WriteBool(true)
-	p.WriteByte(byte(len(records))) // Hit count precedes target count.
-	p.WriteByte(1)
-	p.WriteUInt32(targetUID)
-	for _, record := range records {
-		writeDamageRecord(p, record)
+	p.WriteByte(byte(hitCount))
+	p.WriteByte(byte(len(targets)))
+	for _, target := range targets {
+		p.WriteUInt32(target.TargetUID)
+		for _, record := range target.Records {
+			writeDamageRecord(p, record)
+		}
 	}
 }
 
 func writeDamageRecord(p *network.Packet, record CombatDamageRecord) {
 	p.WriteByte(record.AttackState)
-	if record.AttackState&DamageAttackStateBlock != 0 {
+	kind := record.AttackState &^ DamageAttackStateDead
+	if kind != DamageAttackStateNormal && kind != DamageResultKnockOver && kind != DamageResultKnockback && kind != DamageResultBarrier {
 		return
 	}
 	damageState := record.DamageState
@@ -280,5 +334,16 @@ func writeDamageRecord(p *network.Packet, record CombatDamageRecord) {
 	p.WriteByte(byte(record.Damage))
 	p.WriteByte(byte(record.Damage >> 8))
 	p.WriteByte(byte(record.Damage >> 16))
+	if kind == DamageResultBarrier {
+		p.WriteUInt16(record.BarrierRemaining)
+		p.WriteUInt16(record.BarrierMaximum)
+		return
+	}
 	p.WriteUInt32(record.EffectMask)
+	if kind == DamageResultKnockOver || kind == DamageResultKnockback {
+		p.WriteUInt16(record.EndpointRegion)
+		p.WriteUInt32(math.Float32bits(record.EndpointX))
+		p.WriteUInt32(math.Float32bits(record.EndpointY))
+		p.WriteUInt32(math.Float32bits(record.EndpointZ))
+	}
 }

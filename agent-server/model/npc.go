@@ -88,7 +88,7 @@ type npcCombatState struct {
 	maxHit     int
 	experience uint64
 	decay      time.Duration
-	statuses   map[CombatStatusKind]CombatStatus
+	statuses   map[CombatStatusKind]map[uint32]CombatStatus
 	baseSpeed  *npcBaseSpeed
 }
 
@@ -137,6 +137,7 @@ type CombatStatus struct {
 	Level     int
 	Payload   int
 	ExpiresAt time.Time
+	Stackable bool
 }
 
 func CombatStatusBadEffectBit(kind CombatStatusKind) uint32 {
@@ -235,15 +236,28 @@ func (n *NPC) RemoveCombatStatus(kind CombatStatusKind, token uint32) bool {
 		return false
 	}
 	n.combat.mutex.Lock()
-	status, exists := n.combat.statuses[kind]
-	if !exists || token != 0 && status.Token != token {
+	statuses, exists := n.combat.statuses[kind]
+	if !exists || len(statuses) == 0 {
 		n.combat.mutex.Unlock()
 		return false
 	}
-	delete(n.combat.statuses, kind)
+	removed := false
+	if token == 0 {
+		delete(n.combat.statuses, kind)
+		removed = true
+	} else if _, exists := statuses[token]; exists {
+		delete(statuses, token)
+		removed = true
+		if len(statuses) == 0 {
+			delete(n.combat.statuses, kind)
+		}
+	}
+	remaining := len(n.combat.statuses[kind])
 	n.combat.mutex.Unlock()
-	n.restoreStatusMovementEffect(kind)
-	return true
+	if removed && remaining == 0 {
+		n.restoreStatusMovementEffect(kind)
+	}
+	return removed
 }
 
 func (n *NPC) CureCombatStatuses(mask uint32, maxLevel, count int, now time.Time) int {
@@ -279,8 +293,17 @@ func combatCureEligible(bit uint32, level int, statusMask uint32, statusMaxLevel
 }
 
 func (n *NPC) ApplyCombatStatus(status CombatStatus) bool {
+	return n.ApplyCombatStatusAt(status, time.Now())
+}
+
+// ApplyCombatStatusAt is the timestamped status-admission form used by
+// authoritative combat execution and deterministic tests.
+func (n *NPC) ApplyCombatStatusAt(status CombatStatus, now time.Time) bool {
 	if n == nil || status.Kind == 0 || status.SkillID == 0 || status.ExpiresAt.IsZero() {
 		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
 	}
 	n.combat.mutex.Lock()
 	if n.LifeState == Dead || n.combat.hitPoints <= 0 {
@@ -288,11 +311,28 @@ func (n *NPC) ApplyCombatStatus(status CombatStatus) bool {
 		return false
 	}
 	if n.combat.statuses == nil {
-		n.combat.statuses = make(map[CombatStatusKind]CombatStatus)
+		n.combat.statuses = make(map[CombatStatusKind]map[uint32]CombatStatus)
 	}
-	n.combat.statuses[status.Kind] = status
+	// SR_GameServer's tisc record is abnormal type 0x14. Its record has
+	// priority 0 and class 2, so 0x004A4270 rejects another active record of
+	// the same type instead of stacking or replacing it.
+	if status.Kind == CombatStatusDamageTakenUp {
+		for _, current := range n.combat.statuses[status.Kind] {
+			if current.ExpiresAt.After(now) {
+				n.combat.mutex.Unlock()
+				return false
+			}
+		}
+	}
+	if !status.Stackable {
+		delete(n.combat.statuses, status.Kind)
+	}
+	if n.combat.statuses[status.Kind] == nil {
+		n.combat.statuses[status.Kind] = make(map[uint32]CombatStatus)
+	}
+	n.combat.statuses[status.Kind][status.Token] = status
 	n.combat.mutex.Unlock()
-	n.applyStatusMovementEffect(status.Kind, status.Power, time.Now())
+	n.applyStatusMovementEffect(status.Kind, status.Power, now)
 	return true
 }
 
@@ -301,19 +341,54 @@ func (n *NPC) CombatStatus(kind CombatStatusKind, now time.Time) (CombatStatus, 
 		return CombatStatus{}, false
 	}
 	n.combat.mutex.Lock()
-	status, exists := n.combat.statuses[kind]
-	if !exists {
+	statuses, exists := n.combat.statuses[kind]
+	if !exists || len(statuses) == 0 {
 		n.combat.mutex.Unlock()
 		return CombatStatus{}, false
 	}
-	if !status.ExpiresAt.After(now) {
+	selected := CombatStatus{}
+	selectedSet := false
+	for token, status := range statuses {
+		if !status.ExpiresAt.After(now) {
+			delete(statuses, token)
+			continue
+		}
+		if !selectedSet || status.Level > selected.Level || status.Level == selected.Level && (status.ExpiresAt.After(selected.ExpiresAt) || status.ExpiresAt.Equal(selected.ExpiresAt) && status.Token > selected.Token) {
+			selected = status
+			selectedSet = true
+		}
+	}
+	if len(statuses) == 0 {
 		delete(n.combat.statuses, kind)
-		n.combat.mutex.Unlock()
+	}
+	n.combat.mutex.Unlock()
+	if !selectedSet {
 		n.restoreStatusMovementEffect(kind)
 		return CombatStatus{}, false
 	}
+	return selected, true
+}
+
+func (n *NPC) CombatStatusByToken(kind CombatStatusKind, token uint32, now time.Time) (CombatStatus, bool) {
+	if n == nil || kind == 0 || token == 0 {
+		return CombatStatus{}, false
+	}
+	n.combat.mutex.Lock()
+	statuses := n.combat.statuses[kind]
+	status, exists := statuses[token]
+	if exists && !status.ExpiresAt.After(now) {
+		delete(statuses, token)
+		if len(statuses) == 0 {
+			delete(n.combat.statuses, kind)
+		}
+		exists = false
+	}
+	remaining := len(n.combat.statuses[kind])
 	n.combat.mutex.Unlock()
-	return status, true
+	if !exists && remaining == 0 {
+		n.restoreStatusMovementEffect(kind)
+	}
+	return status, exists
 }
 
 func (n *NPC) applyStatusMovementEffect(kind CombatStatusKind, power int, now time.Time) {
@@ -347,7 +422,7 @@ func (n *NPC) restoreStatusMovementEffect(kind CombatStatusKind) {
 	base := n.combat.baseSpeed
 	if kind == CombatStatusFreeze {
 		n.combat.baseSpeed = nil
-	} else if _, frozen := n.combat.statuses[CombatStatusFreeze]; frozen {
+	} else if frozen := len(n.combat.statuses[CombatStatusFreeze]) > 0; frozen {
 		n.combat.mutex.Unlock()
 		return
 	}

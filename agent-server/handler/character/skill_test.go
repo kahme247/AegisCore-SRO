@@ -47,4 +47,12 @@ func TestSkillErrorPacketMappings(t *testing.T) {
 	if got := buildSkillFailure(skillErrorCode(model.ErrSkillInsufficientSP)); !bytes.Equal(got.Payload(), []byte{2, 0x34, 0x0A}) {
 		t.Fatalf("SP failure = %x", got.Payload())
 	}
+	for _, test := range []struct {
+		err  error
+		code byte
+	}{{model.ErrSkillRaceMismatch, 0x05}, {model.ErrSkillLevelChainInvalid, 0x06}, {model.ErrSkillAlreadyLearned, 0x0C}} {
+		if got := buildSkillFailure(skillErrorCode(test.err)); !bytes.Equal(got.Payload(), []byte{2, 0x34, test.code}) {
+			t.Fatalf("failure %v = %x", test.err, got.Payload())
+		}
+	}
 }

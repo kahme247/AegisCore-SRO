@@ -35,6 +35,21 @@ func TestCombatPursuitRetargetsMovingMonsterBeforeStaleLegArrives(t *testing.T) 
 	}
 }
 
+func TestCombatPursuitAimsAtTargetSoMovingMonsterDoesNotLeaveAStandOffStop(t *testing.T) {
+	handler, player, mob, _, destinations, _ := newMovingPursuitTest(t)
+	if err := handler.handlePacket(context.Background(), player.Session, combatAttackPacket(mob.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if len(*destinations) != 1 {
+		t.Fatalf("initial pursuit destinations = %d, want 1", len(*destinations))
+	}
+	got := (*destinations)[0].GetGlobalCoordinates()
+	want := mob.GetNavmeshPosition().GetGlobalCoordinates()
+	if got.X != want.X || got.Z != want.Z {
+		t.Fatalf("pursuit destination = (%g, %g), want target position (%g, %g)", got.X, got.Z, want.X, want.Z)
+	}
+}
+
 func TestCombatPursuitStopsAndHitsWhenMovingMonsterEntersReach(t *testing.T) {
 	handler, player, mob, scheduled, _, sent := newMovingPursuitTest(t)
 	if err := handler.handlePacket(context.Background(), player.Session, combatAttackPacket(mob.GetUniqueID())); err != nil {

@@ -2,9 +2,40 @@ package model
 
 import "time"
 
+// CombatMovementRestricted reports whether an active combat status prevents
+// locomotion. The native execution path stops movement for these control
+// effects; callers should still allow an explicit stop/turn request so the
+// client can recover cleanly when the effect expires.
+func (p *Player) CombatMovementRestricted(now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	for _, kind := range []CombatStatusKind{
+		CombatStatusFreeze,
+		CombatStatusStun,
+		CombatStatusSleep,
+		CombatStatusBind,
+		CombatStatusPetrify,
+	} {
+		if _, active := p.CombatStatus(kind, now); active {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Player) ApplyCombatStatus(status CombatStatus) bool {
+	return p.ApplyCombatStatusAt(status, time.Now())
+}
+
+// ApplyCombatStatusAt admits an abnormal actor using the supplied execution
+// timestamp, keeping replacement precedence deterministic under replay clocks.
+func (p *Player) ApplyCombatStatusAt(status CombatStatus, now time.Time) bool {
 	if p == nil || status.Kind == 0 || status.ExpiresAt.IsZero() {
 		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
 	}
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
@@ -13,6 +44,13 @@ func (p *Player) ApplyCombatStatus(status CombatStatus) bool {
 	}
 	if p.combatStatuses == nil {
 		p.combatStatuses = make(map[CombatStatusKind]CombatStatus)
+	}
+	// tisc is abnormal type 0x14 with fixed class 2 and no explicit
+	// priority. SR_GameServer 0x004A4270 rejects an equal active record.
+	if status.Kind == CombatStatusDamageTakenUp {
+		if current, active := p.combatStatuses[status.Kind]; active && current.ExpiresAt.After(now) {
+			return false
+		}
 	}
 	p.combatStatuses[status.Kind] = status
 	return true

@@ -13,6 +13,8 @@ var (
 	ErrCharacterSkillIDRequired            = errors.New("character skill ID is required")
 	ErrCharacterSkillEnabledInvalid        = errors.New("character skill enabled state is invalid")
 	ErrSkillInvalid                        = errors.New("skill is invalid for this character")
+	ErrSkillRaceMismatch                   = errors.New("skill race requirement is not met")
+	ErrSkillLevelChainInvalid              = errors.New("skill level chain is invalid")
 	ErrSkillAlreadyLearned                 = errors.New("skill is already learned")
 	ErrSkillMasteryRequired                = errors.New("skill mastery requirement is not met")
 	ErrSkillStrengthRequired               = errors.New("skill strength requirement is not met")
@@ -138,7 +140,7 @@ func (r *SQLCharacterSkillRepository) LearnSkill(ctx context.Context, characterI
 		return result, fmt.Errorf("lock skill character: %w", err)
 	}
 	if command.Skill.RequiredRace != 3 && int(command.Skill.RequiredRace) != country {
-		return result, ErrSkillInvalid
+		return result, ErrSkillRaceMismatch
 	}
 	if strength < command.Skill.RequiredStr {
 		return result, ErrSkillStrengthRequired
@@ -199,7 +201,7 @@ func (r *SQLCharacterSkillRepository) LearnSkill(ctx context.Context, characterI
 		return result, ErrSkillAlreadyLearned
 	}
 	if command.ReplacedSkillID != 0 && !owned[command.ReplacedSkillID] {
-		return result, ErrSkillConflict
+		return result, ErrSkillLevelChainInvalid
 	}
 	for _, requirement := range command.RequiredOwnedSkillIDs {
 		if requirement != 0 && !owned[requirement] && requirement != command.ReplacedSkillID {

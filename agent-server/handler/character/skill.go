@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	skillErrorInvalid      = uint16(0x0134)
+	skillErrorInvalid      = uint16(0x0934)
 	skillErrorMastery      = uint16(0x0234)
 	skillErrorStrength     = uint16(0x0334)
 	skillErrorIntellect    = uint16(0x0434)
-	skillErrorAlreadyKnown = uint16(0x0634)
+	skillErrorAlreadyKnown = uint16(0x0C34)
 	skillErrorPrerequisite = uint16(0x0734)
+	skillErrorRace         = uint16(0x0534)
+	skillErrorLevelChain   = uint16(0x0634)
 	skillErrorSP           = uint16(0x0A34)
 )
 
@@ -93,6 +95,10 @@ func skillErrorCode(err error) uint16 {
 		return skillErrorStrength
 	case errors.Is(err, model.ErrSkillIntellectRequired):
 		return skillErrorIntellect
+	case errors.Is(err, model.ErrSkillRaceMismatch):
+		return skillErrorRace
+	case errors.Is(err, model.ErrSkillLevelChainInvalid):
+		return skillErrorLevelChain
 	case errors.Is(err, model.ErrSkillAlreadyLearned):
 		return skillErrorAlreadyKnown
 	case errors.Is(err, model.ErrSkillPrerequisiteRequired):

@@ -9,6 +9,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -20,6 +21,7 @@ type ResurrectionHandler struct {
 	players    resurrectionPlayerLookup
 	repository model.CharacterVitalsRepository
 	items      model.ResurrectionItemRepository
+	teleport   resurrectionReturnTeleport
 }
 
 type resurrectionPlayerLookup interface {
@@ -30,11 +32,17 @@ type resurrectionVisibilityReconciler interface {
 	ReconcileCharacterVisibility(model.ICharacter) []service.VisibilityDelta
 }
 
-func RegisterResurrectionHandler(target *server.Server, repository model.CharacterVitalsRepository, items ...model.ResurrectionItemRepository) {
+type resurrectionReturnTeleport interface {
+	PrepareItemReturn(*server.Session, *model.Player) error
+	AbortItemReturn(*server.Session)
+	CompleteItemReturn(*server.Session, *model.Player, model.TeleportDestination) error
+}
+
+func RegisterResurrectionHandler(target *server.Server, repository model.CharacterVitalsRepository, teleport resurrectionReturnTeleport, items ...model.ResurrectionItemRepository) {
 	if target == nil || repository == nil {
 		return
 	}
-	handler := &ResurrectionHandler{players: service.GetWorldServiceInstance(), repository: repository}
+	handler := &ResurrectionHandler{players: service.GetWorldServiceInstance(), repository: repository, teleport: teleport}
 	if len(items) > 0 {
 		handler.items = items[0]
 	}
@@ -54,7 +62,7 @@ func (h *ResurrectionHandler) handlePacket(ctx context.Context, session *server.
 	if err != nil {
 		return err
 	}
-	if player.GetLifeState() != model.Dead || player.CurrentHP() != 0 {
+	if player.GetLifeState() != model.Dead {
 		return fmt.Errorf("character is not dead")
 	}
 	hp, mp := player.MaxVitals()
@@ -75,16 +83,32 @@ func (h *ResurrectionHandler) handlePacket(ctx context.Context, session *server.
 			return fmt.Errorf("character item resurrection was superseded")
 		}
 		player.UnlockEconomy()
-		used := network.EmptyPacket()
-		used.MessageID = opcode.InventoryItemUseResponse
-		used.WriteByte(1)
-		used.WriteByte(result.SourceSlot)
-		used.WriteUInt16(result.NewAmount)
-		used.WriteUInt16(result.ItemType)
+		used := buildResurrectionItemUseSuccess(result)
 		if err = session.Send(used); err != nil {
 			return err
 		}
 		return h.publishResurrection(player)
+	}
+	if returnPoints, ok := h.repository.(model.ReturnPointResurrectionRepository); ok && h.teleport != nil {
+		if err = h.teleport.PrepareItemReturn(session, player); err != nil {
+			return err
+		}
+		destination, updated, resurrectErr := returnPoints.ResurrectAtReturnPoint(ctx, player.ID, hp, mp)
+		if resurrectErr != nil || !updated {
+			h.teleport.AbortItemReturn(session)
+			if resurrectErr != nil {
+				return resurrectErr
+			}
+			return fmt.Errorf("character resurrection was superseded")
+		}
+		if !player.CommitResurrection(hp, mp) {
+			h.teleport.AbortItemReturn(session)
+			return fmt.Errorf("character resurrection was superseded")
+		}
+		if err = h.teleport.CompleteItemReturn(session, player, destination); err != nil {
+			return err
+		}
+		return nil
 	}
 	updated, err := h.repository.Resurrect(ctx, player.ID, hp, mp)
 	if err != nil {
@@ -104,6 +128,14 @@ func (h *ResurrectionHandler) publishResurrection(player *model.Player) error {
 		_ = visibility.ReconcileCharacterVisibility(player)
 	}
 	return nil
+}
+
+func buildResurrectionItemUseSuccess(result model.ItemUseResult) network.Packet {
+	return vsro188.BuildItemUseSuccess(vsro188.ItemUseSuccess{
+		SourceSlot: result.SourceSlot,
+		NewAmount:  result.NewAmount,
+		ItemType:   result.ItemType,
+	})
 }
 
 type resurrectionPlayerResolver struct{ players resurrectionPlayerLookup }
