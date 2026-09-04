@@ -14,10 +14,20 @@ import (
 )
 
 type cosRepositoryFake struct {
-	record  model.COSRecord
-	saved   []model.COSRecord
-	saveErr error
+	record   model.COSRecord
+	saved    []model.COSRecord
+	saveErr  error
+	stored   []int
+	services []model.COSTimedService
 }
+
+type cosGroundItemLifecycleFake struct{ canceled *model.Item }
+
+type fixedCOSPolicyProvider struct{ policy model.COSPolicySnapshot }
+
+func (p fixedCOSPolicyProvider) Current() model.COSPolicySnapshot { return p.policy }
+
+func (f *cosGroundItemLifecycleFake) Cancel(item *model.Item) { f.canceled = item }
 
 func (f *cosRepositoryFake) LoadOwned(_ context.Context, owner int, id uint64) (model.COSRecord, error) {
 	if f.record.OwnerCharID != owner || f.record.ID != id {
@@ -30,6 +40,16 @@ func (f *cosRepositoryFake) Save(_ context.Context, record model.COSRecord) erro
 	return f.saveErr
 }
 func (f *cosRepositoryFake) Rename(context.Context, int, uint64, string) error { return nil }
+func (f *cosRepositoryFake) LoadInventory(context.Context, int, uint64) (model.Inventory, error) {
+	return model.NewInventory(nil), nil
+}
+func (f *cosRepositoryFake) LoadCOSTimedServices(context.Context, int, uint64, time.Time) ([]model.COSTimedService, error) {
+	return append([]model.COSTimedService(nil), f.services...), nil
+}
+func (f *cosRepositoryFake) StoreItem(_ context.Context, _ int, _ uint64, _ byte, itemID int) error {
+	f.stored = append(f.stored, itemID)
+	return nil
+}
 
 type cosWorldFake struct {
 	next           uint32
@@ -54,6 +74,9 @@ func (w *cosWorldFake) GetObjectByUniqueId(uid uint32) (model.ISRObject, error) 
 		return nil, model.ErrCOSNotFound
 	}
 	return object, nil
+}
+func (w *cosWorldFake) GetKnownObjectsAroundObject(model.ISRObject) map[uint32]model.ISRObject {
+	return w.objects
 }
 func (w *cosWorldFake) NewPosFromGlobalCoordinates(global *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
 	return navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: global.Clone()}, nil
@@ -94,10 +117,19 @@ func TestCOSServiceFollowsAndRelocatesToOwner(t *testing.T) {
 		t.Fatalf("Summon: %v", err)
 	}
 	owner.RtNavmeshPosition.Offset = math32.NewVector3(20, 0, 0)
+	owner.SetRunSpeed(45)
 	now := time.Now()
 	runtime.UpdateFollowers(now)
 	if len(world.registered) != 1 || pet.GetMotionState() != model.Running {
 		t.Fatalf("follow registration = %d motion=%d", len(world.registered), pet.GetMotionState())
+	}
+	if got := pet.GetMovementSpeed(); got != owner.GetMovementSpeed() {
+		t.Fatalf("growth pet speed = %g, want owner speed %g", got, owner.GetMovementSpeed())
+	}
+	owner.SetRunSpeed(75)
+	runtime.UpdateFollowers(now.Add(250 * time.Millisecond))
+	if got := pet.GetMovementSpeed(); got != 75 {
+		t.Fatalf("dynamic growth pet speed = %g, want 75", got)
 	}
 	targetDistance := navmeshv2.HorizontalDistance(world.movements[0].TargetPosition, owner.GetNavmeshPosition())
 	if targetDistance < 38 || targetDistance > 59 {
@@ -130,7 +162,90 @@ func TestCOSServiceFollowsAndRelocatesToOwner(t *testing.T) {
 	}
 }
 
-func TestCOSAbilityPetUsesLargeCollectionPatrolArea(t *testing.T) {
+func TestCOSServiceAppliesDatabaseBackedSpeedPolicyByKind(t *testing.T) {
+	settings := model.DefaultCOSPolicySnapshot()
+	settings.Kinds[model.COSGrowthPet].InheritOwnerSpeed = false
+	settings.Kinds[model.COSAbilityPet].InheritOwnerSpeed = true
+	provider := fixedCOSPolicyProvider{policy: settings}
+	owner := &model.Player{RunSpeed: 75, MotionState: model.Running}
+	growth := &model.COS{NPC: model.NPC{Mutex: new(sync.Mutex), RunSpeed: 40}, Kind: model.COSGrowthPet}
+	ability := &model.COS{NPC: model.NPC{Mutex: new(sync.Mutex), RunSpeed: 50}, Kind: model.COSAbilityPet}
+	runtime := NewCOSService(nil, nil)
+	runtime.ConfigurePolicy(provider)
+	policy := runtime.currentPolicy()
+	growth.SetOwnerMovementSpeed(owner.GetMovementSpeed(), policy.ForKind(growth.Kind).InheritOwnerSpeed)
+	ability.SetOwnerMovementSpeed(owner.GetMovementSpeed(), policy.ForKind(ability.Kind).InheritOwnerSpeed)
+	if got := growth.GetMovementSpeed(); got != 40 {
+		t.Fatalf("database-disabled growth owner speed = %g, want native 40", got)
+	}
+	if got := ability.GetMovementSpeed(); got != 75 {
+		t.Fatalf("database-enabled ability owner speed = %g, want owner 75", got)
+	}
+}
+
+func TestCOSServiceResolvesOwnedRuntimeTargetAndAppliesCommittedResources(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9002: {RefObject: model.RefObject{ID: 9002, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 3}}, Level: 1, MaxHP: 100}}
+	repository := &cosRepositoryFake{record: model.COSRecord{ID: 78, OwnerCharID: 6, RefObjectID: 9002, Kind: model.COSGrowthPet, Level: 1, Health: 50, MaxHealth: 100, HGP: 20, InventorySlot: 16}}
+	owner := &model.Player{ID: 6, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{16: {Data: 78, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10}}
+	runtime := NewCOSService(repository, &cosWorldFake{next: 200})
+	pet, err := runtime.Summon(context.Background(), owner, 78)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistentID, ok := runtime.ResolvePersistentTarget(owner, pet.GetUniqueID()); !ok || persistentID != 78 {
+		t.Fatalf("resolved target = %d, %v", persistentID, ok)
+	}
+	stranger := &model.Player{ID: 7, SRObject: model.SRObject{UniqueID: 11}}
+	if _, ok := runtime.ResolvePersistentTarget(stranger, pet.GetUniqueID()); ok {
+		t.Fatal("runtime target resolved for a non-owner")
+	}
+	updated, err := runtime.ApplyPersistedResources(owner, 78, 90, 30)
+	if err != nil || updated != pet || pet.Health != 90 || pet.HGP != 30 {
+		t.Fatalf("applied resources pet=%p err=%v health=%d hgp=%d", updated, err, pet.Health, pet.HGP)
+	}
+}
+
+func TestCOSManualMoveHoldsUntilFollowCommand(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9002: {RefObject: model.RefObject{ID: 9002, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 3}, Speed1: 20, Speed2: 60}, Level: 1, MaxHP: 100}}
+	repository := &cosRepositoryFake{record: model.COSRecord{ID: 78, OwnerCharID: 6, RefObjectID: 9002, Kind: model.COSGrowthPet, Level: 1, Health: 100, MaxHealth: 100, InventorySlot: 16}}
+	owner := &model.Player{ID: 6, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{16: {Data: 78, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}}
+	world := &cosWorldFake{next: 200, players: map[uint32]*model.Player{10: owner}}
+	runtime := NewCOSService(repository, world)
+	pet, err := runtime.Summon(context.Background(), owner, 78)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(60, 0, 0)}
+	if err = runtime.MoveTo(owner, pet.GetUniqueID(), destination); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	runtime.UpdateFollowers(now)
+	if len(world.movements) != 1 || navmeshv2.HorizontalDistance(world.movements[0].TargetPosition, destination) > 0.1 {
+		t.Fatalf("manual movements = %+v", world.movements)
+	}
+	pet.CancelMovement(destination, "arrived")
+	pet.SetNavmeshPosition(destination)
+	pet.SetMotionState(model.NoMotion)
+	runtime.UpdateFollowers(now.Add(time.Second))
+	runtime.UpdateFollowers(now.Add(5 * time.Second))
+	if len(world.movements) != 1 {
+		t.Fatalf("held pet resumed autonomous movement: %d", len(world.movements))
+	}
+	if err = runtime.Follow(owner, pet.GetUniqueID()); err != nil {
+		t.Fatal(err)
+	}
+	runtime.UpdateFollowers(now.Add(6 * time.Second))
+	if len(world.movements) != 2 {
+		t.Fatalf("follow did not restore owner movement: %d", len(world.movements))
+	}
+}
+
+func TestCOSAbilityPetIdlesCloseWhileRetainingLargeCollectionRange(t *testing.T) {
 	owner := &model.Player{LifeState: model.Alive, SRObject: model.SRObject{
 		UniqueID:          10,
 		RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)},
@@ -146,14 +261,49 @@ func TestCOSAbilityPetUsesLargeCollectionPatrolArea(t *testing.T) {
 		t.Fatal("ability pet collection target was unavailable")
 	}
 	distance := navmeshv2.HorizontalDistance(first, owner.GetNavmeshPosition())
-	if distance < cosPickupOrbitMinRadius || distance > cosPickupOrbitMinRadius+float32(cosPickupRadiusVariance-1)/100 {
-		t.Fatalf("ability pet collection target distance = %.2f", distance)
+	settings := model.DefaultCOSPolicySnapshot().Settings
+	if distance < settings.PickupIdleMinRadius || distance > settings.PickupIdleMinRadius+float32(settings.PickupIdleVariance-1)/100 {
+		t.Fatalf("ability pet idle target distance = %.2f", distance)
 	}
-	if companionRelocationRadius(model.COSAbilityPet) <= distance {
-		t.Fatalf("ability pet relocation radius %.2f does not contain patrol target %.2f", companionRelocationRadius(model.COSAbilityPet), distance)
+	if companionRelocationRadius(model.COSAbilityPet, settings) <= settings.PickupCollectionRange {
+		t.Fatalf("ability pet relocation radius %.2f does not contain collection range %.2f", companionRelocationRadius(model.COSAbilityPet, settings), settings.PickupCollectionRange)
 	}
-	if companionRelocationRadius(model.COSGrowthPet) >= cosPickupOrbitMinRadius {
-		t.Fatal("growth-pet leash was widened with the pickup pet")
+	if companionRelocationRadius(model.COSGrowthPet, settings) >= settings.PickupCollectionRange {
+		t.Fatal("growth-pet leash was widened to the pickup collection range")
+	}
+}
+
+func TestCOSAbilityPetPursuesAndStoresGroundItem(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9003: {
+		RefObject:     model.RefObject{ID: 9003, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 4}, Speed1: 20, Speed2: 60},
+		Level:         1,
+		MaxHP:         100,
+		InventorySize: 28,
+	}}
+	expires := time.Now().UTC().Add(time.Hour)
+	repository := &cosRepositoryFake{record: model.COSRecord{ID: 79, OwnerCharID: 6, RefObjectID: 9003, Kind: model.COSAbilityPet, Level: 1, Health: 100, MaxHealth: 100, InventorySlot: 17, RentEndsAt: &expires}}
+	owner := &model.Player{ID: 6, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{17: {Data: 79, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}}
+	item := &model.Item{ID: 55, SRObject: model.SRObject{UniqueID: 300, RefObjectID: 500, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3}, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(3, 0, 0)}}, StackSize: 1, OwnerUniqueID: 10}
+	world := &cosWorldFake{next: 200, players: map[uint32]*model.Player{10: owner}, objects: map[uint32]model.ISRObject{300: item}}
+	runtime := NewCOSService(repository, world)
+	lifecycle := &cosGroundItemLifecycleFake{}
+	runtime.ConfigureGroundItemLifecycle(lifecycle)
+	pet, err := runtime.Summon(context.Background(), owner, 79)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.UpdateFollowers(time.Now())
+	if len(repository.stored) != 1 || repository.stored[0] != 55 || len(world.removed) != 1 {
+		t.Fatalf("pickup stored=%v removed=%d", repository.stored, len(world.removed))
+	}
+	if lifecycle.canceled != item {
+		t.Fatalf("pickup lifecycle canceled=%v, want item", lifecycle.canceled)
+	}
+	stored := pet.Inventory.Snapshot()
+	if got, exists := stored.Items[0]; !exists || got.ID != 55 {
+		t.Fatalf("pet inventory = %+v", stored.Items)
 	}
 }
 
@@ -210,7 +360,7 @@ func TestCOSServiceGrowthPetAssistsSharesOwnerKillEXPAndKeepsPursuit(t *testing.
 	if pet.Experience != 40 || len(repository.saved) != 2 {
 		t.Fatalf("shared pet EXP/persistence = %d/%d, want 40/2", pet.Experience, len(repository.saved))
 	}
-	target.SetNavmeshPosition(navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(cosCombatLeashRadius+1, 0, 0)})
+	target.SetNavmeshPosition(navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(model.DefaultCOSPolicySnapshot().Settings.CombatLeashRange+1, 0, 0)})
 	if err := runtime.SetAttackTarget(owner, pet.GetUniqueID(), target.GetUniqueID(), 0); !errors.Is(err, model.ErrItemUseInvalidRequest) {
 		t.Fatalf("out-of-leash attack error = %v", err)
 	}
@@ -246,6 +396,89 @@ func TestCOSServiceSummonAndUnsummonOwnsWorldAndPersistence(t *testing.T) {
 	}
 	if len(repository.saved) != 2 || repository.saved[0].State != model.COSItemSummoned || repository.saved[1].State != model.COSItemActive || len(world.removed) != 1 || owner.COSState.Snapshot().TransportUniqueID != 0 {
 		t.Fatalf("unsummon persistence/world/player = %d/%d/%#v", len(repository.saved), len(world.removed), owner.COSState.Snapshot())
+	}
+}
+
+func TestCOSServiceSummonRestoresWatchInventoryService(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9003: {RefObject: model.RefObject{ID: 9003, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 4}}, Level: 1, MaxHP: 100, InventorySize: 5}}
+	expires := time.Now().UTC().Add(time.Hour)
+	repository := &cosRepositoryFake{
+		record:   model.COSRecord{ID: 79, OwnerCharID: 7, RefObjectID: 9003, Kind: model.COSAbilityPet, Level: 1, Health: 100, MaxHealth: 100, InventorySlot: 17, RentEndsAt: &expires},
+		services: []model.COSTimedService{{Category: 5, JobID: 7002, Data1: 28, ExpiresAt: expires}},
+	}
+	owner := &model.Player{ID: 7, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{17: {Data: 79, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}}}}
+	pet, err := NewCOSService(repository, &cosWorldFake{next: 200}).Summon(context.Background(), owner, 79)
+	if err != nil {
+		t.Fatalf("Summon: %v", err)
+	}
+	if pet.BaseInventorySize != 5 || pet.InventorySize != 33 || len(pet.TimedServices) != 1 {
+		t.Fatalf("restored watch service = base %d active %d jobs %#v", pet.BaseInventorySize, pet.InventorySize, pet.TimedServices)
+	}
+}
+
+func TestCOSServiceTemporaryRideConsumesNoPersistentInstrument(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9001: {RefObject: model.RefObject{ID: 9001, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 2}, Speed1: 20, Speed2: 60}, Level: 1, MaxHP: 100}}
+	repository := &cosRepositoryFake{}
+	world := &cosWorldFake{next: 100}
+	runtime := NewCOSService(repository, world)
+	owner := &model.Player{ID: 5, CharName: "Alice", LifeState: model.Alive, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 9, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(1, 2, 3)}}}
+	world.players = map[uint32]*model.Player{owner.GetUniqueID(): owner}
+
+	cos, err := runtime.ActivateTemporaryRide(owner, 9001)
+	if err != nil {
+		t.Fatalf("ActivateTemporaryRide: %v", err)
+	}
+	if cos.PersistentID != 0 || cos.GetUniqueID() != 101 || owner.COSState.Snapshot().TransportUniqueID != 101 || len(repository.saved) != 0 {
+		t.Fatalf("temporary ride state = persistent %d uid %d transport %d saves %d", cos.PersistentID, cos.GetUniqueID(), owner.COSState.Snapshot().TransportUniqueID, len(repository.saved))
+	}
+	if mounted, ok := runtime.ResolveMountedTransport(owner); !ok || mounted != cos {
+		t.Fatalf("mounted movement transport = %p/%t, want %p/true", mounted, ok, cos)
+	}
+	if _, err = owner.COSState.SetMounted(cos.GetUniqueID(), false); err != nil {
+		t.Fatalf("dismount temporary ride: %v", err)
+	}
+	if mounted, ok := runtime.ResolveMountedTransport(owner); ok || mounted != nil {
+		t.Fatalf("dismounted movement transport = %p/%t, want nil/false", mounted, ok)
+	}
+	if _, err = owner.COSState.SetMounted(cos.GetUniqueID(), true); err != nil {
+		t.Fatalf("remount temporary ride: %v", err)
+	}
+	destination := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(40, 2, 30)}
+	if err = runtime.MoveTo(owner, cos.GetUniqueID(), destination); err != nil {
+		t.Fatalf("move mounted temporary ride: %v", err)
+	}
+	if len(world.registered) != 1 || world.registered[0] != owner || world.movements[0].SpeedOverride != cos.GetMovementSpeed() {
+		t.Fatalf("mounted movement authority = registered:%v movement:%+v, want owner with transport speed %g", world.registered, world.movements, cos.GetMovementSpeed())
+	}
+	runtime.UpdateFollowers(time.Now())
+	if len(world.registered) != 1 || len(world.stopped) != 0 {
+		t.Fatalf("mounted transport received companion AI movement: registered=%d stopped=%d", len(world.registered), len(world.stopped))
+	}
+	if err = runtime.Unsummon(context.Background(), owner, cos.GetUniqueID()); err != nil {
+		t.Fatalf("Unsummon temporary ride: %v", err)
+	}
+	if len(repository.saved) != 0 || len(world.removed) != 1 || owner.COSState.Snapshot().TransportUniqueID != 0 {
+		t.Fatalf("temporary unsummon persistence/world/player = %d/%d/%#v", len(repository.saved), len(world.removed), owner.COSState.Snapshot())
+	}
+}
+
+func TestCOSServiceRejectsDeadPetUntilRevival(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9002: {RefObject: model.RefObject{ID: 9002, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 3}}, Level: 1, MaxHP: 100}}
+	repository := &cosRepositoryFake{record: model.COSRecord{ID: 78, OwnerCharID: 6, RefObjectID: 9002, Kind: model.COSGrowthPet, State: model.COSItemDead, Health: 0, MaxHealth: 100, InventorySlot: 16}}
+	owner := &model.Player{ID: 6, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{16: {Data: 78, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}}}}
+	world := &cosWorldFake{next: 200, players: map[uint32]*model.Player{10: owner}}
+	_, err := NewCOSService(repository, world).Summon(context.Background(), owner, 78)
+	if !errors.Is(err, ErrCOSDead) {
+		t.Fatalf("Summon() error = %v, want ErrCOSDead", err)
+	}
+	if len(world.added) != 0 || len(repository.saved) != 0 {
+		t.Fatalf("dead summon mutated world/persistence: added=%d saved=%d", len(world.added), len(repository.saved))
 	}
 }
 
