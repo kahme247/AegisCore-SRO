@@ -6,9 +6,15 @@ import (
 
 const (
 	InventoryEquipmentSlots byte = 13
-	InventoryPageSlots      byte = 32
-	InventoryPages          byte = 3
-	BaseInventorySize            = InventoryEquipmentSlots + InventoryPageSlots*InventoryPages
+	// MaxInventoryWireSize is the highest slot ceiling accepted by the pinned
+	// SR_GameServer equipment path: normal wire slots end at 0x6f, immediately
+	// after the 13 body slots. BaseInventorySize remains the configured default,
+	// not the protocol ceiling.
+	MaxInventoryWireSize   byte = 0x70
+	MaxNormalInventorySlot byte = MaxInventoryWireSize - 1
+	InventoryPageSlots     byte = 32
+	InventoryPages         byte = 3
+	BaseInventorySize           = InventoryEquipmentSlots + InventoryPageSlots*InventoryPages
 )
 
 const (
@@ -81,6 +87,56 @@ func (i *Inventory) Snapshot() Inventory {
 	mutex.Unlock()
 
 	return NewInventory(items)
+}
+
+func (i *Inventory) FirstFreeSlot(capacity byte) (byte, bool) {
+	if i == nil || capacity == 0 {
+		return 0, false
+	}
+	mutex := i.synchronizationMutex()
+	mutex.Lock()
+	defer mutex.Unlock()
+	for slot := byte(0); slot < capacity; slot++ {
+		if _, occupied := i.Items[slot]; !occupied {
+			return slot, true
+		}
+	}
+	return 0, false
+}
+
+// FirstFreeNormalSlot excludes the thirteen equipment slots. Ground pickups
+// are ordinary inventory links and must never be placed in an equipment slot,
+// even when the character's inventory is only partially expanded.
+func (i *Inventory) FirstFreeNormalSlot(capacity byte) (byte, bool) {
+	if i == nil || capacity <= InventoryEquipmentSlots {
+		return 0, false
+	}
+	if capacity > MaxInventoryWireSize {
+		capacity = MaxInventoryWireSize
+	}
+	mutex := i.synchronizationMutex()
+	mutex.Lock()
+	defer mutex.Unlock()
+	for slot := InventoryEquipmentSlots; slot < capacity; slot++ {
+		if _, occupied := i.Items[slot]; !occupied {
+			return slot, true
+		}
+	}
+	return 0, false
+}
+
+func (i *Inventory) Put(slot, capacity byte, item Item) bool {
+	if i == nil || slot >= capacity {
+		return false
+	}
+	mutex := i.synchronizationMutex()
+	mutex.Lock()
+	defer mutex.Unlock()
+	if _, occupied := i.Items[slot]; occupied {
+		return false
+	}
+	i.Items[slot] = item
+	return true
 }
 
 func (i *Inventory) MoveItems(sourceSlot, targetSlot byte, player *Player) (bool, int) {
@@ -260,7 +316,7 @@ func (i *Inventory) canEquipSecondaryWeapon(item Item, player *Player) bool {
 			return true
 		} else if !ok && item.IsCHShield() && i.fulfillsLevelRequirements(item, player) {
 			return true
-		} else if !ok && primWeapon.IsBow() && item.IsArrow() {
+		} else if ok && primWeapon.IsBow() && item.IsArrow() {
 			return true
 		}
 
@@ -269,7 +325,7 @@ func (i *Inventory) canEquipSecondaryWeapon(item Item, player *Player) bool {
 			return true
 		} else if !ok && item.IsEUShield() && i.fulfillsLevelRequirements(item, player) {
 			return true
-		} else if !ok && primWeapon.IsCrossbow() && item.IsBolt() {
+		} else if ok && primWeapon.IsCrossbow() && item.IsBolt() {
 			return true
 		}
 	}

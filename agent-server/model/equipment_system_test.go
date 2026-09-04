@@ -38,11 +38,11 @@ func TestProtectionRulesAndEnhancementFailure(t *testing.T) {
 		t.Fatal("valid protections were rejected")
 	}
 	level, remaining, destroyed, durabilityLost := ApplyEnhancementFailure(8, protection)
-	if level != 4 || destroyed || durabilityLost || remaining != (EquipmentProtection{}) {
+	if level != 4 || destroyed || durabilityLost || remaining != (EquipmentProtection{Steady: 1}) {
 		t.Fatalf("protected failure = level %d protection %+v destroyed=%v durability=%v", level, remaining, destroyed, durabilityLost)
 	}
 	level, _, destroyed, durabilityLost = ApplyEnhancementFailure(8, EquipmentProtection{})
-	if level != 8 || !destroyed || !durabilityLost {
+	if level != 8 || !destroyed || durabilityLost {
 		t.Fatalf("unprotected high-level failure = level %d destroyed=%v durability=%v", level, destroyed, durabilityLost)
 	}
 }

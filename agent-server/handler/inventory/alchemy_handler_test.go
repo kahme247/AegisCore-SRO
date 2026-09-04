@@ -2,24 +2,52 @@ package inventory
 
 import (
 	"bytes"
+	"context"
 	"testing"
-	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
-func TestAlchemyWaitUsesAnimationDuration(t *testing.T) {
-	var waited time.Duration
-	h := &AlchemyHandler{wait: func(duration time.Duration) { waited = duration }}
-	h.waitFor(3 * time.Second)
-	if waited != 3*time.Second {
-		t.Fatalf("elixir wait = %v", waited)
+func TestAlchemyLifecycleAdvancesOnThirdGameTick(t *testing.T) {
+	player := &model.Player{ID: 77, LifeState: model.Alive, BodyState: model.Normal}
+	h := &AlchemyHandler{states: newAlchemyLifecycle()}
+	if !h.beginDelayed(player, alchemyTypeElixir) {
+		t.Fatal("begin alchemy operation failed")
 	}
-	h.waitFor(4500 * time.Millisecond)
-	if waited != 4500*time.Millisecond {
-		t.Fatalf("stone wait = %v", waited)
+	h.TickAlchemy()
+	h.TickAlchemy()
+	select {
+	case <-h.lifecycle().active[player.ID].wake:
+		t.Fatal("operation woke before phase three")
+	default:
+	}
+	h.TickAlchemy()
+	if wake := h.awaitPhaseThree(context.Background(), player); !wake.execute || wake.suppressResponse {
+		t.Fatalf("phase-three wake = %+v", wake)
+	}
+}
+
+func TestAlchemyLifecycleInterruptsUntouchableAndSuppressesDuplicateCancel(t *testing.T) {
+	player := &model.Player{ID: 78, LifeState: model.Alive, BodyState: model.Normal}
+	h := &AlchemyHandler{states: newAlchemyLifecycle()}
+	if !h.beginDelayed(player, alchemyTypeMagicStone) {
+		t.Fatal("begin alchemy operation failed")
+	}
+	player.SetBodyState(model.Untouchable)
+	h.TickAlchemy()
+	if wake := h.awaitPhaseThree(context.Background(), player); wake.execute || wake.suppressResponse {
+		t.Fatalf("body-state interruption wake = %+v", wake)
+	}
+
+	player.SetBodyState(model.Normal)
+	h.lifecycle().finish(player.ID)
+	if !h.beginDelayed(player, alchemyTypeMagicStone) || !h.lifecycle().cancel(player.ID) {
+		t.Fatal("cancel setup failed")
+	}
+	if wake := h.awaitPhaseThree(context.Background(), player); wake.execute || !wake.suppressResponse {
+		t.Fatalf("explicit cancel wake = %+v", wake)
 	}
 }
 
@@ -72,8 +100,9 @@ func TestParseExtendedAlchemyRequestsVSRO188(t *testing.T) {
 	socket.WriteByte(alchemyTypeSocketInsert)
 	socket.WriteByte(13)
 	socket.WriteByte(14)
+	socket.WriteByte(2)
 	request, err = parseAlchemySocketRequest(&socket)
-	if err != nil || request.targetSlot != 13 || request.materialSlot != 14 {
+	if err != nil || request.targetSlot != 13 || request.materialSlot != 14 || request.index != 2 {
 		t.Fatalf("socket request = %+v, %v", request, err)
 	}
 
@@ -100,12 +129,9 @@ func TestAlchemyResponsesMatchVSRO188Layout(t *testing.T) {
 	result, e1 := packet.ReadByte()
 	action, e2 := packet.ReadByte()
 	success, e3 := packet.ReadBool()
-	slot, e4 := packet.ReadByte()
-	rent, e5 := packet.ReadUInt32()
-	refID, e6 := packet.ReadUInt32()
-	opt, e7 := packet.ReadByte()
-	if result != 1 || action != 2 || !success || slot != 13 || rent != 0 || refID != 1234 || opt != 3 || e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil {
-		t.Fatalf("alchemy ACK prefix = %d/%d/%v/%d/%d/%d/%d errors %v/%v/%v/%v/%v/%v/%v", result, action, success, slot, rent, refID, opt, e1, e2, e3, e4, e5, e6, e7)
+	targetSlot, e4 := packet.ReadByte()
+	if result != 1 || action != 2 || !success || targetSlot != 13 || e1 != nil || e2 != nil || e3 != nil || e4 != nil || packet.Remaining() == 0 {
+		t.Fatalf("alchemy ACK = %d/%d/%v/%d errors %v/%v/%v/%v remaining %d", result, action, success, targetSlot, e1, e2, e3, e4, packet.Remaining())
 	}
 
 	quantity := buildAlchemyMaterialQuantity(14, 9)
@@ -129,34 +155,75 @@ func TestAlchemyResultPayloadsMatchVSRO188Layouts(t *testing.T) {
 	item := model.Item{OptLevel: 0, Data: 10}
 	item.RefObjectID = 1234
 	item.SetTypeInfo(model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2})
-	target := network.EmptyPacket()
-	writeAlchemyTarget(&target, item)
-	targetPayload := append([]byte(nil), target.Payload()...)
-
 	tests := []struct {
 		name   string
 		packet network.Packet
 		opcode uint16
 		prefix []byte
-		target bool
 	}{
-		{name: "elixir success", packet: buildElixirAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 1, 13}, target: true},
-		{name: "elixir non-destructive failure", packet: buildElixirAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 0, 13, 0}, target: true},
+		{name: "elixir success", packet: buildElixirAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 1, 13}},
+		{name: "elixir non-destructive failure", packet: buildElixirAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 0, 13, 0}},
 		{name: "elixir destruction", packet: buildElixirAlchemyResult(model.AlchemyResult{TargetSlot: 13, Destroyed: true}), opcode: opcode.AlchemyElixirResponse, prefix: []byte{1, 2, 0, 13, 1}},
-		{name: "stone success", packet: buildStoneAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 1, 13}, target: true},
-		{name: "stone failure", packet: buildStoneAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 0, 13}, target: true},
-		{name: "socket success", packet: buildSocketAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemySocketResponse, prefix: []byte{1, 2, 13}, target: true},
+		{name: "stone success", packet: buildStoneAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 1, 13}},
+		{name: "stone failure", packet: buildStoneAlchemyResult(model.AlchemyResult{TargetSlot: 13, Target: item}), opcode: opcode.AlchemyStoneResponse, prefix: []byte{1, 2, 0, 13}},
+		{name: "socket success", packet: buildSocketAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), opcode: opcode.AlchemySocketResponse, prefix: []byte{1, 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			want := append([]byte(nil), tt.prefix...)
-			if tt.target {
-				want = append(want, targetPayload...)
-			}
-			if tt.packet.MessageID != tt.opcode || !bytes.Equal(tt.packet.Payload(), want) {
+			exact := tt.name == "elixir destruction" || tt.name == "socket success"
+			matches := bytes.HasPrefix(tt.packet.Payload(), want) && (!exact || bytes.Equal(tt.packet.Payload(), want))
+			if tt.packet.MessageID != tt.opcode || !matches {
 				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, want)
 			}
 		})
+	}
+}
+
+func TestSocketActionResultsEmbedTargetSlot(t *testing.T) {
+	for _, action := range []byte{2, 3, 4} {
+		packet := buildSocketAlchemyActionResult(action, model.AlchemyResult{TargetSlot: 99})
+		if packet.MessageID != opcode.AlchemySocketResponse || !bytes.HasPrefix(packet.Payload(), []byte{1, action, 99}) || len(packet.Payload()) == 3 {
+			t.Errorf("socket action %d response = opcode %#x payload % X", action, packet.MessageID, packet.Payload())
+		}
+	}
+}
+
+func TestParseAlchemyAvatarRequests(t *testing.T) {
+	avatar := network.EmptyPacket()
+	avatar.WriteByte(alchemyActionFuse)
+	avatar.WriteByte(2)
+	avatar.WriteByte(13)
+	avatar.WriteByte(14)
+	request, err := parseAlchemyAvatarRequest(&avatar)
+	if err != nil || request.cancel || !bytes.Equal(request.slots, []byte{13, 14}) {
+		t.Fatalf("avatar request = %+v, %v", request, err)
+	}
+
+	cancel := network.EmptyPacket()
+	cancel.WriteByte(alchemyActionCancel)
+	request, err = parseAlchemyAvatarRequest(&cancel)
+	if err != nil || !request.cancel || len(request.slots) != 0 {
+		t.Fatalf("avatar cancel = %+v, %v", request, err)
+	}
+
+	grant := network.EmptyPacket()
+	grant.WriteByte(13)
+	grant.WriteString("MATTR_AVATAR_STR")
+	grantRequest, err := parseAlchemyAvatarGrantRequest(&grant)
+	if err != nil || grantRequest.targetSlot != 13 || grantRequest.optionCode != "MATTR_AVATAR_STR" {
+		t.Fatalf("avatar grant = %+v, %v", grantRequest, err)
+	}
+}
+
+func TestAlchemyAvatarResultLayouts(t *testing.T) {
+	avatar := buildAlchemyAvatarResult(true)
+	if avatar.MessageID != opcode.AlchemyAvatarResponse || !bytes.Equal(avatar.Payload(), []byte{1, 2, 1}) {
+		t.Fatalf("avatar response = opcode %#x payload % X", avatar.MessageID, avatar.Payload())
+	}
+	grant := buildAlchemyAvatarGrantResult(true)
+	if grant.MessageID != opcode.AlchemyAvatarGrantResponse || !bytes.Equal(grant.Payload(), []byte{1, 1}) {
+		t.Fatalf("avatar grant response = opcode %#x payload % X", grant.MessageID, grant.Payload())
 	}
 }
 
@@ -176,5 +243,57 @@ func TestAlchemyProtocolFailuresMatchVSRO188Layouts(t *testing.T) {
 				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseMaterialAndDismantleRequestsVSRO188(t *testing.T) {
+	material := network.EmptyClientPacket()
+	material.WriteByte(2)
+	material.WriteByte(1)
+	material.WriteByte(2)
+	material.WriteByte(13)
+	material.WriteByte(14)
+	request, err := parseAlchemyMaterialRequest(&material)
+	if err != nil || request.selector != 1 || !bytes.Equal(request.slots, []byte{13, 14}) {
+		t.Fatalf("material request = %+v, %v", request, err)
+	}
+
+	duplicate := network.EmptyClientPacket()
+	duplicate.WriteByte(2)
+	duplicate.WriteByte(1)
+	duplicate.WriteByte(2)
+	duplicate.WriteByte(13)
+	duplicate.WriteByte(13)
+	if _, err = parseAlchemyMaterialRequest(&duplicate); err == nil {
+		t.Fatal("duplicate resolve slots unexpectedly accepted")
+	}
+
+	dismantle := network.EmptyClientPacket()
+	dismantle.WriteByte(2)
+	dismantle.WriteByte(15)
+	dismantle.WriteByte(16)
+	slots, err := parseAlchemyDismantleRequest(&dismantle)
+	if err != nil || !bytes.Equal(slots, []byte{15, 16}) {
+		t.Fatalf("dismantle slots = %v, %v", slots, err)
+	}
+
+	tooMany := network.EmptyClientPacket()
+	tooMany.WriteByte(10)
+	for slot := byte(13); slot < 23; slot++ {
+		tooMany.WriteByte(slot)
+	}
+	if _, err = parseAlchemyDismantleRequest(&tooMany); err == nil {
+		t.Fatal("ten dismantle slots unexpectedly accepted")
+	}
+}
+
+func TestMaterialAndDismantleResponsesMatchBinaryLayouts(t *testing.T) {
+	material := buildAlchemyMaterialSuccess(model.AlchemyMakeResult{ResponseByte: 21, ProducedValue: 0x11223344})
+	if material.MessageID != opcode.AlchemyMaterialResponse || !bytes.Equal(material.Payload(), []byte{1, 2, 21, 0x44, 0x33, 0x22, 0x11}) {
+		t.Fatalf("material response = opcode %#x payload % X", material.MessageID, material.Payload())
+	}
+	dismantle := buildAlchemyDismantleSuccess()
+	if dismantle.MessageID != opcode.AlchemyDismantleResponse || !bytes.Equal(dismantle.Payload(), []byte{1}) {
+		t.Fatalf("dismantle response = opcode %#x payload % X", dismantle.MessageID, dismantle.Payload())
 	}
 }

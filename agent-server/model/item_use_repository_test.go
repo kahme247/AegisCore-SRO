@@ -90,6 +90,92 @@ func TestIsCOSScrollRecognizesLiveGrowthAndAbilityPetItems(t *testing.T) {
 	}
 }
 
+func TestIsCOSTransportScrollSeparatesTemporaryRideItemsFromPetInstruments(t *testing.T) {
+	for _, transport := range []RefItem{
+		{RefObject: RefObject{CodeName: "ITEM_COS_T_WHITEELEPHANT_SCROLL", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 2}}, Param1Desc: "COS_T_WHITEELEPHANT"},
+		// The live catalog's red horse is a C-family ride, not a T-family job transport.
+		{RefObject: RefObject{CodeName: "ITEM_COS_C_HORSE1", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 2}}, Param1Desc: "COS_C_HORSE1"},
+	} {
+		if !IsCOSTransportScroll(transport) {
+			t.Fatalf("stock TypeID 3/3/3/2 ride scroll %s was not recognized", transport.CodeName)
+		}
+		if IsCOSScroll(transport) {
+			t.Fatalf("temporary ride scroll %s was classified as a persistent pet instrument", transport.CodeName)
+		}
+	}
+	transport := RefItem{RefObject: RefObject{CodeName: "ITEM_COS_T_WHITEELEPHANT_SCROLL", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 2}}, Param1Desc: "COS_T_WHITEELEPHANT"}
+	eventTransport := transport
+	eventTransport.CodeName = "ITEM_EVENT_COS_T_WHITEELEPHANT_SCROLL"
+	if !IsCOSTransportScroll(eventTransport) {
+		t.Fatal("event ride scroll was not recognized")
+	}
+	petInstrument := RefItem{RefObject: RefObject{CodeName: "ITEM_COS_P_FLUTE", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1, TypeID4: 1}}}
+	if IsCOSTransportScroll(petInstrument) {
+		t.Fatal("persistent pet instrument was classified as a temporary ride scroll")
+	}
+}
+
+func TestCOSResourcePotionClassifiersUseConfirmedTypeIDs(t *testing.T) {
+	hp := RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 4}}, Param1: 360}
+	if !IsCOSHealthPotion(hp) || IsCOSHGPotion(hp) {
+		t.Fatal("COS HP potion classification mismatch")
+	}
+	hgp := RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 9}}, Param1: 10}
+	if !IsCOSHGPotion(hgp) || IsCOSHealthPotion(hgp) {
+		t.Fatal("COS HGP potion classification mismatch")
+	}
+	if IsCOSHealthPotion(RefItem{RefObject: RefObject{TypeInfo: hp.TypeInfo}}) {
+		t.Fatal("non-usable COS HP reference was accepted")
+	}
+}
+
+func TestCOSPetTimedServiceFieldsResolveCatalogSkillAndCategory(t *testing.T) {
+	old := RefSkills
+	defer func() { RefSkills = old }()
+	RefSkills = map[uint32]RefSkill{7001: {ID: 7001, CodeName: "SKILL_MALL_PET_GROWTH_POTION_01"}}
+	ref := RefItem{RefObject: RefObject{ID: 22712, IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 15}}, Param1: 1800}
+	category, jobID, data1, ok := COSPetTimedServiceFields(ref, COSGrowthPet)
+	if !ok || category != 0 || jobID != 7001 || data1 != 0 {
+		t.Fatalf("growth service fields = %d,%d,%d,%v", category, jobID, data1, ok)
+	}
+	watch := ref
+	watch.ID = 22710
+	RefSkills[7002] = RefSkill{ID: 7002, CodeName: "SKILL_MALL_PET_WATCH_CHULHYEN_01"}
+	category, jobID, data1, ok = COSPetTimedServiceFields(watch, COSAbilityPet)
+	if !ok || category != 5 || jobID != 7002 || data1 != 28 {
+		t.Fatalf("watch service fields = %d,%d,%d,%v", category, jobID, data1, ok)
+	}
+	if _, _, _, ok = COSPetTimedServiceFields(watch, COSGrowthPet); ok {
+		t.Fatal("watch service accepted a growth pet")
+	}
+}
+
+func TestIsCOSExtensionUsesConfirmedTypeAndMinuteDuration(t *testing.T) {
+	oneDay := RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 12}}, Param1: 1440}
+	if !IsCOSExtension(oneDay) || time.Duration(oneDay.Param1)*time.Minute != 24*time.Hour {
+		t.Fatal("one-day COS extension reference mismatch")
+	}
+	if IsCOSExtension(RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 15}}}) {
+		t.Fatal("pet service item was classified as rental extension")
+	}
+}
+
+func TestIsCOSRevivalRequiresPetRevivalCatalogName(t *testing.T) {
+	ref := RefItem{RefObject: RefObject{CodeName: "ITEM_COS_REVIVAL", IsUseable: true}}
+	if !IsCOSRevival(ref) {
+		t.Fatal("COS revival item was not recognized")
+	}
+	character := ref
+	character.CodeName = "ITEM_RESURRECTION"
+	if IsCOSRevival(character) {
+		t.Fatal("character resurrection item was classified as COS revival")
+	}
+	grassOfLife := RefItem{RefObject: RefObject{CodeName: "ITEM_COS_P_CURE_ALL_01", IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 2, TypeID4: 7}}}
+	if IsCOSRevival(grassOfLife) {
+		t.Fatal("unresolved Grass of Life cure parameters were guessed as revival")
+	}
+}
+
 func TestValidateCOSItemRentalRejectsExpiredAbilityPetOnly(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	if err := validateCOSItemRental(COSAbilityPet, sql.NullTime{Valid: true, Time: now.Add(-time.Second)}, now); !errors.Is(err, ErrItemUseExpired) {

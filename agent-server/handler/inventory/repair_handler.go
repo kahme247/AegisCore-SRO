@@ -9,6 +9,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/sirupsen/logrus"
 )
 
@@ -78,33 +79,19 @@ func (h *InventoryHandler) handleRepairPacket(ctx context.Context, session *serv
 		return err
 	}
 	for repairedSlot, durability := range result.Durability {
-		update := network.EmptyPacket()
-		update.MessageID = opcode.ItemDurabilityUpdate
-		update.WriteByte(repairedSlot)
-		update.WriteUInt32(durability)
+		update := vsro188.BuildDurabilityUpdate(vsro188.DurabilityUpdate{Slot: repairedSlot, Value: durability})
 		if err = h.sendPacket(session, update); err != nil {
 			return err
 		}
 	}
-	points := network.EmptyPacket()
-	points.MessageID = opcode.EntityUpdatePoints
-	points.WriteByte(1)
-	points.WriteUInt64(result.Gold)
-	points.WriteByte(0)
+	points := vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: result.Gold})
 	return h.sendPacket(session, points)
 }
 
 func buildRepairSuccess() network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemRepairResponse
-	p.WriteByte(1)
-	return p
+	return vsro188.BuildRepairSuccess()
 }
 
 func buildRepairFailure() network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemRepairResponse
-	p.WriteByte(2)
-	p.WriteUInt16(0)
-	return p
+	return vsro188.BuildRepairFailure(0)
 }

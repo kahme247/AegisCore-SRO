@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/questwire"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/sirupsen/logrus"
 )
 
@@ -23,6 +27,8 @@ var (
 	ErrEconomyPacketInvalid                    = errors.New("economy packet is invalid")
 )
 
+const playerPickupCollectionRange = float32(160)
+
 // PlayerLookup is the narrow world-facing dependency needed to resolve a
 // packet's authenticated runtime owner. It deliberately accepts only a
 // UniqueID lookup; character names are mutable display data and must not
@@ -31,27 +37,92 @@ type PlayerLookup interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
 }
 
+type QuestCollectionProgressRepository interface {
+	RecordCollectedItem(context.Context, int, uint32, uint32) ([]model.QuestProgressResult, error)
+}
+
 type InventoryHandler struct {
 	players PlayerLookup
 	objects interface {
 		GetObjectByUniqueId(uint32) (model.ISRObject, error)
 	}
-	relocator     model.InventoryRelocator
-	economy       model.EconomyRepository
-	mall          model.ItemMallRepository
-	guild         model.GuildStorageRepository
-	avatar        model.AvatarInventoryRepository
-	exchange      ExchangeOperations
-	referenceData *model.ReferenceDataCatalog
-	send          func(*server.Session, network.Packet) error
-	buybackMu     sync.Mutex
-	buyback       map[int]string
-	buybackLog    sync.Once
+	objectRemover interface {
+		RemoveVisibleObject(model.ISRObject)
+	}
+	relocator    model.InventoryRelocator
+	economy      model.EconomyRepository
+	mall         model.ItemMallRepository
+	guild        model.GuildStorageRepository
+	avatar       model.AvatarInventoryRepository
+	cosInventory model.COSInventoryTransferRepository
+	groundPickup model.GroundItemPickupRepository
+	groundGold   model.GroundGoldPickupRepository
+	groundDrop   model.GroundItemDropRepository
+	groundItems  interface {
+		Spawn(*model.Item, uint32) error
+	}
+	groundLifecycle interface{ Cancel(*model.Item) }
+	questProgress   QuestCollectionProgressRepository
+	exchange        ExchangeOperations
+	referenceData   *model.ReferenceDataCatalog
+	send            func(*server.Session, network.Packet) error
+	buybackMu       sync.Mutex
+	buyback         map[int]string
+	buybackLog      sync.Once
 }
 
 func (h *InventoryHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) {
 	if h != nil {
 		h.referenceData = catalog
+	}
+}
+
+func (h *InventoryHandler) ConfigureCOSRepository(repository model.COSInventoryTransferRepository) {
+	if h != nil {
+		h.cosInventory = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureGroundItemPickupRepository(repository model.GroundItemPickupRepository) {
+	if h != nil {
+		h.groundPickup = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureGroundGoldPickupRepository(repository model.GroundGoldPickupRepository) {
+	if h != nil {
+		h.groundGold = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureGroundItemDropRepository(repository model.GroundItemDropRepository) {
+	if h != nil {
+		h.groundDrop = repository
+	}
+}
+
+// ConfigureGroundItemService connects the persistence-first drop handler to
+// the world admission boundary. The handler deliberately depends on the
+// narrow Spawn method instead of the concrete service.
+func (h *InventoryHandler) ConfigureGroundItemService(spawner interface {
+	Spawn(*model.Item, uint32) error
+}) {
+	if h != nil {
+		h.groundItems = spawner
+	}
+}
+
+// ConfigureGroundItemLifecycle cancels ownership/despawn timers after the
+// pickup transaction commits and before the object leaves the world.
+func (h *InventoryHandler) ConfigureGroundItemLifecycle(lifecycle interface{ Cancel(*model.Item) }) {
+	if h != nil {
+		h.groundLifecycle = lifecycle
+	}
+}
+
+func (h *InventoryHandler) ConfigureQuestProgressRepository(repository QuestCollectionProgressRepository) {
+	if h != nil {
+		h.questProgress = repository
 	}
 }
 
@@ -69,25 +140,32 @@ const (
 	PutItemIntoExchangeWindowOperation  ItemInventoryOperation = 0x04
 	TakeItemFromExchangeWindowOperation ItemInventoryOperation = 0x05
 	DropItemOperation                   ItemInventoryOperation = 0x07
-	BuyItemOperation                    ItemInventoryOperation = 0x08
-	SellItemOperation                   ItemInventoryOperation = 0x09
-	DropGoldOperation                   ItemInventoryOperation = 0x0A
-	DepositStorageGoldOperation         ItemInventoryOperation = 0x0B
-	WithdrawStorageGoldOperation        ItemInventoryOperation = 0x0C
-	BuyItemFromMallOperation            ItemInventoryOperation = 0x12
-	BuyItemFromModernMallOperation      ItemInventoryOperation = 0x18
-	BuySpecialtyGoodsOperation          ItemInventoryOperation = 0x2B
-	SellSpecialtyGoodsOperation         ItemInventoryOperation = 0x2C
-	BuyBackItemOperation                ItemInventoryOperation = 0x22
-	UnequipAvatarItemOperation          ItemInventoryOperation = 0x23
-	EquipAvatarItemOperation            ItemInventoryOperation = 0x24
-	PutItemIntoPetInventoryOperation    ItemInventoryOperation = 0x1A
-	TakeItemFromPetInventoryOperation   ItemInventoryOperation = 0x1B
-	GuildStorageMoveOperation           ItemInventoryOperation = 0x1D
-	GuildStorageDepositItemOperation    ItemInventoryOperation = 0x1E
-	GuildStorageWithdrawItemOperation   ItemInventoryOperation = 0x1F
-	GuildStorageDepositGoldOperation    ItemInventoryOperation = 0x20
-	GuildStorageWithdrawGoldOperation   ItemInventoryOperation = 0x21
+	PickupItemOperation                 ItemInventoryOperation = 0x06
+	// Operation 0x08 is body-form overloaded. The maintained NPC-buy path is
+	// the recovered eight-byte context form; the stock package-item sender is
+	// a separate four-byte form and is demultiplexed in handlePacket.
+	BuyItemOperation               ItemInventoryOperation = 0x08
+	SellItemOperation              ItemInventoryOperation = 0x09
+	DropGoldOperation              ItemInventoryOperation = 0x0A
+	DepositStorageGoldOperation    ItemInventoryOperation = 0x0B
+	WithdrawStorageGoldOperation   ItemInventoryOperation = 0x0C
+	BuyItemFromMallOperation       ItemInventoryOperation = 0x12
+	BuyItemFromModernMallOperation ItemInventoryOperation = 0x18
+	BuySpecialtyGoodsOperation     ItemInventoryOperation = 0x2B
+	SellSpecialtyGoodsOperation    ItemInventoryOperation = 0x2C
+	// BuyBackItemOperation is retained as stock updater vocabulary only. The
+	// recovered evidence does not prove it as a client 0x7034 discriminator;
+	// NPC buyback is handled through opcode.NPCBuyBackRequest below.
+	BuyBackItemOperation              ItemInventoryOperation = 0x22
+	UnequipAvatarItemOperation        ItemInventoryOperation = 0x23
+	EquipAvatarItemOperation          ItemInventoryOperation = 0x24
+	TakeItemFromPetInventoryOperation ItemInventoryOperation = 0x1A
+	PutItemIntoPetInventoryOperation  ItemInventoryOperation = 0x1B
+	GuildStorageMoveOperation         ItemInventoryOperation = 0x1D
+	GuildStorageDepositItemOperation  ItemInventoryOperation = 0x1E
+	GuildStorageWithdrawItemOperation ItemInventoryOperation = 0x1F
+	GuildStorageDepositGoldOperation  ItemInventoryOperation = 0x20
+	GuildStorageWithdrawGoldOperation ItemInventoryOperation = 0x21
 )
 
 // NewInventoryHandler exposes the two dependencies needed for an inventory
@@ -98,6 +176,9 @@ func NewInventoryHandler(players PlayerLookup, relocator model.InventoryRelocato
 	h := &InventoryHandler{players: players, relocator: relocator}
 	h.objects, _ = players.(interface {
 		GetObjectByUniqueId(uint32) (model.ISRObject, error)
+	})
+	h.objectRemover, _ = players.(interface {
+		RemoveVisibleObject(model.ISRObject)
 	})
 	if len(economy) > 0 {
 		h.economy = economy[0]
@@ -172,6 +253,10 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		logrus.Infof("item mall request operation=0x%02X payload=%X", operationType, packet.Payload())
 	}
 	switch ItemInventoryOperation(operationType) {
+	case DropItemOperation:
+		return h.handleGroundItemDrop(ctx, session, &packet)
+	case PickupItemOperation:
+		return h.handleGroundItemPickup(ctx, session, &packet)
 	case PutItemIntoExchangeWindowOperation, TakeItemFromExchangeWindowOperation, 13:
 		if h.exchange == nil {
 			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
@@ -182,17 +267,30 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		}
 		return h.exchange.HandleInventoryOperation(ctx, session, player, operationType, &packet)
 	case BuyItemOperation:
-		return h.handleBuy(ctx, session, &packet)
+		switch packet.Remaining() {
+		case 8:
+			// AegisCore's existing NPC economy contract is the exact
+			// tab/slot/quantity/NPC-context body.
+			return h.handleBuy(ctx, session, &packet)
+		case vsro188.PackageItemRequestBodySize:
+			// Stock operation 0x08 also has a package-item insertion form.
+			// Its request lifecycle/catalog transaction is not implemented;
+			// parse it exactly and fail closed rather than treating its fields
+			// as an NPC purchase.
+			return h.handlePackageItemInsertion(session, &packet)
+		default:
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
 	case BuyItemFromMallOperation, BuyItemFromModernMallOperation:
 		return h.handleMallBuy(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case SellItemOperation:
 		return h.handleSell(ctx, session, &packet)
 	case DepositStorageGoldOperation, WithdrawStorageGoldOperation:
 		return h.handleStorageGold(ctx, session, ItemInventoryOperation(operationType), &packet)
-	case BuyBackItemOperation:
-		return h.handleBuyBack(ctx, session, &packet)
 	case EquipAvatarItemOperation, UnequipAvatarItemOperation:
 		return h.handleAvatarTransfer(ctx, session, ItemInventoryOperation(operationType), &packet)
+	case PutItemIntoPetInventoryOperation, TakeItemFromPetInventoryOperation:
+		return h.handlePetInventoryTransfer(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case PutItemIntoStorageOperation, TakeItemFromStorageOperation, 1:
 		return h.handleStorageMutation(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case GuildStorageMoveOperation, GuildStorageDepositItemOperation, GuildStorageWithdrawItemOperation,
@@ -209,7 +307,7 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 	if err != nil {
 		return err
 	}
-	player, plan, err := h.relocate(ctx, session, request)
+	player, plan, removedBuffs, err := h.relocate(ctx, session, request)
 	if err != nil {
 		if errors.Is(err, model.ErrInventoryRelocationOutcomeUnknown) {
 			// Commit may have reached MySQL even though the caller observed an
@@ -228,7 +326,251 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 	if err := sendRelocationStateUpdates(session, player, plan); err != nil {
 		return err
 	}
-	return sendMoveItemSuccess(session, request)
+	for _, token := range removedBuffs {
+		removed := model.BuildBuffRemove(token)
+		player.SendToSelfAndKnown(&removed)
+	}
+	return sendMoveItemSuccess(session, request, plan)
+}
+
+func (h *InventoryHandler) handleGroundItemDrop(ctx context.Context, session *server.Session, packet *network.Packet) error {
+	if h == nil || h.groundDrop == nil || h.groundItems == nil || packet == nil || packet.Remaining() != 1 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	slot, err := packet.ReadByte()
+	if err != nil || packet.Remaining() != 0 || slot < model.InventoryEquipmentSlots || slot >= model.MaxInventoryWireSize {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+
+	result, err := h.groundDrop.Drop(ctx, int64(player.ID), slot)
+	if err != nil {
+		if errors.Is(err, model.ErrGroundItemDropOutcomeUnknown) {
+			return err
+		}
+		logrus.WithError(err).Debug("rejected ground-item drop")
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	if result.Item == nil || result.Item.ID <= 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	result.Item.SetNavmeshPosition(player.GetNavmeshPosition())
+	if err = h.groundItems.Spawn(result.Item, 0); err != nil {
+		restoreErr := h.groundDrop.Restore(ctx, int64(player.ID), slot, int64(result.Item.ID))
+		if restoreErr != nil {
+			return fmt.Errorf("ground-item world admission failed: %w; restore failed: %v", err, restoreErr)
+		}
+		logrus.WithError(err).Debug("rejected ground-item world admission; inventory link restored")
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.CommitInventory(result.Inventory)
+	return h.sendPacket(session, vsro188.BuildGroundDropSuccess(slot))
+}
+
+func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *server.Session, packet *network.Packet) error {
+	if h == nil || h.objects == nil || h.objectRemover == nil || (h.groundPickup == nil && h.groundGold == nil) || packet == nil || packet.Remaining() != 4 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	targetUID, err := packet.ReadUInt32()
+	if err != nil || targetUID == 0 || packet.Remaining() != 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	object, err := h.objects.GetObjectByUniqueId(targetUID)
+	item, valid := groundPickupItem(object)
+	if err != nil || !valid || item == nil || item.ID <= 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	if owner := item.GetOwner(); owner != 0 && owner != player.GetUniqueID() {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	playerPosition, itemPosition := player.GetNavmeshPosition(), item.GetNavmeshPosition()
+	if playerPosition.Region.ID != itemPosition.Region.ID || navmeshv2.HorizontalDistance(playerPosition, itemPosition) > playerPickupCollectionRange {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if isGeneratedGoldItem(item) {
+		if h.groundGold == nil {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		gold, pickupErr := h.groundGold.PickupGold(ctx, int64(player.ID), int64(item.ID))
+		if pickupErr != nil {
+			if errors.Is(pickupErr, model.ErrGroundItemPickupOutcomeUnknown) {
+				return pickupErr
+			}
+			logrus.WithError(pickupErr).Debug("rejected ground-gold pickup")
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		player.SetGold(gold.Gold)
+		h.cancelGroundItemLifecycle(object)
+		h.objectRemover.RemoveVisibleObject(object)
+		if err := h.sendPacket(session, buildGroundPickupAnimation(player, item)); err != nil {
+			return err
+		}
+		return h.sendPacket(session, buildGoldUpdate(gold.Gold))
+	}
+	if h.groundPickup == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	slot, available := player.Inventory.FirstFreeNormalSlot(player.GetInventorySize())
+	if !available {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	result, err := h.groundPickup.Pickup(ctx, int64(player.ID), int64(item.ID), slot)
+	if err != nil {
+		if errors.Is(err, model.ErrGroundItemPickupOutcomeUnknown) {
+			return err
+		}
+		logrus.WithError(err).Debug("rejected ground-item pickup")
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.CommitInventory(result.Inventory)
+	h.cancelGroundItemLifecycle(object)
+	h.objectRemover.RemoveVisibleObject(object)
+	if err := h.sendPacket(session, buildGroundPickupAnimation(player, item)); err != nil {
+		return err
+	}
+	if err := h.sendPacket(session, buildGroundPickupInventoryUpdate(result.Slot)); err != nil {
+		return err
+	}
+	if h.questProgress == nil {
+		return nil
+	}
+	quantity := item.StackSize
+	if quantity <= 0 {
+		quantity = 1
+	}
+	if uint64(quantity) > math.MaxUint32 {
+		return model.ErrQuestStateConflict
+	}
+	progress, err := h.questProgress.RecordCollectedItem(ctx, player.ID, item.GetRefObjectID(), uint32(quantity))
+	if err != nil {
+		return err
+	}
+	for _, result := range progress {
+		if !result.Changed {
+			continue
+		}
+		player.CommitQuestMutation(result.Quest)
+		update, buildErr := questwire.BuildUpdate(result.Quest, vsro188.QuestUpdateDelta)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err = h.sendPacket(session, update); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *InventoryHandler) cancelGroundItemLifecycle(object model.ISRObject) {
+	if h == nil || h.groundLifecycle == nil {
+		return
+	}
+	if concrete, ok := object.(*model.Item); ok {
+		h.groundLifecycle.Cancel(concrete)
+	} else if equipment, ok := object.(*model.Equipment); ok && equipment != nil {
+		h.groundLifecycle.Cancel(&equipment.Item)
+	}
+}
+
+func isGeneratedGoldItem(item *model.Item) bool {
+	if item == nil {
+		return false
+	}
+	typeInfo := item.GetTypeInfo()
+	return typeInfo.TypeID1 == model.TypeID1Item && typeInfo.TypeID2 == 3 && typeInfo.TypeID3 == 5 && typeInfo.TypeID4 != 1
+}
+
+func groundPickupItem(object model.ISRObject) (*model.Item, bool) {
+	switch item := object.(type) {
+	case *model.Item:
+		return item, item != nil
+	case *model.Equipment:
+		if item == nil {
+			return nil, false
+		}
+		return &item.Item, true
+	default:
+		return nil, false
+	}
+}
+
+func buildGroundPickupAnimation(player *model.Player, item *model.Item) network.Packet {
+	return vsro188.BuildEntityPickupAnimation(player.GetUniqueID(), groundPickupHeading(player, item))
+}
+
+func groundPickupHeading(player *model.Player, item *model.Item) byte {
+	if player == nil || item == nil {
+		return 0
+	}
+	from := player.GetNavmeshPosition().GetGlobalCoordinates()
+	to := item.GetNavmeshPosition().GetGlobalCoordinates()
+	radians := math.Atan2(float64(to.Z-from.Z), float64(to.X-from.X))
+	if radians < 0 {
+		radians += 2 * math.Pi
+	}
+	return byte(math.Round(radians / (2 * math.Pi) * 255))
+}
+
+func buildGroundPickupInventoryUpdate(slot byte) network.Packet {
+	return vsro188.BuildItemOperationSlotSuccess(vsro188.ItemOperationPickup, slot)
+}
+
+func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
+	if h == nil || h.cosInventory == nil || h.objects == nil || packet == nil || packet.Remaining() != 6 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	petUID, err := packet.ReadUInt32()
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	source, err := packet.ReadByte()
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	destination, err := packet.ReadByte()
+	if err != nil || packet.Remaining() != 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	object, err := h.objects.GetObjectByUniqueId(petUID)
+	pet, valid := object.(*model.COS)
+	if err != nil || !valid || pet == nil || pet.InventorySize == 0 || pet.OwnerCharID != player.ID || pet.OwnerUniqueID != player.GetUniqueID() {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	toCOS := operation == PutItemIntoPetInventoryOperation
+	if (toCOS && destination >= pet.InventorySize) || (!toCOS && source >= pet.InventorySize) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if h.exchange != nil && h.exchange.Busy(player.ID) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	playerInventory, cosInventory, err := h.cosInventory.TransferItem(ctx, player.ID, pet.PersistentID, source, destination, toCOS)
+	if err != nil {
+		if errors.Is(err, model.ErrInventoryRelocationOutcomeUnknown) {
+			return err
+		}
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player.CommitInventory(playerInventory)
+	pet.ReplaceInventory(cosInventory)
+	response := vsro188.BuildItemOperationObjectSlotSuccess(byte(operation), petUID, destination)
+	return h.sendPacket(session, response)
 }
 
 func (h *InventoryHandler) handleAvatarTransfer(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
@@ -266,20 +608,13 @@ func sendAvatarStateUpdate(player *model.Player, operation ItemInventoryOperatio
 		if !exists {
 			return
 		}
-		packet.MessageID = opcode.EntityEquipItem
-		packet.WriteUInt32(player.GetUniqueID())
-		packet.WriteByte(request.targetSlot)
-		packet.WriteUInt32(item.GetRefObjectID())
-		packet.WriteBool(false)
+		packet = vsro188.BuildEntityEquipItem(player.GetUniqueID(), request.targetSlot, item.GetRefObjectID(), false)
 	} else {
 		item, exists := result.Inventory.Items[request.targetSlot]
 		if !exists {
 			return
 		}
-		packet.MessageID = opcode.EntityUnequipItem
-		packet.WriteUInt32(player.GetUniqueID())
-		packet.WriteByte(request.sourceSlot)
-		packet.WriteUInt32(item.GetRefObjectID())
+		packet = vsro188.BuildEntityUnequipItem(player.GetUniqueID(), request.sourceSlot, item.GetRefObjectID())
 	}
 	player.SendToSelfAndKnown(&packet)
 }
@@ -331,6 +666,27 @@ func parseItemMallPurchaseRequest(operation ItemInventoryOperation, packet *netw
 		return itemMallPurchaseRequest{}, errors.New("item mall purchase packet is unavailable")
 	}
 	request := itemMallPurchaseRequest{operation: operation}
+	if operation == BuyItemFromModernMallOperation {
+		wireRequest, err := vsro188.DecodeItemMallModernRequest(packet)
+		if err != nil {
+			return itemMallPurchaseRequest{}, err
+		}
+		request.position = model.ItemMallPosition{
+			RefShopGroupID: wireRequest.ShopGroupID,
+			GroupIndex:     wireRequest.GroupIndex,
+			TabIndex:       wireRequest.TabIndex,
+			SlotIndex:      wireRequest.SlotIndex,
+		}
+		request.packageName = wireRequest.PackageName
+		request.purchaseCount = wireRequest.PackageCount
+		request.clientPoints = uint32(wireRequest.OpaqueValue)
+		request.clientBonus = uint32(wireRequest.OpaqueValue >> 32)
+		request.packageID = wireRequest.PackageID
+		if request.position.RefShopGroupID == 0 || request.purchaseCount == 0 {
+			return itemMallPurchaseRequest{}, errors.New("item mall purchase contains invalid identifiers")
+		}
+		return request, nil
+	}
 	var err error
 	if operation == BuyItemFromMallOperation {
 		request.position.RefShopGroupID = 1051 // GROUP_MALL in the vSRO 1.188 Media catalog.
@@ -402,6 +758,10 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 	result, err := h.mall.Purchase(ctx, int64(player.ID), session.UserContext.UserID, request.position, request.purchaseCount)
 	if err != nil {
 		if errors.Is(err, model.ErrItemMallOutcomeUnknown) {
+			// The purchase may already have committed. Do not let the client
+			// continue with a possibly stale inventory/balance snapshot; a fresh
+			// session reloads the canonical state from persistence.
+			session.Close()
 			return fmt.Errorf("item mall purchase outcome is unknown: %w", err)
 		}
 		logrus.WithError(err).WithFields(logrus.Fields{"shop_group": request.position.RefShopGroupID, "group": request.position.GroupIndex, "tab": request.position.TabIndex, "slot": request.position.SlotIndex}).Info("rejected item mall purchase")
@@ -412,10 +772,17 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 	if result.ItemService != nil {
 		serviceToken, replacedServiceToken = player.ApplyItemService(*result.ItemService)
 	}
-	if err := h.sendPacket(session, buildItemMallBalanceUpdate(result.Balances)); err != nil {
-		return err
+	purchaseSuccess := buildItemMallPurchaseSuccess(request, result)
+	packets := []network.Packet{purchaseSuccess}
+	if operation != BuyItemFromModernMallOperation {
+		// The recovered operation-0x18 completion reaches the stock balance
+		// updater with its state-only flag; that path updates server-side
+		// balance state without directly emitting 0x3153. Keep the legacy
+		// route's established balance-then-result ordering separate until its
+		// own completion edge is capture-correlated.
+		packets = []network.Packet{buildItemMallBalanceUpdate(result.Balances), purchaseSuccess}
 	}
-	if err := h.sendPacket(session, buildItemMallPurchaseSuccess(request, result)); err != nil {
+	if err := h.sendPackets(session, packets...); err != nil {
 		return err
 	}
 	if result.ItemService != nil && serviceToken != 0 {
@@ -568,10 +935,27 @@ func (h *InventoryHandler) handleBuy(ctx context.Context, session *server.Sessio
 	}
 	result, err := h.economy.Buy(ctx, int64(player.ID), session.UserContext.UserID, npcCode, tab, slot, amount)
 	if err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"npc": npcCode, "tab": tab, "slot": slot, "amount": amount,
+		}).Warn("rejected NPC shop purchase")
 		return h.handleEconomyError(session, err)
 	}
 	player.CommitEconomy(result.Gold, result.Inventory)
-	return h.sendPacket(session, buildBuySuccess(tab, slot, amount, result.DestinationSlots, result.Item))
+	goldUpdate := vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: result.Gold})
+	return h.sendPackets(session, goldUpdate, buildBuySuccess(tab, slot, amount, result.DestinationSlots, result.Item))
+}
+
+func (h *InventoryHandler) handlePackageItemInsertion(session *server.Session, packet *network.Packet) error {
+	request, err := vsro188.DecodePackageItemRequestBody(packet)
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	logrus.WithFields(logrus.Fields{
+		"selectorA": fmt.Sprintf("0x%02X", request.SelectorA),
+		"selectorB": fmt.Sprintf("0x%02X", request.SelectorB),
+		"quantity":  request.Quantity,
+	}).Debug("package-item operation 0x08 is not enabled")
+	return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 }
 
 func (h *InventoryHandler) handleSell(ctx context.Context, session *server.Session, packet *network.Packet) error {
@@ -684,14 +1068,7 @@ func (h *InventoryHandler) handleBuyBack(ctx context.Context, session *server.Se
 }
 
 func buildNPCBuyBackResponse(success bool) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.NPCBuyBackResponse
-	if success {
-		p.WriteByte(1)
-	} else {
-		p.WriteByte(2)
-	}
-	return p
+	return vsro188.BuildNPCBuyBackResponse(success)
 }
 
 type buyBackRequest struct {
@@ -811,78 +1188,51 @@ func (h *InventoryHandler) sendPacket(session *server.Session, packet network.Pa
 	return session.Send(packet)
 }
 
+// sendPackets preserves the stock client's expected balance-then-purchase
+// ordering as one sender job. Tests and small integrations may inject the
+// single-packet callback; production uses Session.SendBatch so another
+// handler cannot interleave a packet between the two related updates.
+func (h *InventoryHandler) sendPackets(session *server.Session, packets ...network.Packet) error {
+	if h.send != nil {
+		for _, packet := range packets {
+			if err := h.send(session, packet); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return session.SendBatch(packets)
+}
+
 func buildBuySuccess(tab, slot byte, amount uint16, destinations []byte, item model.Item) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(BuyItemOperation))
-	p.WriteByte(tab)
-	p.WriteByte(slot)
-	p.WriteByte(byte(len(destinations)))
-	p.WriteBytes(destinations)
-	p.WriteUInt16(amount)
-	model.WriteRentInfo(&p, item)
-	return p
+	rent := network.EmptyPacket()
+	model.WriteRentInfo(&rent, item)
+	return vsro188.BuildItemBuySuccess(tab, slot, amount, destinations, rent.Payload())
 }
 func buildSellSuccess(source byte, amount uint16, npcUID uint32, buybackSlot byte) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(SellItemOperation))
-	p.WriteByte(source)
-	p.WriteUInt16(amount)
-	p.WriteUInt32(npcUID)
-	p.WriteByte(buybackSlot)
-	return p
+	return vsro188.BuildItemSellSuccess(source, amount, npcUID, buybackSlot)
 }
 
 func buildGoldUpdate(gold uint64) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntityUpdatePoints
-	p.WriteByte(1)
-	p.WriteUInt64(gold)
-	// vSRO 1.188 terminates point updates with a notification flag. Omitting
-	// it makes MsgStreamBuffer read one byte past the packet and assert.
-	p.WriteByte(0)
-	return p
+	return vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold})
 }
 
 func buildStorageGoldSuccess(operation ItemInventoryOperation, amount, characterGold uint64) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(operation))
+	value := amount
 	if operation == DepositStorageGoldOperation {
-		p.WriteUInt64(characterGold)
-	} else {
-		p.WriteUInt64(amount)
+		value = characterGold
 	}
-	return p
+	return vsro188.BuildItemOperationUInt64Success(byte(operation), value)
 }
 
 func buildBuyBackSuccess(destination, source byte, amount uint16) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(BuyBackItemOperation))
-	p.WriteByte(destination)
-	p.WriteByte(source)
-	p.WriteUInt16(amount)
-	return p
+	return vsro188.BuildItemBuyBackSuccess(destination, source, amount)
 }
 func buildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(operation))
-	p.WriteByte(source)
-	p.WriteByte(destination)
-	return p
+	return vsro188.BuildItemOperationSlotPairSuccess(byte(operation), source, destination)
 }
 func buildStorageMoveSuccess(operation ItemInventoryOperation, source, destination byte, amount uint16) network.Packet {
-	p := buildStorageTransferSuccess(operation, source, destination)
-	p.WriteUInt16(amount)
-	return p
+	return vsro188.BuildItemOperationSlotPairQuantitySuccess(byte(operation), source, destination, amount)
 }
 
 func buildGuildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {
@@ -894,49 +1244,48 @@ func buildGuildStorageMoveSuccess(operation ItemInventoryOperation, source, dest
 }
 
 func buildGuildStorageGoldSuccess(operation ItemInventoryOperation, amount uint64) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(byte(operation))
-	p.WriteUInt64(amount)
-	return p
+	return vsro188.BuildItemOperationUInt64Success(byte(operation), amount)
 }
 
 func buildUnsupportedItemOperationResponse() network.Packet {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ItemOperationResponse
-	packet.WriteByte(2)   // operation failed
-	packet.WriteUInt16(0) // generic failure code
-	return packet
+	return vsro188.BuildItemOperationFailure(0)
 }
 
 func buildItemMallBalanceUpdate(balances model.ItemMallBalances) network.Packet {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ItemMallBalanceUpdate
-	packet.WriteUInt32(balances.Silk)
-	packet.WriteUInt32(balances.GiftSilk)
-	packet.WriteUInt32(balances.Point)
-	return packet
+	return vsro188.BuildBalanceStateUpdate(vsro188.BalanceStateUpdate{
+		First:  balances.Silk,
+		Second: balances.GiftSilk,
+		Third:  balances.Point,
+	})
 }
 
 func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.ItemMallPurchaseResult) network.Packet {
+	if request.operation == BuyItemFromModernMallOperation {
+		return vsro188.BuildItemMallModernPurchaseSuccess(vsro188.ItemMallModernPurchaseSuccess{
+			ShopGroupID:  result.Position.RefShopGroupID,
+			GroupIndex:   result.Position.GroupIndex,
+			TabIndex:     result.Position.TabIndex,
+			SlotIndex:    result.Position.SlotIndex,
+			ResultBytes:  result.DestinationSlots,
+			PackageCount: request.purchaseCount,
+		})
+	}
+	if request.operation == BuyItemFromMallOperation {
+		return vsro188.BuildItemMallLegacyPurchaseSuccess(vsro188.ItemMallLegacyPurchaseSuccess{
+			Operation:        byte(request.operation),
+			MallVersion:      request.mallVersion,
+			Page:             request.page,
+			GroupIndex:       result.Position.GroupIndex,
+			TabIndex:         result.Position.TabIndex,
+			SlotIndex:        result.Position.SlotIndex,
+			DestinationSlots: result.DestinationSlots,
+			Quantity:         result.Quantity,
+		})
+	}
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemOperationResponse
 	packet.WriteByte(1)
 	packet.WriteByte(byte(request.operation))
-	if request.operation == BuyItemFromMallOperation {
-		packet.WriteByte(request.mallVersion)
-		packet.WriteByte(request.page)
-		packet.WriteByte(result.Position.GroupIndex)
-		packet.WriteByte(result.Position.TabIndex)
-		packet.WriteByte(result.Position.SlotIndex)
-		packet.WriteByte(byte(len(result.DestinationSlots)))
-		for _, slot := range result.DestinationSlots {
-			packet.WriteByte(slot)
-		}
-		packet.WriteUInt16(result.Quantity)
-		return packet
-	}
 	packet.WriteUInt16(result.Position.RefShopGroupID)
 	packet.WriteByte(result.Position.GroupIndex)
 	packet.WriteByte(result.Position.TabIndex)
@@ -1007,29 +1356,31 @@ func parseAvatarTransferRequest(packet *network.Packet) (moveItemRequest, error)
 // relocate resolves the player exclusively from session-owned identity and
 // calls the per-inventory commit boundary. In particular, it never uses the
 // mutable CharName field that the legacy handler used as its authority key.
-func (h *InventoryHandler) relocate(ctx context.Context, session *server.Session, request moveItemRequest) (*model.Player, model.InventoryRelocationPlan, error) {
+func (h *InventoryHandler) relocate(ctx context.Context, session *server.Session, request moveItemRequest) (*model.Player, model.InventoryRelocationPlan, []uint32, error) {
 	if h == nil || h.relocator == nil {
-		return nil, model.InventoryRelocationPlan{}, model.ErrInventoryRelocationRepositoryUnavailable
+		return nil, model.InventoryRelocationPlan{}, nil, model.ErrInventoryRelocationRepositoryUnavailable
 	}
 	player, err := h.resolvePlayer(session)
 	if err != nil {
-		return nil, model.InventoryRelocationPlan{}, err
+		return nil, model.InventoryRelocationPlan{}, nil, err
 	}
 	player.LockEconomy()
 	defer player.UnlockEconomy()
 	if h.exchange != nil && h.exchange.Busy(player.ID) {
-		return nil, model.InventoryRelocationPlan{}, model.ErrInventoryRelocationConflict
+		return nil, model.InventoryRelocationPlan{}, nil, model.ErrInventoryRelocationConflict
 	}
 	plan, err := player.Inventory.CommitRelocation(player, request.sourceSlot, request.targetSlot, func(plan model.InventoryRelocationPlan) error {
 		return h.relocator.Relocate(ctx, int64(session.UserContext.CharacterID), plan)
 	})
 	if err != nil {
-		return nil, model.InventoryRelocationPlan{}, err
+		return nil, model.InventoryRelocationPlan{}, nil, err
 	}
+	var removedBuffs []uint32
 	if plan.Action == model.InventoryRelocationEquip || plan.Action == model.InventoryRelocationUnequip {
 		player.RecalculatePassiveSkillModifiers(h.referenceData)
+		removedBuffs = player.RemoveInvalidFireShieldBuffs(h.referenceData)
 	}
-	return player, plan, nil
+	return player, plan, removedBuffs, nil
 }
 
 func (h *InventoryHandler) resolvePlayer(session *server.Session) (*model.Player, error) {
@@ -1057,72 +1408,53 @@ func sendRelocationStateUpdates(session *server.Session, player *model.Player, p
 
 	switch plan.Action {
 	case model.InventoryRelocationEquip:
-		packet := network.EmptyPacket()
-		packet.MessageID = opcode.EntityEquipItem
-		if err := packet.WriteUInt32(player.GetUniqueID()); err != nil {
-			return err
+		if !plan.SourceAmmunition {
+			packet := vsro188.BuildEntityEquipItem(player.GetUniqueID(), plan.TargetSlot, plan.SourceReferenceID, plan.SourceOneHanded)
+			if err := session.Send(packet); err != nil {
+				return err
+			}
 		}
-		if err := packet.WriteByte(plan.TargetSlot); err != nil {
-			return err
-		}
-		if err := packet.WriteUInt32(plan.SourceReferenceID); err != nil {
-			return err
-		}
-		if err := packet.WriteBool(plan.SourceOneHanded); err != nil {
-			return err
-		}
-		if err := session.Send(packet); err != nil {
-			return err
-		}
-		player.SendStatsUpdate()
 	case model.InventoryRelocationUnequip:
-		packet := network.EmptyPacket()
-		packet.MessageID = opcode.EntityUnequipItem
-		if err := packet.WriteUInt32(player.GetUniqueID()); err != nil {
-			return err
+		if !plan.SourceAmmunition {
+			packet := vsro188.BuildEntityUnequipItem(player.GetUniqueID(), plan.SourceSlot, plan.SourceReferenceID)
+			if err := session.Send(packet); err != nil {
+				return err
+			}
 		}
-		if err := packet.WriteByte(plan.SourceSlot); err != nil {
-			return err
+	}
+	for _, move := range plan.AdditionalMoves {
+		// Additional moves only arise when a paired body item is displaced by
+		// an equip transition. Observers must receive its body-slot removal as
+		// well as the newly equipped primary item.
+		if !move.SourceAmmunition {
+			packet := vsro188.BuildEntityUnequipItem(player.GetUniqueID(), move.SourceSlot, move.SourceReferenceID)
+			if err := session.Send(packet); err != nil {
+				return err
+			}
 		}
-		if err := packet.WriteUInt32(plan.SourceReferenceID); err != nil {
-			return err
-		}
-		if err := session.Send(packet); err != nil {
-			return err
-		}
+	}
+	if plan.Action == model.InventoryRelocationEquip || plan.Action == model.InventoryRelocationUnequip || len(plan.AdditionalMoves) > 0 {
 		player.SendStatsUpdate()
 	}
 	return nil
 }
 
-func sendMoveItemSuccess(session *server.Session, request moveItemRequest) error {
+func sendMoveItemSuccess(session *server.Session, request moveItemRequest, plan model.InventoryRelocationPlan) error {
 	if session == nil {
 		return ErrInventoryHandlerSessionIdentityInvalid
 	}
-
-	// Preserve the legacy success payload exactly. Invalid actions return no
-	// new failure packet until a sanitized capture establishes those bytes.
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ItemOperationResponse
-	if err := packet.WriteBool(true); err != nil {
+	if err := session.Send(vsro188.BuildItemOperationRelocationSuccess(request.sourceSlot, request.targetSlot, request.amount)); err != nil {
 		return err
 	}
-	if err := packet.WriteByte(byte(MoveItemOperation)); err != nil {
-		return err
+	for _, move := range plan.AdditionalMoves {
+		// Paired equipment displacement is a second real inventory relocation.
+		// The entity unequip packet updates the character model, but the owning
+		// client also needs B034 so its bag moves the item out of the body slot.
+		if err := session.Send(vsro188.BuildItemOperationRelocationSuccess(move.SourceSlot, move.TargetSlot, 0)); err != nil {
+			return err
+		}
 	}
-	if err := packet.WriteByte(request.sourceSlot); err != nil {
-		return err
-	}
-	if err := packet.WriteByte(request.targetSlot); err != nil {
-		return err
-	}
-	if err := packet.WriteUInt16(request.amount); err != nil {
-		return err
-	}
-	if err := packet.WriteByte(0); err != nil {
-		return err
-	}
-	return session.Send(packet)
+	return nil
 }
 
 func sendAvatarTransferSuccess(session *server.Session, operation ItemInventoryOperation, request moveItemRequest) error {
@@ -1133,13 +1465,5 @@ func sendAvatarTransferSuccess(session *server.Session, operation ItemInventoryO
 }
 
 func buildAvatarTransferSuccess(operation ItemInventoryOperation, request moveItemRequest) network.Packet {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ItemOperationResponse
-	packet.WriteBool(true)
-	packet.WriteByte(byte(operation))
-	packet.WriteByte(request.sourceSlot)
-	packet.WriteByte(request.targetSlot)
-	packet.WriteUInt16(0)
-	packet.WriteByte(0)
-	return packet
+	return vsro188.BuildItemOperationAvatarTransferSuccess(byte(operation), request.sourceSlot, request.targetSlot)
 }

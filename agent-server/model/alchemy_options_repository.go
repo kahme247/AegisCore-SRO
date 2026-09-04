@@ -40,7 +40,7 @@ func (r *SQLAlchemyRepository) FuseStone(ctx context.Context, characterID int64,
 	if chance <= 0 || chance > 100 {
 		chance = 50
 	}
-	result.Success = r.roll()*100 < float64(chance)
+	result.Success = stoneSucceeds(chance, r.roll())
 	if result.Success {
 		switch alchemyType {
 		case alchemyTypeMagicStone:
@@ -82,9 +82,43 @@ func (r *SQLAlchemyRepository) FuseStone(ctx context.Context, characterID int64,
 				_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,?)", target.ID, len(target.MagicOptions), option.Type, option.Value)
 			}
 		case alchemyTypeAttributeStone:
-			variance, ok := applyAttributeStone(target.Variance, targetRef, stoneRef.Param1Desc)
+			variance, ok := applyAttributeStoneValue(target.Variance, targetRef, stoneRef.Param1Desc, attributeStoneValue(r.roll()))
 			if !ok {
 				return AlchemyResult{}, ErrAlchemyUnsupported
+			}
+			assimilation := int(byte(uint32(stoneRef.Param3) >> 24))
+			if assimilation > 0 && int(r.roll()*101) < assimilation {
+				protected, protectErr := consumeAlchemyMagicCharge(ctx, tx, target, "MATTR_APE")
+				if protectErr != nil {
+					return AlchemyResult{}, protectErr
+				}
+				if !protected {
+					candidates := attributeStoneCandidates(targetRef)
+					candidateCount := len(candidates) + len(target.MagicOptions)
+					if candidateCount > 0 {
+						selectedIndex := min(int(r.roll()*float64(candidateCount)), candidateCount-1)
+						if selectedIndex >= len(candidates) {
+							magic := target.MagicOptions[selectedIndex-len(candidates)]
+							var packed uint32
+							if queryErr := tx.QueryRowContext(ctx, "SELECT `PARAM_VALUE` FROM `REF_MAGIC_OPTION` WHERE `ID`=? AND `OPTION_LEVEL`=? LIMIT 1", magic.Type, targetRef.Degree()).Scan(&packed); queryErr != nil {
+								return AlchemyResult{}, fmt.Errorf("resolve assimilation magic option: %w", queryErr)
+							}
+							minimum, maximum, valid := decodeMagicOptionRange(packed)
+							if !valid {
+								return AlchemyResult{}, ErrAlchemyConflict
+							}
+							value := rollMagicOptionValue(minimum, maximum, r.roll())
+							if _, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=? WHERE `FK_ITEM`=? AND `SLOT`=? AND `TYPE`=?", value, target.ID, selectedIndex-len(candidates), magic.Type); updateErr != nil {
+								return AlchemyResult{}, updateErr
+							}
+							break
+						}
+						selected := candidates[selectedIndex]
+						if !strings.EqualFold(selected, stoneRef.Param1Desc) {
+							variance, _ = applyAttributeStoneValue(variance, targetRef, selected, attributeStoneValue(r.roll()))
+						}
+					}
+				}
 			}
 			_, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `VARIANCE`=? WHERE `id`=? AND `VARIANCE`=?", variance, target.ID, target.Variance)
 		}
@@ -93,6 +127,18 @@ func (r *SQLAlchemyRepository) FuseStone(ctx context.Context, characterID int64,
 		}
 	}
 	return r.finishAlchemyTransaction(ctx, tx, characterID, targetSlot, result)
+}
+
+func stoneSucceeds(chance int, roll float64) bool {
+	if chance < 5 {
+		chance = 5
+	} else if chance > 100 {
+		chance = 100
+	}
+	if roll < 0 || roll >= 1 {
+		return false
+	}
+	return int(roll*100) <= chance
 }
 
 func decodeMagicOptionRange(packed uint32) (uint32, uint32, bool) {
@@ -150,17 +196,17 @@ func (r *SQLAlchemyRepository) ApplyAdvancedElixir(ctx context.Context, characte
 	return r.finishAlchemyTransaction(ctx, tx, characterID, targetSlot, result)
 }
 
-func (r *SQLAlchemyRepository) InsertSocket(ctx context.Context, characterID int64, userID uint32, targetSlot, stoneSlot byte) (result AlchemyResult, err error) {
+func (r *SQLAlchemyRepository) InsertSocket(ctx context.Context, characterID int64, userID uint32, targetSlot, stoneSlot, socketIndex byte) (result AlchemyResult, err error) {
 	tx, target, targetRef, stone, stoneRef, err := r.lockAlchemyPair(ctx, characterID, userID, targetSlot, stoneSlot)
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if stoneRef.TypeID1 != 3 || stoneRef.TypeID2 != 3 || stoneRef.TypeID3 != 11 || stoneRef.TypeID4 != 8 || targetRef.Degree() < stoneRef.ItemClass || !socketStoneApplies(stoneRef, targetRef) || len(target.SocketOptions) >= 3 {
+	if stoneRef.TypeID1 != 3 || stoneRef.TypeID2 != 3 || stoneRef.TypeID3 != 11 || stoneRef.TypeID4 != 8 || targetRef.Degree() < stoneRef.ItemClass || !socketStoneApplies(stoneRef, targetRef) || socketIndex >= 3 {
 		return result, ErrAlchemyUnsupported
 	}
 	for _, socket := range target.SocketOptions {
-		if socket.ID == uint32(stoneRef.Param1) {
+		if socket.Slot == socketIndex || socket.ID == uint32(stoneRef.Param1) {
 			return result, ErrAlchemyConflict
 		}
 	}
@@ -168,7 +214,76 @@ func (r *SQLAlchemyRepository) InsertSocket(ctx context.Context, characterID int
 		return result, err
 	}
 	result.Materials = []AlchemyMaterialUpdate{{Slot: stoneSlot, Remaining: remainingAlchemyStack(stone)}}
-	_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_BINDING_OPTION` (`FK_ITEM`,`OPTION_TYPE`,`SLOT`,`OPTION_ID`,`OPTION_VALUE`) VALUES (?,?,?,?,0)", target.ID, alchemyBindingSocket, len(target.SocketOptions), stoneRef.Param1)
+	_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_BINDING_OPTION` (`FK_ITEM`,`OPTION_TYPE`,`SLOT`,`OPTION_ID`,`OPTION_VALUE`) VALUES (?,?,?,?,0)", target.ID, alchemyBindingSocket, socketIndex, stoneRef.Param1)
+	if err != nil {
+		return result, err
+	}
+	result.Success = true
+	return r.finishAlchemyTransaction(ctx, tx, characterID, targetSlot, result)
+}
+
+func (r *SQLAlchemyRepository) CreateSocket(ctx context.Context, characterID int64, userID uint32, targetSlot, socketIndex byte) (AlchemyResult, error) {
+	return r.mutateSocketSlot(ctx, characterID, userID, targetSlot, socketIndex, 9, true)
+}
+
+func (r *SQLAlchemyRepository) EraseSocket(ctx context.Context, characterID int64, userID uint32, targetSlot, socketIndex byte) (AlchemyResult, error) {
+	return r.mutateSocketSlot(ctx, characterID, userID, targetSlot, socketIndex, 10, false)
+}
+
+func (r *SQLAlchemyRepository) mutateSocketSlot(ctx context.Context, characterID int64, userID uint32, targetSlot, socketIndex byte, materialSubtype int, create bool) (result AlchemyResult, err error) {
+	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || targetSlot < 13 || targetSlot >= BaseInventorySize || socketIndex >= 3 {
+		return result, ErrAlchemyInvalidRequest
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var owner uint32
+	if err = tx.QueryRowContext(ctx, "SELECT `FK_USER` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&owner); err != nil || owner != userID {
+		return result, ErrAlchemyConflict
+	}
+	inv, err := loadLockedAlchemyInventory(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	target, ok := inv.Items[targetSlot]
+	targetRef, refOK := RefItems[target.RefObjectID]
+	if !ok || !refOK || !targetRef.IsEquipment() {
+		return result, ErrAlchemyConflict
+	}
+	exists := false
+	for _, option := range target.SocketOptions {
+		if option.Slot == socketIndex {
+			exists = true
+			break
+		}
+	}
+	if create == exists {
+		return result, ErrAlchemyConflict
+	}
+	var materialSlot byte
+	var material Item
+	found := false
+	for slot, candidate := range inv.Items {
+		ref, refOK := RefItems[candidate.RefObjectID]
+		if slot >= 13 && refOK && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 11 && ref.TypeID4 == materialSubtype {
+			materialSlot, material, found = slot, candidate, true
+			break
+		}
+	}
+	if !found {
+		return result, ErrAlchemyUnsupported
+	}
+	if err = consumeAlchemyMaterial(ctx, tx, characterID, materialSlot, material); err != nil {
+		return result, err
+	}
+	result.Materials = []AlchemyMaterialUpdate{{Slot: materialSlot, Remaining: remainingAlchemyStack(material)}}
+	if create {
+		_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_BINDING_OPTION` (`FK_ITEM`,`OPTION_TYPE`,`SLOT`,`OPTION_ID`,`OPTION_VALUE`) VALUES (?,1,?,0,0)", target.ID, socketIndex)
+	} else {
+		_, err = tx.ExecContext(ctx, "DELETE FROM `ITEM_BINDING_OPTION` WHERE `FK_ITEM`=? AND `OPTION_TYPE`=1 AND `SLOT`=?", target.ID, socketIndex)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -254,31 +369,64 @@ func socketStoneApplies(stone, target RefItem) bool {
 }
 
 func applyAttributeStone(variance uint64, target RefItem, code string) (uint64, bool) {
+	return applyAttributeStoneValue(variance, target, code, int(VarianceStatMask))
+}
+
+func applyAttributeStoneValue(variance uint64, target RefItem, code string, value int) (uint64, bool) {
 	code = strings.ToUpper(strings.TrimSpace(code))
-	shift := -1
-	switch code {
-	case "NATTR_CRITICAL":
-		shift = 0
-	case "NATTR_HR":
-		shift = 15
-	case "NATTR_DUR":
-		shift = 0
-	case "NATTR_ER":
-		shift = 25
-	case "NATTR_PA", "NATTR_PARRY":
-		shift = 20
-	case "NATTR_MA":
-		shift = 25
-	case "NATTR_PR":
-		shift = 5
-	case "NATTR_MR":
-		shift = 10
-	case "NATTR_BR":
-		shift = 15
-	}
+	shift := attributeVarianceShift(target, code)
 	if shift < 0 {
 		return variance, false
 	}
+	if value < 0 {
+		value = 0
+	} else if value > int(VarianceStatMask) {
+		value = int(VarianceStatMask)
+	}
 	mask := uint64(VarianceStatMask) << shift
-	return (variance &^ mask) | (uint64(VarianceStatMask) << shift), true
+	return (variance &^ mask) | (uint64(value) << shift), true
+}
+
+func attributeStoneValue(roll float64) int {
+	residue := int(roll * 100)
+	bucket := 100
+	for _, threshold := range []int{0, 23, 43, 63, 83, 100} {
+		if residue <= threshold {
+			bucket = threshold
+			break
+		}
+	}
+	return bucket * int(VarianceStatMask) / 100
+}
+
+func attributeStoneCandidates(target RefItem) []string {
+	switch target.TypeID3 {
+	case 4:
+		return []string{"NATTR_DUR", "NATTR_PDSTR", "NATTR_MDINT", "NATTR_PD", "NATTR_MD", "NATTR_ER"}
+	case 6:
+		return []string{"NATTR_DUR", "NATTR_PASTR", "NATTR_MAINT", "NATTR_HR", "NATTR_PA", "NATTR_MA", "NATTR_CRITICAL"}
+	case 5, 12:
+		return []string{"NATTR_PAR", "NATTR_MAR"}
+	default:
+		return []string{"NATTR_DUR", "NATTR_PDSTR", "NATTR_MDINT", "NATTR_BR", "NATTR_PD", "NATTR_MD"}
+	}
+}
+
+func attributeVarianceShift(target RefItem, code string) int {
+	var shifts map[string]int
+	switch target.TypeID3 {
+	case 6: // weapon
+		shifts = map[string]int{"NATTR_CRITICAL": 0, "NATTR_MA": 5, "NATTR_PA": 10, "NATTR_HR": 15, "NATTR_MAINT": 20, "NATTR_PASTR": 25, "NATTR_DUR": 30}
+	case 4: // shield
+		shifts = map[string]int{"NATTR_MD": 0, "NATTR_PD": 5, "NATTR_ER": 10, "NATTR_MDINT": 15, "NATTR_PDSTR": 20, "NATTR_DUR": 25}
+	case 5, 12: // accessory
+		shifts = map[string]int{"NATTR_MAR": 0, "NATTR_PAR": 5}
+	default: // armor/protector
+		shifts = map[string]int{"NATTR_BR": 0, "NATTR_MD": 5, "NATTR_PD": 10, "NATTR_MDINT": 15, "NATTR_PDSTR": 20, "NATTR_DUR": 25}
+	}
+	shift, ok := shifts[code]
+	if !ok {
+		return -1
+	}
+	return shift
 }

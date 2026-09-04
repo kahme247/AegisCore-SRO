@@ -85,18 +85,22 @@ func TestRemainingAlchemyStack(t *testing.T) {
 }
 
 func TestEnhancementProbabilityAndAttributeMutation(t *testing.T) {
-	if !enhancementSucceeds(5, false, 0.29) || enhancementSucceeds(5, false, 0.30) {
-		t.Fatal("level-five enhancement boundary does not match the configured probability")
+	ref := RefItem{Param2: 0x19140f0a, Param7: 0x0a0a0a0a, Param12: 0x0a050505}
+	if got := reinforcementChance(ref, 0); got != 25 {
+		t.Fatalf("+0 reinforcement chance = %d, want 25", got)
 	}
-	if !enhancementSucceeds(5, true, 0.34) || enhancementSucceeds(5, true, 0.35) {
-		t.Fatal("lucky powder did not add five percentage points")
+	if got := reinforcementChance(ref, 4); got != 10 {
+		t.Fatalf("+4 reinforcement chance = %d, want 10", got)
 	}
-	ref := alchemyRef(6, 2, 1, 0)
-	variance, ok := applyAttributeStone(0, ref, "NATTR_CRITICAL")
+	if !enhancementSucceeds(30, 0.29) || enhancementSucceeds(30, 0.30) {
+		t.Fatal("reinforcement residue boundary does not match rand()%100 < chance")
+	}
+	target := alchemyRef(6, 2, 1, 0)
+	variance, ok := applyAttributeStone(0, target, "NATTR_CRITICAL")
 	if !ok || variance&VarianceStatMask != VarianceStatMask {
 		t.Fatalf("critical attribute variance = %#x, %v", variance, ok)
 	}
-	if _, ok = applyAttributeStone(0, ref, "NATTR_UNKNOWN"); ok {
+	if _, ok = applyAttributeStone(0, target, "NATTR_UNKNOWN"); ok {
 		t.Fatal("unknown attribute stone unexpectedly applied")
 	}
 }

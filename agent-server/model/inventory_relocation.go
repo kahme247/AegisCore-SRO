@@ -48,6 +48,21 @@ type InventoryRelocationPlan struct {
 
 	SourceReferenceID uint32
 	SourceOneHanded   bool
+	SourceAmmunition  bool
+
+	// AdditionalMoves carries body items displaced by a paired equipment
+	// transition. SR_GameServer's attach path explicitly handles slots 6 and
+	// 7 as a unit; retaining these moves in the same plan keeps persistence and
+	// runtime state atomic rather than leaving an incompatible off-hand item.
+	AdditionalMoves []InventoryRelocationAdditionalMove
+}
+
+type InventoryRelocationAdditionalMove struct {
+	SourceSlot        byte
+	TargetSlot        byte
+	SourceItemID      int64
+	SourceReferenceID uint32
+	SourceAmmunition  bool
 }
 
 // InventoryRelocationCommit persists one validated plan. CommitRelocation
@@ -63,10 +78,10 @@ func PlanInventoryRelocation(items map[byte]Item, sourceSlot, targetSlot byte, p
 	if player == nil {
 		return InventoryRelocationPlan{}, ErrInventoryRelocationPlayerRequired
 	}
-	if err := validateInventoryRelocationSlot(sourceSlot); err != nil {
+	if err := validateInventoryRelocationSlotForPlayer(sourceSlot, player); err != nil {
 		return InventoryRelocationPlan{}, err
 	}
-	if err := validateInventoryRelocationSlot(targetSlot); err != nil {
+	if err := validateInventoryRelocationSlotForPlayer(targetSlot, player); err != nil {
 		return InventoryRelocationPlan{}, err
 	}
 	if sourceSlot == targetSlot {
@@ -93,6 +108,7 @@ func PlanInventoryRelocation(items map[byte]Item, sourceSlot, targetSlot byte, p
 		Action:            InventoryRelocationMove,
 		SourceReferenceID: sourceItem.GetRefObjectID(),
 		SourceOneHanded:   sourceItem.IsOneHandedWeapon(),
+		SourceAmmunition:  sourceItem.IsArrow() || sourceItem.IsBolt(),
 	}
 	if targetExists {
 		plan.TargetItemID = int64(targetItem.ID)
@@ -105,6 +121,21 @@ func PlanInventoryRelocation(items map[byte]Item, sourceSlot, targetSlot byte, p
 	if targetSlot <= SlotRightRing {
 		if canEquipAtSlot(&rules, sourceItem, targetSlot, player) {
 			plan.Action = InventoryRelocationEquip
+			if targetSlot == SlotPrimaryWeapon && !sourceItem.IsOneHandedWeapon() {
+				if secondary, occupied := items[SlotSecondaryWeapon]; occupied {
+					destination, found := pairedDisplacementDestination(items, player, sourceSlot, targetSlot, targetExists)
+					if !found {
+						return InventoryRelocationPlan{}, fmt.Errorf("%w: paired equipment requires a free normal slot", ErrInventoryRelocationTargetOccupied)
+					}
+					plan.AdditionalMoves = []InventoryRelocationAdditionalMove{{
+						SourceSlot:        SlotSecondaryWeapon,
+						TargetSlot:        destination,
+						SourceItemID:      int64(secondary.ID),
+						SourceReferenceID: secondary.GetRefObjectID(),
+						SourceAmmunition:  secondary.IsArrow() || secondary.IsBolt(),
+					}}
+				}
+			}
 			return plan, nil
 		}
 		return InventoryRelocationPlan{}, fmt.Errorf("%w: item %d cannot equip slot %d", ErrInventoryRelocationNotAllowed, sourceItem.ID, targetSlot)
@@ -117,6 +148,24 @@ func PlanInventoryRelocation(items map[byte]Item, sourceSlot, targetSlot byte, p
 		plan.Action = InventoryRelocationUnequip
 	}
 	return plan, nil
+}
+
+func pairedDisplacementDestination(items map[byte]Item, player *Player, sourceSlot, targetSlot byte, targetOccupied bool) (byte, bool) {
+	// When the primary target is empty, the incoming item vacates its normal
+	// source slot. Reusing it matches the storage-manipulator's capacity-aware
+	// relocation rather than requiring an unrelated extra free slot.
+	if !targetOccupied && sourceSlot >= InventoryEquipmentSlots {
+		return sourceSlot, true
+	}
+	for slot := InventoryEquipmentSlots; slot < player.GetInventorySize(); slot++ {
+		if slot == sourceSlot || slot == targetSlot {
+			continue
+		}
+		if _, occupied := items[slot]; !occupied {
+			return slot, true
+		}
+	}
+	return 0, false
 }
 
 func canEquipAtSlot(inventory *Inventory, item Item, targetSlot byte, player *Player) bool {
@@ -157,13 +206,17 @@ func ApplyInventoryRelocation(items map[byte]Item, plan InventoryRelocationPlan)
 	if err := validateInventoryRelocationPlan(plan); err != nil {
 		return err
 	}
+	next := make(map[byte]Item, len(items))
+	for slot, item := range items {
+		next[slot] = item
+	}
 
-	sourceItem, sourceExists := items[plan.SourceSlot]
+	sourceItem, sourceExists := next[plan.SourceSlot]
 	if !sourceExists || int64(sourceItem.ID) != plan.SourceItemID {
 		return fmt.Errorf("%w: source slot %d", ErrInventoryRelocationRuntimeConflict, plan.SourceSlot)
 	}
 
-	targetItem, targetExists := items[plan.TargetSlot]
+	targetItem, targetExists := next[plan.TargetSlot]
 	if plan.TargetItemID == 0 {
 		if targetExists {
 			return fmt.Errorf("%w: target slot %d became occupied", ErrInventoryRelocationRuntimeConflict, plan.TargetSlot)
@@ -172,11 +225,28 @@ func ApplyInventoryRelocation(items map[byte]Item, plan InventoryRelocationPlan)
 		return fmt.Errorf("%w: target slot %d", ErrInventoryRelocationRuntimeConflict, plan.TargetSlot)
 	}
 
-	items[plan.TargetSlot] = sourceItem
+	next[plan.TargetSlot] = sourceItem
 	if targetExists {
-		items[plan.SourceSlot] = targetItem
+		next[plan.SourceSlot] = targetItem
 	} else {
-		delete(items, plan.SourceSlot)
+		delete(next, plan.SourceSlot)
+	}
+	for _, move := range plan.AdditionalMoves {
+		item, exists := next[move.SourceSlot]
+		if !exists || int64(item.ID) != move.SourceItemID {
+			return fmt.Errorf("%w: displaced source slot %d", ErrInventoryRelocationRuntimeConflict, move.SourceSlot)
+		}
+		if _, occupied := next[move.TargetSlot]; occupied {
+			return fmt.Errorf("%w: displaced target slot %d", ErrInventoryRelocationRuntimeConflict, move.TargetSlot)
+		}
+		next[move.TargetSlot] = item
+		delete(next, move.SourceSlot)
+	}
+	for slot := range items {
+		delete(items, slot)
+	}
+	for slot, item := range next {
+		items[slot] = item
 	}
 	return nil
 }
@@ -212,8 +282,22 @@ func (i *Inventory) CommitRelocation(player *Player, sourceSlot, targetSlot byte
 }
 
 func validateInventoryRelocationSlot(slot byte) error {
-	if slot >= BaseInventorySize {
-		return fmt.Errorf("%w: %d (maximum %d)", ErrInventoryRelocationSlotOutOfRange, slot, BaseInventorySize-1)
+	if slot >= MaxInventoryWireSize {
+		return fmt.Errorf("%w: %d (wire maximum %d)", ErrInventoryRelocationSlotOutOfRange, slot, MaxNormalInventorySlot)
+	}
+	return nil
+}
+
+// validateInventoryRelocationSlotForPlayer applies SR_GameServer's second
+// bound after the wire range: a slot must exist in this character's current
+// inventory. Body slots are always within the character inventory; normal
+// slots require the runtime capacity to include them.
+func validateInventoryRelocationSlotForPlayer(slot byte, player *Player) error {
+	if err := validateInventoryRelocationSlot(slot); err != nil {
+		return err
+	}
+	if capacity := player.GetInventorySize(); capacity < InventoryEquipmentSlots || capacity > MaxInventoryWireSize || slot >= capacity {
+		return fmt.Errorf("%w: %d (character capacity %d)", ErrInventoryRelocationSlotOutOfRange, slot, capacity)
 	}
 	return nil
 }
@@ -230,8 +314,29 @@ func validateInventoryRelocationPlan(plan InventoryRelocationPlan) error {
 	}
 	switch plan.Action {
 	case InventoryRelocationEquip, InventoryRelocationUnequip, InventoryRelocationMove:
-		return nil
 	default:
 		return ErrInventoryRelocationInvalidPlan
 	}
+	seenSources := map[byte]struct{}{plan.SourceSlot: {}}
+	seenTargets := map[byte]struct{}{plan.TargetSlot: {}}
+	for _, move := range plan.AdditionalMoves {
+		if err := validateInventoryRelocationSlot(move.SourceSlot); err != nil {
+			return err
+		}
+		if err := validateInventoryRelocationSlot(move.TargetSlot); err != nil {
+			return err
+		}
+		if move.SourceItemID <= 0 {
+			return ErrInventoryRelocationInvalidPlan
+		}
+		if _, duplicate := seenSources[move.SourceSlot]; duplicate {
+			return ErrInventoryRelocationInvalidPlan
+		}
+		if _, duplicate := seenTargets[move.TargetSlot]; duplicate {
+			return ErrInventoryRelocationInvalidPlan
+		}
+		seenSources[move.SourceSlot] = struct{}{}
+		seenTargets[move.TargetSlot] = struct{}{}
+	}
+	return nil
 }

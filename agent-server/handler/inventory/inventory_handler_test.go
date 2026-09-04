@@ -1,13 +1,18 @@
 package inventory
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/g3n/engine/math32"
 )
 
 type inventoryHandlerPlayerLookupFake struct {
@@ -28,6 +33,141 @@ type inventoryHandlerRelocatorFake struct {
 	characterID int64
 	plan        model.InventoryRelocationPlan
 	err         error
+}
+
+type petInventoryWorldFake struct {
+	player *model.Player
+	pet    *model.COS
+}
+
+type groundPickupWorldFake struct {
+	player  *model.Player
+	item    *model.Item
+	removed model.ISRObject
+}
+
+type groundPickupLifecycleFake struct{ canceled *model.Item }
+
+func (f *groundPickupLifecycleFake) Cancel(item *model.Item) { f.canceled = item }
+
+func (f *groundPickupWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) {
+	return f.player, nil
+}
+
+func (f *groundPickupWorldFake) GetObjectByUniqueId(uint32) (model.ISRObject, error) {
+	return f.item, nil
+}
+
+func (f *groundPickupWorldFake) RemoveVisibleObject(object model.ISRObject) {
+	f.removed = object
+}
+
+type groundPickupRepositoryFake struct {
+	characterID int64
+	itemID      int64
+	slot        byte
+	result      model.GroundItemPickupResult
+	err         error
+	calls       int
+}
+
+type groundGoldPickupRepositoryFake struct {
+	characterID int64
+	itemID      int64
+	result      model.GroundGoldPickupResult
+	err         error
+	calls       int
+}
+
+type groundDropRepositoryFake struct {
+	result      model.GroundItemDropResult
+	err         error
+	restoreErr  error
+	characterID int64
+	slot        byte
+	restoredID  int64
+	events      *[]string
+	called      int
+}
+
+func (f *groundDropRepositoryFake) Drop(_ context.Context, characterID int64, slot byte) (model.GroundItemDropResult, error) {
+	f.called++
+	f.characterID, f.slot = characterID, slot
+	if f.events != nil {
+		*f.events = append(*f.events, "drop")
+	}
+	return f.result, f.err
+}
+
+func (f *groundDropRepositoryFake) Restore(_ context.Context, characterID int64, slot byte, itemID int64) error {
+	f.characterID, f.slot, f.restoredID = characterID, slot, itemID
+	if f.events != nil {
+		*f.events = append(*f.events, "restore")
+	}
+	return f.restoreErr
+}
+
+type groundDropSpawnerFake struct {
+	item   *model.Item
+	err    error
+	events *[]string
+}
+
+func (f *groundDropSpawnerFake) Spawn(item *model.Item, partyNumber uint32) error {
+	f.item = item
+	if partyNumber != 0 {
+		return errors.New("ground-drop test expects no party ownership")
+	}
+	if f.events != nil {
+		*f.events = append(*f.events, "spawn")
+	}
+	return f.err
+}
+
+func (f *groundGoldPickupRepositoryFake) PickupGold(_ context.Context, characterID, itemID int64) (model.GroundGoldPickupResult, error) {
+	f.calls++
+	f.characterID, f.itemID = characterID, itemID
+	return f.result, f.err
+}
+
+type collectionProgressRepositoryFake struct {
+	characterID int
+	itemRefID   uint32
+	quantity    uint32
+	result      []model.QuestProgressResult
+	err         error
+	calls       int
+}
+
+func (f *collectionProgressRepositoryFake) RecordCollectedItem(_ context.Context, characterID int, itemRefID, quantity uint32) ([]model.QuestProgressResult, error) {
+	f.calls++
+	f.characterID, f.itemRefID, f.quantity = characterID, itemRefID, quantity
+	return f.result, f.err
+}
+
+func (f *groundPickupRepositoryFake) Pickup(_ context.Context, characterID, itemID int64, slot byte) (model.GroundItemPickupResult, error) {
+	f.calls++
+	f.characterID, f.itemID, f.slot = characterID, itemID, slot
+	return f.result, f.err
+}
+
+func (f *petInventoryWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) {
+	return f.player, nil
+}
+func (f *petInventoryWorldFake) GetObjectByUniqueId(uint32) (model.ISRObject, error) {
+	return f.pet, nil
+}
+
+type petInventoryTransferFake struct {
+	owner, itemSource, itemDestination int
+	cosID                              uint64
+	toCOS                              bool
+	playerInventory, cosInventory      model.Inventory
+}
+
+func (f *petInventoryTransferFake) TransferItem(_ context.Context, owner int, cosID uint64, source, destination byte, toCOS bool) (model.Inventory, model.Inventory, error) {
+	f.owner, f.cosID, f.itemSource, f.itemDestination, f.toCOS = owner, cosID, int(source), int(destination), toCOS
+	return f.playerInventory, f.cosInventory, nil
 }
 
 func (f *inventoryHandlerRelocatorFake) Relocate(_ context.Context, characterID int64, plan model.InventoryRelocationPlan) error {
@@ -55,6 +195,236 @@ func TestInventoryMoveWithTrailingPayloadIsRejectedBeforeLookupOrDatabase(t *tes
 	}
 }
 
+func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}},
+		ID:       44, Session: session,
+	}
+	item := &model.Item{
+		SRObject: model.SRObject{UniqueID: 900, RefObjectID: 700, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 1}, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(3, 0, 0)}},
+		ID:       91,
+	}
+	world := &groundPickupWorldFake{player: player, item: item}
+	repository := &groundPickupRepositoryFake{result: model.GroundItemPickupResult{Slot: 13, Inventory: model.NewInventory(map[byte]model.Item{13: *item})}}
+	lifecycle := &groundPickupLifecycleFake{}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemPickupRepository(repository)
+	handler.ConfigureGroundItemLifecycle(lifecycle)
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		packets = append(packets, packet)
+		return nil
+	}
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("pickup: %v", err)
+	}
+	if repository.calls != 1 || repository.characterID != 44 || repository.itemID != 91 || repository.slot != 13 {
+		t.Fatalf("repository call = %+v, want character 44 item 91 slot 13", repository)
+	}
+	if world.removed != item {
+		t.Fatalf("removed object = %v, want picked item", world.removed)
+	}
+	if lifecycle.canceled != item {
+		t.Fatalf("lifecycle canceled = %v, want picked item", lifecycle.canceled)
+	}
+	if got := player.Inventory.Items[13].ID; got != 91 {
+		t.Fatalf("runtime inventory item = %d, want 91", got)
+	}
+	if len(packets) != 2 || packets[0].MessageID != 0x3036 || packets[1].MessageID != opcode.ItemOperationResponse {
+		t.Fatalf("pickup packets = %#v, want 0x3036 followed by 0xB034", packets)
+	}
+	if got, want := packets[1].Payload(), []byte{1, 0x06, 0x0D}; !bytes.Equal(got, want) {
+		t.Fatalf("pickup response payload = % X, want % X", got, want)
+	}
+	if got := packets[0].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
+		t.Fatalf("pickup animation payload = % X, want collector UID 77 and one heading byte", got)
+	}
+}
+
+func TestGroundItemDropPersistsBeforeWorldAdmission(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(10, 0, 20)}
+	item := &model.Item{ID: 91, SRObject: model.SRObject{RefObjectID: 700}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: position}, ID: 44, Session: session, Inventory: model.NewInventory(map[byte]model.Item{14: *item})}
+	world := &groundPickupWorldFake{player: player}
+	events := make([]string, 0, 2)
+	drop := &groundDropRepositoryFake{events: &events, result: model.GroundItemDropResult{Item: item, Slot: 14, Inventory: model.NewInventory(nil)}}
+	spawner := &groundDropSpawnerFake{events: &events}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemDropRepository(drop)
+	handler.ConfigureGroundItemService(spawner)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(DropItemOperation))
+	request.WriteByte(14)
+
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if drop.called != 1 || drop.characterID != 44 || drop.slot != 14 {
+		t.Fatalf("drop repository call = %+v", drop)
+	}
+	if got, want := events, []string{"drop", "spawn"}; !bytes.Equal([]byte(joinEventNames(got)), []byte(joinEventNames(want))) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if spawner.item != item || item.GetNavmeshPosition().Offset.X != 10 || item.GetNavmeshPosition().Offset.Z != 20 {
+		t.Fatalf("spawned item/position = %v/%v", spawner.item, item.GetNavmeshPosition())
+	}
+	if _, exists := player.Inventory.Items[14]; exists {
+		t.Fatal("runtime inventory retained the dropped item")
+	}
+	if response.MessageID != opcode.ItemOperationResponse {
+		t.Fatalf("response opcode = 0x%04X, want 0xB034", response.MessageID)
+	}
+	if got, want := response.Payload(), []byte{1, 0x07, 14}; !bytes.Equal(got, want) {
+		t.Fatalf("drop response = % X, want % X", got, want)
+	}
+}
+
+func TestGroundItemDropRestoresLinkWhenWorldAdmissionFails(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	item := &model.Item{ID: 91, SRObject: model.SRObject{RefObjectID: 700}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}, ID: 44, Session: session, Inventory: model.NewInventory(map[byte]model.Item{14: *item})}
+	world := &groundPickupWorldFake{player: player}
+	events := make([]string, 0, 3)
+	drop := &groundDropRepositoryFake{events: &events, result: model.GroundItemDropResult{Item: item, Slot: 14, Inventory: model.NewInventory(nil)}}
+	spawner := &groundDropSpawnerFake{events: &events, err: errors.New("world unavailable")}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemDropRepository(drop)
+	handler.ConfigureGroundItemService(spawner)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(DropItemOperation))
+	request.WriteByte(14)
+
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("drop admission failure: %v", err)
+	}
+	if got, want := events, []string{"drop", "spawn", "restore"}; !bytes.Equal([]byte(joinEventNames(got)), []byte(joinEventNames(want))) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if drop.restoredID != 91 {
+		t.Fatalf("restored item ID = %d, want 91", drop.restoredID)
+	}
+	if _, exists := player.Inventory.Items[14]; !exists {
+		t.Fatal("runtime inventory changed after compensated drop failure")
+	}
+	if response.MessageID != opcode.ItemOperationResponse {
+		t.Fatalf("failure response opcode = 0x%04X, want 0xB034", response.MessageID)
+	}
+}
+
+func joinEventNames(events []string) string {
+	result := ""
+	for _, event := range events {
+		result += event + ","
+	}
+	return result
+}
+
+func TestGroundItemPickupPublishesCommittedCollectionProgress(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}},
+		ID:       44, Session: session,
+	}
+	item := &model.Item{
+		SRObject: model.SRObject{UniqueID: 900, RefObjectID: 700, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 1}, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(3, 0, 0)}},
+		ID:       91, StackSize: 3,
+	}
+	world := &groundPickupWorldFake{player: player, item: item}
+	pickup := &groundPickupRepositoryFake{result: model.GroundItemPickupResult{Slot: 13, Inventory: model.NewInventory(map[byte]model.Item{13: *item})}}
+	quest := model.CharacterQuest{QuestID: 58, Status: model.QuestProgressed, AchievementCount: 1, Data1: 3, ObjectiveKey: "SN_CON_QNO_CH_SMITH_2", TaskCount: 1}
+	progress := &collectionProgressRepositoryFake{result: []model.QuestProgressResult{{Quest: quest, Changed: true}}}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemPickupRepository(pickup)
+	handler.ConfigureQuestProgressRepository(progress)
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if progress.calls != 1 || progress.characterID != 44 || progress.itemRefID != 700 || progress.quantity != 3 {
+		t.Fatalf("collection progress call = %+v", progress)
+	}
+	if len(packets) != 3 || packets[2].MessageID != opcode.QuestUpdate {
+		t.Fatalf("packets = %#v", packets)
+	}
+	if len(player.Quests) != 1 || player.Quests[0] != quest {
+		t.Fatalf("runtime quests = %#v", player.Quests)
+	}
+}
+
+func TestGroundGoldPickupCreditsBalanceInsteadOfInventory(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}},
+		ID:       44, Session: session, Gold: 100,
+	}
+	item := &model.Item{
+		SRObject: model.SRObject{UniqueID: 901, RefObjectID: 1, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5, TypeID4: 0}, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(3, 0, 0)}},
+		ID:       92, Data: 250,
+	}
+	world := &groundPickupWorldFake{player: player, item: item}
+	repository := &groundGoldPickupRepositoryFake{result: model.GroundGoldPickupResult{Gold: 350, Amount: 250}}
+	lifecycle := &groundPickupLifecycleFake{}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundGoldPickupRepository(repository)
+	handler.ConfigureGroundItemLifecycle(lifecycle)
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("gold pickup: %v", err)
+	}
+	if repository.calls != 1 || repository.characterID != 44 || repository.itemID != 92 {
+		t.Fatalf("gold repository call = %+v", repository)
+	}
+	if player.Gold != 350 || len(player.Inventory.Items) != 0 {
+		t.Fatalf("player state gold=%d inventory=%v", player.Gold, player.Inventory.Items)
+	}
+	if lifecycle.canceled != item || world.removed != item {
+		t.Fatalf("lifecycle/world state canceled=%v removed=%v", lifecycle.canceled, world.removed)
+	}
+	if len(packets) != 2 || packets[0].MessageID != opcode.EntityAnimationPickup || packets[1].MessageID != opcode.EntityUpdatePoints {
+		t.Fatalf("gold pickup packets = %#v", packets)
+	}
+}
+
+func TestGroundItemPickupRejectsForeignOwnerBeforePersistence(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}, ID: 44, Session: session}
+	item := &model.Item{SRObject: model.SRObject{UniqueID: 900, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(1, 0, 0)}}, ID: 91, OwnerUniqueID: 88}
+	world := &groundPickupWorldFake{player: player, item: item}
+	repository := &groundPickupRepositoryFake{result: model.GroundItemPickupResult{Slot: 13, Inventory: model.NewInventory(nil)}}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemPickupRepository(repository)
+	handler.send = func(_ *server.Session, _ network.Packet) error { return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("foreign-owner pickup returned error: %v", err)
+	}
+	if repository.calls != 0 || world.removed != nil {
+		t.Fatalf("foreign-owner pickup mutated state: repository=%d removed=%v", repository.calls, world.removed)
+	}
+}
+
 func TestParseAvatarTransferRequestUsesTwoSlotPayload(t *testing.T) {
 	packet := network.EmptyClientPacket()
 	mustWriteAvatarTest(t, packet.WriteByte(32))
@@ -66,6 +436,37 @@ func TestParseAvatarTransferRequestUsesTwoSlotPayload(t *testing.T) {
 	}
 	if request.sourceSlot != 32 || request.targetSlot != 4 || request.amount != 0 {
 		t.Fatalf("request = %+v, want source 32 target 4", request)
+	}
+}
+
+func TestPlayerItemMovesIntoAbilityPetInventory(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(map[byte]model.Item{14: {ID: 100}})}
+	pet := &model.COS{NPC: model.NPC{SRObject: model.SRObject{UniqueID: 88}}, PersistentID: 9, OwnerCharID: 44, OwnerUniqueID: 77, Kind: model.COSAbilityPet, InventorySize: 28, Inventory: model.NewInventory(nil)}
+	nextPlayer := model.NewInventory(nil)
+	nextCOS := model.NewInventory(map[byte]model.Item{3: {ID: 100}})
+	repository := &petInventoryTransferFake{playerInventory: nextPlayer, cosInventory: nextCOS}
+	handler := NewInventoryHandler(&petInventoryWorldFake{player: player, pet: pet}, nil)
+	handler.ConfigureCOSRepository(repository)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PutItemIntoPetInventoryOperation))
+	request.WriteUInt32(88)
+	request.WriteByte(14)
+	request.WriteByte(3)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.owner != 44 || repository.cosID != 9 || repository.itemSource != 14 || repository.itemDestination != 3 || !repository.toCOS {
+		t.Fatalf("transfer = %+v", repository)
+	}
+	if len(player.GetInventory().Items) != 0 || pet.Snapshot().Inventory.Items[3].ID != 100 {
+		t.Fatalf("runtime inventories player=%+v pet=%+v", player.GetInventory().Items, pet.Snapshot().Inventory.Items)
+	}
+	want := []byte{1, byte(PutItemIntoPetInventoryOperation), 88, 0, 0, 0, 3}
+	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
+		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
 	}
 }
 
@@ -122,7 +523,7 @@ func TestInventoryRelocationUsesSessionUniqueAndCharacterIDsNotCharacterName(t *
 	relocator := &inventoryHandlerRelocatorFake{}
 	handler := NewInventoryHandler(lookup, relocator)
 
-	resolved, plan, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: 15})
+	resolved, plan, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: 15})
 	if err != nil {
 		t.Fatalf("relocate() error = %v", err)
 	}
@@ -148,6 +549,7 @@ func TestInventoryRelocationUsesSessionUniqueAndCharacterIDsNotCharacterName(t *
 
 func TestInventoryEquipRecalculatesRequiredItemPassive(t *testing.T) {
 	const passiveID = uint32(39)
+	const fireShieldID = uint32(40)
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	shield := model.Item{
 		SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 4, TypeID4: 1}},
@@ -158,21 +560,29 @@ func TestInventoryEquipRecalculatesRequiredItemPassive(t *testing.T) {
 		Skills: map[uint32]byte{passiveID: 1}, Inventory: model.NewInventory(map[byte]model.Item{14: shield}), AvatarInventory: model.NewInventory(nil),
 	}
 	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
-		passiveID: {ID: passiveID, BasicActivity: 0, BuffModifiers: model.BuffModifiers{BlockRate: 2}, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}},
+		passiveID:    {ID: passiveID, BasicActivity: 0, BuffModifiers: model.BuffModifiers{BlockRate: 2}, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}},
+		fireShieldID: {ID: fireShieldID, CodeName: "SKILL_CH_FIRE_SHIELD_A_01", BasicActivity: 2, RequiredItems: []model.SkillRequiredItem{{TypeID3: 4, TypeID4: 1}}},
 	}})
 	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, &inventoryHandlerRelocatorFake{})
 	handler.ConfigureReferenceData(catalog)
-	if _, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: model.SlotSecondaryWeapon}); err != nil {
+	if _, _, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: model.SlotSecondaryWeapon}); err != nil {
 		t.Fatalf("equip shield: %v", err)
 	}
 	if player.BonusDefenseStats.BlockRate != 2 {
 		t.Fatalf("equipped shield passive = %d, want 2", player.BonusDefenseStats.BlockRate)
 	}
-	if _, _, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: model.SlotSecondaryWeapon, targetSlot: 15}); err != nil {
+	if _, ok := player.CommitActiveBuff(fireShieldID, 900, time.Minute, model.BuffModifiers{MagicalDefense: 5}); !ok {
+		t.Fatal("arrange active Fire Shield")
+	}
+	_, _, removed, err := handler.relocate(context.Background(), session, moveItemRequest{sourceSlot: model.SlotSecondaryWeapon, targetSlot: 15})
+	if err != nil {
 		t.Fatalf("unequip shield: %v", err)
 	}
 	if player.BonusDefenseStats.BlockRate != 0 {
 		t.Fatalf("unequipped shield passive = %d, want 0", player.BonusDefenseStats.BlockRate)
+	}
+	if len(removed) != 1 || removed[0] != 900 || len(player.ActiveBuffSnapshot()) != 0 || player.BonusDefenseStats.MagDef != 0 {
+		t.Fatalf("Fire Shield teardown = tokens:%v buffs:%v magical defense:%d", removed, player.ActiveBuffSnapshot(), player.BonusDefenseStats.MagDef)
 	}
 }
 
@@ -212,12 +622,32 @@ func TestInventoryRelocationRejectsResolvedPlayerWithMismatchedCharacterID(t *te
 	}}
 	relocator := &inventoryHandlerRelocatorFake{}
 
-	_, _, err := NewInventoryHandler(lookup, relocator).relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: 15})
+	_, _, _, err := NewInventoryHandler(lookup, relocator).relocate(context.Background(), session, moveItemRequest{sourceSlot: 14, targetSlot: 15})
 	if !errors.Is(err, ErrInventoryHandlerSessionPlayerMismatch) {
 		t.Fatalf("relocate() error = %v, want session/player mismatch", err)
 	}
 	if relocator.calls != 0 {
 		t.Fatalf("mismatched player reached relocation repository %d times", relocator.calls)
+	}
+}
+
+func Test7034Operation22FailsClosedBecauseBuybackUsesDedicatedOpcode(t *testing.T) {
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{}, nil)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		response = packet
+		return nil
+	}
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(byte(BuyBackItemOperation))
+	packet.WriteUInt32(0x11223344)
+	packet.WriteByte(0)
+
+	if err := handler.handlePacket(context.Background(), &server.Session{}, packet); err != nil {
+		t.Fatalf("operation 0x22 error = %v", err)
+	}
+	if response.MessageID != opcode.ItemOperationResponse || !bytes.Equal(response.Payload(), []byte{2, 0, 0}) {
+		t.Fatalf("operation 0x22 response = opcode 0x%04X payload %x, want failure envelope", response.MessageID, response.Payload())
 	}
 }
 

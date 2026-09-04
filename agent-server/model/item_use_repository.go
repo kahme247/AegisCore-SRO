@@ -20,36 +20,71 @@ var (
 )
 
 type ItemUseResult struct {
-	Inventory                Inventory
-	HP                       int
-	MP                       int
-	RefItemID                uint32
-	ItemType                 uint16
-	SourceSlot               byte
-	NewAmount                uint16
-	EffectSkillID            uint32
-	SpeedPercent             int
-	EffectDuration           int
-	EffectExpiresAt          time.Time
-	ItemService              *ItemServiceEffect
-	ItemServiceToken         uint32
-	ReplacedItemServiceToken uint32
-	ReturnDestination        *TeleportDestination
-	ReturnDelay              time.Duration
-	BuffModifiers            BuffModifiers
-	COSPersistentID          uint64
-	MaskRefCharID            uint32
-	MaskDuration             time.Duration
+	Inventory                   Inventory
+	HP                          int
+	MP                          int
+	RefItemID                   uint32
+	ItemType                    uint16
+	SourceSlot                  byte
+	NewAmount                   uint16
+	EffectSkillID               uint32
+	SpeedPercent                int
+	EffectDuration              int
+	EffectExpiresAt             time.Time
+	ItemService                 *ItemServiceEffect
+	ItemServiceToken            uint32
+	ReplacedItemServiceToken    uint32
+	ReturnDestination           *TeleportDestination
+	ReturnDelay                 time.Duration
+	BuffModifiers               BuffModifiers
+	COSPersistentID             uint64
+	COSTemporaryRideRefObjectID uint32
+	COSRevivedPersistentID      uint64
+	COSRevivedHealth            int32
+	COSRevivedItemState         COSItemState
+	COSResourcePersistentID     uint64
+	COSResourceHealth           int32
+	COSResourceHGP              int
+	COSResourceKind             byte
+	COSExtendedPersistentID     uint64
+	COSExtendedRentEndsAt       time.Time
+	COSTimedServicePersistentID uint64
+	COSTimedServiceExpiresAt    time.Time
+	COSTimedServiceCategory     int
+	COSTimedServiceJobID        int
+	COSTimedServiceData1        int
+	MaskRefCharID               uint32
+	MaskDuration                time.Duration
+}
+
+// COSItemTarget is the item-family-specific target carried by 0x704C.
+// Coordinates remain raw wire values until their numeric representation is
+// confirmed; ownership is resolved from ObjectID by the service/repository.
+type COSItemTarget struct {
+	ObjectID uint32
+	Region   uint16
+	X        uint32
+	Y        uint32
+	Z        uint32
 }
 
 type ItemUseVitals struct {
-	HP, MP       int
-	MaxHP, MaxMP int
+	HP, MP              int
+	MaxHP, MaxMP        int
+	Level               int
+	ReverseReturnOption byte
+	ReverseReturnMapID  uint32
 }
 
 type ItemUseRepository interface {
 	UseItem(context.Context, int64, byte, uint16, ItemUseVitals) (ItemUseResult, error)
 	UseResurrectionItem(context.Context, int64, ItemUseVitals) (ItemUseResult, error)
+}
+
+// TargetedItemUseRepository atomically validates and mutates a COS target
+// together with consuming the selected item.
+type TargetedItemUseRepository interface {
+	UseTargetedItem(context.Context, int64, byte, uint16, ItemUseVitals, COSItemTarget) (ItemUseResult, error)
 }
 
 type SpeedEffect struct {
@@ -151,7 +186,21 @@ func IsTeleportScroll(ref RefItem) bool {
 	return IsReturnScroll(ref) || IsReverseReturnScroll(ref)
 }
 
-func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals) (result ItemUseResult, err error) {
+func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals) (ItemUseResult, error) {
+	return r.useItem(ctx, characterID, slot, requestedType, vitals, nil)
+}
+
+// UseTargetedItem is the transactional entry point for COS item payloads.
+// The target is deliberately resolved inside the same transaction as item
+// consumption; callers cannot select an object they do not own.
+func (r *SQLItemUseRepository) UseTargetedItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals, target COSItemTarget) (ItemUseResult, error) {
+	if target.ObjectID == 0 {
+		return ItemUseResult{}, ErrItemUseInvalidRequest
+	}
+	return r.useItem(ctx, characterID, slot, requestedType, vitals, &target)
+}
+
+func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals, target *COSItemTarget) (result ItemUseResult, err error) {
 	if r == nil || r.shard == nil {
 		return result, ErrItemUseRepositoryUnavailable
 	}
@@ -196,6 +245,12 @@ func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, s
 	isReturnScroll := IsReturnScroll(ref)
 	isReverseReturnScroll := IsReverseReturnScroll(ref)
 	isCOSScroll := IsCOSScroll(ref)
+	isCOSTransportScroll := IsCOSTransportScroll(ref)
+	isCOSHealthPotion := IsCOSHealthPotion(ref)
+	isCOSHGPotion := IsCOSHGPotion(ref)
+	isCOSExtension := IsCOSExtension(ref)
+	isCOSPetService := IsCOSPetTimedService(ref)
+	isCOSRevival := IsCOSRevival(ref)
 	isMonsterMask := ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 2 && itemData != 0
 	linkedSkill, hasLinkedSkill := RefSkills[uint32(skillID)]
 	isSkillBuff := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1 &&
@@ -231,6 +286,182 @@ func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, s
 			itemData = createdID
 		}
 		result.COSPersistentID = uint64(itemData)
+	case isCOSTransportScroll:
+		refObjectID, resolveErr := resolveTemporaryRideReference(ctx, tx, ref)
+		if resolveErr != nil {
+			return result, resolveErr
+		}
+		result.COSTemporaryRideRefObjectID = refObjectID
+	case isCOSHealthPotion || isCOSHGPotion:
+		if target == nil || target.ObjectID == 0 || ref.Param1 <= 0 {
+			return result, ErrItemUseInvalidRequest
+		}
+		var cosID uint64
+		var health, maxHealth int32
+		var hgp int
+		var kind byte
+		var state COSItemState
+		var rentEndsAt sql.NullTime
+		err = tx.QueryRowContext(ctx, "SELECT `ID`,`HEALTH`,`MAX_HEALTH`,`HGP`,`KIND`,`STATE`,`RENT_ENDS_AT` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", target.ObjectID, characterID).Scan(&cosID, &health, &maxHealth, &hgp, &kind, &state, &rentEndsAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, ErrItemUseNoEffect
+		}
+		if err != nil {
+			return result, fmt.Errorf("lock COS resource target: %w", err)
+		}
+		if err = validateCOSItemRental(COSKind(kind), rentEndsAt, time.Now().UTC()); err != nil {
+			return result, err
+		}
+		if health <= 0 || maxHealth <= 0 || state == COSItemDead {
+			return result, ErrItemUseNoEffect
+		}
+		if isCOSHealthPotion {
+			newHealth := minInt(int(maxHealth), int(health)+ref.Param1)
+			if newHealth == int(health) {
+				return result, ErrItemUseNoEffect
+			}
+			mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `CHAR_COS` SET `HEALTH`=? WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND `HEALTH`=?", newHealth, cosID, characterID, health)
+			if mutationErr != nil {
+				return result, fmt.Errorf("persist COS health potion: %w", mutationErr)
+			}
+			if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+				return result, ErrItemUseNoEffect
+			}
+			health = int32(newHealth)
+		} else {
+			if COSKind(kind) != COSGrowthPet {
+				return result, ErrItemUseNoEffect
+			}
+			const maxCOSHGP = 10000
+			newHGP := minInt(maxCOSHGP, hgp+ref.Param1)
+			if newHGP == hgp {
+				return result, ErrItemUseNoEffect
+			}
+			mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `CHAR_COS` SET `HGP`=? WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND `HGP`=?", newHGP, cosID, characterID, hgp)
+			if mutationErr != nil {
+				return result, fmt.Errorf("persist COS HGP potion: %w", mutationErr)
+			}
+			if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+				return result, ErrItemUseNoEffect
+			}
+			hgp = newHGP
+		}
+		result.COSResourcePersistentID = cosID
+		result.COSResourceHealth = health
+		result.COSResourceHGP = hgp
+		result.COSResourceKind = kind
+	case isCOSPetService:
+		if target == nil || target.ObjectID == 0 || ref.Param1 <= 0 {
+			return result, ErrItemUseInvalidRequest
+		}
+		var cosID uint64
+		var kind byte
+		if err = tx.QueryRowContext(ctx, "SELECT `ID`,`KIND` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", target.ObjectID, characterID).Scan(&cosID, &kind); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseNoEffect
+			}
+			return result, fmt.Errorf("lock COS timed-service target: %w", err)
+		}
+		category, jobID, data1, ok := COSPetTimedServiceFields(ref, COSKind(kind))
+		if !ok {
+			return result, ErrItemUseNoEffect
+		}
+		now := time.Now().UTC()
+		expiresAt := now.Add(time.Duration(ref.Param1) * time.Second)
+		mutation, mutationErr := tx.ExecContext(ctx, "INSERT INTO `CHAR_COS_TIMED_SERVICE` (`COS_ID`,`OWNER_CHAR_ID`,`CATEGORY`,`JOB_ID`,`TIME_TO_KEEP`,`DATA1`,`SERIAL64`,`EXPIRES_AT`) VALUES (?,?,?,?,?,?,?,?)", cosID, characterID, category, jobID, ref.Param1, data1, int64(ref.ID), expiresAt)
+		if mutationErr != nil {
+			return result, fmt.Errorf("persist COS timed service: %w", mutationErr)
+		}
+		if _, affectedErr := mutation.RowsAffected(); affectedErr != nil {
+			return result, fmt.Errorf("read COS timed-service mutation: %w", affectedErr)
+		}
+		result.COSTimedServicePersistentID = cosID
+		result.COSTimedServiceExpiresAt = expiresAt
+		result.COSTimedServiceCategory = category
+		result.COSTimedServiceJobID = jobID
+		result.COSTimedServiceData1 = data1
+	case isCOSExtension:
+		if target == nil || target.ObjectID == 0 || ref.Param1 <= 0 {
+			return result, ErrItemUseInvalidRequest
+		}
+		var cosID uint64
+		var kind byte
+		var rentEndsAt sql.NullTime
+		err = tx.QueryRowContext(ctx, "SELECT `ID`,`KIND`,`RENT_ENDS_AT` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", target.ObjectID, characterID).Scan(&cosID, &kind, &rentEndsAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, ErrItemUseNoEffect
+		}
+		if err != nil {
+			return result, fmt.Errorf("lock COS extension target: %w", err)
+		}
+		if COSKind(kind) != COSAbilityPet {
+			return result, ErrItemUseNoEffect
+		}
+		now := time.Now().UTC()
+		base := now
+		if rentEndsAt.Valid && rentEndsAt.Time.After(base) {
+			base = rentEndsAt.Time
+		}
+		newRentEndsAt := base.Add(time.Duration(ref.Param1) * time.Minute)
+		mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `CHAR_COS` SET `RENT_ENDS_AT`=? WHERE `ID`=? AND `OWNER_CHAR_ID`=?", newRentEndsAt, cosID, characterID)
+		if mutationErr != nil {
+			return result, fmt.Errorf("persist COS rental extension: %w", mutationErr)
+		}
+		if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrItemUseNoEffect
+		}
+		result.COSExtendedPersistentID = cosID
+		result.COSExtendedRentEndsAt = newRentEndsAt
+	case isCOSRevival:
+		var cosID uint64
+		var maxHealth int32
+		var kind byte
+		var state COSItemState
+		var rentEndsAt sql.NullTime
+		var revivalQuery string
+		var revivalArgs []any
+		if target == nil || target.ObjectID == 0 {
+			// The vSRO 0x704C revival form carries a COS object ID. Never select
+			// an arbitrary dead pet when a client omits or corrupts that target.
+			return result, ErrItemUseInvalidRequest
+		}
+		revivalQuery = "SELECT `ID`,`MAX_HEALTH`,`KIND`,`STATE`,`RENT_ENDS_AT` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND (`HEALTH`=0 OR `STATE`=4) FOR UPDATE"
+		revivalArgs = []any{target.ObjectID, characterID}
+		err = tx.QueryRowContext(ctx, revivalQuery, revivalArgs...).Scan(&cosID, &maxHealth, &kind, &state, &rentEndsAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return result, ErrItemUseNoEffect
+		}
+		if err != nil {
+			return result, fmt.Errorf("lock dead COS for revival: %w", err)
+		}
+		if err = validateCOSItemRental(COSKind(kind), rentEndsAt, time.Now().UTC()); err != nil {
+			return result, err
+		}
+		if maxHealth <= 0 {
+			return result, ErrItemUseNoEffect
+		}
+		healthPercent := ref.Param2
+		if healthPercent <= 0 || healthPercent > 100 {
+			healthPercent = 100
+		}
+		newHealth := maxHealth * int32(healthPercent) / 100
+		if newHealth < 1 {
+			newHealth = 1
+		}
+		newState := state
+		if newState == COSItemDead || newState < COSItemInactive || newState > COSItemActive {
+			newState = COSItemActive
+		}
+		mutation, mutationErr := tx.ExecContext(ctx, "UPDATE `CHAR_COS` SET `HEALTH`=?,`STATE`=? WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND (`HEALTH`=0 OR `STATE`=4)", newHealth, newState, cosID, characterID)
+		if mutationErr != nil {
+			return result, fmt.Errorf("persist COS revival: %w", mutationErr)
+		}
+		if affected, affectedErr := mutation.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrItemUseNoEffect
+		}
+		result.COSRevivedPersistentID = cosID
+		result.COSRevivedHealth = newHealth
+		result.COSRevivedItemState = newState
 	case isMonsterMask:
 		if _, exists := RefChars[itemData]; !exists {
 			return result, ErrItemUseNoEffect
@@ -323,8 +554,19 @@ func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, s
 		result.ReturnDelay = time.Duration(ref.Param1) * time.Millisecond
 	case isReverseReturnScroll:
 		var destination TeleportDestination
-		destination.ID = ref.ID
-		err = tx.QueryRowContext(ctx, "SELECT `REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID` FROM `CHAR_REVERSE_RETURN_POSITION` WHERE `CHAR_ID`=? FOR UPDATE", characterID).Scan(&destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID)
+		switch vitals.ReverseReturnOption {
+		case 2:
+			destination.ID = ref.ID
+			err = tx.QueryRowContext(ctx, "SELECT `REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID` FROM `CHAR_REVERSE_RETURN_POSITION` WHERE `CHAR_ID`=? FOR UPDATE", characterID).Scan(&destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID)
+		case 3:
+			destination.ID = ref.ID
+			err = tx.QueryRowContext(ctx, "SELECT `REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID` FROM `CHAR_DEATH_POSITION` WHERE `CHAR_ID`=? FOR UPDATE", characterID).Scan(&destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID)
+		case 7:
+			destination.ID = vitals.ReverseReturnMapID
+			err = tx.QueryRowContext(ctx, "SELECT o.`ID`,o.`REGION_ID`,o.`POS_X`,o.`POS_Y`,o.`POS_Z`,o.`WORLD_ID`,0,o.`MIN_LEVEL` FROM `REF_OPTIONAL_TELEPORT` o JOIN `REGION_REFERENCE` r ON r.`wRegionID`=o.`REGION_ID` JOIN `GAME_SERVER_REGION` g ON g.`Continent_Name`=r.`ContinentName` AND g.`Game_Server_ID`=1 WHERE o.`ID`=? AND o.`SERVICE`=1 AND (o.`MIN_LEVEL`=0 OR o.`MIN_LEVEL`<=?) AND (o.`MAX_LEVEL`=0 OR o.`MAX_LEVEL`>=?)", vitals.ReverseReturnMapID, vitals.Level, vitals.Level).Scan(&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel)
+		default:
+			return result, ErrItemUseInvalidRequest
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, ErrItemUseNoEffect
 		}
@@ -395,6 +637,154 @@ func validateCOSItemRental(kind COSKind, endsAt sql.NullTime, now time.Time) err
 func IsCOSScroll(ref RefItem) bool {
 	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 1 &&
 		(ref.TypeID4 == 1 || ref.TypeID4 == 2) && strings.Contains(strings.ToUpper(ref.CodeName), "COS_")
+}
+
+// IsCOSTransportScroll identifies consumable ride-COS scrolls. Unlike pet
+// instruments, these create a temporary transport and must not retain an
+// ITEM.DATA-to-CHAR_COS association after the source stack is consumed.
+func IsCOSTransportScroll(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 2 &&
+		(strings.Contains(strings.ToUpper(ref.CodeName), "COS_T_") || strings.Contains(strings.ToUpper(ref.CodeName), "COS_C_"))
+}
+
+// DeleteCOSTimedService removes one committed timed service after runtime
+// expiry. It is intentionally separate from COSRepository so existing
+// repositories remain source-compatible.
+type COSTimedServiceRepository interface {
+	DeleteCOSTimedService(context.Context, int64, uint64, int) error
+}
+
+func (r *SQLItemUseRepository) DeleteCOSTimedService(ctx context.Context, characterID int64, cosID uint64, jobID int) error {
+	if r == nil || r.shard == nil {
+		return ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 || cosID == 0 || jobID <= 0 {
+		return ErrItemUseInvalidRequest
+	}
+	_, err := r.shard.ExecContext(ctx, "DELETE FROM `CHAR_COS_TIMED_SERVICE` WHERE `OWNER_CHAR_ID`=? AND `COS_ID`=? AND `JOB_ID`=? AND `EXPIRES_AT`<=CURRENT_TIMESTAMP(6)", characterID, cosID, jobID)
+	return err
+}
+
+// IsCOSHealthPotion identifies the target-bearing flat COS HP recovery family.
+func IsCOSHealthPotion(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 == 4
+}
+
+// IsCOSHGPotion identifies the target-bearing growth-pet HGP recovery family.
+func IsCOSHGPotion(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 == 9
+}
+
+// IsCOSPetTimedService identifies the TypeID4=15 growth/skill/watch family.
+func IsCOSPetTimedService(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 15 &&
+		(ref.ID == 22710 || ref.ID == 22711 || ref.ID == 22712 || ref.ID == 22713 || ref.ID == 22714 || ref.ID == 22715 || ref.ID == 22926 || ref.ID == 22927 || ref.ID == 35874)
+}
+
+// COSPetTimedServiceFields maps the confirmed catalog families to the binary
+// service categories and resolves the actual JobID from the loaded REF_SKILL
+// catalog. It rejects the use when that authoritative skill row is absent.
+func COSPetTimedServiceTargetKind(ref RefItem) COSKind {
+	switch ref.ID {
+	case 22710, 22711, 22926, 22927:
+		return COSAbilityPet
+	default:
+		return COSGrowthPet
+	}
+}
+
+func COSPetTimedServiceFields(ref RefItem, kind COSKind) (category, jobID, data1 int, ok bool) {
+	if !IsCOSPetTimedService(ref) || ref.Param1 <= 0 {
+		return 0, 0, 0, false
+	}
+	codeName := ""
+	switch ref.ID {
+	case 22712, 35874:
+		codeName = "SKILL_MALL_PET_GROWTH_POTION_01"
+	case 22713:
+		codeName = "SKILL_MALL_PET_SKILL_COLD"
+	case 22714:
+		codeName = "SKILL_MALL_PET_SKILL_FIRE"
+	case 22715:
+		codeName = "SKILL_MALL_PET_SKILL_LIGHTNING"
+	case 22710:
+		codeName = "SKILL_MALL_PET_WATCH_CHULHYEN_01"
+	case 22711:
+		codeName = "SKILL_MALL_PET_WATCH_AGOL_01"
+	case 22926:
+		codeName = "SKILL_MALL_PET_WATCH_CHULHYEN_02"
+	case 22927:
+		codeName = "SKILL_MALL_PET_WATCH_AGOL_02"
+	default:
+		return 0, 0, 0, false
+	}
+	var skillID uint32
+	for id, skill := range RefSkills {
+		if skill.CodeName == codeName {
+			skillID = id
+			break
+		}
+	}
+	if skillID == 0 {
+		return 0, 0, 0, false
+	}
+	if ref.ID == 22710 || ref.ID == 22711 || ref.ID == 22926 || ref.ID == 22927 {
+		if kind != COSAbilityPet {
+			return 0, 0, 0, false
+		}
+		return 5, int(skillID), 28, true
+	}
+	if kind != COSGrowthPet {
+		return 0, 0, 0, false
+	}
+	return 0, int(skillID), 0, true
+}
+
+// IsCOSExtension identifies the ability-pet rental extension family. Param1
+// is the catalog duration in minutes (1440 for one day, 40320 for 28 days).
+func IsCOSExtension(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 12
+}
+
+// IsCOSRevival identifies the pet-revival consumable family. The pinned
+// GameServer binary exposes the dead COS state and generic COS state SQL, but
+// does not expose a stable symbolic item name. Keep the data-driven predicate
+// deliberately narrow so character resurrection items stay on their own path.
+func IsCOSRevival(ref RefItem) bool {
+	if !ref.IsUseable {
+		return false
+	}
+	name := strings.ToUpper(strings.TrimSpace(ref.CodeName))
+	// Grass of Life (Type 3/3/2/7) has six distinct cure parameters and is not
+	// promoted to revival without a recovered effect mapping.
+	return (strings.Contains(name, "REVIV") && (strings.Contains(name, "COS") || strings.Contains(name, "PET"))) ||
+		(ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 == 6 && strings.Contains(name, "COS_P_"))
+}
+
+func resolveTemporaryRideReference(ctx context.Context, tx *sql.Tx, item RefItem) (uint32, error) {
+	codeName := strings.TrimSpace(item.Param1Desc)
+	if tx == nil || codeName == "" || strings.EqualFold(codeName, "xxx") {
+		return 0, ErrItemUseNoEffect
+	}
+	var refObjectID uint32
+	var typeID1, typeID2, typeID3, typeID4 int
+	err := tx.QueryRowContext(ctx, "SELECT `RefObjID`,`TypeID_1`,`TypeID_2`,`TypeID_3`,`TypeID_4` FROM `CHAR_REF_DATA` WHERE `CodeName`=? LIMIT 1", codeName).Scan(
+		&refObjectID, &typeID1, &typeID2, &typeID3, &typeID4,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrItemUseNoEffect
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve temporary ride COS reference: %w", err)
+	}
+	// C-family riding mounts use TypeID4=1; T-family trade transports use
+	// TypeID4=2. Both are temporary COS scroll targets, but their client
+	// movement semantics are different and the catalog discriminator must be
+	// preserved through runtime spawn serialization.
+	if refObjectID == 0 || typeID1 != 1 || typeID2 != 2 || typeID3 != 3 || (typeID4 != 1 && typeID4 != 2) {
+		return 0, ErrInvalidCOSKind
+	}
+	return refObjectID, nil
 }
 
 func createCOSForItemUse(ctx context.Context, tx *sql.Tx, characterID, itemID int64, inventorySlot byte, item RefItem) (uint32, error) {

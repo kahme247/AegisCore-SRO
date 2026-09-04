@@ -126,8 +126,21 @@ func (p *EquipmentProtection) Add(kind ProtectionKind) bool {
 }
 
 func ApplyEnhancementFailure(level byte, protection EquipmentProtection) (byte, EquipmentProtection, bool, bool) {
-	destroyed := level >= 6
-	durabilityLost := true
+	return applyEnhancementFailure(level, protection, 0)
+}
+
+// applyEnhancementFailure mirrors SR_GameServer's failure branch. For +5 and
+// above, branchRoll<0.5 selects destruction and the other half selects the
+// max-durability penalty. Below +5 neither secondary penalty is selected.
+func applyEnhancementFailure(level byte, protection EquipmentProtection, branchRoll float64) (byte, EquipmentProtection, bool, bool) {
+	destroyed, durabilityLost := false, false
+	if level >= 5 {
+		if branchRoll < 0.5 {
+			destroyed = true
+		} else {
+			durabilityLost = true
+		}
+	}
 	if protection.Immortal > 0 && destroyed {
 		protection.Immortal--
 		destroyed = false
@@ -138,7 +151,7 @@ func ApplyEnhancementFailure(level byte, protection EquipmentProtection) (byte, 
 	} else if !destroyed {
 		level = 0
 	}
-	if protection.Steady > 0 {
+	if protection.Steady > 0 && durabilityLost {
 		protection.Steady--
 		durabilityLost = false
 	}

@@ -318,15 +318,15 @@ func validateInventoryItemID(itemID int64) error {
 }
 
 func validateInventorySlot(slot byte) error {
-	if slot >= BaseInventorySize {
-		return fmt.Errorf("%w: %d (maximum %d)", ErrInventorySlotOutOfRange, slot, BaseInventorySize-1)
+	if slot >= MaxInventoryWireSize {
+		return fmt.Errorf("%w: %d (maximum %d)", ErrInventorySlotOutOfRange, slot, MaxNormalInventorySlot)
 	}
 	return nil
 }
 
 func validatedPersistedInventorySlot(slot int64) (byte, error) {
-	if slot < 0 || slot >= int64(BaseInventorySize) {
-		return 0, fmt.Errorf("%w: %d (maximum %d)", ErrInventorySlotOutOfRange, slot, BaseInventorySize-1)
+	if slot < 0 || slot >= int64(MaxInventoryWireSize) {
+		return 0, fmt.Errorf("%w: %d (maximum %d)", ErrInventorySlotOutOfRange, slot, MaxNormalInventorySlot)
 	}
 	return byte(slot), nil
 }

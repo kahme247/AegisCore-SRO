@@ -127,6 +127,98 @@ func TestPlanInventoryRelocationRetainsExistingEquipRulesWithoutMutating(t *test
 	}
 }
 
+func TestPlanInventoryRelocationUsesCharacterCapacityWithinWireRange(t *testing.T) {
+	weapon := relocationTestItem(101, 1001, TypeInfo{
+		TypeID1: TypeID1Item,
+		TypeID2: TypeID2Wearable,
+		TypeID3: TypeID3Weapon,
+		TypeID4: 2,
+	})
+	weapon.RequiredLevelType1 = 1
+	weapon.RequiredLevel1 = 1
+	items := map[byte]Item{111: weapon}
+	player := relocationTestPlayer()
+	player.InventorySize = MaxInventoryWireSize
+
+	plan, err := PlanInventoryRelocation(items, 111, SlotPrimaryWeapon, player)
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocation() error = %v", err)
+	}
+	if plan.Action != InventoryRelocationEquip {
+		t.Fatalf("plan action = %d, want equip", plan.Action)
+	}
+
+	player.InventorySize = BaseInventorySize
+	if _, err := PlanInventoryRelocation(items, 111, SlotPrimaryWeapon, player); !errors.Is(err, ErrInventoryRelocationSlotOutOfRange) {
+		t.Fatalf("PlanInventoryRelocation() error = %v, want capacity rejection", err)
+	}
+}
+
+func TestPlanInventoryRelocationRejectsSlotAboveWireCeiling(t *testing.T) {
+	player := relocationTestPlayer()
+	player.InventorySize = MaxInventoryWireSize
+	items := map[byte]Item{111: relocationTestItem(101, 1001, TypeInfo{})}
+	if _, err := PlanInventoryRelocation(items, 111, MaxInventoryWireSize, player); !errors.Is(err, ErrInventoryRelocationSlotOutOfRange) {
+		t.Fatalf("PlanInventoryRelocation() error = %v, want wire-range rejection", err)
+	}
+}
+
+func TestCanEquipSecondaryWeaponAllowsMatchingAmmunition(t *testing.T) {
+	bow := relocationTestItem(101, 1001, TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable, TypeID3: TypeID3Weapon, TypeID4: 6})
+	arrow := relocationTestItem(202, 2002, TypeInfo{TypeID1: TypeID1Item, TypeID2: 3, TypeID3: 4, TypeID4: 1})
+	arrow.RequiredLevelType1 = 1
+	arrow.RequiredLevel1 = 1
+	player := relocationTestPlayer()
+	player.SRObject.RefObjectID = 1907 // Chinese
+	inventory := NewInventory(map[byte]Item{SlotPrimaryWeapon: bow})
+
+	if !inventory.canEquipSecondaryWeapon(arrow, player) {
+		t.Fatal("canEquipSecondaryWeapon() rejected arrows with an equipped bow")
+	}
+	items := map[byte]Item{SlotPrimaryWeapon: bow, 13: arrow}
+	plan, err := PlanInventoryRelocation(items, 13, SlotSecondaryWeapon, player)
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocation() error = %v", err)
+	}
+	if plan.Action != InventoryRelocationEquip || !plan.SourceAmmunition {
+		t.Fatalf("arrow plan = %+v, want ammunition equip", plan)
+	}
+}
+
+func TestPlanInventoryRelocationDisplacesSecondaryForTwoHandedPrimary(t *testing.T) {
+	twoHanded := relocationTestItem(101, 1001, TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable, TypeID3: TypeID3Weapon, TypeID4: 4})
+	twoHanded.RequiredLevelType1 = 1
+	twoHanded.RequiredLevel1 = 1
+	shield := relocationTestItem(202, 2002, TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable, TypeID3: 4, TypeID4: 1})
+	items := map[byte]Item{14: twoHanded, SlotSecondaryWeapon: shield}
+	player := relocationTestPlayer()
+	player.SRObject.RefObjectID = 1907 // Chinese
+
+	plan, err := PlanInventoryRelocation(items, 14, SlotPrimaryWeapon, player)
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocation() error = %v", err)
+	}
+	if len(plan.AdditionalMoves) != 1 {
+		t.Fatalf("additional moves = %+v, want one secondary displacement", plan.AdditionalMoves)
+	}
+	move := plan.AdditionalMoves[0]
+	if move.SourceSlot != SlotSecondaryWeapon || move.TargetSlot != 14 || move.SourceItemID != 202 || move.SourceReferenceID != 2002 {
+		t.Fatalf("additional move = %+v, want secondary item into vacated source slot", move)
+	}
+	if err := ApplyInventoryRelocation(items, plan); err != nil {
+		t.Fatalf("ApplyInventoryRelocation() error = %v", err)
+	}
+	if got := items[SlotPrimaryWeapon].ID; got != 101 {
+		t.Fatalf("primary item ID = %d, want 101", got)
+	}
+	if got := items[14].ID; got != 202 {
+		t.Fatalf("displaced secondary ID = %d, want 202", got)
+	}
+	if _, exists := items[SlotSecondaryWeapon]; exists {
+		t.Fatal("secondary slot still occupied after two-handed equip")
+	}
+}
+
 func TestApplyInventoryRelocationRejectsStaleMapWithoutPartialMutation(t *testing.T) {
 	items := map[byte]Item{
 		14: relocationTestItem(101, 1001, TypeInfo{}),

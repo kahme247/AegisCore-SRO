@@ -10,9 +10,11 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const baseStorageSize byte = 150
+const storageDataChunkSize = vsro188.StorageDataChunkSize
 
 type storageWorld interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
@@ -110,28 +112,33 @@ func buildEmptyStorageResponses() []network.Packet {
 }
 
 func buildStorageResponses(snapshot model.StorageSnapshot) []network.Packet {
-	begin := network.EmptyPacket()
-	begin.MessageID = opcode.StorageDataBegin
-	begin.WriteUInt64(snapshot.Gold)
+	begin := vsro188.BuildStorageDataBegin(opcode.StorageDataBegin, snapshot.Gold)
 
-	data := network.EmptyPacket()
-	data.MessageID = opcode.StorageData
 	capacity := snapshot.Capacity
 	if capacity == 0 {
 		capacity = baseStorageSize
 	}
-	data.WriteByte(capacity)
 	slots := model.SortedInventorySlots(snapshot.Items)
-	data.WriteByte(byte(len(slots)))
+	records := make([]vsro188.StorageItemRecord, 0, len(slots))
 	for _, slot := range slots {
 		item := snapshot.Items[slot]
-		data.WriteByte(slot)
-		model.WriteRentInfo(&data, item)
-		data.WriteUInt32(item.GetRefObjectID())
-		model.WriteInventoryItem(&data, item)
+		rent := network.EmptyPacket()
+		model.WriteRentInfo(&rent, item)
+		body := network.EmptyPacket()
+		model.WriteInventoryItem(&body, item)
+		records = append(records, vsro188.StorageItemRecord{Slot: slot, RentPayload: rent.Payload(), RefItemID: item.GetRefObjectID(), ItemPayload: body.Payload()})
+	}
+	data := vsro188.BuildStorageItemDataPayload(capacity, records)
+
+	responses := []network.Packet{begin}
+	for _, chunk := range chunkStorageData(data.Payload()) {
+		responses = append(responses, chunk)
 	}
 
-	end := network.EmptyPacket()
-	end.MessageID = opcode.StorageDataEnd
-	return []network.Packet{begin, data, end}
+	end := vsro188.BuildStorageDataEnd(opcode.StorageDataEnd)
+	return append(responses, end)
+}
+
+func chunkStorageData(payload []byte) []network.Packet {
+	return vsro188.ChunkStorageData(opcode.StorageData, payload)
 }

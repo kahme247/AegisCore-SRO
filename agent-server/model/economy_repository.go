@@ -636,7 +636,12 @@ func loadShopGood(ctx context.Context, tx *sql.Tx, npc string, tab, slot byte) (
 	g.NPCCodeName = npc
 	g.TabIndex = tab
 	g.SlotIndex = slot
-	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT g.`FK_REF_ITEM`,g.`BUY_PRICE`,g.`SELL_PRICE`,g.`OPT_LEVEL`,g.`VARIANCE`,g.`DATA`,COALESCE(NULLIF(i.`Stack_Size`,0),1),g.`RENT_TYPE`,g.`RENT_CAN_DELETE`,g.`RENT_CAN_RECHARGE`,g.`RENT_PERIOD_BEGIN_TIME`,g.`RENT_PERIOD_END_TIME`,g.`RENT_METER_RATE_TIME`,g.`RENT_PACKING_TIME` FROM `SHOP_GOODS` g JOIN `ITEMDATA` i ON i.`ItemID`=g.`FK_REF_ITEM` WHERE g.`NPC_CODE_NAME`=? AND g.`TAB_INDEX`=? AND g.`SLOT_INDEX`=?", npc, tab, slot).Scan(&g.RefItemID, &g.BuyPrice, &g.SellPrice, &g.OptLevel, &g.Variance, &g.Data, &g.MaxStack, &g.RentInfo.Type, &g.RentInfo.CanDelete, &g.RentInfo.CanRecharge, &g.RentInfo.PeriodBeginTime, &g.RentInfo.PeriodEndTime, &g.RentInfo.MeterRateTime, &g.RentInfo.PackingTime)
+	dbTab := tab
+	// NPC shop packets use one-based tab numbers, while SHOP_GOODS is stored zero-based.
+	if dbTab > 0 {
+		dbTab--
+	}
+	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT g.`FK_REF_ITEM`,g.`BUY_PRICE`,g.`SELL_PRICE`,g.`OPT_LEVEL`,g.`VARIANCE`,g.`DATA`,COALESCE(NULLIF(i.`Stack_Size`,0),1),g.`RENT_TYPE`,g.`RENT_CAN_DELETE`,g.`RENT_CAN_RECHARGE`,g.`RENT_PERIOD_BEGIN_TIME`,g.`RENT_PERIOD_END_TIME`,g.`RENT_METER_RATE_TIME`,g.`RENT_PACKING_TIME` FROM `SHOP_GOODS` g JOIN `ITEMDATA` i ON i.`ItemID`=g.`FK_REF_ITEM` WHERE g.`NPC_CODE_NAME`=? AND g.`TAB_INDEX`=? AND g.`SLOT_INDEX`=?", npc, dbTab, slot).Scan(&g.RefItemID, &g.BuyPrice, &g.SellPrice, &g.OptLevel, &g.Variance, &g.Data, &g.MaxStack, &g.RentInfo.Type, &g.RentInfo.CanDelete, &g.RentInfo.CanRecharge, &g.RentInfo.PeriodBeginTime, &g.RentInfo.PeriodEndTime, &g.RentInfo.MeterRateTime, &g.RentInfo.PackingTime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ShopGood{}, ErrEconomyShopGoodNotFound
 	}

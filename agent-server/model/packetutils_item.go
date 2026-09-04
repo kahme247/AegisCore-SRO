@@ -25,9 +25,9 @@ func WriteRentInfo(p *network.Packet, item Item) {
 		p.WriteUInt32(rent.MeterRateTime)
 	case 3:
 		p.WriteUInt16(rent.CanDelete)
-		p.WriteUInt16(rent.CanRecharge)
 		p.WriteUInt32(rent.PeriodBeginTime)
 		p.WriteUInt32(rent.PeriodEndTime)
+		p.WriteUInt16(rent.CanRecharge)
 		p.WriteUInt32(rent.PackingTime)
 	}
 }
@@ -132,6 +132,10 @@ func writeCOSAbilityPetLifetime(p *network.Packet, endsAt, now time.Time) {
 }
 
 func WriteExpendableItem(p *network.Packet, item Item) {
+	if item.TypeID3 == 5 && item.TypeID4 == 0 {
+		p.WriteUInt32(item.Data)
+		return
+	}
 	stackSize := item.StackSize
 	if stackSize < 1 {
 		stackSize = 1
@@ -153,12 +157,11 @@ func WriteExpendableItem(p *network.Packet, item Item) {
 	} else if item.TypeID3 == 14 && (item.TypeID4 == 1 || item.TypeID4 == 2) {
 		// ITEM_MALL_GACHA_CARD_WIN
 		// ITEM_MALL_GACHA_CARD_LOSE
-		numMagParams := 0
-		p.WriteByte(0) // TODO item.MagParamCount
-
-		for i := 0; i < numMagParams; i++ {
-			p.WriteUInt32(0) // TODO magParam.Type
-			p.WriteUInt32(0) // TODO magParam.Value
+		magicOptions := boundedMagicOptions(item.MagicOptions)
+		p.WriteByte(byte(len(magicOptions)))
+		for _, option := range magicOptions {
+			p.WriteUInt32(option.Type)
+			p.WriteUInt32(option.Value)
 		}
 	}
 }

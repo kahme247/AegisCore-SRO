@@ -22,6 +22,14 @@ type Item struct {
 	OptLevel byte
 	Data     uint32
 	RentInfo RentInfo
+	// RentCodeName is retained for drop records whose source references a
+	// rent-item definition not yet represented by the maintained shard schema.
+	RentCodeName string
+	MagicGroupID uint32
+	// DropType is the direct-reference category byte copied by the binary
+	// into its generated item description. Persistence does not have a
+	// dedicated column, so it remains runtime metadata.
+	DropType byte
 	TradeInfo
 	PriceInfo
 	LevelInfo
@@ -32,6 +40,8 @@ type Item struct {
 	SocketOptions   []BindingOption
 	AdvancedElixirs []BindingOption
 	Protection      EquipmentProtection
+	OwnerUniqueID   uint32
+	DropRarity      byte
 }
 
 type MagicOption struct {
@@ -78,6 +88,20 @@ type RentInfo struct {
 
 func (i *Item) GetType() string {
 	return "Item"
+}
+
+func (i *Item) GetOwner() uint32 {
+	if i == nil {
+		return 0
+	}
+	return i.OwnerUniqueID
+}
+
+func (i *Item) GetRarity() byte {
+	if i == nil {
+		return 0
+	}
+	return i.DropRarity
 }
 
 func (i Item) IsActiveDevilSpirit(now time.Time) bool {

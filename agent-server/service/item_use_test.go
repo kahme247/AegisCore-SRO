@@ -35,7 +35,7 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	player.BaseStats.Str, player.BaseStats.Int = 20, 15
 	player.BonusStats.HP, player.BonusStats.MP = 102, 51
 
-	result, err := NewItemUseService(repository).UseItem(context.Background(), player, 14, 0x08EC)
+	result, err := NewItemUseService(repository).UseItem(context.Background(), player, 14, 0x08EC, 0, 0)
 	if err != nil {
 		t.Fatalf("UseItem() error = %v", err)
 	}

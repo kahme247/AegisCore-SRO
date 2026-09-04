@@ -15,6 +15,8 @@ import (
 type itemUseRepositoryFake struct {
 	calls  int
 	result model.ItemUseResult
+	vitals model.ItemUseVitals
+	target model.COSItemTarget
 }
 
 type returnTeleportFake struct {
@@ -37,13 +39,74 @@ func (f *returnTeleportFake) CompleteItemReturn(_ *server.Session, _ *model.Play
 	return nil
 }
 
-func (f *itemUseRepositoryFake) UseItem(context.Context, int64, byte, uint16, model.ItemUseVitals) (model.ItemUseResult, error) {
+func (f *itemUseRepositoryFake) UseItem(_ context.Context, _ int64, _ byte, _ uint16, vitals model.ItemUseVitals) (model.ItemUseResult, error) {
 	f.calls++
+	f.vitals = vitals
 	return f.result, nil
+}
+
+func (f *itemUseRepositoryFake) UseTargetedItem(_ context.Context, _ int64, _ byte, _ uint16, vitals model.ItemUseVitals, target model.COSItemTarget) (model.ItemUseResult, error) {
+	f.calls++
+	f.vitals = vitals
+	f.target = target
+	return f.result, nil
+}
+
+func TestReverseReturnSelectionPayloadReachesRepository(t *testing.T) {
+	previousRefs := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousRefs })
+	ref := model.RefItem{RefObject: model.RefObject{ID: 61, IsUseable: true, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 3, TypeID4: 3}}}
+	ref.Param1 = 1_000
+	model.RefItems = map[uint32]model.RefItem{61: ref}
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 7, Level: 42, Session: session, BaseStats: model.BaseStats{HP: 600, MP: 250, Str: 29, Int: 29}, Inventory: model.Inventory{Items: map[byte]model.Item{14: {SRObject: model.SRObject{RefObjectID: 61}, StackSize: 1}}}}
+	destination := model.TeleportDestination{ID: 19, Region: 25000, WorldID: 1}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{Inventory: model.Inventory{Items: map[byte]model.Item{}}, HP: 600, MP: 250, SourceSlot: 14, ItemType: model.InventoryItemType(ref), ReturnDestination: &destination}}
+	teleport := &returnTeleportFake{}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	h.returnTeleport = teleport
+	h.send = func(*server.Session, network.Packet) error { return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(14)
+	request.WriteUInt16(model.InventoryItemType(ref))
+	request.WriteByte(7)
+	request.WriteUInt32(19)
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("reverse-return map selection failed: %v", err)
+	}
+	if repository.vitals.ReverseReturnOption != 7 || repository.vitals.ReverseReturnMapID != 19 || repository.vitals.Level != 42 {
+		t.Fatalf("reverse selection = option %d map %d level %d calls %d prepared %d", repository.vitals.ReverseReturnOption, repository.vitals.ReverseReturnMapID, repository.vitals.Level, repository.calls, teleport.prepared)
+	}
 }
 
 func (f *itemUseRepositoryFake) UseResurrectionItem(context.Context, int64, model.ItemUseVitals) (model.ItemUseResult, error) {
 	return model.ItemUseResult{}, model.ErrItemUseUnsupported
+}
+
+func TestCOSServiceItemSelectorResolvesPersistentPetFromInventorySlot(t *testing.T) {
+	previousRefs := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousRefs })
+	ref := model.RefItem{RefObject: model.RefObject{ID: 22712, IsUseable: true, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 15}}}
+	ref.Param1 = 1800
+	model.RefItems = map[uint32]model.RefItem{22712: ref}
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 7, Session: session, BaseStats: model.BaseStats{HP: 600, MP: 250}, Inventory: model.Inventory{Items: map[byte]model.Item{
+		14: {SRObject: model.SRObject{RefObjectID: 22712}, StackSize: 1},
+		17: {Data: 79, COS: model.COSItemInfo{Present: true, State: model.COSItemSummoned}, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}},
+	}}}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{Inventory: player.Inventory, HP: 600, MP: 250, SourceSlot: 14, ItemType: model.InventoryItemType(ref)}}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	h.send = func(*server.Session, network.Packet) error { return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(14)
+	request.WriteUInt16(model.InventoryItemType(ref))
+	request.WriteByte(17)
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("COS service selector failed: %v", err)
+	}
+	if repository.calls != 1 || repository.target.ObjectID != 79 {
+		t.Fatalf("targeted item use = calls %d target %#v", repository.calls, repository.target)
+	}
 }
 
 func TestItemUseMalformedPayloadFailsBeforeIdentityOrDatabaseLookup(t *testing.T) {
@@ -55,6 +118,7 @@ func TestItemUseMalformedPayloadFailsBeforeIdentityOrDatabaseLookup(t *testing.T
 	packet := network.EmptyClientPacket()
 	packet.WriteByte(14)
 	packet.WriteUInt16(0x08EC)
+	packet.WriteByte(0xFF)
 	packet.WriteByte(0xFF)
 	if err := h.handlePacket(context.Background(), &server.Session{}, packet); err != nil {
 		t.Fatalf("handlePacket() error = %v", err)
@@ -178,9 +242,8 @@ func TestSpeedItemPublishesTimedBuffIcon(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	duration, err := published[0].ReadUInt32()
-	if err != nil || duration != 1800000 || published[0].Remaining() != 0 {
-		t.Fatalf("published speed duration = %d remaining %d: %v", duration, published[0].Remaining(), err)
+	if published[0].Remaining() != 0 {
+		t.Fatalf("stock speed buff has %d trailing bytes", published[0].Remaining())
 	}
 	expire()
 	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {
@@ -218,15 +281,15 @@ func TestReferenceSkillItemAppliesAndExpiresStatBuff(t *testing.T) {
 	if err := h.handlePacket(context.Background(), session, request); err != nil {
 		t.Fatalf("buff item use failed: %v", err)
 	}
-	if player.BonusAttackStats.PhyAttackPercent != 20 || player.BonusStats.HP != 500 || player.BonusAttackStats.HitRate != 10 {
-		t.Fatalf("applied modifiers = attack %d hp %d hit %d", player.BonusAttackStats.PhyAttackPercent, player.BonusStats.HP, player.BonusAttackStats.HitRate)
+	if player.ActiveCombatDamagePercent() != 20 || player.BonusStats.HP != 500 || player.BonusAttackStats.HitRate != 10 {
+		t.Fatalf("applied modifiers = damage %d hp %d hit %d", player.ActiveCombatDamagePercent(), player.BonusStats.HP, player.BonusAttackStats.HitRate)
 	}
 	if len(published) != 1 || published[0].MessageID != opcode.EntityBuffAdd || expire == nil {
 		t.Fatalf("buff publication = %+v expiry=%v", published, expire != nil)
 	}
 	expire()
-	if player.BonusAttackStats.PhyAttackPercent != 0 || player.BonusStats.HP != 0 || player.BonusAttackStats.HitRate != 0 {
-		t.Fatalf("expired modifiers = attack %d hp %d hit %d", player.BonusAttackStats.PhyAttackPercent, player.BonusStats.HP, player.BonusAttackStats.HitRate)
+	if player.ActiveCombatDamagePercent() != 0 || player.BonusStats.HP != 0 || player.BonusAttackStats.HitRate != 0 {
+		t.Fatalf("expired modifiers = damage %d hp %d hit %d", player.ActiveCombatDamagePercent(), player.BonusStats.HP, player.BonusAttackStats.HitRate)
 	}
 	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {
 		t.Fatalf("expiration publication = %+v", published)

@@ -203,17 +203,40 @@ func verifyInventoryRelocationPlan(items map[byte]int64, plan InventoryRelocatio
 		if targetExists {
 			return newInventoryRelocationRepositoryError("verify relocation target", ErrInventoryRelocationConflict)
 		}
-		return nil
-	}
-	if !targetExists || targetItemID != plan.TargetItemID {
+	} else if !targetExists || targetItemID != plan.TargetItemID {
 		return newInventoryRelocationRepositoryError("verify relocation target", ErrInventoryRelocationConflict)
+	}
+
+	// Verify the entire paired transition against a copy using the same order
+	// as the runtime application. This permits an extra item to occupy the
+	// normal source slot only after the primary item has vacated it.
+	next := make(map[byte]int64, len(items))
+	for slot, itemID := range items {
+		next[slot] = itemID
+	}
+	next[plan.TargetSlot] = plan.SourceItemID
+	if plan.TargetItemID == 0 {
+		delete(next, plan.SourceSlot)
+	} else {
+		next[plan.SourceSlot] = plan.TargetItemID
+	}
+	for _, move := range plan.AdditionalMoves {
+		itemID, exists := next[move.SourceSlot]
+		if !exists || itemID != move.SourceItemID {
+			return newInventoryRelocationRepositoryError("verify displaced relocation source", ErrInventoryRelocationConflict)
+		}
+		if _, occupied := next[move.TargetSlot]; occupied {
+			return newInventoryRelocationRepositoryError("verify displaced relocation target", ErrInventoryRelocationConflict)
+		}
+		next[move.TargetSlot] = itemID
+		delete(next, move.SourceSlot)
 	}
 	return nil
 }
 
 func executeInventoryRelocation(ctx context.Context, tx *sql.Tx, characterID int64, plan InventoryRelocationPlan) error {
 	if plan.TargetItemID == 0 {
-		return executeInventoryRelocationStatement(
+		if err := executeInventoryRelocationStatement(
 			ctx,
 			tx,
 			"move source item",
@@ -222,15 +245,10 @@ func executeInventoryRelocation(ctx context.Context, tx *sql.Tx, characterID int
 			characterID,
 			plan.SourceSlot,
 			plan.SourceItemID,
-		)
-	}
-
-	// A direct two-row slot swap can violate MySQL's unique (character, slot)
-	// key while the rows are being updated. Remove the source link only inside
-	// this transaction, move the locked target into the freed slot, then insert
-	// the original source link at the target. Rollback restores all three steps
-	// if any statement or Commit fails.
-	if err := executeInventoryRelocationStatement(
+		); err != nil {
+			return err
+		}
+	} else if err := executeInventoryRelocationStatement(
 		ctx,
 		tx,
 		"remove source item for swap",
@@ -240,8 +258,7 @@ func executeInventoryRelocation(ctx context.Context, tx *sql.Tx, characterID int
 		plan.SourceItemID,
 	); err != nil {
 		return err
-	}
-	if err := executeInventoryRelocationStatement(
+	} else if err := executeInventoryRelocationStatement(
 		ctx,
 		tx,
 		"move target item for swap",
@@ -252,8 +269,7 @@ func executeInventoryRelocation(ctx context.Context, tx *sql.Tx, characterID int
 		plan.TargetItemID,
 	); err != nil {
 		return err
-	}
-	return executeInventoryRelocationStatement(
+	} else if err := executeInventoryRelocationStatement(
 		ctx,
 		tx,
 		"insert source item for swap",
@@ -261,7 +277,15 @@ func executeInventoryRelocation(ctx context.Context, tx *sql.Tx, characterID int
 		characterID,
 		plan.TargetSlot,
 		plan.SourceItemID,
-	)
+	); err != nil {
+		return err
+	}
+	for _, move := range plan.AdditionalMoves {
+		if err := executeInventoryRelocationStatement(ctx, tx, "move displaced equipment item", MoveInventoryRelocationSource, move.TargetSlot, characterID, move.SourceSlot, move.SourceItemID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func executeInventoryRelocationStatement(ctx context.Context, tx *sql.Tx, operation, query string, args ...any) error {

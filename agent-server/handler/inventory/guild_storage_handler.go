@@ -13,12 +13,13 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/sirupsen/logrus"
 )
 
 const (
 	guildStorageTalkAction = byte(0x0D)
-	guildStorageChunkSize  = 4096
+	guildStorageChunkSize  = vsro188.StorageDataChunkSize
 )
 
 type GuildStorageHandler struct {
@@ -129,63 +130,38 @@ func (h *GuildStorageHandler) sendPacket(session *server.Session, packet network
 }
 
 func buildGuildStorageOpenSuccess() network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.GuildStorageOpenResponse
-	p.WriteByte(1)
-	return p
+	return vsro188.BuildGuildStorageOpenSuccess()
 }
 
 func buildGuildStorageOpenFailure(code byte) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.GuildStorageOpenResponse
-	p.WriteByte(2)
-	p.WriteByte(code)
-	p.WriteByte(0x4C)
-	return p
+	return vsro188.BuildGuildStorageOpenFailure(code)
 }
 
 func buildGuildStorageCloseSuccess() network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.GuildStorageCloseResponse
-	p.WriteByte(1)
-	return p
+	return vsro188.BuildGuildStorageCloseSuccess()
 }
 
 func buildGuildStorageResponses(snapshot model.StorageSnapshot) []network.Packet {
-	begin := network.EmptyPacket()
-	begin.MessageID = opcode.GuildStorageDataBegin
-	begin.WriteUInt64(snapshot.Gold)
+	begin := vsro188.BuildStorageDataBegin(opcode.GuildStorageDataBegin, snapshot.Gold)
 
-	data := network.EmptyPacket()
 	capacity := snapshot.Capacity
 	if capacity == 0 {
 		capacity = baseStorageSize
 	}
-	data.WriteByte(capacity)
 	slots := model.SortedInventorySlots(snapshot.Items)
-	data.WriteByte(byte(len(slots)))
+	records := make([]vsro188.StorageItemRecord, 0, len(slots))
 	for _, slot := range slots {
 		item := snapshot.Items[slot]
-		data.WriteByte(slot)
-		model.WriteRentInfo(&data, item)
-		data.WriteUInt32(item.GetRefObjectID())
-		model.WriteInventoryItem(&data, item)
+		rent := network.EmptyPacket()
+		model.WriteRentInfo(&rent, item)
+		body := network.EmptyPacket()
+		model.WriteInventoryItem(&body, item)
+		records = append(records, vsro188.StorageItemRecord{Slot: slot, RentPayload: rent.Payload(), RefItemID: item.GetRefObjectID(), ItemPayload: body.Payload()})
 	}
+	data := vsro188.BuildStorageItemDataPayload(capacity, records)
 
 	responses := []network.Packet{begin}
-	payload := data.Payload()
-	for len(payload) > 0 {
-		size := len(payload)
-		if size > guildStorageChunkSize {
-			size = guildStorageChunkSize
-		}
-		chunk := network.EmptyPacket()
-		chunk.MessageID = opcode.GuildStorageData
-		chunk.WriteBytes(payload[:size])
-		responses = append(responses, chunk)
-		payload = payload[size:]
-	}
-	end := network.EmptyPacket()
-	end.MessageID = opcode.GuildStorageDataEnd
+	responses = append(responses, vsro188.ChunkStorageData(opcode.GuildStorageData, data.Payload())...)
+	end := vsro188.BuildStorageDataEnd(opcode.GuildStorageDataEnd)
 	return append(responses, end)
 }

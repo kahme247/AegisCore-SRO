@@ -302,6 +302,45 @@ func TestSQLInventoryRelocationRepositoryCommitsLockedMove(t *testing.T) {
 	assertInventoryRelocationInteger(t, calls[2].args[3].Value, 101)
 }
 
+func TestSQLInventoryRelocationRepositoryCommitsPairedDisplacementAtomically(t *testing.T) {
+	store := &inventoryRelocationRepositoryTestStore{
+		characterExists: true,
+		lockedItems: [][]driver.Value{
+			{int64(14), int64(101)},
+			{int64(SlotSecondaryWeapon), int64(202)},
+		},
+	}
+	repository, store := newInventoryRelocationRepositoryForTest(t, store)
+	plan := inventoryRelocationRepositoryPlan(14, SlotPrimaryWeapon, 101, 0)
+	plan.Action = InventoryRelocationEquip
+	plan.AdditionalMoves = []InventoryRelocationAdditionalMove{{
+		SourceSlot:   SlotSecondaryWeapon,
+		TargetSlot:   14,
+		SourceItemID: 202,
+	}}
+
+	if err := repository.Relocate(context.Background(), 44, plan); err != nil {
+		t.Fatalf("Relocate() error = %v", err)
+	}
+	store.Lock()
+	calls := append([]inventoryRelocationRepositoryTestCall(nil), store.calls...)
+	commitCount, rollbackCount := store.commitCount, store.rollbackCount
+	store.Unlock()
+	if commitCount != 1 || rollbackCount != 0 {
+		t.Fatalf("transaction commits=%d rollbacks=%d, want one commit and no rollback", commitCount, rollbackCount)
+	}
+	assertInventoryRelocationRepositoryQueries(t, calls, []string{
+		LockCharacterForInventoryRelocation,
+		LockCharacterInventoryForRelocation,
+		MoveInventoryRelocationSource,
+		MoveInventoryRelocationSource,
+	})
+	assertInventoryRelocationInteger(t, calls[2].args[0].Value, int64(SlotPrimaryWeapon))
+	assertInventoryRelocationInteger(t, calls[2].args[2].Value, 14)
+	assertInventoryRelocationInteger(t, calls[3].args[0].Value, 14)
+	assertInventoryRelocationInteger(t, calls[3].args[2].Value, int64(SlotSecondaryWeapon))
+}
+
 func TestSQLInventoryRelocationRepositoryClassifiesUnknownCommitOutcome(t *testing.T) {
 	commitFailure := errors.New("connection dropped during commit")
 	store := &inventoryRelocationRepositoryTestStore{

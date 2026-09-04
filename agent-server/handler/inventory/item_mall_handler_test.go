@@ -9,6 +9,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 type itemMallRepositoryFake struct {
@@ -54,7 +55,7 @@ func TestModernItemMallResponseEchoesPackageCount(t *testing.T) {
 		DestinationSlots: []byte{14},
 		Quantity:         11,
 	})
-	if got, want := hex.EncodeToString(purchase.Payload()), "01181b0402010d010e010000000000"; got != want {
+	if got, want := hex.EncodeToString(purchase.Payload()), "01181b0402010d010e0100"; got != want {
 		t.Fatalf("modern purchase payload = %s, want %s", got, want)
 	}
 }
@@ -103,6 +104,42 @@ func TestItemMallPurchasePublishesInventoryAndSendsBalanceThenPurchase(t *testin
 	}
 	if len(sent) != 2 || sent[0].MessageID != opcode.ItemMallBalanceUpdate || sent[1].MessageID != opcode.ItemOperationResponse {
 		t.Fatalf("sent packets = %#v, want balance then purchase response", sent)
+	}
+}
+
+func TestModernItemMallPurchaseSendsOnlyConfirmedOperationCompletion(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UserID: 9, UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(nil)}
+	mall := &itemMallRepositoryFake{result: model.ItemMallPurchaseResult{
+		Balances:         model.ItemMallBalances{Silk: 90, GiftSilk: 20, Point: 10},
+		Inventory:        model.NewInventory(map[byte]model.Item{13: {ID: 100}}),
+		Position:         model.ItemMallPosition{RefShopGroupID: 1051, GroupIndex: 2, TabIndex: 1, SlotIndex: 13},
+		DestinationSlots: []byte{13},
+		Quantity:         1,
+	}}
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, nil)
+	handler.mall = mall
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+
+	body, err := vsro188.BuildItemMallModernRequest(vsro188.ItemMallModernRequest{
+		ShopGroupID: 1051, GroupIndex: 2, TabIndex: 1, SlotIndex: 13,
+		PackageName: "PACKAGE_ITEM_MALL_TEST", PackageCount: 1, PackageID: 40000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(byte(BuyItemFromModernMallOperation))
+	packet.WriteBytes(body.Payload())
+	if err = handler.handlePacket(context.Background(), session, packet); err != nil {
+		t.Fatalf("modern mall purchase error = %v", err)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.ItemOperationResponse {
+		t.Fatalf("modern mall packets = %#v, want one 0xB034 completion", sent)
 	}
 }
 

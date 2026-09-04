@@ -26,6 +26,21 @@ func TestBuildEmptyStorageResponsesUsesVSROChunkSequence(t *testing.T) {
 	}
 }
 
+func TestChunkStorageDataUsesStockCompatibleMultipartLimit(t *testing.T) {
+	packets := chunkStorageData(make([]byte, storageDataChunkSize*2+1))
+	if len(packets) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(packets))
+	}
+	if len(packets[0].Payload()) != storageDataChunkSize || len(packets[1].Payload()) != storageDataChunkSize || len(packets[2].Payload()) != 1 {
+		t.Fatalf("chunk sizes = %d, %d, %d", len(packets[0].Payload()), len(packets[1].Payload()), len(packets[2].Payload()))
+	}
+	for _, packet := range packets {
+		if packet.MessageID != opcode.StorageData {
+			t.Fatalf("chunk opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.StorageData)
+		}
+	}
+}
+
 func TestEconomySuccessPacketsMatchVSRO188Layouts(t *testing.T) {
 	tests := []struct {
 		name   string

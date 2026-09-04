@@ -319,7 +319,7 @@ func TestSQLInventoryRepositoryReadReturnsSafeErrors(t *testing.T) {
 		{
 			name: "persisted slot range",
 			store: &inventoryRepositoryTestStore{
-				queryRows: [][]driver.Value{inventoryTestRow(int64(BaseInventorySize), int64(1), int64(0), int64(1), int64(1), int64(0), int64(0))},
+				queryRows: [][]driver.Value{inventoryTestRow(int64(MaxInventoryWireSize), int64(1), int64(0), int64(1), int64(1), int64(0), int64(0))},
 			},
 			want: ErrInventorySlotOutOfRange,
 			op:   "scan character inventory",
@@ -435,7 +435,7 @@ func TestSQLInventoryRepositoryInsertReturnsSafeErrors(t *testing.T) {
 			name:        "slot range",
 			characterID: 1,
 			itemID:      1,
-			slot:        BaseInventorySize,
+			slot:        MaxInventoryWireSize,
 			store:       &inventoryRepositoryTestStore{},
 			want:        ErrInventorySlotOutOfRange,
 		},

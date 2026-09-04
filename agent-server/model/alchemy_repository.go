@@ -41,11 +41,25 @@ type AlchemyResult struct {
 	Materials      []AlchemyMaterialUpdate
 }
 
+type AlchemyMakeResult struct {
+	Inventory     Inventory
+	ResponseByte  byte
+	ProducedValue uint32
+	Materials     []AlchemyMaterialUpdate
+}
+
 type AlchemyRepository interface {
 	FuseElixir(context.Context, int64, uint32, byte, byte, *byte) (AlchemyResult, error)
 	FuseStone(context.Context, int64, uint32, byte, byte, byte) (AlchemyResult, error)
 	ApplyAdvancedElixir(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
-	InsertSocket(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
+	InsertSocket(context.Context, int64, uint32, byte, byte, byte) (AlchemyResult, error)
+	CreateSocket(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
+	EraseSocket(context.Context, int64, uint32, byte, byte) (AlchemyResult, error)
+	ResolveMaterial(context.Context, int64, uint32, byte) (AlchemyMakeResult, error)
+	CompoundMaterial(context.Context, int64, uint32, []byte) (AlchemyMakeResult, error)
+	DismantleEquipment(context.Context, int64, uint32, []byte) (AlchemyResult, error)
+	BlessAvatarItem(context.Context, int64, uint32, byte, string) (AlchemyResult, error)
+	EnchantAvatarItem(context.Context, int64, uint32, byte, *byte) (AlchemyResult, error)
 }
 
 type SQLAlchemyRepository struct {
@@ -68,18 +82,29 @@ func secureAlchemyRoll() float64 {
 	return float64(value.Int64()) / 1_000_000
 }
 
-func enhancementSucceeds(level byte, powder bool, roll float64) bool {
-	if level >= MaxEquipmentPlus || roll < 0 || roll >= 1 {
+func enhancementSucceeds(chance int, roll float64) bool {
+	if roll < 0 || roll >= 1 {
 		return false
 	}
-	chance := 80 - 10*float64(level)
-	if powder {
-		chance += 5
+	if chance < 10 {
+		chance = 10
+	} else if chance > 100 {
+		chance = 100
 	}
-	if chance < 5 {
-		chance = 5
+	return int(roll*100) < chance
+}
+
+// reinforcementChance decodes the three packed four-byte matrices used by
+// the vSRO reinforcement reference object. Param2, Param7 and Param12 are the
+// tier rows; the selected byte is 3-min(plus,3).
+func reinforcementChance(ref RefItem, plus byte) int {
+	tier := int(plus)/4 + 1
+	if tier > 3 {
+		tier = 3
 	}
-	return roll*100 < chance
+	packed := [3]uint32{uint32(ref.Param2), uint32(ref.Param7), uint32(ref.Param12)}[tier-1]
+	column := 3 - min(int(plus), 3)
+	return int(byte(packed >> (8 * column)))
 }
 
 func alchemyTargetClass(ref RefItem) (int, bool) {
@@ -245,7 +270,18 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 		}
 		result.Materials = append(result.Materials, AlchemyMaterialUpdate{Slot: *powderSlot, Remaining: remainingAlchemyStack(*powder)})
 	}
-	result.Success = enhancementSucceeds(target.OptLevel, powder != nil, r.roll())
+	chance := reinforcementChance(elixirRef, target.OptLevel)
+	if powderRef != nil && chance < 100 {
+		chance += reinforcementChance(*powderRef, target.OptLevel)
+	}
+	luck, luckErr := consumeAlchemyMagicCharge(ctx, tx, target, "MATTR_LUCK")
+	if luckErr != nil {
+		return result, luckErr
+	}
+	if luck {
+		chance += 5
+	}
+	result.Success = enhancementSucceeds(chance, r.roll())
 	if result.Success {
 		update, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=? AND `OPT_LEVEL`=?", target.OptLevel+1, target.ID, target.OptLevel)
 		if updateErr != nil {
@@ -255,7 +291,7 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 			return result, ErrAlchemyConflict
 		}
 	} else {
-		newLevel, protection, destroyed, durabilityLost := ApplyEnhancementFailure(target.OptLevel, target.Protection)
+		newLevel, protection, destroyed, durabilityLost := applyEnhancementFailure(target.OptLevel, target.Protection, r.roll())
 		result.Destroyed, result.DurabilityLost = destroyed, durabilityLost
 		if destroyed {
 			if _, err = tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, targetSlot, target.ID); err != nil {
@@ -265,12 +301,13 @@ func (r *SQLAlchemyRepository) FuseElixir(ctx context.Context, characterID int64
 				return result, err
 			}
 		} else {
-			newData := target.Data
-			if durabilityLost && newData > 1 {
-				newData--
-			}
-			if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=?,`DATA`=? WHERE `id`=? AND `OPT_LEVEL`=?", newLevel, newData, target.ID, target.OptLevel); err != nil {
+			if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=? AND `OPT_LEVEL`=?", newLevel, target.ID, target.OptLevel); err != nil {
 				return result, err
+			}
+			if durabilityLost {
+				if err = incrementAlchemyMagicProperty(ctx, tx, target, "MATTR_DEC_MAXDUR"); err != nil {
+					return result, err
+				}
 			}
 			if _, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_ALCHEMY_PROTECTION` (`FK_ITEM`,`ASTRAL`,`IMMORTAL`,`STEADY`) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE `ASTRAL`=VALUES(`ASTRAL`),`IMMORTAL`=VALUES(`IMMORTAL`),`STEADY`=VALUES(`STEADY`)", target.ID, protection.Astral, protection.Immortal, protection.Steady); err != nil {
 				return result, err
@@ -346,4 +383,52 @@ func consumeAlchemyMaterial(ctx context.Context, tx *sql.Tx, characterID int64, 
 		return fmt.Errorf("delete alchemy material: %w", err)
 	}
 	return nil
+}
+
+func consumeAlchemyMagicCharge(ctx context.Context, tx *sql.Tx, target Item, code string) (bool, error) {
+	for _, option := range target.MagicOptions {
+		var optionCode string
+		if err := tx.QueryRowContext(ctx, "SELECT `CODE_NAME` FROM `REF_MAGIC_OPTION` WHERE `ID`=?", option.Type).Scan(&optionCode); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return false, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(optionCode), code) {
+			continue
+		}
+		if option.Value > 1 {
+			_, err := tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=`VALUE`-1 WHERE `FK_ITEM`=? AND `TYPE`=? AND `VALUE`=?", target.ID, option.Type, option.Value)
+			return true, err
+		}
+		_, err := tx.ExecContext(ctx, "DELETE FROM `ITEM_MAGIC_OPTION` WHERE `FK_ITEM`=? AND `TYPE`=?", target.ID, option.Type)
+		return true, err
+	}
+	return false, nil
+}
+
+func incrementAlchemyMagicProperty(ctx context.Context, tx *sql.Tx, target Item, code string) error {
+	for _, option := range target.MagicOptions {
+		var optionCode string
+		if err := tx.QueryRowContext(ctx, "SELECT `CODE_NAME` FROM `REF_MAGIC_OPTION` WHERE `ID`=?", option.Type).Scan(&optionCode); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(optionCode), code) {
+			_, err := tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=`VALUE`+1 WHERE `FK_ITEM`=? AND `TYPE`=?", target.ID, option.Type)
+			return err
+		}
+	}
+	ref, ok := RefItems[target.RefObjectID]
+	if !ok {
+		return ErrInventoryReferenceItemNotFound
+	}
+	var optionID uint32
+	if err := tx.QueryRowContext(ctx, "SELECT `ID` FROM `REF_MAGIC_OPTION` WHERE `CODE_NAME`=? AND `OPTION_LEVEL`=?", code, ref.Degree()).Scan(&optionID); err != nil {
+		return err
+	}
+	if len(target.MagicOptions) >= 12 {
+		return ErrAlchemyConflict
+	}
+	_, err := tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,1)", target.ID, len(target.MagicOptions), optionID)
+	return err
 }

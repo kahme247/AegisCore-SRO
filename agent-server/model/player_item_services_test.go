@@ -88,7 +88,7 @@ func TestItemPerkPacketsCarryPremiumIconAndDuration(t *testing.T) {
 		t.Fatalf("remove packet opcode=0x%04X payload=%x", removed.MessageID, removed.Payload())
 	}
 	buff, exists := BuildItemServiceBuffAdd(7, 9, premium, 28*24*time.Hour)
-	if !exists || buff.MessageID != opcode.EntityBuffAdd || len(buff.Payload()) != 16 {
+	if !exists || buff.MessageID != opcode.EntityBuffAdd || len(buff.Payload()) != 12 {
 		t.Fatalf("premium buff opcode=0x%04X payload=%x exists=%v", buff.MessageID, buff.Payload(), exists)
 	}
 	if binary.LittleEndian.Uint32(buff.Payload()[4:8]) != 5412 {

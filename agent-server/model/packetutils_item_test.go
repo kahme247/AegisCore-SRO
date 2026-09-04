@@ -21,6 +21,53 @@ func TestWriteExpendableItemDoesNotEncodeMPPotionAsGachaCard(t *testing.T) {
 	}
 }
 
+func TestWriteGoldItemMatchesStock008BE4F0AmountBranch(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5, TypeID4: 0}},
+		Data:      0x11223344,
+		StackSize: 9,
+	})
+	if got, want := packet.Payload(), []byte{0x44, 0x33, 0x22, 0x11}; !bytes.Equal(got, want) {
+		t.Fatalf("gold payload = % X, want % X", got, want)
+	}
+}
+
+func TestWriteMagicStoneItemMatchesStock008BE4F0AssimilationBranch(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 11, TypeID4: 1}},
+		StackSize: 9,
+		Data:      77,
+	})
+	if got, want := packet.Payload(), []byte{9, 0, 77}; !bytes.Equal(got, want) {
+		t.Fatalf("magic-stone payload = % X, want % X", got, want)
+	}
+}
+
+func TestWriteRentInfoType3MatchesStock008BB130ReadOrder(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteRentInfo(&packet, Item{RentInfo: RentInfo{
+		Type:            3,
+		CanDelete:       0x1122,
+		CanRecharge:     0xCCDD,
+		PeriodBeginTime: 0x33445566,
+		PeriodEndTime:   0x778899AA,
+		PackingTime:     0xEEFF0011,
+	}})
+	want := []byte{
+		0x03, 0x00, 0x00, 0x00,
+		0x22, 0x11,
+		0x66, 0x55, 0x44, 0x33,
+		0xAA, 0x99, 0x88, 0x77,
+		0xDD, 0xCC,
+		0x11, 0x00, 0xFF, 0xEE,
+	}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("type-3 rent payload = % X, want % X", got, want)
+	}
+}
+
 func TestWriteSummonedGrowthCOSItemMatchesStockVSRO188Reader(t *testing.T) {
 	packet := network.EmptyPacket()
 	WriteContainerItem(&packet, Item{
@@ -82,6 +129,19 @@ func TestWriteExpendableItemEncodesGachaMetadataOnlyForGachaType(t *testing.T) {
 	}
 }
 
+func TestWriteExpendableItemEncodesGachaMagicOptions(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:     SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 1}},
+		StackSize:    1,
+		MagicOptions: []MagicOption{{Type: 0x11223344, Value: 0x55667788}},
+	})
+	want := []byte{1, 0, 1, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("gacha metadata payload = % X, want % X", got, want)
+	}
+}
+
 func TestWriteMonsterMaskItemEncodesCapturedMonsterReference(t *testing.T) {
 	packet := network.EmptyPacket()
 	WriteContainerItem(&packet, Item{
@@ -116,13 +176,17 @@ func TestWriteEquipmentItemIncludesBluesSocketsAndAdvancedElixir(t *testing.T) {
 		AdvancedElixirs: []BindingOption{{Slot: 0, ID: 25874, Value: 1}},
 	})
 	payload := packet.Payload()
-	if payload[0] != 12 || payload[13] != 2 {
-		t.Fatalf("equipment plus/blues = %d/%d payload=% X", payload[0], payload[13], payload)
+	want := []byte{
+		12,
+		9, 0, 0, 0, 0, 0, 0, 0,
+		100, 0, 0, 0,
+		2,
+		212, 0, 0, 0, 3, 0, 0, 0,
+		5, 0, 0, 0, 7, 0, 0, 0,
+		1, 1, 1, 0xE8, 3, 0, 0, 2, 0, 0, 0,
+		2, 1, 0, 0x12, 0x65, 0, 0, 1, 0, 0, 0,
 	}
-	if !bytes.Contains(payload, []byte{1, 1, 0xE8, 3, 0, 0, 2, 0, 0, 0}) {
-		t.Fatalf("socket option missing from payload: % X", payload)
-	}
-	if !bytes.Contains(payload, []byte{2, 1, 0, 0x12, 0x65, 0, 0, 1, 0, 0, 0}) {
-		t.Fatalf("advanced elixir missing from payload: % X", payload)
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("equipment payload = % X, want % X", payload, want)
 	}
 }
