@@ -73,15 +73,43 @@ type WorldService struct {
 	// world membership mutex: known-list operations can acquire their own
 	// locks, so they must run after the membership snapshot is taken without
 	// blocking movement, admission, or shutdown from acquiring w.mutex.
-	visibilityMutex     sync.Mutex
-	loader2             *navmeshv2.Loader
-	navmeshGobPath      string
-	positionPersistence *PositionPersistenceService
-	positionCheckpoint  time.Duration
-	regionCatalog       model.GameServerRegionRepository
-	spawnCatalog        model.ContinentSpawnRepository
-	teleportGateCatalog model.TeleportGateRepository
-	gameplayRates       interface{ Current() model.GameplayRates }
+	visibilityMutex          sync.Mutex
+	loader2                  *navmeshv2.Loader
+	navmeshGobPath           string
+	positionPersistence      *PositionPersistenceService
+	positionCheckpoint       time.Duration
+	regionCatalog            model.GameServerRegionRepository
+	spawnCatalog             model.ContinentSpawnRepository
+	teleportGateCatalog      model.TeleportGateRepository
+	gameplayRates            interface{ Current() model.GameplayRates }
+	referenceData            *model.ReferenceDataCatalog
+	mountedTransportResolver func(*model.Player) (*model.COS, bool)
+}
+
+// ConfigureMountedTransportResolver connects world movement to the COS
+// lifecycle without making WorldService own COS activation or persistence.
+// Production configures it once before the network listener starts.
+func (w *WorldService) ConfigureMountedTransportResolver(resolver func(*model.Player) (*model.COS, bool)) {
+	if w == nil {
+		return
+	}
+	w.mountedTransportResolver = resolver
+}
+
+func (w *WorldService) MountedTransport(player *model.Player) (*model.COS, bool) {
+	if w == nil || player == nil || w.mountedTransportResolver == nil {
+		return nil, false
+	}
+	return w.mountedTransportResolver(player)
+}
+
+func (w *WorldService) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) {
+	if w == nil {
+		return
+	}
+	w.visibilityMutex.Lock()
+	w.referenceData = catalog
+	w.visibilityMutex.Unlock()
 }
 
 // WorldRepositories is the live Agent persistence boundary for world
@@ -93,6 +121,15 @@ type WorldRepositories struct {
 	SpawnCatalog  model.ContinentSpawnRepository
 	Positions     model.CharacterPositionRepository
 	TeleportGates model.TeleportGateRepository
+}
+
+func (w *WorldService) ObjectCount() int {
+	if w == nil || w.mutex == nil {
+		return 0
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return len(w.visibleObjects)
 }
 
 func (w *WorldService) ConfigureGameplayRates(rates interface{ Current() model.GameplayRates }) {
@@ -917,9 +954,17 @@ func (w *WorldService) GetKnownObjectsAroundObject(object model.ISRObject) map[u
 			continue
 		}
 
+		if subject, ok := otherObject.(*model.Player); ok {
+			state := subject.GetBodyState()
+			if state == model.Stealth || state == model.Invisible || state == model.GmInvisible {
+				observer, playerObserver := object.(*model.Player)
+				if !playerObserver || !w.playerCanSee(observer, subject) {
+					continue
+				}
+			}
+		}
 		known := object.GetKnownObjectList() != nil && object.GetKnownObjectList().Knows(otherObject)
 		if w.DistanceTo(objectPosition, otherObject.GetNavmeshPosition()) <= objectVisibilityRange(otherObject, known) {
-			// TODO What about stealth / invisible characters?
 			knownObjects[otherObject.GetUniqueID()] = otherObject
 		}
 	}
@@ -999,7 +1044,10 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 	}
 
 	currentTime := movement.now()
-	movementSpeed := p.GetMovementSpeed()
+	movementSpeed := movementData.SpeedOverride
+	if movementSpeed <= 0 {
+		movementSpeed = p.GetMovementSpeed()
+	}
 	deltaTime := currentTime.Sub(movementData.UpdateTime)
 
 	if deltaTime <= 0 {
@@ -1069,7 +1117,9 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 		// blocked boundary, so a player corrected there can collide again while
 		// trying to walk back (notably at Jangan's town gates). Keeping the last
 		// verified position leaves the player on the walkable side of the gate.
-		log.Debugf("object collision at %s with edge flag %d", curPos.String(), collision.ContactEdge.GetFlag())
+		log.Debugf("object collision at %s with object world_id=%d local_id=%d edge=%d edge_flag=%d contact=%v",
+			curPos.String(), collision.ObjectWorldID, collision.ObjectID, collision.ContactEdge.GetIndex(),
+			collision.ContactEdge.GetFlag(), collision.VectorGlobal)
 		return w.commitMovementStep(p, movementData.Generation, curPos, currentTime, true, "object-collision", true)
 	}
 
@@ -1102,6 +1152,13 @@ func (w *WorldService) commitMovementStep(p model.ICharacter, generation uint64,
 	regionChanged := oldPosition.Region.ID != newPosition.Region.ID
 	activeMovement := p.GetMovementData()
 	hasDestination := activeMovement != nil && activeMovement.Generation == generation && activeMovement.HasDestination
+	player, mounted := w.mountedMovementPair(p)
+	var mountedOldPosition navmeshv2.RtNavmeshPosition
+	mountedRegionChanged := false
+	if mounted != nil {
+		mountedOldPosition = mounted.GetNavmeshPosition()
+		mountedRegionChanged = mountedOldPosition.Region.ID != newPosition.Region.ID
+	}
 	w.mutex.Lock()
 	committed := false
 	if completed {
@@ -1122,29 +1179,44 @@ func (w *WorldService) commitMovementStep(p model.ICharacter, generation uint64,
 		delete(w.movingObjects, p.GetUniqueID())
 		w.rebuildMovingObjectSnapshotLocked()
 	}
+	if mounted != nil {
+		mounted.SetNavmeshPosition(newPosition)
+		mounted.SetMotionState(p.GetMotionState())
+		if mountedRegionChanged {
+			w.removeVisibleObjectFromRegionLocked(mounted, mountedOldPosition.Region.ID)
+			w.addVisibleObjectToRegionLocked(mounted, newPosition.Region.ID)
+		}
+	}
 	w.mutex.Unlock()
-	if player, ok := p.(*model.Player); ok {
+	if player != nil {
 		w.positionPersistence.MarkDirty(player)
 	}
 	traceMovementFor(p, "commit uid=%d generation=%d completed=%t reason=%s position=%s", p.GetUniqueID(), generation, completed, reason, newPosition.String())
-	// A directional movement response has no destination region. When a player
-	// crosses a region seam, send the authoritative position packet even though
-	// this was not otherwise a correction, so the client updates its active map
-	// region before it receives visibility changes for the new area.
+	// While mounted, the client moves and corrects the transport entity. The
+	// player model is visually attached to it by B0CB, so publishing a player
+	// B023 here would detach or rewind the rider to the old transport position.
 	if correction || (regionChanged && !hasDestination) {
-		p.SendPositionUpdate()
+		w.sendMovementPositionUpdate(p, player, mounted)
 	}
-	// Visibility is reconciled from the committed authoritative position, not
-	// by a ticker that walks every world object. Keep it after the existing
-	// position update so an unverified spawn path can never make a newly-known
-	// peer receive a movement update before a capture-backed spawn sequence.
+	// Visibility is reconciled from both members of the mounted pair. Their
+	// region membership and coordinates were committed atomically above.
 	_ = w.ReconcileCharacterVisibility(p)
+	if mounted != nil {
+		_ = w.ReconcileCharacterVisibility(mounted)
+	}
 	return completed
 }
 
 func (w *WorldService) StopMovingCharacter(p model.ICharacter, position navmeshv2.RtNavmeshPosition, reason string, correction bool) bool {
 	oldPosition := p.GetNavmeshPosition()
 	regionChanged := oldPosition.Region.ID != position.Region.ID
+	player, mounted := w.mountedMovementPair(p)
+	var mountedOldPosition navmeshv2.RtNavmeshPosition
+	mountedRegionChanged := false
+	if mounted != nil {
+		mountedOldPosition = mounted.GetNavmeshPosition()
+		mountedRegionChanged = mountedOldPosition.Region.ID != position.Region.ID
+	}
 	w.mutex.Lock()
 	generation := p.CancelMovement(position, reason)
 	p.SetMotionState(model.NoMotion)
@@ -1154,8 +1226,16 @@ func (w *WorldService) StopMovingCharacter(p model.ICharacter, position navmeshv
 		w.removeVisibleObjectFromRegionLocked(p, oldPosition.Region.ID)
 		w.addVisibleObjectToRegionLocked(p, position.Region.ID)
 	}
+	if mounted != nil {
+		mounted.SetNavmeshPosition(position)
+		mounted.SetMotionState(model.NoMotion)
+		if mountedRegionChanged {
+			w.removeVisibleObjectFromRegionLocked(mounted, mountedOldPosition.Region.ID)
+			w.addVisibleObjectToRegionLocked(mounted, position.Region.ID)
+		}
+	}
 	w.mutex.Unlock()
-	if player, ok := p.(*model.Player); ok {
+	if player != nil {
 		w.positionPersistence.MarkDirty(player)
 		if reason == "teleport" || regionChanged {
 			if err := w.positionPersistence.FlushPlayer(player.GetUniqueID()); err != nil {
@@ -1165,10 +1245,34 @@ func (w *WorldService) StopMovingCharacter(p model.ICharacter, position navmeshv
 	}
 	traceMovementFor(p, "stop uid=%d generation=%d reason=%s position=%s", p.GetUniqueID(), generation, reason, position.String())
 	if correction {
-		p.SendPositionUpdate()
+		w.sendMovementPositionUpdate(p, player, mounted)
 	}
 	_ = w.ReconcileCharacterVisibility(p)
+	if mounted != nil {
+		_ = w.ReconcileCharacterVisibility(mounted)
+	}
 	return true
+}
+
+func (w *WorldService) mountedMovementPair(character model.ICharacter) (*model.Player, *model.COS) {
+	player, ok := character.(*model.Player)
+	if !ok {
+		return nil, nil
+	}
+	transport, mounted := w.MountedTransport(player)
+	if !mounted {
+		return player, nil
+	}
+	return player, transport
+}
+
+func (w *WorldService) sendMovementPositionUpdate(character model.ICharacter, player *model.Player, mounted *model.COS) {
+	if player == nil || mounted == nil {
+		character.SendPositionUpdate()
+		return
+	}
+	packet := model.BuildPositionUpdatePacket(mounted)
+	player.SendToSelfAndKnown(&packet)
 }
 
 func (w *WorldService) AddVisibleObjectToRegion(p model.ICharacter, regionId int16) {

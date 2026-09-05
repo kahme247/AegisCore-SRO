@@ -62,7 +62,7 @@ func TestMovementPacketFixtures(t *testing.T) {
 	target := testPosition(25000, 150, 13, 250)
 	movement := MovementData{HasDestination: true, TargetPosition: target}
 	packet := BuildMovementUpdatePacket(player, movement, start)
-	if packet.MessageID != opcode.EntityMovementResponse || packet.DataSize != 24 {
+	if packet.MessageID != opcode.EntityMovementResponse || packet.DataSize != 14 {
 		t.Fatalf("unexpected destination packet metadata: opcode=%04X size=%d", packet.MessageID, packet.DataSize)
 	}
 	if got, want := packet.Payload(), []byte{
@@ -72,11 +72,7 @@ func TestMovementPacketFixtures(t *testing.T) {
 		0x96, 0x00, // target X is a signed 16-bit coordinate
 		0x0D, 0x00, // target Y
 		0xFA, 0x00, // target Z is a signed 16-bit coordinate
-		0x01,       // source-position marker
-		0xA8, 0x61, // source region 25000
-		0xE8, 0x03, // source X * 10
-		0x00, 0x00, 0x48, 0x41, // source Y 12.5
-		0xD0, 0x07, // source Z * 10
+		0x00, // hasSource=false; no source fields follow
 	}; !bytes.Equal(got, want) {
 		t.Fatalf("destination packet payload = % X, want % X", got, want)
 	}
@@ -86,7 +82,8 @@ func TestMovementPacketFixtures(t *testing.T) {
 	x, _ := packet.ReadUInt16()
 	y, _ := packet.ReadUInt16()
 	z, _ := packet.ReadUInt16()
-	if uid != 42 || !hasDestination || region != uint16(target.Region.ID) || x != uint16(int16(target.Offset.X)) || y != uint16(target.Offset.Y) || z != uint16(int16(target.Offset.Z)) {
+	hasSource, _ := packet.ReadBool()
+	if uid != 42 || !hasDestination || hasSource || region != uint16(target.Region.ID) || x != uint16(int16(target.Offset.X)) || y != uint16(target.Offset.Y) || z != uint16(int16(target.Offset.Z)) {
 		t.Fatalf("destination packet fixture mismatch uid=%d destination=%t region=%d xyz=(%d,%d,%d)", uid, hasDestination, region, x, y, z)
 	}
 

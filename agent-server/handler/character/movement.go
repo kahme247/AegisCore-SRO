@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -86,6 +87,10 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 			mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 			movementService.Turn(player, float32(request.Directional.Heading))
 		} else {
+			if player.CombatMovementRestricted(time.Now()) {
+				movementService.Stop(player, "combat-status-control")
+				return
+			}
 			mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 			movementService.WalkToDirection(player, float32(request.Directional.Heading))
 		}
@@ -93,6 +98,16 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 	}
 
 	destination := request.Destination
+	if destination.Extended {
+		// The stock wire form is decoded so the packet boundary stays exact, but
+		// the current world partition deliberately owns no dungeon planes.
+		mh.rejectMalformed(player, "dungeon destination", fmt.Errorf("region %d is not owned by this world", destination.RegionID))
+		return
+	}
+	if player.CombatMovementRestricted(time.Now()) {
+		movementService.Stop(player, "combat-status-control")
+		return
+	}
 	regionID := destination.RegionID
 	offset := math32.NewVector3(float32(destination.X), float32(destination.Y), float32(destination.Z))
 	targetPosition, err := resolveDestinationPosition(world, regionID, offset)
@@ -176,6 +191,10 @@ func (mh *MovementHandler) handleForward(data server.PacketChannelData) {
 		mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 		movementService.Stop(player, "forward-release")
 	} else {
+		if player.CombatMovementRestricted(time.Now()) {
+			movementService.Stop(player, "combat-status-control")
+			return
+		}
 		mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 		movementService.WalkToDirection(player, float32(heading))
 	}
@@ -199,8 +218,14 @@ func (mh *MovementHandler) handleTurn(data server.PacketChannelData) {
 }
 
 func parseForwardPacket(packet *network.Packet, fallbackHeading uint16) (byte, uint16, error) {
-	if packet.DataSize != 1 && packet.DataSize != 3 {
+	if packet.DataSize != 1 && packet.DataSize != 2 && packet.DataSize != 3 {
 		return 0, 0, fmt.Errorf("invalid forward payload length %d", packet.DataSize)
+	}
+	// The pinned vSRO 1.188 constructor writes only heading:uint16. Keep the
+	// older action and action+heading emulator forms as explicit compatibility.
+	if packet.DataSize == 2 {
+		heading, err := packet.ReadUInt16()
+		return 1, heading, err
 	}
 	action, err := packet.ReadByte()
 	if err != nil {

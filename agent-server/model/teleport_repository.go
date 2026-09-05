@@ -15,6 +15,7 @@ var (
 	ErrTeleportLevelRequired         = errors.New("character level is too low for teleport")
 	ErrTeleportInsufficientGold      = errors.New("insufficient gold for teleport")
 	ErrTeleportOutcomeUnknown        = errors.New("teleport commit outcome is unknown")
+	ErrTeleportPointNotFound         = errors.New("teleport point does not exist")
 )
 
 type TeleportDestination struct {
@@ -38,6 +39,13 @@ type TeleportRepository interface {
 	Commit(context.Context, int64, uint32, uint32, uint32) (TeleportResult, error)
 }
 
+// TeleportDesignationRepository is implemented separately so focused tests
+// and alternate catalog providers can support normal travel without also
+// pretending to persist a bind-point change.
+type TeleportDesignationRepository interface {
+	Designate(context.Context, int64, uint32, uint32) (uint32, error)
+}
+
 type SQLTeleportRepository struct{ shard *sql.DB }
 
 func NewTeleportRepository(shard *sql.DB) (*SQLTeleportRepository, error) {
@@ -58,6 +66,64 @@ func (r *SQLTeleportRepository) Quote(ctx context.Context, sourceNPCRefID, targe
 		return TeleportDestination{}, ErrTeleportRepositoryUnavailable
 	}
 	return scanTeleportDestination(r.shard.QueryRowContext(normalizeTeleportContext(ctx), selectTeleportLink, sourceNPCRefID, targetTeleportID))
+}
+
+// Designate persists the selected teleport building as the character's bind
+// city. The caller has already authenticated the selected world object; the
+// transaction repeats the owner and catalog checks so a stale or forged
+// request cannot change another character's return point.
+func (r *SQLTeleportRepository) Designate(ctx context.Context, characterID int64, userID, sourceNPCRefID uint32) (uint32, error) {
+	if r == nil || r.shard == nil {
+		return 0, ErrTeleportRepositoryUnavailable
+	}
+	if characterID <= 0 || userID == 0 || sourceNPCRefID == 0 {
+		return 0, ErrTeleportCharacterNotFound
+	}
+	ctx = normalizeTeleportContext(ctx)
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var owner uint32
+	if err = tx.QueryRowContext(ctx, "SELECT FK_USER FROM `CHAR` WHERE ID=? FOR UPDATE", characterID).Scan(&owner); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrTeleportCharacterNotFound
+		}
+		return 0, err
+	}
+	if owner != userID {
+		return 0, ErrTeleportOwnerMismatch
+	}
+	var teleportID uint32
+	if err = tx.QueryRowContext(ctx, "SELECT ID FROM TELEPORT_POINT WHERE NPC_REF_OBJ_ID=? AND SERVICE=1 LIMIT 1", sourceNPCRefID).Scan(&teleportID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrTeleportPointNotFound
+		}
+		return 0, err
+	}
+	write, err := tx.ExecContext(ctx, "UPDATE `CHAR` SET RETURN_TELEPORT_ID=?,UTIME=CURRENT_TIMESTAMP WHERE ID=? AND FK_USER=?", teleportID, characterID, userID)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := write.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if rows != 1 {
+		return 0, fmt.Errorf("teleport designation affected %d rows", rows)
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, errors.Join(ErrTeleportOutcomeUnknown, err)
+	}
+	committed = true
+	return teleportID, nil
 }
 
 func (r *SQLTeleportRepository) Commit(ctx context.Context, characterID int64, userID, sourceNPCRefID, targetTeleportID uint32) (result TeleportResult, err error) {

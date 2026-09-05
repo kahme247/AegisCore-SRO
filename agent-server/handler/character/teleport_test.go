@@ -46,6 +46,8 @@ type teleportRepositoryFake struct {
 	err         error
 	quotes      int
 	commits     int
+	designates  int
+	designated  uint32
 }
 
 func (f *teleportRepositoryFake) Quote(context.Context, uint32, uint32) (model.TeleportDestination, error) {
@@ -56,6 +58,51 @@ func (f *teleportRepositoryFake) Quote(context.Context, uint32, uint32) (model.T
 func (f *teleportRepositoryFake) Commit(context.Context, int64, uint32, uint32, uint32) (model.TeleportResult, error) {
 	f.commits++
 	return f.result, f.err
+}
+
+func (f *teleportRepositoryFake) Designate(context.Context, int64, uint32, uint32) (uint32, error) {
+	f.designates++
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.designated = 1
+	return f.designated, nil
+}
+
+func TestTeleportDesignationPersistsSelectedBuildingAndReturnsB059Success(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not prepare an in-world teleport session")
+	}
+	session.UserContext.UserID = 7
+	gate := &model.TeleportGate{SRObject: model.SRObject{
+		UniqueID: 102, RefObjectID: 2094, Name: "STORE_CH_GATE",
+		TypeInfo: model.TypeInfo{TypeID1: 4}, RtNavmeshPosition: selectEntityPosition(30000, 20, 0, 20),
+	}}
+	if !player.GetKnownObjectList().AddObject(gate) {
+		t.Fatal("fixture could not add teleport gate to known-object list")
+	}
+	world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{gate.GetUniqueID(): gate}, distance: selectionKnownRange,
+	}}
+	repository := &teleportRepositoryFake{}
+	handler := NewTeleportHandler(world, repository)
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	npcInteractions.Record(player.GetUniqueID(), gate.GetUniqueID(), gate.GetRefObjectID(), teleportTaskUse)
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(gate.GetUniqueID())
+	if err := handler.handleDesignate(context.Background(), session, request); err != nil {
+		t.Fatalf("handleDesignate: %v", err)
+	}
+	if repository.designates != 1 || repository.designated != 1 {
+		t.Fatalf("designation calls=%d id=%d, want one persisted bind point", repository.designates, repository.designated)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.TeleportDesignateResponse || !reflect.DeepEqual(sent[0].Payload(), []byte{1}) {
+		t.Fatalf("designation response = %#v, want B059/01", sent)
+	}
 }
 
 func TestTeleportUsesValidatedLinkAndCompletesLoadingHandshake(t *testing.T) {
@@ -171,6 +218,28 @@ func TestReturnScrollUsesTeleportLoadingHandshakeWithoutGateResponse(t *testing.
 	}
 	if bootstraps != 1 {
 		t.Fatalf("bootstrap calls = %d, want 1", bootstraps)
+	}
+}
+
+func TestTeleportCancelAbortsPreparedReturnScrollCast(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not prepare an in-world session")
+	}
+	world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{player: player}}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	if err := handler.PrepareItemReturn(session, player); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.handleCancel(context.Background(), session, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("handleCancel() error = %v", err)
+	}
+	if session.LifecyclePhase() != server.SessionInWorld {
+		t.Fatalf("cancelled phase = %s, want in-world", session.LifecyclePhase())
+	}
+	if err := handler.CompleteItemReturn(session, player, model.TeleportDestination{}); err == nil {
+		t.Fatal("cancelled return-scroll cast completed")
 	}
 }
 

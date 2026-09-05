@@ -23,7 +23,11 @@ func (obj RtNavmeshObj) IsPositionInObjectCell(vPosLocal *math32.Vector3) bool {
 	}
 
 	for _, cell := range obj.Cells {
-		if inTri, _ := cell.Triangle.FindHeight(vPosLocal); inTri {
+		// Triangle.FindHeight writes the resolved height back into its argument.
+		// Containment is an X/Z query and must not change the caller's movement
+		// height, which is needed to distinguish overlapping vertical layers.
+		candidate := vPosLocal.Clone()
+		if inTri, _ := cell.Triangle.FindHeight(candidate); inTri {
 			return true
 		}
 	}

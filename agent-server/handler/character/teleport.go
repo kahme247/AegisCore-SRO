@@ -46,9 +46,81 @@ func RegisterTeleportHandler(target *server.Server, repository model.TeleportRep
 		return nil
 	}
 	handler := NewTeleportHandler(service.GetWorldServiceInstance(), repository)
+	target.RegisterHandler(opcode.TeleportDesignateRequest, handler.handleDesignate)
 	target.RegisterHandler(opcode.TeleportUseRequest, handler.handleUse)
+	target.RegisterHandler(opcode.TeleportCancelRequest, handler.handleCancel)
 	target.RegisterHandler(opcode.TeleportReadyResponse, handler.handleReady)
 	return handler
+}
+
+// handleDesignate implements the stock 0x7059 bind-point request. The wire
+// payload is exactly the selected world-object UID; the response carries only
+// the one-byte success/failure status recovered from the GameServer/client
+// family. The catalog write is intentionally separate from teleport use:
+// designating a gate does not charge gold or move the player.
+func (h *TeleportHandler) handleDesignate(ctx context.Context, session *server.Session, packet network.Packet) error {
+	if packet.Remaining() != 4 {
+		return fmt.Errorf("teleport designation payload length %d, want 4", packet.Remaining())
+	}
+	npcUID, err := packet.ReadUInt32()
+	if err != nil {
+		return fmt.Errorf("read teleport designation target: %w", err)
+	}
+	if h == nil {
+		return fmt.Errorf("teleport designation handler is unavailable")
+	}
+	if h.world == nil || h.repository == nil {
+		return h.rejectDesignation(session, 1)
+	}
+	designation, ok := h.repository.(model.TeleportDesignationRepository)
+	if !ok {
+		return h.rejectDesignation(session, 1)
+	}
+	player, err := resolveSelectingPlayer(h.world, session)
+	if err != nil {
+		return err
+	}
+	interaction, ok := npcInteractions.Get(player.GetUniqueID())
+	if !ok || interaction.NPCUniqueID != npcUID || interaction.Action != teleportTaskUse {
+		return h.rejectDesignation(session, 1)
+	}
+	if err = validateNPCSelection(h.world, player, npcUID); err != nil {
+		return h.rejectDesignation(session, 1)
+	}
+	object, err := h.world.GetObjectByUniqueId(npcUID)
+	if err != nil || object == nil {
+		return h.rejectDesignation(session, 1)
+	}
+	// The stock selection data advertises designation only for a teleport
+	// building. Ferry NPCs share the use/link path but expose no bind-point
+	// task, so a forged 0x7059 for a ferry must not change RETURN_TELEPORT_ID.
+	if gate, ok := object.(*model.TeleportGate); !ok || !model.IsTeleportGateObject(gate) {
+		return h.rejectDesignation(session, 1)
+	}
+	if _, err = designation.Designate(ctx, int64(player.ID), session.UserContext.UserID, interaction.NPCRefObjectID); err != nil {
+		if errors.Is(err, model.ErrTeleportOutcomeUnknown) {
+			return fmt.Errorf("teleport designation outcome is unknown: %w", err)
+		}
+		return h.rejectDesignation(session, 1)
+	}
+	return h.sendPacket(session, buildTeleportDesignationSuccess())
+}
+
+func (h *TeleportHandler) handleCancel(_ context.Context, session *server.Session, packet network.Packet) error {
+	if packet.Remaining() != 0 {
+		return fmt.Errorf("teleport cancel contains %d trailing bytes", packet.Remaining())
+	}
+	if h == nil || session == nil || session.LifecyclePhase() != server.SessionCharacterLoading {
+		return fmt.Errorf("teleport cancel has no active cast")
+	}
+	h.mu.Lock()
+	_, alreadyCommitted := h.pending[session]
+	h.mu.Unlock()
+	if alreadyCommitted {
+		return fmt.Errorf("teleport cancel arrived after teleport commit")
+	}
+	session.AbortTeleportLoading()
+	return nil
 }
 
 // PrepareItemReturn reserves the same loading lifecycle used by gate
@@ -257,6 +329,14 @@ func (h *TeleportHandler) reject(session *server.Session, code uint16) error {
 	return h.sendPacket(session, packet)
 }
 
+func (h *TeleportHandler) rejectDesignation(session *server.Session, code uint16) error {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.TeleportDesignateResponse
+	packet.WriteByte(2)
+	packet.WriteUInt16(code)
+	return h.sendPacket(session, packet)
+}
+
 func (h *TeleportHandler) sendPacket(session *server.Session, packet network.Packet) error {
 	if h.send != nil {
 		return h.send(session, packet)
@@ -267,6 +347,13 @@ func (h *TeleportHandler) sendPacket(session *server.Session, packet network.Pac
 func buildTeleportSuccess() network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.TeleportUseResponse
+	packet.WriteByte(1)
+	return packet
+}
+
+func buildTeleportDesignationSuccess() network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.TeleportDesignateResponse
 	packet.WriteByte(1)
 	return packet
 }

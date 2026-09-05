@@ -2,6 +2,7 @@ package service
 
 import (
 	"sort"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
@@ -347,7 +348,11 @@ func (w *WorldService) reconcilePlayerObject(player *model.Player, object model.
 	if inRange {
 		playerList.AddObject(object)
 		if objectList != nil {
-			objectList.AddObject(player)
+			if player.GetBodyState() == model.Stealth || player.GetBodyState() == model.Invisible || player.GetBodyState() == model.GmInvisible {
+				objectList.RemoveObject(player)
+			} else {
+				objectList.AddObject(player)
+			}
 		}
 		return
 	}
@@ -398,16 +403,22 @@ func (w *WorldService) reconcilePlayerPair(player, other *model.Player) []Visibi
 		rangeLimit = visibilityExitRange
 	}
 	inRange := playerList != nil && otherList != nil &&
-		visibilityEligible(player) && visibilityEligible(other) &&
+		visibilityObserverEligible(player) && visibilityObserverEligible(other) &&
 		w.playersAreWithinVisibilityRange(player, other, rangeLimit)
 
 	deltas := make([]VisibilityDelta, 0, 2)
 	if inRange {
-		if playerList.AddObject(other) {
+		if w.playerCanSee(player, other) && playerList.AddObject(other) {
 			deltas = append(deltas, VisibilityDelta{ObserverUID: player.GetUniqueID(), SubjectUID: other.GetUniqueID(), Kind: VisibilityAdded})
 		}
-		if otherList.AddObject(player) {
+		if !w.playerCanSee(player, other) && playerList.RemoveObject(other) {
+			deltas = append(deltas, VisibilityDelta{ObserverUID: player.GetUniqueID(), SubjectUID: other.GetUniqueID(), Kind: VisibilityRemoved})
+		}
+		if w.playerCanSee(other, player) && otherList.AddObject(player) {
 			deltas = append(deltas, VisibilityDelta{ObserverUID: other.GetUniqueID(), SubjectUID: player.GetUniqueID(), Kind: VisibilityAdded})
+		}
+		if !w.playerCanSee(other, player) && otherList.RemoveObject(player) {
+			deltas = append(deltas, VisibilityDelta{ObserverUID: other.GetUniqueID(), SubjectUID: player.GetUniqueID(), Kind: VisibilityRemoved})
 		}
 		return deltas
 	}
@@ -422,7 +433,37 @@ func (w *WorldService) reconcilePlayerPair(player, other *model.Player) []Visibi
 }
 
 func visibilityEligible(player *model.Player) bool {
-	return player != nil && player.GetUniqueID() != 0 && player.GetLifeState() == model.Alive && player.GetBodyState() != model.Invisible
+	return visibilityObserverEligible(player)
+}
+
+func visibilityObserverEligible(player *model.Player) bool {
+	return player != nil && player.GetUniqueID() != 0 && player.GetLifeState() == model.Alive
+}
+
+func (w *WorldService) playerCanSee(observer, subject *model.Player) bool {
+	if !visibilityObserverEligible(observer) || !visibilityObserverEligible(subject) {
+		return false
+	}
+	switch subject.GetBodyState() {
+	case model.GmInvisible:
+		return false
+	case model.Stealth, model.Invisible:
+		if w.referenceData == nil {
+			return false
+		}
+		now := time.Now()
+		state, level, hidden := subject.HiddenBodyState(w.referenceData, now)
+		if !hidden || state != subject.GetBodyState() {
+			return false
+		}
+		hideMask := 1
+		if state == model.Invisible {
+			hideMask = 2
+		}
+		return observer.DetectsHidden(w.referenceData, hideMask, level, now)
+	default:
+		return true
+	}
 }
 
 func (w *WorldService) playersAreWithinVisibilityRange(first, second *model.Player, rangeLimit float32) bool {

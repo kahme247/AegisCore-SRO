@@ -297,8 +297,19 @@ func (r *Region) RemoveVisibleObject(object ISRObject) {
 }
 
 func (p *Player) GetMovementSpeed() float32 {
+	transport := p.COSState.Snapshot()
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
+	if transport.Mounted {
+		if ref, exists := RefChars[transport.TransportRefObjectID]; exists {
+			if p.MotionState == Walking && ref.Speed1 > 0 {
+				return float32(ref.Speed1)
+			}
+			if ref.Speed2 > 0 {
+				return float32(ref.Speed2)
+			}
+		}
+	}
 	multiplier := float32(100+p.speedEffectPercent) / 100
 	if p.BodyState == Berserker {
 		multiplier *= BerserkSpeedMultiplier

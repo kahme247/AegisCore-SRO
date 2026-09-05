@@ -9,6 +9,8 @@ const (
 	CollisionObject
 )
 
+const objectCollisionVerticalTolerance = float32(50)
+
 type CollisionFlag byte
 
 func (f CollisionFlag) IsTerrain() bool {
@@ -24,7 +26,9 @@ type Collision struct {
 	VectorGlobal *math32.Vector3
 	ContactEdge  RtNavmeshEdge
 	Region
-	Flag CollisionFlag
+	Flag          CollisionFlag
+	ObjectWorldID int
+	ObjectID      int16
 }
 
 func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
@@ -246,8 +250,8 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 		vCurLocal := positionInRegion(cur, object.Region).ApplyMatrix4(object.GetWorldToLocal())
 		vNextLocal := positionInRegion(next, object.Region).ApplyMatrix4(object.GetWorldToLocal())
 
-		curInObject := object.Object.IsPositionInObjectCell(vCurLocal)
-		nextInObject := object.Object.IsPositionInObjectCell(vNextLocal)
+		curInObject := isPositionInObjectLayer(object.Object, vCurLocal)
+		nextInObject := isPositionInObjectLayer(object.Object, vNextLocal)
 		if !curInObject && !nextInObject {
 			// skip
 			continue
@@ -263,18 +267,26 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 
 		for _, gEdge := range object.Object.GlobalEdges {
 			line2 := gEdge.GetLine()
-			if intersects, vIntersection := line1.Intersects(line2); intersects {
+			if intersects, vIntersection := line2.Intersects3D(line1); intersects {
+				// Object meshes can overlap in X/Z while representing a different
+				// floor, tunnel, or terrain layer. A collider far above or below
+				// the character must not become an invisible wall.
+				if math32.Abs(vCurLocal.Y-vIntersection.Y) > objectCollisionVerticalTolerance {
+					continue
+				}
 				// Bridge edges are the authored transition between an object's
 				// walkable surface and the surrounding terrain. They must remain
 				// passable in both directions; treating a bridge as blocked while
 				// exiting traps players inside structures such as Jangan's gates.
 				if gEdge.GetFlag().IsBlocked() {
 					gCollisions = append(gCollisions, Collision{
-						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y).ApplyMatrix4(object.GetLocalToWorld()),
-						ContactEdge:  &gEdge,
-						Region:       object.Region,
-						Flag:         CollisionObject,
+						VectorLocal:   vIntersection,
+						VectorGlobal:  vIntersection.Clone().ApplyMatrix4(object.GetLocalToWorld()),
+						ContactEdge:   &gEdge,
+						Region:        object.Region,
+						Flag:          CollisionObject,
+						ObjectWorldID: object.WorldID,
+						ObjectID:      object.ID,
 					})
 				}
 			}
@@ -282,14 +294,19 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 
 		for _, iEdge := range object.Object.InternalEdges {
 			line2 := iEdge.GetLine()
-			if intersects, vIntersection := line1.Intersects(line2); intersects {
+			if intersects, vIntersection := line2.Intersects3D(line1); intersects {
+				if vIntersection.Y < vCurLocal.Y && vCurLocal.Y-vIntersection.Y > objectCollisionVerticalTolerance {
+					continue
+				}
 				if iEdge.GetFlag().IsBlocked() {
 					iCollisions = append(iCollisions, Collision{
-						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y).ApplyMatrix4(object.GetLocalToWorld()),
-						ContactEdge:  &iEdge,
-						Region:       object.Region,
-						Flag:         CollisionObject,
+						VectorLocal:   vIntersection,
+						VectorGlobal:  vIntersection.Clone().ApplyMatrix4(object.GetLocalToWorld()),
+						ContactEdge:   &iEdge,
+						Region:        object.Region,
+						Flag:          CollisionObject,
+						ObjectWorldID: object.WorldID,
+						ObjectID:      object.ID,
 					})
 				}
 			}
@@ -333,6 +350,20 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 	}
 
 	return false, Collision{}, inObj, objPos
+}
+
+func isPositionInObjectLayer(object RtNavmeshObj, position *math32.Vector3) bool {
+	if !object.IsPositionInObjectGrid(position) {
+		return false
+	}
+	for _, cell := range object.Cells {
+		candidate := position.Clone()
+		if inCell, height := cell.Triangle.FindHeight(candidate); inCell &&
+			math32.Abs(position.Y-height) <= objectCollisionVerticalTolerance {
+			return true
+		}
+	}
+	return false
 }
 
 func positionInRegion(position RtNavmeshPosition, region Region) *math32.Vector3 {

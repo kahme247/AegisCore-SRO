@@ -52,6 +52,55 @@ func TestBlockedObjectBoundaryStopsMovement(t *testing.T) {
 	}
 }
 
+func TestObjectBoundaryOnDifferentVerticalLayerDoesNotStopMovement(t *testing.T) {
+	object := rectangularTestObject(0, 0, 10, 10, LineSegment{
+		A: math32.NewVector3(5, 0, 0),
+		B: math32.NewVector3(5, 0, 10),
+	})
+	object.GlobalEdges[0].Flag = RtNavmeshEdgeFlag(3)
+	identity := math32.NewMatrix4()
+	region := NewRegionFromXAndY(100, 100)
+	instance := RtNavmeshInstObj{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: object, LocalToWorld: identity, WorldToLocal: identity},
+		Region:            region,
+	}
+	current := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(4, 74, 5)}
+	next := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(6, 74, 5)}
+	currentLocal := positionInRegion(current, region).ApplyMatrix4(instance.GetWorldToLocal())
+	if math32.Abs(currentLocal.Y-74) > 0.001 {
+		t.Fatalf("unexpected transformed height: %f", currentLocal.Y)
+	}
+	intersects, intersection := object.GlobalEdges[0].GetLine().Intersects3D(LineSegment{A: currentLocal, B: positionInRegion(next, region)})
+	if !intersects || math32.Abs(currentLocal.Y-intersection.Y) <= objectCollisionVerticalTolerance {
+		t.Fatalf("test does not cross a separate vertical layer: current=%v intersection=%v", currentLocal, intersection)
+	}
+
+	collides, collision, _, _ := FindObjectCollisions(current, next, []RtNavmeshInstObj{instance}, nil)
+	if collides {
+		t.Fatalf("object boundary 74 units below movement became an invisible wall: %+v", collision.VectorLocal)
+	}
+}
+
+func TestDifferentVerticalLayerDoesNotAdoptObjectHeight(t *testing.T) {
+	object := rectangularTestObject(0, 0, 10, 10, LineSegment{
+		A: math32.NewVector3(10, 0, 0),
+		B: math32.NewVector3(10, 0, 10),
+	})
+	identity := math32.NewMatrix4()
+	region := NewRegionFromXAndY(100, 100)
+	instance := RtNavmeshInstObj{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: object, LocalToWorld: identity, WorldToLocal: identity},
+		Region:            region,
+	}
+	current := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(4, 74, 5)}
+	next := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(6, 74, 5)}
+
+	_, _, inObject, objectPosition := FindObjectCollisions(current, next, []RtNavmeshInstObj{instance}, nil)
+	if inObject || objectPosition != nil {
+		t.Fatal("movement adopted the height of a distant overlapping object layer")
+	}
+}
+
 func TestBlockedObjectBoundaryStillStopsFromContactPoint(t *testing.T) {
 	object := RtNavmeshObj{
 		Cells: []RtNavmeshCellTri{{Triangle: Triangle{

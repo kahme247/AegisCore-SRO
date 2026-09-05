@@ -227,7 +227,7 @@ func TestWorldVisibilityReconcileEmitsNoDuplicateDeltas(t *testing.T) {
 	}
 }
 
-func TestWorldVisibilityFiltersNonAliveAndInvisiblePlayers(t *testing.T) {
+func TestWorldVisibilityFiltersNonAlivePlayers(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		configure func(*model.Player)
@@ -242,13 +242,6 @@ func TestWorldVisibilityFiltersNonAliveAndInvisiblePlayers(t *testing.T) {
 			name: "dead",
 			configure: func(player *model.Player) {
 				player.SetLifeState(model.Dead)
-			},
-		},
-		{
-			name: "invisible",
-			configure: func(player *model.Player) {
-				player.SetLifeState(model.Alive)
-				player.SetBodyState(model.Invisible)
 			},
 		},
 	} {
@@ -267,6 +260,74 @@ func TestWorldVisibilityFiltersNonAliveAndInvisiblePlayers(t *testing.T) {
 				t.Fatal("filtered player entered a reciprocal known list")
 			}
 		})
+	}
+}
+
+func TestWorldVisibilityHiddenPlayerStillObservesVisiblePeer(t *testing.T) {
+	regionID := int16(25000)
+	alice := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	bob := newVisibilityTestPlayer(2, "Bob", visibilityTestPosition(regionID, 140, 100))
+	world := newVisibilityTestWorld(t, alice, bob)
+	alice.SetLifeState(model.Alive)
+	bob.SetLifeState(model.Alive)
+	bob.SetBodyState(model.Invisible)
+
+	deltas := world.ReconcileCharacterVisibility(alice)
+	want := []VisibilityDelta{{ObserverUID: bob.GetUniqueID(), SubjectUID: alice.GetUniqueID(), Kind: VisibilityAdded}}
+	if !reflect.DeepEqual(deltas, want) {
+		t.Fatalf("directional hidden deltas = %#v, want %#v", deltas, want)
+	}
+	if alice.GetKnownObjectList().Knows(bob) || !bob.GetKnownObjectList().Knows(alice) {
+		t.Fatal("hidden subject visibility was not directional")
+	}
+}
+
+func TestWorldVisibilityHiddenPlayerStillObservesNPC(t *testing.T) {
+	regionID := int16(25000)
+	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	player.SetLifeState(model.Alive)
+	player.SetBodyState(model.Stealth)
+	world := newVisibilityTestWorld(t, player)
+	npc := newVisibilityTestNPC(visibilityTestPosition(regionID, 140, 100))
+	world.AddVisibleObject(npc)
+
+	world.ReconcileCharacterVisibility(player)
+	if !player.GetKnownObjectList().Knows(npc) {
+		t.Fatal("hidden player could not observe nearby NPC")
+	}
+	if npc.GetKnownObjectList().Knows(player) {
+		t.Fatal("NPC observed hidden player")
+	}
+}
+
+func TestWorldVisibilityDetectorRevealsOnlyCompatibleHideMaskAndLevel(t *testing.T) {
+	regionID := int16(25000)
+	observer := newVisibilityTestPlayer(1, "Observer", visibilityTestPosition(regionID, 100, 100))
+	hidden := newVisibilityTestPlayer(2, "Hidden", visibilityTestPosition(regionID, 140, 100))
+	world := newVisibilityTestWorld(t, observer, hidden)
+	observer.SetLifeState(model.Alive)
+	hidden.SetLifeState(model.Alive)
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		10: {ID: 10, HideType: 1, HideLevel: 8},
+		20: {ID: 20, DetectionType: 5, DetectionLevel: 8, ReferenceRadius: 100},
+	}})
+	world.ConfigureReferenceData(catalog)
+	if _, ok := hidden.CommitActiveBuff(10, 1001, time.Minute, model.BuffModifiers{}); !ok {
+		t.Fatal("commit hide")
+	}
+	hidden.SetBodyState(model.Stealth)
+	if _, ok := observer.CommitActiveBuff(20, 2001, time.Minute, model.BuffModifiers{}); !ok {
+		t.Fatal("commit detection")
+	}
+
+	world.ReconcileCharacterVisibility(observer)
+	if !observer.GetKnownObjectList().Knows(hidden) {
+		t.Fatal("compatible dtt mask and level did not reveal hidden player")
+	}
+	observer.RemoveActiveBuff(2001)
+	world.ReconcileCharacterVisibility(observer)
+	if observer.GetKnownObjectList().Knows(hidden) {
+		t.Fatal("hidden player remained revealed after detection removal")
 	}
 }
 

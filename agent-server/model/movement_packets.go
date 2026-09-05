@@ -12,8 +12,6 @@ func BuildMovementUpdatePacket(character ICharacter, movement MovementData, star
 			EntityUniqueID: character.GetUniqueID(),
 			TargetRegion:   uint16(movement.TargetPosition.Region.ID), TargetX: int16(movement.TargetPosition.Offset.X),
 			TargetY: int16(movement.TargetPosition.Offset.Y), TargetZ: int16(movement.TargetPosition.Offset.Z),
-			SourceRegion: uint16(startPosition.Region.ID), SourceX: uint16(startPosition.Offset.X) * 10,
-			SourceY: startPosition.Offset.Y, SourceZ: uint16(startPosition.Offset.Z) * 10,
 		})
 		return packet
 	}
@@ -28,6 +26,14 @@ func BuildPositionUpdatePacket(character ICharacter) network.Packet {
 	packet, _ := (vsro188.EntityPositionUpdateCodec{}).Encode(vsro188.EntityPositionUpdate{
 		EntityUniqueID: character.GetUniqueID(), Region: uint16(position.Region.ID),
 		X: position.Offset.X, Y: position.Offset.Y, Z: position.Offset.Z, Heading: uint16(position.Heading),
+	})
+	return packet
+}
+
+func BuildTurnUpdatePacket(character ICharacter) network.Packet {
+	packet, _ := (vsro188.EntityTurnResponseCodec{}).Encode(vsro188.EntityTurnResponse{
+		EntityUniqueID: character.GetUniqueID(),
+		Heading:        uint16(character.GetNavmeshPosition().Heading),
 	})
 	return packet
 }

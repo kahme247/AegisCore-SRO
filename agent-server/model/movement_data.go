@@ -15,6 +15,9 @@ type MovementData struct {
 	TargetPosition navmeshv2.RtNavmeshPosition
 	HasDestination bool
 	DirectionAngle float32
+	// SpeedOverride pins movement authority to a mounted transport's run
+	// speed while the owner remains the server-side position anchor.
+	SpeedOverride float32
 }
 
 func HeadingToRadians(heading float32) float32 {
