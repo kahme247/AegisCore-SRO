@@ -45,3 +45,12 @@ func TestWriteGuildMatchesVSRO188MemberLayout(t *testing.T) {
 		t.Fatalf("guild payload is incomplete: %v", p.Payload())
 	}
 }
+
+func TestAcademySuccessResponsesDoNotEmbedUnverifiedSnapshot(t *testing.T) {
+	for _, messageID := range []uint16{opcode.AcademyCreateResponse, opcode.AcademyMatchingJoinResponse} {
+		packet := operationPacket(messageID, nil)
+		if got := packet.Payload(); len(got) != 1 || got[0] != 1 {
+			t.Fatalf("academy response 0x%04X payload = %v, want result envelope only", messageID, got)
+		}
+	}
+}

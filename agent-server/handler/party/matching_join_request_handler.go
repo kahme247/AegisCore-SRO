@@ -22,7 +22,10 @@ func (h *PartyHandler) handleMatchingJoin(_ context.Context, session *server.Ses
 		return h.sendPacket(session, buildMatchingJoinResult(false, 2))
 	}
 	requestPacket := network.EmptyPacket()
-	requestPacket.MessageID = opcode.PartyMatchingPlayerJoinRequest
+	// 0x706D is reused directionally: the client sends it to request a
+	// listing join, while the server sends it to the listing master as the
+	// approval prompt. The client's approval answer returns as 0x306E.
+	requestPacket.MessageID = opcode.PartyMatchingPlayerJoinNotification
 	requestPacket.WriteUInt32(request.RequestID)
 	requestPacket.WriteUInt32(applicant.GetUniqueID())
 	requestPacket.WriteUInt32(request.PartyNumber)

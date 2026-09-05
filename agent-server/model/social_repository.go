@@ -98,14 +98,15 @@ type AcademySnapshot struct {
 }
 
 type AcademyMatch struct {
-	AcademyID      int
-	CountryType    byte
-	Title          string
-	DisplayLevel   byte
-	LeaderLevel    byte
-	LeaderName     string
-	GraduatedCount uint32
-	HonorRank      byte
+	AcademyID       int
+	LeaderCharacter int
+	CountryType     byte
+	Title           string
+	DisplayLevel    byte
+	LeaderLevel     byte
+	LeaderName      string
+	GraduatedCount  uint32
+	HonorRank       byte
 }
 
 type JobSnapshot struct {
@@ -968,7 +969,7 @@ func (r *SQLSocialRepository) ListAcademyMatches(ctx context.Context, page byte,
 	if err := r.shard.QueryRowContext(ctx, "SELECT COUNT(*) FROM ACADEMY_MATCHING").Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.shard.QueryContext(ctx, "SELECT a.ID,m.COUNTRY_TYPE,m.TITLE,m.DISPLAY_LEVEL,c.CURRENT_LEVEL,c.CHAR_NAME,a.GRADUATED_COUNT,a.HONOR_RANK FROM ACADEMY_MATCHING m JOIN ACADEMY a ON a.ID=m.FK_ACADEMY JOIN `CHAR` c ON c.id=a.LEADER_CHAR ORDER BY a.HONOR_RANK,a.GRADUATED_COUNT DESC,a.ID LIMIT ? OFFSET ?", pageSize, int(page)*pageSize)
+	rows, err := r.shard.QueryContext(ctx, "SELECT a.ID,a.LEADER_CHAR,m.COUNTRY_TYPE,m.TITLE,m.DISPLAY_LEVEL,c.CURRENT_LEVEL,c.CHAR_NAME,a.GRADUATED_COUNT,a.HONOR_RANK FROM ACADEMY_MATCHING m JOIN ACADEMY a ON a.ID=m.FK_ACADEMY JOIN `CHAR` c ON c.id=a.LEADER_CHAR ORDER BY a.HONOR_RANK,a.GRADUATED_COUNT DESC,a.ID LIMIT ? OFFSET ?", pageSize, int(page)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -976,7 +977,7 @@ func (r *SQLSocialRepository) ListAcademyMatches(ctx context.Context, page byte,
 	list := make([]AcademyMatch, 0, pageSize)
 	for rows.Next() {
 		var m AcademyMatch
-		if err = rows.Scan(&m.AcademyID, &m.CountryType, &m.Title, &m.DisplayLevel, &m.LeaderLevel, &m.LeaderName, &m.GraduatedCount, &m.HonorRank); err != nil {
+		if err = rows.Scan(&m.AcademyID, &m.LeaderCharacter, &m.CountryType, &m.Title, &m.DisplayLevel, &m.LeaderLevel, &m.LeaderName, &m.GraduatedCount, &m.HonorRank); err != nil {
 			return nil, 0, err
 		}
 		list = append(list, m)
@@ -989,7 +990,7 @@ func (r *SQLSocialRepository) AcademyHonorRanking(ctx context.Context, limit int
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	rows, err := r.shard.QueryContext(socialContext(ctx), "SELECT a.ID,0,'',0,c.CURRENT_LEVEL,c.CHAR_NAME,a.GRADUATED_COUNT,a.HONOR_RANK FROM ACADEMY a JOIN `CHAR` c ON c.id=a.LEADER_CHAR ORDER BY a.HONOR_POINTS DESC,a.GRADUATED_COUNT DESC,a.ID LIMIT ?", limit)
+	rows, err := r.shard.QueryContext(socialContext(ctx), "SELECT a.ID,a.LEADER_CHAR,0,'',0,c.CURRENT_LEVEL,c.CHAR_NAME,a.GRADUATED_COUNT,a.HONOR_RANK FROM ACADEMY a JOIN `CHAR` c ON c.id=a.LEADER_CHAR ORDER BY a.HONOR_POINTS DESC,a.GRADUATED_COUNT DESC,a.ID LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -997,7 +998,7 @@ func (r *SQLSocialRepository) AcademyHonorRanking(ctx context.Context, limit int
 	var list []AcademyMatch
 	for rows.Next() {
 		var m AcademyMatch
-		if err = rows.Scan(&m.AcademyID, &m.CountryType, &m.Title, &m.DisplayLevel, &m.LeaderLevel, &m.LeaderName, &m.GraduatedCount, &m.HonorRank); err != nil {
+		if err = rows.Scan(&m.AcademyID, &m.LeaderCharacter, &m.CountryType, &m.Title, &m.DisplayLevel, &m.LeaderLevel, &m.LeaderName, &m.GraduatedCount, &m.HonorRank); err != nil {
 			return nil, err
 		}
 		list = append(list, m)

@@ -41,6 +41,7 @@ func RegisterPartyHandlers(target *server.Server, fallback ...interface {
 	target.RegisterHandler(opcode.PartyMatchingListRequest, handler.handleMatchingList)
 	target.RegisterHandler(opcode.PartyMatchingJoinRequest, handler.handleMatchingJoin)
 	target.RegisterHandler(opcode.PartyMatchingPlayerJoinRequest, handler.handleMatchingPlayerJoin)
+	target.RegisterHandler(opcode.PartyMatchingCompletionRequest, handler.handleMatchingPlayerJoin)
 }
 
 func (h *PartyHandler) sendPacket(session *server.Session, packet network.Packet) error {
@@ -58,4 +59,18 @@ func (h *PartyHandler) core() *service.PartyService {
 		return h.service
 	}
 	return service.GetPartyServiceInstance()
+}
+
+// partySessionJID is the durable character identity used by party records.
+// UniqueID is a live-world/session identity and must remain separate. The
+// fallback keeps isolated packet tests that intentionally omit CharacterID
+// working without allowing production sessions to conflate the two values.
+func partySessionJID(session *server.Session) uint32 {
+	if session == nil {
+		return 0
+	}
+	if session.UserContext.CharacterID > 0 {
+		return uint32(session.UserContext.CharacterID)
+	}
+	return session.UserContext.UniqueID
 }

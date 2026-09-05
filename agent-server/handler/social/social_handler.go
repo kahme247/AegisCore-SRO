@@ -666,9 +666,6 @@ func (h *Handler) academyCreate(ctx context.Context, session *server.Session, pa
 	}
 	academy, gold, err := h.repo.CreateAcademy(ctx, actor)
 	response := operationPacket(opcode.AcademyCreateResponse, err)
-	if err == nil {
-		writeAcademy(&response, academy)
-	}
 	if sendErr := h.sendPacket(session, response); sendErr != nil {
 		return sendErr
 	}
@@ -857,28 +854,43 @@ func (h *Handler) academyMatchingList(ctx context.Context, session *server.Sessi
 		return err
 	}
 	matches, pages, err := h.repo.ListAcademyMatches(ctx, page, academyPageSize)
-	response := operationPacket(opcode.AcademyMatchingListResponse, err)
-	if err == nil {
-		response.WriteByte(byte(pages))
-		response.WriteByte(page)
-		response.WriteByte(byte(len(matches)))
-		for _, m := range matches {
-			response.WriteUInt32(uint32(m.AcademyID))
-			response.WriteUInt32(0)
-			response.WriteByte(m.CountryType)
-			response.WriteString(m.Title)
-			response.WriteUInt32(0)
-			response.WriteUInt32(0)
-			response.WriteByte(m.DisplayLevel)
-			response.WriteByte(m.LeaderLevel)
-			response.WriteUInt32(0)
-			response.WriteString(m.LeaderName)
-			response.WriteUInt32(m.GraduatedCount)
-			response.WriteByte(m.HonorRank)
-			response.WriteUInt64(0)
-		}
-	}
+	response := buildAcademyMatchingListResponse(matches, pages, page, err, h.world)
 	return h.sendPacket(session, response)
+}
+
+// buildAcademyMatchingListResponse follows the recovered 0xB47D entry shape.
+// LeaderCharacter is a durable CHAR.id; the wire field is the live runtime
+// UID and is therefore resolved only at serialization time.
+func buildAcademyMatchingListResponse(matches []model.AcademyMatch, pages int, page byte, err error, world worldLookup) network.Packet {
+	response := operationPacket(opcode.AcademyMatchingListResponse, err)
+	if err != nil {
+		return response
+	}
+	response.WriteByte(byte(pages))
+	response.WriteByte(page)
+	response.WriteByte(byte(len(matches)))
+	for _, m := range matches {
+		response.WriteUInt32(uint32(m.AcademyID))
+		response.WriteUInt32(0)
+		response.WriteByte(m.CountryType)
+		response.WriteString(m.Title)
+		response.WriteUInt32(0)
+		response.WriteUInt32(0)
+		response.WriteByte(m.DisplayLevel)
+		response.WriteByte(m.LeaderLevel)
+		leaderUID := uint32(0)
+		if world != nil && m.LeaderCharacter > 0 {
+			if leader, lookupErr := world.GetPlayerByCharacterID(m.LeaderCharacter); lookupErr == nil && leader != nil {
+				leaderUID = leader.GetUniqueID()
+			}
+		}
+		response.WriteUInt32(leaderUID)
+		response.WriteString(m.LeaderName)
+		response.WriteUInt32(m.GraduatedCount)
+		response.WriteByte(m.HonorRank)
+		response.WriteUInt64(0)
+	}
+	return response
 }
 func (h *Handler) academyMatchingJoin(ctx context.Context, session *server.Session, packet network.Packet) error {
 	actor, err := socialCharacter(session)
@@ -894,9 +906,6 @@ func (h *Handler) academyMatchingJoin(ctx context.Context, session *server.Sessi
 	}
 	academy, err := h.repo.JoinAcademy(ctx, actor, int(academyID))
 	response := operationPacket(opcode.AcademyMatchingJoinResponse, err)
-	if err == nil {
-		writeAcademy(&response, academy)
-	}
 	if sendErr := h.sendPacket(session, response); sendErr != nil {
 		return sendErr
 	}
@@ -905,75 +914,22 @@ func (h *Handler) academyMatchingJoin(ctx context.Context, session *server.Sessi
 	}
 	return nil
 }
-func writeAcademy(p *network.Packet, a model.AcademySnapshot) {
-	p.WriteUInt32(uint32(a.ID))
-	p.WriteUInt32(uint32(a.LeaderCharacter))
-	p.WriteString(a.CommentTitle)
-	p.WriteString(a.CommentBody)
-	p.WriteUInt32(a.GraduatedCount)
-	p.WriteUInt32(a.HonorPoints)
-	p.WriteByte(a.HonorRank)
-	p.WriteByte(byte(len(a.Members)))
-	for _, m := range a.Members {
-		p.WriteUInt32(uint32(m.CharacterID))
-		p.WriteString(m.Name)
-		p.WriteByte(m.Class)
-		p.WriteByte(m.Level)
-		p.WriteUInt32(m.RefObjectID)
-		if m.Online {
-			p.WriteByte(0)
-		} else {
-			p.WriteByte(1)
-		}
-	}
-}
 func (h *Handler) publishAcademy(a model.AcademySnapshot) error {
-	for _, m := range a.Members {
-		player, err := h.world.GetPlayerByCharacterID(m.CharacterID)
-		if err != nil || player == nil || player.Session == nil {
-			continue
-		}
-		p := network.EmptyPacket()
-		p.MessageID = opcode.AcademyInfo
-		writeAcademy(&p, a)
-		if err = h.sendPacket(player.Session, p); err != nil {
-			return err
-		}
-	}
+	// The vSRO 1.188 client does not accept the former snapshot encoding for
+	// 0x3C81. Its handler reads a different record shape and deliberately
+	// raises an access violation when that contract is violated. Keep the
+	// persistent Academy operations available, but do not publish an
+	// unverified wire representation to connected clients.
+	_ = a
 	return nil
 }
 func (h *Handler) publishAcademyRemoval(a model.AcademySnapshot) error {
-	for _, m := range a.Members {
-		if err := h.sendAcademyRemove(m.CharacterID); err != nil {
-			return err
-		}
-	}
+	_ = a
 	return nil
 }
 func (h *Handler) publishAcademyRemovalFor(a model.AcademySnapshot, id int) error {
-	if err := h.sendAcademyRemove(id); err != nil {
-		return err
-	}
-	for _, m := range a.Members {
-		if m.CharacterID == id {
-			continue
-		}
-		current, err := h.repo.Academy(context.Background(), m.CharacterID)
-		if err == nil {
-			return h.publishAcademy(current)
-		}
-	}
+	_, _ = a, id
 	return nil
-}
-func (h *Handler) sendAcademyRemove(id int) error {
-	player, err := h.world.GetPlayerByCharacterID(id)
-	if err != nil || player == nil || player.Session == nil {
-		return nil
-	}
-	p := network.EmptyPacket()
-	p.MessageID = opcode.AcademyUpdate
-	p.WriteByte(1)
-	return h.sendPacket(player.Session, p)
 }
 
 func (h *Handler) jobJoin(ctx context.Context, session *server.Session, packet network.Packet) error {

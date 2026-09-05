@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
-	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -13,13 +12,19 @@ import (
 )
 
 func (h *PartyHandler) handleMatchingForm(_ context.Context, session *server.Session, packet network.Packet) error {
+	if h == nil || session == nil || session.UserContext.UniqueID == 0 {
+		return fmt.Errorf("party matching form session is unavailable")
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if _, err := packet.ReadUInt32(); err != nil { // TODO: possible party-number placeholder
+	// The client sends MatchingID followed by Party.ID. A newly formed
+	// listing uses zero for Party.ID; the server allocates the authoritative
+	// matching/party number below rather than trusting either client value.
+	if _, err := packet.ReadUInt32(); err != nil {
 		return err
 	}
-	if _, err := packet.ReadUInt32(); err != nil { // TODO: possible party-number placeholder
+	if _, err := packet.ReadUInt32(); err != nil {
 		return err
 	}
 	partySetting, err := packet.ReadByte()
@@ -45,10 +50,12 @@ func (h *PartyHandler) handleMatchingForm(_ context.Context, session *server.Ses
 	}
 
 	party := model.PartyFormRequest{
-		MasterJID:         session.UserContext.UniqueID,
-		MasterUniqueID:    session.UserContext.UniqueID,
-		MasterName:        session.UserContext.CharName,
-		CountryType:       0, // TODO: Figure out
+		MasterJID:      partySessionJID(session),
+		MasterUniqueID: session.UserContext.UniqueID,
+		MasterName:     session.UserContext.CharName,
+		// The TestIn handler reads this field from the matching record, but the
+		// source of the value is not recovered. Keep the neutral country value.
+		CountryType:       0,
 		PartySettingsFlag: model.PartySetting(partySetting),
 		PurposeType:       model.PartyPurpose(purposeType),
 		LevelMin:          levelMin,
@@ -56,14 +63,14 @@ func (h *PartyHandler) handleMatchingForm(_ context.Context, session *server.Ses
 		Title:             title,
 	}
 
-	partyNumber := service.GetPartyServiceInstance().FormParty(party)
+	partyNumber := h.core().FormParty(party)
 
-	// TODO Add check for existing party
+	// FormParty updates an existing listing only for its authenticated master;
+	// otherwise it creates a new listing and live party atomically.
 	p := network.EmptyPacket()
 	p.MessageID = opcode.PartyMatchingFormResponse
 	if partyNumber == 0 {
-		p.WriteByte(2)
-		return h.sendPacket(session, p)
+		return h.sendPacket(session, buildMatchingOperationFailure(opcode.PartyMatchingFormResponse))
 	}
 	p.WriteByte(1)
 	p.WriteUInt32(partyNumber)

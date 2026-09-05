@@ -11,6 +11,16 @@ import (
 	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
+// PartyMatchingErrorNotFound is the corroborated vSRO response code for a
+// missing matching entry/party. It is a wire value, not a replacement for the
+// service's internal error taxonomy.
+const PartyMatchingErrorNotFound uint16 = 11292
+
+const (
+	partyMatchingJoinDenied   uint16 = 1
+	partyMatchingJoinAccepted uint16 = 2
+)
+
 func buildInvitation(invite service.PartyInvitation) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.PartyInvitation
@@ -40,11 +50,36 @@ func buildMatchingJoinResult(success bool, answer byte) network.Packet {
 	packet.MessageID = opcode.PartyMatchingJoinResponse
 	if success {
 		packet.WriteByte(1)
+		joinResult := partyMatchingJoinDenied
+		if answer == 1 {
+			joinResult = partyMatchingJoinAccepted
+		}
+		packet.WriteUInt16(joinResult)
 	} else {
 		packet.WriteByte(2)
+		packet.WriteUInt16(PartyMatchingErrorNotFound)
 	}
-	packet.WriteByte(answer)
-	packet.WriteByte(0)
+	return packet
+}
+
+func buildMatchingDeleteResult(success bool, matchingID uint32) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.PartyMatchingDeleteResponse
+	if success {
+		packet.WriteByte(1)
+		packet.WriteUInt32(matchingID)
+		return packet
+	}
+	packet.WriteByte(2)
+	packet.WriteUInt16(PartyMatchingErrorNotFound)
+	return packet
+}
+
+func buildMatchingOperationFailure(messageID uint16) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = messageID
+	packet.WriteByte(2)
+	packet.WriteUInt16(PartyMatchingErrorNotFound)
 	return packet
 }
 

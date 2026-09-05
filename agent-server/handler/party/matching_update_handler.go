@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
-	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -14,14 +13,19 @@ import (
 )
 
 func (h *PartyHandler) handleMatchingUpdate(_ context.Context, session *server.Session, packet network.Packet) error {
+	if h == nil || session == nil || session.UserContext.UniqueID == 0 {
+		return fmt.Errorf("party matching update session is unavailable")
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	partyNumber, err := packet.ReadUInt32()
+	matchingID, err := packet.ReadUInt32()
 	if err != nil {
 		return err
 	}
-	if _, err := packet.ReadUInt32(); err != nil { // TODO: possible party-number placeholder
+	// Party.ID is present in the wire request but the authenticated live
+	// party/master state is authoritative for updates.
+	if _, err := packet.ReadUInt32(); err != nil {
 		return err
 	}
 	partySetting, err := packet.ReadByte()
@@ -47,11 +51,12 @@ func (h *PartyHandler) handleMatchingUpdate(_ context.Context, session *server.S
 	}
 
 	party := model.Party{
-		Number:            partyNumber,
-		MasterJID:         session.UserContext.UniqueID,
-		MasterName:        session.UserContext.CharName,
-		MasterUniqueID:    session.UserContext.UniqueID,
-		CountryType:       0, // TODO: Figure out
+		Number:         matchingID,
+		MasterJID:      partySessionJID(session),
+		MasterName:     session.UserContext.CharName,
+		MasterUniqueID: session.UserContext.UniqueID,
+		// The TestIn handler's source for CountryType is unresolved.
+		CountryType:       0,
 		PartySettingsFlag: model.PartySetting(partySetting),
 		PurposeType:       model.PartyPurpose(purposeType),
 		LevelMin:          levelMin,
@@ -60,12 +65,14 @@ func (h *PartyHandler) handleMatchingUpdate(_ context.Context, session *server.S
 		Mutex:             &sync.Mutex{},
 	}
 
-	service.GetPartyServiceInstance().UpdateParty(party)
+	if err := h.core().UpdateMatchingEntry(party); err != nil {
+		return h.sendPacket(session, buildMatchingOperationFailure(opcode.PartyMatchingUpdateResponse))
+	}
 
 	p := network.EmptyPacket()
 	p.MessageID = opcode.PartyMatchingUpdateResponse
 	p.WriteByte(1)
-	p.WriteUInt32(partyNumber)
+	p.WriteUInt32(matchingID)
 	p.WriteUInt32(0)
 	p.WriteByte(partySetting)
 	p.WriteByte(purposeType)
