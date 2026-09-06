@@ -58,6 +58,24 @@ func TestMobSpawnKeepsNeutralTalkFlagBeforeRarity(t *testing.T) {
 	}
 }
 
+func TestGroundGoldSpawnUsesItemDataAmount(t *testing.T) {
+	item := &Item{SRObject: SRObject{
+		RefObjectID: 1,
+		UniqueID:    2,
+		TypeInfo:    TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5, TypeID4: 0},
+		RtNavmeshPosition: navmeshv2.RtNavmeshPosition{
+			Region: navmeshv2.NewRegionFromInt16(25000),
+			Offset: math32.NewVector3(10, 0, 20),
+		},
+	}, Data: 54321}
+	packet := network.EmptyPacket()
+	WriteEntitySpawnData(&packet, item)
+	payload := packet.Payload()
+	if len(payload) < 8 || binary.LittleEndian.Uint32(payload[4:8]) != 54321 {
+		t.Fatalf("gold spawn payload = %x, want amount 54321 at item-data position", payload)
+	}
+}
+
 func TestMovingMobSpawnUsesStationarySnapshot(t *testing.T) {
 	mob := &NPC{SRObject: SRObject{
 		RefObjectID: 1,

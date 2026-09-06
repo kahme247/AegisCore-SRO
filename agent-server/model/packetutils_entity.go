@@ -229,7 +229,13 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 			p.WriteByte(eq.GetOptLevel())
 		} else if typeInfo.IsExpendable() {
 			if typeInfo.IsGold() {
-				p.WriteUInt32(1_000_000) // FIXME correct amount
+				// Gold candidates carry the amount in ITEM.DATA (the same
+				// item-data +0x38 field consumed by the pickup credit path).
+				if concrete, ok := object.(*Item); ok && concrete != nil {
+					p.WriteUInt32(concrete.Data)
+				} else {
+					p.WriteUInt32(0)
+				}
 			} else if typeInfo.IsTradeItem() || typeInfo.IsQuestItem() {
 				p.WriteString("Owner") // FIXME correct owner name
 			}
@@ -238,8 +244,12 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		p.WriteUInt32(object.GetUniqueID())
 		WritePosition(p, object.GetNavmeshPosition())
 
-		if ownerJID := item.GetOwner(); ownerJID > 0 {
-			p.WriteUInt32(item.GetOwner())
+		ownerJID := item.GetOwner()
+		// The mode-2/no-context item serializer writes an explicit marker
+		// presence byte before the optional owner UID.
+		p.WriteBool(ownerJID > 0)
+		if ownerJID > 0 {
+			p.WriteUInt32(ownerJID)
 		}
 		p.WriteByte(item.GetRarity())
 	} else if typeInfo.IsStructure() {
@@ -284,8 +294,11 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		if typeInfo.IsCharacter() || typeInfo.IsStructure() {
 			p.WriteByte(0) // TODO unkByte5
 		} else if typeInfo.IsItem() {
-			p.WriteByte(0)   // TODO DropSource
-			p.WriteUInt32(0) // TODO Dropper.UniqueID
+			// Stock 0x3015 appends the drop source and dropper UID after the
+			// ordinary item record. Omitting this tail makes the vSRO 1.188
+			// client terminate while creating the ground-item visual.
+			p.WriteByte(0)   // DropSource: ordinary world drop
+			p.WriteUInt32(0) // Dropper.UniqueID: no attributed dropper
 		}
 	}
 }

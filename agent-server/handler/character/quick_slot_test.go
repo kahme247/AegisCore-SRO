@@ -16,11 +16,43 @@ func (f quickSlotWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) {
 type quickSlotRepositoryFake struct {
 	characterID int
 	slot        model.CharacterQuickSlot
+	autoPotion  model.AutoPotionSettings
 	err         error
+}
+
+func (f *quickSlotRepositoryFake) LoadAutoPotionSettings(context.Context, int) (model.AutoPotionSettings, bool, error) {
+	return f.autoPotion, true, f.err
+}
+
+func (f *quickSlotRepositoryFake) SaveAutoPotionSettings(_ context.Context, characterID int, settings model.AutoPotionSettings) error {
+	f.characterID = characterID
+	f.autoPotion = settings
+	return f.err
 }
 
 func (*quickSlotRepositoryFake) LoadQuickSlots(context.Context, int) ([]model.CharacterQuickSlot, error) {
 	return nil, nil
+}
+
+func TestAutoPotionUpdatePersistsCapturedVSROPayload(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{ID: 42, Session: session}
+	repository := &quickSlotRepositoryFake{}
+	handler := &QuickSlotHandler{world: quickSlotWorldFake{player: player}, repository: repository, autoPotion: repository}
+
+	want := model.AutoPotionSettings{0x19, 0xDC, 0x1A, 0xD9, 0x13, 0x00, 0x8A}
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(autoPotionConfigType)
+	packet.WriteBytes(want[:])
+	if err := handler.handlePacket(context.Background(), session, packet); err != nil {
+		t.Fatalf("handlePacket: %v", err)
+	}
+	if repository.characterID != 42 || repository.autoPotion != want {
+		t.Fatalf("saved auto-potion settings = character %d %x, want character 42 %x", repository.characterID, repository.autoPotion, want)
+	}
+	if got, present := player.AutoPotionSettingsSnapshot(); !present || got != want {
+		t.Fatalf("runtime auto-potion settings = %x, %t; want %x, true", got, present, want)
+	}
 }
 
 func (f *quickSlotRepositoryFake) SaveQuickSlot(_ context.Context, characterID int, slot model.CharacterQuickSlot) error {

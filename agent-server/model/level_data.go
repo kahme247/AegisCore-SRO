@@ -26,6 +26,8 @@ type LevelDataRow struct {
 	Level               int
 	RequiredExperience  uint64
 	RequiredSkillPoints uint64
+	DropGoldMin         uint64
+	DropGoldMax         uint64
 }
 
 // LevelTable is loaded from the client-matched reference rows stored in the

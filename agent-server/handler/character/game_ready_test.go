@@ -138,6 +138,38 @@ func TestGameReadyPreservesPersistedDeathState(t *testing.T) {
 	}
 }
 
+func TestGameReadyRejectsActivationThatDoesNotCompleteLifeState(t *testing.T) {
+	session := newGameReadyTestSession(t)
+	if !session.BeginCharacterLoading() {
+		t.Fatal("test session could not enter character loading")
+	}
+	player := &model.Player{
+		ID:        session.UserContext.CharacterID,
+		Session:   session,
+		CharName:  session.UserContext.CharName,
+		LifeState: model.Spawning,
+		BaseStats: model.BaseStats{HP: 100, MP: 75},
+	}
+	handler := NewGameReadyHandler(&incompleteGameReadyActivation{player: player})
+
+	err := handler.handleSessionPacket(nil, session, network.EmptyClientPacket())
+	if err == nil {
+		t.Fatal("GameReady accepted an activation that left the client-facing life state spawning")
+	}
+}
+
+type incompleteGameReadyActivation struct {
+	player *model.Player
+}
+
+func (f *incompleteGameReadyActivation) GetPlayerByUniqueId(uint32) (*model.Player, error) {
+	return f.player, nil
+}
+
+func (*incompleteGameReadyActivation) ActivatePlayer(*model.Player) []service.VisibilityDelta {
+	return nil
+}
+
 func TestGameReadyRejectsAStagedCharacterOwnedByAnotherSession(t *testing.T) {
 	session := newGameReadyTestSession(t)
 	if !session.BeginCharacterLoading() {

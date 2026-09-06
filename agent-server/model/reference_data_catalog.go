@@ -46,6 +46,19 @@ func (c *ReferenceDataCatalog) Skill(id uint32) (RefSkill, bool) {
 	return skill, ok
 }
 
+// SkillSnapshot returns value copies for rule engines that must inspect skill
+// dependencies across the complete catalog. Callers cannot mutate the catalog.
+func (c *ReferenceDataCatalog) SkillSnapshot() map[uint32]RefSkill {
+	if c == nil {
+		return nil
+	}
+	skills := make(map[uint32]RefSkill, len(c.skills))
+	for id, skill := range c.skills {
+		skills[id] = skill
+	}
+	return skills
+}
+
 // Item returns a value copy of the requested item reference.
 func (c *ReferenceDataCatalog) Item(id uint32) (RefItem, bool) {
 	if c == nil {

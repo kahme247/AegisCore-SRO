@@ -6,6 +6,8 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 )
 
+const europeanMasteryTotalLimit = 240
+
 // MasteryUseCase owns mastery rules and persistence. The Agent packet handler
 // remains responsible only for request shape, player/session resolution, error
 // code mapping, and response encoding.
@@ -59,7 +61,7 @@ func characterMasteryTotalLimit(player *model.Player) int {
 		return 330
 	}
 	if player.IsEuropean() {
-		return 2 * player.Level
+		return min(europeanMasteryTotalLimit, 2*player.Level)
 	}
 	return 0
 }

@@ -153,6 +153,7 @@ type CharacterSelectionHandler struct {
 	masteries         model.MasteryRepository
 	skills            model.CharacterSkillRepository
 	quickSlots        model.CharacterQuickSlotRepository
+	autoPotion        model.AutoPotionSettingsRepository
 	speedEffects      model.SpeedEffectRepository
 	itemServices      model.ItemServiceRepository
 	itemBuffs         model.ItemBuffRepository
@@ -203,6 +204,14 @@ func (h *CharacterSelectionHandler) ConfigureQuickSlotRepository(quickSlots mode
 		return model.ErrCharacterQuickSlotRepositoryUnavailable
 	}
 	h.quickSlots = quickSlots
+	return nil
+}
+
+func (h *CharacterSelectionHandler) ConfigureAutoPotionSettingsRepository(repository model.AutoPotionSettingsRepository) error {
+	if h == nil || repository == nil {
+		return model.ErrAutoPotionRepositoryUnavailable
+	}
+	h.autoPotion = repository
 	return nil
 }
 

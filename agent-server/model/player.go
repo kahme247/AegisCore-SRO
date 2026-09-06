@@ -6,6 +6,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/framework/utils"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"sync"
@@ -79,6 +80,8 @@ type Player struct {
 	BonusAttackStats      BonusAttackStats
 	BonusDefenseStats     BonusDefenseStats
 	PassiveSkillModifiers BuffModifiers
+	PassiveRecovery       []RecoveryStatusDescriptor
+	CombatDamagePercent   int
 	PhyAbsorbPercent      int
 	MagAbsorbPercent      int
 	PhyBalancePercent     int
@@ -91,11 +94,18 @@ type Player struct {
 	Masteries             map[uint32]byte
 	Skills                map[uint32]byte
 	ActiveBuffs           map[uint32]ActiveBuff
+	activeRecovery        map[uint32]RecoveryStatusDescriptor
 	combatStatuses        map[CombatStatusKind]CombatStatus
 	characterMask         CharacterMask
 	activeBarrier         ActiveBarrier
 	QuickSlots            map[byte]CharacterQuickSlot
+	AutoPotionSettings    AutoPotionSettings
+	HasAutoPotionSettings bool
 	Quests                []CharacterQuest
+	questMarks            map[uint32]QuestMark
+	nextQuestMarkID       uint32
+	questTimers           map[int]QuestTimer
+	questTimerGeneration  uint64
 	Level                 int
 	MaxLevel              int
 	PKState               PKState
@@ -126,6 +136,36 @@ type Player struct {
 	- TeleportLocation
 	- Active Buffs / Effects
 	*/
+}
+
+// ActiveCombatDamagePercent is SR_GameServer's urd modifier. Unlike ordinary
+// attack-range bonuses, the binary consumes it after target mitigation.
+func (p *Player) ActiveCombatDamagePercent() int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.CombatDamagePercent
+}
+
+func (p *Player) SetAutoPotionSettings(settings AutoPotionSettings, present bool) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.AutoPotionSettings = settings
+	p.HasAutoPotionSettings = present
+	p.Mutex.Unlock()
+}
+
+func (p *Player) AutoPotionSettingsSnapshot() (AutoPotionSettings, bool) {
+	if p == nil {
+		return AutoPotionSettings{}, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.AutoPotionSettings, p.HasAutoPotionSettings
 }
 
 func (p *Player) GetInventorySize() byte {
@@ -264,10 +304,10 @@ func (p *Player) GoldSnapshot() uint64 {
 	return p.Gold
 }
 
-// MarkQuestAbandoned updates the session-owned snapshot after the database
+// MarkQuestAborted updates the session-owned snapshot after the database
 // compare-and-swap succeeds. Later bootstrap streams (including reconnect-like
-// world reloads) therefore cannot resurrect the abandoned quest.
-func (p *Player) MarkQuestAbandoned(questID int) {
+// world reloads) therefore cannot resurrect the aborted quest.
+func (p *Player) MarkQuestAborted(questID int) {
 	if p == nil {
 		return
 	}
@@ -275,7 +315,7 @@ func (p *Player) MarkQuestAbandoned(questID int) {
 	defer p.Mutex.Unlock()
 	for i := range p.Quests {
 		if p.Quests[i].QuestID == questID {
-			p.Quests[i].Status = QuestAbandoned
+			p.Quests[i].Status = QuestAborted
 			return
 		}
 	}
@@ -334,6 +374,30 @@ func (p *Player) CommitQuestCompletion(result QuestCompletionResult) {
 		p.MaxLevel = p.Level
 	}
 	p.commitQuestLocked(result.Quest)
+	p.Mutex.Unlock()
+}
+
+// CommitEventReward publishes the durable economic portion of the binary
+// event-reward continuation. Event rewards do not implicitly retire a quest.
+func (p *Player) CommitEventReward(result EventRewardResult) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.Inventory = result.Inventory.Snapshot()
+	p.Gold = result.Gold
+	p.Level = result.Progress.Level
+	p.ExpOffset = result.Progress.Experience
+	if result.Progress.SkillExperience > uint64(^uint(0)) {
+		p.SkillExpOffset = ^uint(0)
+	} else {
+		p.SkillExpOffset = uint(result.Progress.SkillExperience)
+	}
+	p.SkillPoints = result.Progress.SkillPoints
+	p.StatPoints = result.Progress.StatPoints
+	if p.MaxLevel < p.Level {
+		p.MaxLevel = p.Level
+	}
 	p.Mutex.Unlock()
 }
 
@@ -571,6 +635,23 @@ func (p *Player) CommitMP(expectedMP, cost int) bool {
 	return true
 }
 
+// CommitHP applies an authored skill HP debit without allowing the cast to
+// kill its owner. The expected-value check mirrors the SQL repository's
+// compare-and-debit predicate and prevents stale concurrent casts from
+// consuming health twice.
+func (p *Player) CommitHP(expectedHP, cost int) bool {
+	if p == nil || expectedHP <= 0 || cost < 0 || expectedHP <= cost {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.BaseStats.HP != expectedHP || p.LifeState != Alive {
+		return false
+	}
+	p.BaseStats.HP -= cost
+	return true
+}
+
 func (p *Player) PreviewHealing(hpAmount, mpAmount int) (hp, mp, healedHP, healedMP int, ok bool) {
 	if p == nil || hpAmount < 0 || mpAmount < 0 {
 		return 0, 0, 0, 0, false
@@ -609,7 +690,7 @@ func (p *Player) CommitResurrection(hp, mp int) bool {
 	}
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
-	if p.LifeState != Dead || p.BaseStats.HP != 0 {
+	if p.LifeState != Dead {
 		return false
 	}
 	p.BaseStats.HP, p.BaseStats.MP = hp, mp
@@ -731,6 +812,8 @@ func (p *Player) DerivedStats() DerivedCharacterStats {
 		ParryRate:    applyStatPercent(11+baseDefense.ParryRate+equipment.ParryRate+defenseBonus.ParryRate+magic.ParryRate, defenseBonus.ParryRatePercent),
 		CriticalRate: applyStatPercent(baseAttack.CriticalRate+equipment.CriticalRate+attackBonus.CriticalRate+magic.CriticalRate, attackBonus.CriticalRatePercent),
 		BlockRate:    applyStatPercent(baseDefense.BlockRate+equipment.BlockRate+defenseBonus.BlockRate, defenseBonus.BlockRatePercent),
+		PhyAbsorb:    equipment.PhyAbsorb,
+		MagAbsorb:    equipment.MagAbsorb,
 		MaxHP:        maxHP,
 		MaxMP:        maxMP,
 	}
@@ -823,9 +906,13 @@ func (p *Player) ApplyMagicalDamage(damage int) (applied int, killed bool) {
 }
 
 type PlayerDamageApplication struct {
-	WireDamage    int
-	AppliedDamage int
-	Killed        bool
+	WireDamage       int
+	AppliedDamage    int
+	Killed           bool
+	BarrierDamage    int
+	BarrierRemaining int
+	BarrierMaximum   int
+	BarrierExhausted bool
 }
 
 // ApplyCombatDamage returns damage after absorption/barriers separately from
@@ -839,13 +926,15 @@ func (p *Player) ApplyCombatDamage(damage int, magical bool) PlayerDamageApplica
 	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
 		return PlayerDamageApplication{}
 	}
+	barrierDamage := 0
+	barrier := ActiveBarrier{}
 	if magical {
-		damage = p.absorbMagicalDamageLocked(damage)
+		damage, barrierDamage, barrier = p.absorbMagicalDamageLocked(damage)
 	} else {
-		damage = p.absorbPhysicalDamageLocked(damage)
+		damage, barrierDamage, barrier = p.absorbPhysicalDamageLocked(damage)
 	}
 	if damage <= 0 {
-		return PlayerDamageApplication{}
+		return PlayerDamageApplication{BarrierDamage: barrierDamage, BarrierRemaining: barrier.HitPoints, BarrierMaximum: barrier.MaxHitPoints, BarrierExhausted: barrierDamage > 0 && barrier.HitPoints <= 0}
 	}
 	wireDamage := damage
 	appliedDamage := damage
@@ -856,9 +945,9 @@ func (p *Player) ApplyCombatDamage(damage int, magical bool) PlayerDamageApplica
 	if p.BaseStats.HP == 0 {
 		p.LifeState = Dead
 		p.clearBerserkLocked()
-		return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage, Killed: true}
+		return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage, Killed: true, BarrierDamage: barrierDamage, BarrierRemaining: barrier.HitPoints, BarrierMaximum: barrier.MaxHitPoints, BarrierExhausted: barrierDamage > 0 && barrier.HitPoints <= 0}
 	}
-	return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage}
+	return PlayerDamageApplication{WireDamage: wireDamage, AppliedDamage: appliedDamage, BarrierDamage: barrierDamage, BarrierRemaining: barrier.HitPoints, BarrierMaximum: barrier.MaxHitPoints, BarrierExhausted: barrierDamage > 0 && barrier.HitPoints <= 0}
 }
 
 func (p *Player) CurrentHP() int {
@@ -871,22 +960,13 @@ func (p *Player) CurrentHP() int {
 }
 
 func (p *Player) SendEquipItemPacket(item Item, slot byte) {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.EntityEquipItem
-	packet.WriteUInt32(p.UniqueID)
-	packet.WriteByte(slot)
-	packet.WriteUInt32(item.GetRefObjectID())
-	packet.WriteBool(item.IsOneHandedWeapon())
+	packet := vsro188.BuildEntityEquipItem(p.UniqueID, slot, item.GetRefObjectID(), item.IsOneHandedWeapon())
 
 	p.Session.Send(packet)
 }
 
 func (p *Player) SendUnequipItemPacket(item Item, slot byte) {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.EntityUnequipItem
-	packet.WriteUInt32(p.UniqueID)
-	packet.WriteByte(slot)
-	packet.WriteUInt32(item.GetRefObjectID())
+	packet := vsro188.BuildEntityUnequipItem(p.UniqueID, slot, item.GetRefObjectID())
 
 	p.Session.Send(packet)
 }

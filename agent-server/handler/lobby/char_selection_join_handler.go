@@ -246,6 +246,9 @@ func (h *CharacterSelectionHandler) loadPlayerData(ctx context.Context, char mod
 	if err := h.loadPlayerQuickSlots(ctx, player); err != nil {
 		return nil, err
 	}
+	if err := h.loadPlayerAutoPotionSettings(ctx, player); err != nil {
+		return nil, err
+	}
 	if err := h.loadPlayerSpeedEffect(ctx, player); err != nil {
 		return nil, err
 	}
@@ -407,6 +410,22 @@ func (h *CharacterSelectionHandler) loadPlayerQuickSlots(ctx context.Context, pl
 	return nil
 }
 
+func (h *CharacterSelectionHandler) loadPlayerAutoPotionSettings(ctx context.Context, player *model.Player) error {
+	if player == nil || player.ID <= 0 {
+		return model.ErrAutoPotionCharacterIDRequired
+	}
+	if h == nil || h.autoPotion == nil {
+		player.SetAutoPotionSettings(model.AutoPotionSettings{}, false)
+		return nil
+	}
+	settings, present, err := h.autoPotion.LoadAutoPotionSettings(ctx, player.ID)
+	if err != nil {
+		return err
+	}
+	player.SetAutoPotionSettings(settings, present)
+	return nil
+}
+
 func (h *CharacterSelectionHandler) loadPlayerInventory(ctx context.Context, charID int64) (model.Inventory, error) {
 	if h == nil || h.inventory == nil {
 		return model.Inventory{}, model.ErrInventoryRepositoryUnavailable
@@ -529,10 +548,7 @@ func sendCharacterBootstrapBody(session *server.Session, player *model.Player) e
 		pDataBody.WriteByte(0)
 	}
 	writeCharacterQuickSlotConfig(&pDataBody, player)
-	pDataBody.WriteUInt16(0)
-	pDataBody.WriteUInt16(0)
-	pDataBody.WriteUInt16(0)
-	pDataBody.WriteByte(0)
+	writeAutoPotionConfig(&pDataBody, player)
 	pDataBody.WriteByte(0)
 	pDataBody.WriteUInt32(0x00010001)
 	pDataBody.WriteByte(0)
@@ -588,6 +604,16 @@ func writeCharacterQuickSlotConfig(packet *network.Packet, player *model.Player)
 		packet.WriteByte(slot.ContentType)
 		packet.WriteUInt32(slot.ContentID)
 	}
+}
+
+var defaultAutoPotionSettings = model.AutoPotionSettings{0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00}
+
+func writeAutoPotionConfig(packet *network.Packet, player *model.Player) {
+	settings, present := player.AutoPotionSettingsSnapshot()
+	if !present {
+		settings = defaultAutoPotionSettings
+	}
+	packet.WriteBytes(settings[:])
 }
 
 func writeCharacterSkillSection(packet *network.Packet, player *model.Player) {

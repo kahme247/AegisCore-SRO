@@ -13,23 +13,31 @@ func TestDerivedStatsCombinesEquipmentEnhancementAndRuntimeEffects(t *testing.T)
 			RefObject:         RefObject{ID: 1001, TypeInfo: TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable, TypeID3: TypeID3Weapon}},
 			PhyAttackMinLower: 100, PhyAttackMinUpper: 200,
 			PhyAttackMaxLower: 200, PhyAttackMaxUpper: 300,
-			PhyAttackIncrease: 10,
+			PhyAttackIncrease:          10,
+			PhyAttackReinforceMinLower: 20, PhyAttackReinforceMinUpper: 20,
+			PhyAttackReinforceMaxLower: 30, PhyAttackReinforceMaxUpper: 30,
 			MagAttackMinLower: 50, MagAttackMinUpper: 70,
 			MagAttackMaxLower: 80, MagAttackMaxUpper: 100,
-			MagAttackIncrease: 5,
-			HitRateLower:      20, HitRateUpper: 30, HitRateIncrease: 2,
+			MagAttackIncrease:          5,
+			MagAttackReinforceMinLower: 10, MagAttackReinforceMinUpper: 10,
+			MagAttackReinforceMaxLower: 15, MagAttackReinforceMaxUpper: 15,
+			HitRateLower: 20, HitRateUpper: 30, HitRateIncrease: 2,
 			CritRateLower: 5, CritRateUpper: 10,
 		},
 		1002: {
 			RefObject:   RefObject{ID: 1002},
 			PhyDefLower: 20, PhyDefUpper: 40, PhyDefIncrease: 2,
 			MagDefLower: 10, MagDefUpper: 30, MagDefIncrease: 1,
+			PhyDefReinforceLower: 5, PhyDefReinforceUpper: 5,
+			MagDefReinforceLower: 6, MagDefReinforceUpper: 6,
 			EvasionRateLower: 5, EvasionRateUpper: 15, EvasionRateIncrease: 1,
 		},
 		1003: {
 			RefObject:   RefObject{ID: 1003},
 			PhyDefLower: 10, PhyDefUpper: 20, PhyDefIncrease: 1,
 			MagDefLower: 20, MagDefUpper: 40, MagDefIncrease: 2,
+			PhyDefReinforceLower: 4, PhyDefReinforceUpper: 4,
+			MagDefReinforceLower: 8, MagDefReinforceUpper: 8,
 			BlockingRateLower: 5, BlockingRateUpper: 10,
 		},
 	}
@@ -58,16 +66,16 @@ func TestDerivedStatsCombinesEquipmentEnhancementAndRuntimeEffects(t *testing.T)
 		t.Fatalf("effective attributes = %d/%d, want 110/100", got.Strength, got.Intellect)
 	}
 	// Physical minimum: (base attribute 49 + intrinsic 7 + weapon 220 + effect 5) * 110%.
-	if got.PhyAttackMin != 309 || got.PhyAttackMax != 446 {
-		t.Fatalf("physical attack = %d-%d, want 309-446", got.PhyAttackMin, got.PhyAttackMax)
+	if got.PhyAttackMin != 331 || got.PhyAttackMax != 479 {
+		t.Fatalf("physical attack = %d-%d, want 331-479", got.PhyAttackMin, got.PhyAttackMax)
 	}
 	// Magical minimum: (base attribute 45 + intrinsic 3 + weapon 80 + effect 7) * 120%.
-	if got.MagAttackMin != 162 || got.MagAttackMax != 224 {
-		t.Fatalf("magical attack = %d-%d, want 162-224", got.MagAttackMin, got.MagAttackMax)
+	if got.MagAttackMin != 174 || got.MagAttackMax != 242 {
+		t.Fatalf("magical attack = %d-%d, want 174-242", got.MagAttackMin, got.MagAttackMax)
 	}
 	// Equipment contributes armor plus shield, including both items' enhancement levels.
-	if got.PhyDef != 130 || got.MagDef != 150 {
-		t.Fatalf("defense = %d/%d, want 130/150", got.PhyDef, got.MagDef)
+	if got.PhyDef != 140 || got.MagDef != 166 {
+		t.Fatalf("defense = %d/%d, want 140/166", got.PhyDef, got.MagDef)
 	}
 	if got.HitRate != 56 || got.ParryRate != 38 {
 		t.Fatalf("hit/parry = %d/%d, want 56/38", got.HitRate, got.ParryRate)
@@ -130,5 +138,22 @@ func TestEquippedMagicOptionsAffectDerivedStats(t *testing.T) {
 	wantMP := utils.BaseHPOrMP(10, 23) + 100
 	if got.MaxHP != wantHP || got.MaxMP != wantMP {
 		t.Fatalf("max vitals = %d/%d, want %d/%d", got.MaxHP, got.MaxMP, wantHP, wantMP)
+	}
+}
+
+func TestDerivedStatsIncludesEquippedAccessoryAbsorption(t *testing.T) {
+	original := RefItems
+	RefItems = map[uint32]RefItem{1004: {
+		RefObject:       RefObject{ID: 1004, TypeInfo: TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable, TypeID3: 5}},
+		PhyAbsRateLower: 10, PhyAbsRateUpper: 20,
+		MagAbsRateLower: 20, MagAbsRateUpper: 40,
+	}}
+	t.Cleanup(func() { RefItems = original })
+	player := &Player{Inventory: NewInventory(map[byte]Item{
+		SlotLeftRing: {SRObject: SRObject{RefObjectID: 1004}, Variance: AccessoryVariance{PhyAbsorb: 31, MagAbsorb: 31}.ToVariance()},
+	})}
+	got := player.DerivedStats()
+	if got.PhyAbsorb != 20 || got.MagAbsorb != 40 {
+		t.Fatalf("accessory absorption = %d/%d, want 20/40", got.PhyAbsorb, got.MagAbsorb)
 	}
 }

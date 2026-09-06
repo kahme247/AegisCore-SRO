@@ -125,18 +125,33 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 			player.SetLifeState(model.Alive)
 		}
 	}
-	if player.GetLifeState() == model.Dead {
-		state := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), model.Dead)
-		if err := session.Send(state); err != nil {
-			return fmt.Errorf("send loaded death state: %w", err)
-		}
+	// Character data is sent while the player is staged as Spawning. Publish
+	// the completed state for living characters too: the stock client keeps
+	// that staged state locally and its auto-potion gate requires the low alive
+	// bit before it will activate a configured quick slot.
+	lifeState := player.GetLifeState()
+	if lifeState != model.Alive && lifeState != model.Dead {
+		return fmt.Errorf("GameReady activation left player in life state %d", lifeState)
+	}
+	state := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), lifeState)
+	if err := session.Send(state); err != nil {
+		return fmt.Errorf("send loaded life state: %w", err)
+	}
+	// The bootstrap carries current HP/MP, while the stock client initializes
+	// the maxima used by auto-potion from 0x303D. Send the authoritative derived
+	// stats after activation so both threshold values are calculated before the
+	// first vitality update; otherwise MP can remain at a zero threshold until
+	// an unrelated stat-changing action refreshes it.
+	stats := player.BuildStatsUpdatePacket()
+	if err := session.Send(stats); err != nil {
+		return fmt.Errorf("send loaded character stats: %w", err)
 	}
 	if h.mall != nil {
-		balancePacket := network.EmptyPacket()
-		balancePacket.MessageID = opcode.ItemMallBalanceUpdate
-		balancePacket.WriteUInt32(balances.Silk)
-		balancePacket.WriteUInt32(balances.GiftSilk)
-		balancePacket.WriteUInt32(balances.Point)
+		balancePacket := vsro188.BuildBalanceStateUpdate(vsro188.BalanceStateUpdate{
+			First:  balances.Silk,
+			Second: balances.GiftSilk,
+			Third:  balances.Point,
+		})
 		if err := session.Send(balancePacket); err != nil {
 			return fmt.Errorf("send item mall balances: %w", err)
 		}
@@ -162,8 +177,16 @@ func publishRestoredActiveBuffs(player *model.Player) {
 		return
 	}
 	for _, buff := range player.ActiveBuffSnapshot() {
+		if buff.Token == 0 {
+			continue
+		}
+		if buff.ExpiresAt.IsZero() {
+			added := model.BuildBuffAdd(player.GetUniqueID(), buff.SkillID, buff.Token)
+			player.SendToSelfAndKnown(&added)
+			continue
+		}
 		remaining := time.Until(buff.ExpiresAt)
-		if remaining <= 0 || buff.Token == 0 {
+		if remaining <= 0 {
 			continue
 		}
 		added := model.BuildTimedBuffAdd(player.GetUniqueID(), buff.SkillID, buff.Token, uint32(remaining.Milliseconds()))
@@ -180,43 +203,12 @@ func publishRestoredActiveBuffs(player *model.Player) {
 	}
 }
 
-func publishRestoredItemServices(player *model.Player) {
-	if player == nil {
-		return
-	}
-	for _, state := range player.ItemServiceStates(time.Now().UTC()) {
-		effect := state.Effect
-		token := state.Token
-		remaining := time.Until(effect.ExpiresAt)
-		if remaining <= 0 || token == 0 {
-			continue
-		}
-		if model.ItemServiceUsesItemPerk(effect) {
-			added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, model.ItemServicePerkValue(effect), remaining)
-			player.SendToSelfAndKnown(&added)
-		}
-		if premiumAdded, exists := model.BuildPremiumDailyAdd(token, effect, remaining); exists {
-			player.SendToSelf(&premiumAdded)
-		}
-		if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
-			player.SendToSelfAndKnown(&buffAdded)
-		}
-		time.AfterFunc(remaining, func() {
-			if player.ClearItemService(effect.Kind, token) {
-				if model.ItemServiceUsesItemPerk(effect) {
-					removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
-					player.SendToSelfAndKnown(&removed)
-				}
-				if premiumRemoved, exists := model.BuildPremiumDailyRemove(token, effect); exists {
-					player.SendToSelf(&premiumRemoved)
-				}
-				if model.ItemServiceBuffSkillID(effect) != 0 {
-					buffRemoved := model.BuildBuffRemove(token)
-					player.SendToSelfAndKnown(&buffRemoved)
-				}
-			}
-		})
-	}
+func publishRestoredItemServices(_ *model.Player) {
+	// The stock vSRO 1.188 client currently rejects the restored premium
+	// service sequence emitted here (0x3159 followed by 0xB0BD) during
+	// GameReady and enters its deliberate access-violation fail-fast path.
+	// Keep the persisted effects loaded for server-side accounting, but do
+	// not publish the unverified restoration packets on login.
 }
 
 func (h *GameReadyHandler) playerLookup() gameReadyPlayerLookup {

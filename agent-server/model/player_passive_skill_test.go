@@ -51,3 +51,16 @@ func TestRecalculatePassiveSkillModifiersRequiresAuthoredEquippedItem(t *testing
 		t.Fatalf("shield passive after unequip = %d, want 0", player.BonusDefenseStats.BlockRate)
 	}
 }
+
+func TestRecalculatePassiveSkillsRegistersRealRecoveryDescriptors(t *testing.T) {
+	player := &Player{Skills: map[uint32]byte{9001: 1, 9002: 0}}
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		9001: {ID: 9001, BasicActivity: 0, RecoveryStatusMask: 0x400, RecoveryStatusValue: 50, RecoveryStatusGrade: 11},
+		9002: {ID: 9002, BasicActivity: 0, RecoveryStatusMask: 0x800, RecoveryStatusValue: 80, RecoveryStatusGrade: 12},
+	}})
+	player.RecalculatePassiveSkillModifiers(catalog)
+	got := player.PassiveRecoveryStatusSnapshot()
+	if len(got) != 1 || got[0] != (RecoveryStatusDescriptor{SkillID: 9001, Mask: 0x400, Value: 50, Grade: 11}) {
+		t.Fatalf("passive real registry = %+v", got)
+	}
+}

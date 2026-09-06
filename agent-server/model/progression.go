@@ -1,6 +1,11 @@
 package model
 
-import "math"
+import (
+	"math"
+
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
+)
 
 const SkillExperiencePerPoint = uint64(400)
 
@@ -13,6 +18,16 @@ type ProgressionResult struct {
 	StatPoints       int
 	LevelsGained     int
 	StatPointsGained int
+}
+
+// BuildLevelUpAnimationPacket reproduces SR_GameServer's 0x3054 promotion
+// broadcast. The stock client consumes exactly the promoted entity UID and
+// creates the level-up visual locally.
+func BuildLevelUpAnimationPacket(uniqueID uint32) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.EntityAnimationPromote
+	packet.WriteUInt32(uniqueID)
+	return packet
 }
 
 // ApplyExperience advances a character using the client-matched level table.

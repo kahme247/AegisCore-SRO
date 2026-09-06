@@ -406,7 +406,7 @@ func insertStarterMasteryInTransaction(ctx context.Context, tx *sql.Tx, characte
 	return nil
 }
 
-const insertReferenceCharacterQuests = "INSERT INTO `SRO_SHARD`.`CHAR_QUEST` (`FK_CHAR`,`QUEST_ID`,`STATUS`,`ACHIEVEMENT_COUNT`,`QUEST_DATA_1`,`QUEST_DATA_2`) SELECT c.`ID`,defaults.`QUEST_ID`,1,0,0,0 FROM `SRO_SHARD`.`CHAR` c JOIN `SRO_SHARD`.`CHAR_REF_DATA` r ON r.`RefObjID`=c.`REF_OBJ_ID` JOIN `SRO_SHARD`.`REF_CHAR_DEFAULT_QUEST` defaults ON defaults.`RACE` IN (r.`Country`,3) WHERE c.`ID`=? AND defaults.`REQUIRED_LEVEL`=1 AND defaults.`SERVICE`=1"
+const insertReferenceCharacterQuests = "INSERT INTO `SRO_SHARD`.`CHAR_QUEST` (`FK_CHAR`,`QUEST_ID`,`STATUS`,`ACHIEVEMENT_COUNT`,`QUEST_DATA_1`,`QUEST_DATA_2`) SELECT c.`ID`,defaults.`QUEST_ID`,4,0,0,0 FROM `SRO_SHARD`.`CHAR` c JOIN `SRO_SHARD`.`CHAR_REF_DATA` r ON r.`RefObjID`=c.`REF_OBJ_ID` JOIN `SRO_SHARD`.`REF_CHAR_DEFAULT_QUEST` defaults ON defaults.`RACE` IN (r.`Country`,3) WHERE c.`ID`=? AND defaults.`REQUIRED_LEVEL`=1 AND defaults.`SERVICE`=1"
 
 func insertReferenceQuestsInTransaction(ctx context.Context, tx *sql.Tx, characterID int64) error {
 	if _, err := tx.ExecContext(ctx, insertReferenceCharacterQuests, characterID); err != nil {

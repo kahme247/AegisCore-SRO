@@ -10,10 +10,10 @@ import (
 func TestSQLLevelTableRepositoryLoadsProgressionRowsFromShard(t *testing.T) {
 	resetReferenceDataRepositoryTestState()
 	setReferenceDataRepositoryTestResponse(selectAllLevelData, referenceDataRepositoryTestResponse{
-		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS"},
+		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS", "DROP_GOLD_MIN", "DROP_GOLD_MAX"},
 		rows: [][]driver.Value{
-			{int64(1), int64(118), int64(1)},
-			{int64(2), int64(470), int64(1)},
+			{int64(1), int64(118), int64(1), int64(28), int64(59)},
+			{int64(2), int64(470), int64(1), int64(32), int64(66)},
 		},
 	})
 
@@ -25,7 +25,7 @@ func TestSQLLevelTableRepositoryLoadsProgressionRowsFromShard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if row, ok := table.Level(2); !ok || row.RequiredExperience != 470 || row.RequiredSkillPoints != 1 {
+	if row, ok := table.Level(2); !ok || row.RequiredExperience != 470 || row.RequiredSkillPoints != 1 || row.DropGoldMin != 32 || row.DropGoldMax != 66 {
 		t.Fatalf("level 2 row = %#v, present = %t; want 470 XP and 1 SP", row, ok)
 	}
 	if got := table.MaxLevel(); got != 2 {
@@ -41,7 +41,7 @@ func TestSQLLevelTableRepositoryRejectsUnavailableOrEmptyData(t *testing.T) {
 
 	resetReferenceDataRepositoryTestState()
 	setReferenceDataRepositoryTestResponse(selectAllLevelData, referenceDataRepositoryTestResponse{
-		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS"},
+		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS", "DROP_GOLD_MIN", "DROP_GOLD_MAX"},
 	})
 	repository, err := NewLevelTableRepository(openReferenceDataRepositoryTestDB(t))
 	if err != nil {
@@ -55,10 +55,10 @@ func TestSQLLevelTableRepositoryRejectsUnavailableOrEmptyData(t *testing.T) {
 func TestSQLLevelTableRepositoryRejectsLevelGaps(t *testing.T) {
 	resetReferenceDataRepositoryTestState()
 	setReferenceDataRepositoryTestResponse(selectAllLevelData, referenceDataRepositoryTestResponse{
-		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS"},
+		columns: []string{"LEVEL", "REQUIRED_EXPERIENCE", "REQUIRED_SKILL_POINTS", "DROP_GOLD_MIN", "DROP_GOLD_MAX"},
 		rows: [][]driver.Value{
-			{int64(1), int64(118), int64(1)},
-			{int64(3), int64(1058), int64(1)},
+			{int64(1), int64(118), int64(1), int64(28), int64(59)},
+			{int64(3), int64(1058), int64(1), int64(35), int64(74)},
 		},
 	})
 	repository, err := NewLevelTableRepository(openReferenceDataRepositoryTestDB(t))

@@ -34,3 +34,23 @@ func TestWriteCharacterQuickSlotConfigWritesEmptySection(t *testing.T) {
 		t.Fatalf("empty quick-slot config = %x, want %x", got, want)
 	}
 }
+
+func TestWriteAutoPotionConfigUsesPersistedVSROPayload(t *testing.T) {
+	player := &model.Player{}
+	want := model.AutoPotionSettings{0x19, 0xDC, 0x1A, 0xD9, 0x13, 0x00, 0x8A}
+	player.SetAutoPotionSettings(want, true)
+	packet := network.EmptyPacket()
+	writeAutoPotionConfig(&packet, player)
+	if got := packet.Payload(); !bytes.Equal(got, want[:]) {
+		t.Fatalf("auto-potion config = %x, want %x", got, want)
+	}
+}
+
+func TestWriteAutoPotionConfigUsesStockThreeUInt16AndByteDefault(t *testing.T) {
+	packet := network.EmptyPacket()
+	writeAutoPotionConfig(&packet, &model.Player{})
+	want := []byte{0, 0, 1, 0, 1, 0, 0}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("default auto-potion config = %x, want %x", got, want)
+	}
+}

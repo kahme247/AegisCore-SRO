@@ -12,7 +12,10 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 )
 
-const quickSlotConfigType byte = 1
+const (
+	quickSlotConfigType  byte = 1
+	autoPotionConfigType byte = 2
+)
 
 type quickSlotWorld interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
@@ -22,13 +25,14 @@ type QuickSlotHandler struct {
 	mu         sync.Mutex
 	world      quickSlotWorld
 	repository model.CharacterQuickSlotRepository
+	autoPotion model.AutoPotionSettingsRepository
 }
 
-func RegisterQuickSlotHandler(target *server.Server, repository model.CharacterQuickSlotRepository) error {
-	if target == nil || repository == nil {
+func RegisterQuickSlotHandler(target *server.Server, repository model.CharacterQuickSlotRepository, autoPotion model.AutoPotionSettingsRepository) error {
+	if target == nil || repository == nil || autoPotion == nil {
 		return model.ErrCharacterQuickSlotRepositoryUnavailable
 	}
-	handler := &QuickSlotHandler{world: service.GetWorldServiceInstance(), repository: repository}
+	handler := &QuickSlotHandler{world: service.GetWorldServiceInstance(), repository: repository, autoPotion: autoPotion}
 	target.RegisterHandler(opcode.CharacterConfigUpdateRequest, handler.handlePacket)
 	return nil
 }
@@ -45,6 +49,26 @@ func (h *QuickSlotHandler) handlePacket(ctx context.Context, session *server.Ses
 	}
 	// 0x7158 carries several unrelated client settings. Only subtype 1 is the
 	// character hotbar; leave other subtypes wire-neutral until established.
+	if configType == autoPotionConfigType {
+		if packet.Remaining() != model.AutoPotionSettingsSize {
+			return fmt.Errorf("auto-potion config payload length %d, want %d", packet.Remaining(), model.AutoPotionSettingsSize)
+		}
+		payload, err := packet.ReadBytes(model.AutoPotionSettingsSize)
+		if err != nil {
+			return err
+		}
+		player, ok := h.resolvePlayer(session)
+		if !ok {
+			return nil
+		}
+		var settings model.AutoPotionSettings
+		copy(settings[:], payload)
+		if err := h.autoPotion.SaveAutoPotionSettings(ctx, player.ID, settings); err != nil {
+			return err
+		}
+		player.SetAutoPotionSettings(settings, true)
+		return nil
+	}
 	if configType != quickSlotConfigType {
 		return nil
 	}
@@ -69,8 +93,8 @@ func (h *QuickSlotHandler) handlePacket(ctx context.Context, session *server.Ses
 	if h == nil || h.world == nil || session == nil || session.UserContext.UniqueID == 0 {
 		return nil
 	}
-	player, err := h.world.GetPlayerByUniqueId(session.UserContext.UniqueID)
-	if err != nil || player == nil || player.Session != session || player.ID <= 0 || player.ID != session.UserContext.CharacterID {
+	player, ok := h.resolvePlayer(session)
+	if !ok {
 		return nil
 	}
 	slot := model.CharacterQuickSlot{Sequence: sequence, ContentType: contentType, ContentID: contentID}
@@ -79,4 +103,15 @@ func (h *QuickSlotHandler) handlePacket(ctx context.Context, session *server.Ses
 	}
 	player.CommitQuickSlot(slot)
 	return nil
+}
+
+func (h *QuickSlotHandler) resolvePlayer(session *server.Session) (*model.Player, bool) {
+	if h == nil || h.world == nil || session == nil || session.UserContext.UniqueID == 0 {
+		return nil, false
+	}
+	player, err := h.world.GetPlayerByUniqueId(session.UserContext.UniqueID)
+	if err != nil || player == nil || player.Session != session || player.ID <= 0 || player.ID != session.UserContext.CharacterID {
+		return nil, false
+	}
+	return player, true
 }

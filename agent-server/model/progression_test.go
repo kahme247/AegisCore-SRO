@@ -1,9 +1,19 @@
 package model
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
+
+func TestBuildLevelUpAnimationPacketCarriesPromotedEntity(t *testing.T) {
+	packet := BuildLevelUpAnimationPacket(0x11223344)
+	if packet.MessageID != opcode.EntityAnimationPromote || !bytes.Equal(packet.Payload(), []byte{0x44, 0x33, 0x22, 0x11}) {
+		t.Fatalf("level-up animation = opcode 0x%04X payload % X", packet.MessageID, packet.Payload())
+	}
+}
 
 func testLevelData() *strings.Reader {
 	return strings.NewReader("1\t118\t1\t0\t0\t24\t0\n2\t470\t2\t0\t0\t47\t0\n3\t999999\t3\t0\t0\t71\t0\n")

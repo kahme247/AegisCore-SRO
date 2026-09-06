@@ -11,6 +11,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -132,15 +133,7 @@ func buildMasteryFailure(code uint16) network.Packet {
 }
 
 func buildSkillPointBalance(skillPoints uint32) network.Packet {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.EntityUpdatePoints
-	packet.WriteByte(2)
-	packet.WriteUInt32(skillPoints)
-	// vSRO 1.88 always terminates an SP update with the notification flag.
-	// Mastery learning spends SP, so update the balance without displaying the
-	// SP-recovery message.
-	packet.WriteByte(0)
-	return packet
+	return vsro188.BuildSkillPointUpdate(vsro188.SkillPointUpdate{Value: skillPoints})
 }
 
 func (h *MasteryHandler) sendFailure(session *server.Session, code uint16) error {
