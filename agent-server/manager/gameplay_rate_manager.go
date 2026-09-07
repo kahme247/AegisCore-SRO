@@ -15,6 +15,7 @@ const GameplayRateRefreshInterval = 5 * time.Second
 
 var safeGameplayRates = model.GameplayRates{
 	ExperienceRatePercent:      100,
+	PartyExperienceRatePercent: 100,
 	SkillExperienceRatePercent: 100,
 	MobCountRatePercent:        100,
 	MobRespawnRatePercent:      100,
@@ -63,7 +64,7 @@ func (m *GameplayRateManager) Refresh(ctx context.Context) error {
 	previous := m.Current()
 	m.current.Store(&rates)
 	if rates != previous {
-		log.Infof("gameplay rates refreshed experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%%", rates.ExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent)
+		log.Infof("gameplay rates refreshed experience=%d%% party-experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%%", rates.ExperienceRatePercent, rates.PartyExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent)
 	}
 	return nil
 }

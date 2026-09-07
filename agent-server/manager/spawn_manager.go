@@ -77,6 +77,25 @@ func groupSpawnObjects(player model.IPlayer, objects map[uint32]model.ISRObject,
 			return
 		}
 	}
+	// Ground items use the binary-confirmed single-object visibility edge
+	// (0x3015). Character/NPC batches continue to use the established 3017 /
+	// 3019 / 3018 grouping because their record layouts are different.
+	if spawning && len(objects) == 1 {
+		for _, object := range objects {
+			if _, isItem := object.(model.IItem); !isItem {
+				break
+			}
+			packet := network.EmptyPacket()
+			packet.MessageID = opcode.EntitySingleSpawn
+			model.WriteEntitySpawnData(&packet, object)
+			if err := player.GetSession().Send(packet); err != nil {
+				logrus.Errorf("send single ground-item spawn: %v", err)
+				return
+			}
+			player.GetCharKnownObjectList().MarkSpawned(objects)
+			return
+		}
+	}
 	p1, p2, p3, err := buildGroupSpawnPackets(objects, spawning)
 	if err != nil {
 		logrus.Errorf("build grouped %s packet: %v", spawnActionName(spawning), err)
@@ -142,7 +161,8 @@ func tracePlayerVisibility(player model.IPlayer, objects map[uint32]model.ISRObj
 // supportedSpawnObjects admits only world entities whose vSRO 1.88 group-spawn
 // layout is implemented. The same filter applies to despawns so the client is
 // never asked to remove an entity that was deliberately withheld from it.
-// NPC_COS and specialized structures require their own trailing fields;
+// NPC_COS, ground items, and specialized structures require their own
+// trailing fields;
 // serializing them as ordinary NPCs corrupts the rest of a 3019 batch. Teleport
 // gates are the one verified structure exception: their serializer supplies the
 // stock client's four state bytes and two zeroed CGObjStruct runtime fields.
@@ -162,7 +182,9 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 		_, verifiedCOSLayout := object.(*model.COS)
 		verifiedCOSLayout = verifiedCOSLayout && typeInfo.IsCOS()
 		verifiedTeleportGateLayout := model.IsTeleportGateObject(object)
-		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedCOSLayout || verifiedTeleportGateLayout) {
+		_, verifiedItemLayout := object.(model.IItem)
+		verifiedItemLayout = verifiedItemLayout && typeInfo.IsItem()
+		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedCOSLayout || verifiedTeleportGateLayout || verifiedItemLayout) {
 			supported[uid] = object
 			continue
 		}

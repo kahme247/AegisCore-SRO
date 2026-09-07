@@ -38,12 +38,14 @@ type ChatHandler struct {
 	// processed them serially, so retain that compatibility boundary here.
 	mu     sync.Mutex
 	social model.SocialRepository
+	filter model.ChatFilter
 }
 
-func RegisterChatHandler(target *server.Server, social ...model.SocialRepository) {
+func RegisterChatHandler(target *server.Server, social model.SocialRepository, filters ...model.ChatFilter) {
 	handler := &ChatHandler{}
-	if len(social) > 0 {
-		handler.social = social[0]
+	handler.social = social
+	if len(filters) > 0 {
+		handler.filter = filters[0]
 	}
 	target.RegisterHandler(opcode.ChatRequest, handler.handlePacket)
 }
@@ -88,6 +90,9 @@ func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session,
 	}
 	if err := vsro188.ValidateText(msg, vsro188.TextRules{Field: "chat message"}); err != nil {
 		return err
+	}
+	if h.filter != nil {
+		request.Message, _ = h.filter.Filter(request.Message)
 	}
 
 	switch request.ChatType {

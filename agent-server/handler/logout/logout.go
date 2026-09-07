@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
@@ -18,6 +19,9 @@ type LogoutHandler struct {
 	mu        sync.Mutex
 	countdown time.Duration
 	pending   map[string]*logoutCountdown
+	world     interface {
+		GetPlayerByUniqueId(uint32) (*model.Player, error)
+	}
 }
 
 type logoutCountdown struct {
@@ -35,15 +39,19 @@ func newLogoutHandler() *LogoutHandler {
 	return &LogoutHandler{
 		countdown: time.Second * time.Duration(CountdownTime),
 		pending:   make(map[string]*logoutCountdown),
+		world:     service.GetWorldServiceInstance(),
 	}
 }
 
 const (
 	LogoutModeExit byte = iota + 1
 	LogoutModeRestart
-	LogoutErrorInBattleState uint16 = iota + 0x801
-	LogoutErrorInTeleportState
 	CountdownTime byte = 5
+)
+
+const (
+	LogoutErrorInBattleState   uint16 = 0x0801
+	LogoutErrorInTeleportState uint16 = 0x0802
 )
 
 func (h *LogoutHandler) handleLogoutPacket(_ context.Context, session *server.Session, packet network.Packet) error {
@@ -65,6 +73,19 @@ func (h *LogoutHandler) doLogout(session *server.Session, packet network.Packet)
 	logoutMode, err := packet.ReadByte()
 	if err != nil {
 		return err
+	}
+	if logoutMode != LogoutModeExit && logoutMode != LogoutModeRestart {
+		return h.sendFailure(session, logoutMode, LogoutErrorInBattleState)
+	}
+	if session.LifecyclePhase() != server.SessionInWorld {
+		return h.sendFailure(session, logoutMode, LogoutErrorInTeleportState)
+	}
+	player, lookupErr := h.world.GetPlayerByUniqueId(session.UserContext.UniqueID)
+	if lookupErr != nil || player == nil {
+		return h.sendFailure(session, logoutMode, LogoutErrorInTeleportState)
+	}
+	if player.GetBattleState() == model.BattleBattle {
+		return h.sendFailure(session, logoutMode, LogoutErrorInBattleState)
 	}
 
 	logrus.Debug("Logging out char")
@@ -122,6 +143,17 @@ func (h *LogoutHandler) doLogout(session *server.Session, packet network.Packet)
 	h.pending[session.ID] = countdown
 	go h.cancelOnSessionClose(session, countdown)
 	return nil
+}
+
+func (h *LogoutHandler) sendFailure(session *server.Session, mode byte, code uint16) error {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.AgentLogoutResponse
+	p.WriteByte(2)
+	p.WriteUInt16(code)
+	if mode != 0 {
+		logrus.Debugf("rejected logout mode %d with code 0x%04X", mode, code)
+	}
+	return session.Send(p)
 }
 
 func (h *LogoutHandler) doCancelLogout(session *server.Session, _ network.Packet) error {

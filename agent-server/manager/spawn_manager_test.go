@@ -66,6 +66,34 @@ func TestSingleObjectDespawnUsesDedicatedOpcode(t *testing.T) {
 	}
 }
 
+func TestGroundItemSpawnUsesSingle3015Boundary(t *testing.T) {
+	_, player := mobAIFixture(100)
+	conn := &mobAICaptureConn{}
+	player.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "ground-item-single-spawn-test")
+	defer player.Session.Close()
+	item := &model.Item{SRObject: model.SRObject{
+		UniqueID:          300,
+		RefObjectID:       1,
+		TypeInfo:          model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5, TypeID4: 0},
+		RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(25000), Offset: math32.NewVector3(2, 0, 2)},
+	}, Data: 777}
+	groupSpawnObjects(player, map[uint32]model.ISRObject{item.GetUniqueID(): item}, true)
+	packets := readCapturedPackets(t, conn, 1)
+	if len(packets) != 1 || packets[0].MessageID != opcode.EntitySingleSpawn {
+		t.Fatalf("ground-item spawn packets = %#v, want one 0x3015", packetOpcodes(packets))
+	}
+	if got := binary.LittleEndian.Uint32(packets[0].Payload()[4:8]); got != 777 {
+		t.Fatalf("ground-item spawn amount = %d, want 777", got)
+	}
+	payload := packets[0].Payload()
+	if got, want := len(payload), 35; got != want {
+		t.Fatalf("ground-item 0x3015 payload length = %d, want %d", got, want)
+	}
+	if got, want := payload[len(payload)-5:], []byte{0, 0, 0, 0, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("ground-item 0x3015 drop tail = % X, want % X", got, want)
+	}
+}
+
 func TestSupportedSpawnObjectsAlsoProtectsDespawnBatches(t *testing.T) {
 	mob := &model.NPC{SRObject: model.SRObject{
 		UniqueID:          10,
@@ -146,6 +174,21 @@ func TestSupportedSpawnObjectsAcceptsPlayerLayout(t *testing.T) {
 	}
 	if begin.MessageID != opcode.EntityGroupSpawnBegin || body.MessageID != opcode.EntityGroupSpawnData || end.MessageID != opcode.EntityGroupSpawnEnd {
 		t.Fatalf("player group opcodes = %#v", []uint16{begin.MessageID, body.MessageID, end.MessageID})
+	}
+}
+
+func TestSupportedSpawnObjectsAdmitsGroundItemLayout(t *testing.T) {
+	item := &model.Item{SRObject: model.SRObject{
+		UniqueID:    88,
+		RefObjectID: 900,
+		TypeInfo:    model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 1},
+		RtNavmeshPosition: navmeshv2.RtNavmeshPosition{
+			Offset: math32.NewVector3(1, 0, 1),
+		},
+	}}
+	filtered := supportedSpawnObjects(map[uint32]model.ISRObject{88: item})
+	if len(filtered) != 1 || filtered[88] != item {
+		t.Fatalf("supported ground-item objects = %#v, want UID 88", filtered)
 	}
 }
 

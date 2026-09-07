@@ -8,13 +8,14 @@ import (
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
-const SelectGameplayRates = "SELECT p.`EXPERIENCE_RATE_PERCENT`, p.`SKILL_EXPERIENCE_RATE_PERCENT`, m.`MOB_COUNT_RATE_PERCENT`, m.`MOB_RESPAWN_RATE_PERCENT` FROM `SRO_SHARD`.`GAMEPLAY_PROGRESSION_RATES` p JOIN `SRO_SHARD`.`GAMEPLAY_MOB_RATES` m ON m.`SETTING_ID`=p.`SETTING_ID` WHERE p.`SETTING_ID`=1"
+const SelectGameplayRates = "SELECT p.`EXPERIENCE_RATE_PERCENT`, p.`PARTY_EXPERIENCE_RATE_PERCENT`, p.`SKILL_EXPERIENCE_RATE_PERCENT`, m.`MOB_COUNT_RATE_PERCENT`, m.`MOB_RESPAWN_RATE_PERCENT` FROM `SRO_SHARD`.`GAMEPLAY_PROGRESSION_RATES` p JOIN `SRO_SHARD`.`GAMEPLAY_MOB_RATES` m ON m.`SETTING_ID`=p.`SETTING_ID` WHERE p.`SETTING_ID`=1"
 
 var ErrGameplayRateRepositoryUnavailable = errors.New("gameplay rate repository is unavailable")
 var ErrGameplayMobRatesInvalid = errors.New("gameplay mob rates must be positive")
 
 type GameplayRates struct {
 	ExperienceRatePercent      uint32
+	PartyExperienceRatePercent uint32
 	SkillExperienceRatePercent uint32
 	MobCountRatePercent        uint32
 	MobRespawnRatePercent      uint32
@@ -45,6 +46,7 @@ func (r *SQLGameplayRateRepository) GameplayRates(ctx context.Context) (Gameplay
 	var rates GameplayRates
 	if err := r.shard.QueryRowContext(ctx, SelectGameplayRates).Scan(
 		&rates.ExperienceRatePercent,
+		&rates.PartyExperienceRatePercent,
 		&rates.SkillExperienceRatePercent,
 		&rates.MobCountRatePercent,
 		&rates.MobRespawnRatePercent,

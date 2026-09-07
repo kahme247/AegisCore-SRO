@@ -1,6 +1,7 @@
 package logout
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -8,10 +9,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 )
+
+type logoutWorldFake struct{ player *model.Player }
+
+func (f logoutWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) { return f.player, nil }
+
+func enterLogoutTestWorld(t *testing.T, session *server.Session) {
+	t.Helper()
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("could not enter in-world lifecycle")
+	}
+}
 
 func TestLogoutCountdownCancelsOnExplicitCancelAndSessionClose(t *testing.T) {
 	for _, closeSession := range []bool{false, true} {
@@ -20,6 +34,9 @@ func TestLogoutCountdownCancelsOnExplicitCancelAndSessionClose(t *testing.T) {
 			handler.countdown = 25 * time.Millisecond
 			serverConn, clientConn := net.Pipe()
 			session := server.NewSession(serverConn, network.EncodingOptions{}, nil, nil, "logout-test")
+			session.UserContext.UniqueID = 77
+			enterLogoutTestWorld(t, session)
+			handler.world = logoutWorldFake{player: &model.Player{SRObject: model.SRObject{UniqueID: 77}}}
 			defer session.Close()
 			defer clientConn.Close()
 
@@ -62,6 +79,30 @@ func TestLogoutCountdownCancelsOnExplicitCancelAndSessionClose(t *testing.T) {
 				t.Fatalf("pending logout countdowns = %d, want 0", pending)
 			}
 		})
+	}
+}
+
+func TestLogoutRejectsBattleStateWithRecoveredCode(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	session := server.NewSession(serverConn, network.EncodingOptions{}, nil, nil, "logout-test")
+	defer session.Close()
+	session.UserContext.UniqueID = 88
+	enterLogoutTestWorld(t, session)
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 88}}
+	player.SetBattleState(model.BattleBattle)
+	handler := newLogoutHandler()
+	handler.world = logoutWorldFake{player: player}
+	request := network.EmptyPacket()
+	request.WriteByte(LogoutModeExit)
+	done := make(chan error, 1)
+	go func() { done <- handler.handleLogoutPacket(context.Background(), session, request) }()
+	response := readLogoutResponse(t, clientConn)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if response.MessageID != opcode.AgentLogoutResponse || !bytes.Equal(response.Payload(), []byte{2, 1, 8}) {
+		t.Fatalf("battle logout response = opcode 0x%04X payload % X", response.MessageID, response.Payload())
 	}
 }
 
