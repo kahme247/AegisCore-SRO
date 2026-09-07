@@ -77,8 +77,13 @@ prepared-cache validation does.
 | `AGENT_POSITION_CHECKPOINT_SECONDS` | `30` | Position checkpoint interval |
 
 Shared `DB_ACCOUNT_*`, `DB_SHARD_*`, `DATABASE_*_DRIVER` and `LOG_LEVEL`
-settings are defined in `framework/config`. `SRO_SESSION_TRACE=1`,
-`SRO_MOVEMENT_TRACE`, and `MOB_AI_TRACE` enable focused diagnostics.
+settings are defined in `framework/config`. `SRO_SESSION_TRACE=1` enables both
+the legacy trace log and bounded JSONL session artifacts; destination, capacity
+and optional non-sensitive prefixes use `SRO_SESSION_TRACE_DIR`,
+`SRO_SESSION_TRACE_CAPACITY`, and `SRO_SESSION_TRACE_PREFIX_BYTES` respectively.
+Completed sessions automatically produce `.analysis.json` and `.analysis.md`
+reports beside their JSONL traces and log any ranked probable failure.
+`SRO_MOVEMENT_TRACE` and `MOB_AI_TRACE` enable focused world diagnostics.
 
 Exact feature names and their legacy directive/schedule evidence are defined in
 `agent-server/feature/catalog.go`. Flags that are not yet `Available` remain
@@ -98,7 +103,8 @@ Scalar Go runtime metrics are available at `/debug/runtime/metrics`. Diagnostics
 are disabled by default and are never attached to the public SRO or admission
 listeners.
 
-The optional management listener exposes `GET /v1/management/players` and
+The optional management listener exposes `GET /v1/management/players`,
+`GET /v1/management/health`, and
 `POST /v1/management/player-disconnects` only to mutually authenticated SMC
 clients. Snapshots include only sessions that completed character loading.
 Disconnect commands require immutable character ID, the expected runtime UID,
@@ -121,6 +127,11 @@ admission-port fallback.
 - Basic and reference-driven physical/magical attacks, self buffs, cooldowns,
   timed effects, HP/MP use, death state, XP/skill-XP progression and DB-backed
   rates. Combat includes rarity-aware mobs, pursuit and bounded respawn paths.
+  Attack/parry damage variance follows the pinned SR_GameServer arithmetic;
+  see [`_docs/sr-gameserver-combat-variance.md`](../_docs/sr-gameserver-combat-variance.md)
+  for binary identity, function addresses, formulas and remaining boundaries.
+  Binary-confirmed threat tags and `2tnt` arithmetic are documented in
+  [`_docs/sr-gameserver-aggro.md`](../_docs/sr-gameserver-aggro.md).
 - Explicit and targeted skill resurrection with persisted vitals. Native
   `hste` fixed/percentage recovery and `resu` target-level caps are enforced;
   skill resurrection commits the target revival and caster MP debit in one
@@ -146,8 +157,11 @@ admission-port fallback.
 - In-memory stall host create/update/leave/destroy handling. Customer entry,
   buying, persistence and stall talk are not implemented.
 
-Local chat currently broadcasts world-wide, global chat does not consume its
-inventory item, and notice/NPC chat is not implemented.
+Local chat is restricted to the sender's reciprocal known-player set. Chat
+messages are filtered through the enabled rows in `CHAT_ABUSE_FILTER`; the
+Agent loads the database snapshot at startup and refreshes it every minute.
+Global chat does not consume its inventory item, and notice/NPC chat is not
+implemented.
 
 ## World invariants
 

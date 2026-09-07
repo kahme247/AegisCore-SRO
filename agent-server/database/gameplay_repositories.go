@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 )
 
 // GameplayRepositories is the Agent's SQL-backed persistence composition.
@@ -15,6 +16,12 @@ type GameplayRepositories struct {
 	Characters              model.CharacterRepository
 	CharacterRename         model.CharacterRenameRepository
 	Inventory               model.InventoryRepository
+	RangedAmmo              model.RangedAmmoRepository
+	GroundItemPickup        model.GroundItemPickupRepository
+	GroundGoldPickup        model.GroundGoldPickupRepository
+	GroundItemDrop          model.GroundItemDropRepository
+	GroundItemMaterializer  model.GroundItemMaterializer
+	MonsterDropCatalog      service.MonsterDropCatalogLoader
 	AvatarInventory         model.AvatarInventoryRepository
 	MonsterMasks            model.MonsterMaskRepository
 	InventoryRelocator      model.InventoryRelocator
@@ -37,7 +44,9 @@ type GameplayRepositories struct {
 	Skills                  model.CharacterSkillRepository
 	SkillLearning           model.SkillLearningRepository
 	QuickSlots              model.CharacterQuickSlotRepository
+	AutoPotionSettings      model.AutoPotionSettingsRepository
 	CharacterQuests         model.CharacterQuestRepository
+	QuestOffers             model.QuestOfferRepository
 	Regions                 model.GameServerRegionRepository
 	Spawns                  model.ContinentSpawnRepository
 	TeleportGates           model.TeleportGateRepository
@@ -47,6 +56,8 @@ type GameplayRepositories struct {
 	Vitals                  model.CharacterVitalsRepository
 	Hwan                    model.HwanRepository
 	COS                     model.COSRepository
+	COSPolicy               model.COSPolicyRepository
+	ChatFilter              model.ChatFilterRepository
 }
 
 func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, error) {
@@ -63,6 +74,22 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.Inventory, err = model.NewInventoryRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent inventory repository: %w", err)
+	}
+	if repositories.RangedAmmo, err = model.NewRangedAmmoRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent ranged ammunition repository: %w", err)
+	}
+	groundPickup, err := model.NewGroundItemPickupRepository(shard)
+	if err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent ground-item pickup repository: %w", err)
+	}
+	repositories.GroundItemPickup = groundPickup
+	repositories.GroundGoldPickup = groundPickup
+	repositories.GroundItemDrop = groundPickup
+	if repositories.GroundItemMaterializer, err = model.NewGroundItemMaterializer(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent ground-item materializer: %w", err)
+	}
+	if repositories.MonsterDropCatalog, err = NewMonsterDropCatalogRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent monster-drop catalog: %w", err)
 	}
 	if repositories.AvatarInventory, err = model.NewAvatarInventoryRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent avatar inventory repository: %w", err)
@@ -126,8 +153,14 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.QuickSlots, err = model.NewCharacterQuickSlotRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character quick-slot repository: %w", err)
 	}
+	if repositories.AutoPotionSettings, err = model.NewAutoPotionSettingsRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent auto-potion settings repository: %w", err)
+	}
 	if repositories.CharacterQuests, err = model.NewCharacterQuestRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character-quest repository: %w", err)
+	}
+	if repositories.QuestOffers, err = model.NewQuestOfferRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent quest-offer repository: %w", err)
 	}
 	if repositories.Regions, err = model.NewGameServerRegionRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent game-server region catalog: %w", err)
@@ -153,6 +186,12 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.COS, err = model.NewCOSRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent COS repository: %w", err)
+	}
+	if repositories.COSPolicy, err = model.NewCOSPolicyRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent COS policy repository: %w", err)
+	}
+	if repositories.ChatFilter, err = model.NewChatFilterRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent chat filter: %w", err)
 	}
 	return repositories, nil
 }

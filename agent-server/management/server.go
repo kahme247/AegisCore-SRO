@@ -13,12 +13,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	frameworkserver "github.com/Harvi8/AegisCore/framework/server"
 )
 
 const OnlinePlayersPath = "/v1/management/players"
 const PlayerDisconnectsPath = "/v1/management/player-disconnects"
 const BroadcastsPath = "/v1/management/broadcasts"
+const HealthPath = "/v1/management/health"
+
+type HealthSource interface {
+	DatabaseQueryCount() int
+	MessageDispatch() frameworkserver.DispatchMetrics
+}
 
 var ErrServerStarted = errors.New("Agent management server already started")
 
@@ -37,7 +45,7 @@ type Server struct {
 	listener net.Listener
 }
 
-func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSource) (*Server, error) {
+func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSource, healthSources ...HealthSource) (*Server, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("Agent management listener address is required")
 	}
@@ -53,7 +61,7 @@ func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSourc
 	return &Server{
 		address: address, tlsConfig: tlsConfig.Clone(),
 		server: &http.Server{
-			Handler:           NewHandler(players),
+			Handler:           NewHandler(players, healthSources...),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,
@@ -63,8 +71,35 @@ func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSourc
 	}, nil
 }
 
-func NewHandler(players PlayerControlSource) http.Handler {
+func NewHandler(players PlayerControlSource, healthSources ...HealthSource) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+HealthPath, func(response http.ResponseWriter, request *http.Request) {
+		now := time.Now()
+		game := manager.GameHealth(now)
+		dbQueries := 0
+		dispatch := frameworkserver.DispatchMetrics{}
+		if len(healthSources) > 0 && healthSources[0] != nil {
+			dbQueries = healthSources[0].DatabaseQueryCount()
+			dispatch = healthSources[0].MessageDispatch()
+		}
+		objects := 0
+		if players != nil {
+			if source, ok := players.(interface{ ObjectCount() int }); ok {
+				objects = source.ObjectCount()
+			} else {
+				objects = len(players.GetActivePlayers())
+			}
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(struct {
+			GeneratedAt        time.Time                       `json:"generatedAt"`
+			ObjectCount        int                             `json:"objectCount"`
+			DatabaseQueryCount int                             `json:"databaseQueryCount"`
+			GameUpdate         manager.GameHealthSnapshot      `json:"gameUpdate"`
+			MessageDispatch    frameworkserver.DispatchMetrics `json:"messageDispatch"`
+		}{now.UTC(), objects, dbQueries, game, dispatch})
+	})
 	mux.HandleFunc("GET "+OnlinePlayersPath, func(response http.ResponseWriter, _ *http.Request) {
 		if players == nil {
 			http.Error(response, "service unavailable", http.StatusServiceUnavailable)

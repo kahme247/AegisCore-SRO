@@ -29,11 +29,14 @@ type AgentDependencies struct {
 	UnhandledPacketsLogger *log.Logger
 	Pools                  *frameworkdb.Pools
 	ReferenceData          model.ReferenceDataRepository
+	MonsterDropCatalog     service.MonsterDropCatalogLoader
 	World                  *service.WorldService
+	MonsterDrops           *service.MonsterDropService
 	LevelTable             *model.LevelTable
 	Exchange               *exchange.Manager
 	GuildStorage           model.GuildStorageRepository
 	GameplayRates          *manager.GameplayRateManager
+	COSPolicy              *manager.COSPolicyManager
 	DisconnectSaver        *service.DisconnectSaver
 	Lifecycle              *agentruntime.Lifecycle
 	Features               feature.Set
@@ -61,14 +64,20 @@ func NewAgentServerWithDependencies(dependencies AgentDependencies) (AgentServer
 		cancelPacketHandling:   cancelPacketHandling,
 		Pools:                  dependencies.Pools,
 		ReferenceData:          dependencies.ReferenceData,
+		MonsterDropCatalog:     dependencies.MonsterDropCatalog,
 		World:                  dependencies.World,
+		MonsterDrops:           dependencies.MonsterDrops,
 		LevelTable:             dependencies.LevelTable,
 		Exchange:               dependencies.Exchange,
 		GuildStorage:           dependencies.GuildStorage,
 		GameplayRates:          dependencies.GameplayRates,
+		COSPolicy:              dependencies.COSPolicy,
 		DisconnectSaver:        dependencies.DisconnectSaver,
 		Lifecycle:              lifecycle,
 		Features:               cloneFeatureSet(dependencies.Features),
+	}
+	if dependencies.World != nil {
+		agent.GroundItems = service.NewGroundItemService(dependencies.World, service.GetPartyServiceInstance())
 	}
 	dependencies.Server.SetSessionClosedHandler(agent.playerSessionClosed)
 	return agent, nil

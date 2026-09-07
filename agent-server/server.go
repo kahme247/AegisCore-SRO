@@ -69,6 +69,16 @@ type AgentServer struct {
 	// World is the configured singleton used by the live Agent. It is retained
 	// here so shutdown can drain its position queue before Pools is closed.
 	World *service.WorldService
+	// GroundItems applies party ownership and emits the binary-confirmed
+	// distribution notification before a materialized item enters the world.
+	GroundItems         *service.GroundItemService
+	GroundItemLifecycle *service.GroundItemLifecycle
+	// MonsterDrops is optional until a hydrated reference-drop catalog is
+	// installed; when present, Combat invokes it after a confirmed mob death.
+	MonsterDrops *service.MonsterDropService
+	// MonsterDropCatalog is the startup SQL boundary used to hydrate
+	// MonsterDrops after the ordinary reference snapshot is available.
+	MonsterDropCatalog service.MonsterDropCatalogLoader
 	// LevelTable is loaded from SRO_SHARD.REF_LEVEL_DATA before any character
 	// can enter the world.
 	LevelTable *model.LevelTable
@@ -81,13 +91,42 @@ type AgentServer struct {
 	Combat             *character.CombatHandler
 	Hwan               *character.HwanHandler
 	Skill              *character.SkillHandler
+	SkillRestoration   *character.SkillRestorationHandler
 	Inventory          *inventory.InventoryHandler
 	CharacterSelection *lobby.CharacterSelectionHandler
 	Vitals             model.CharacterVitalsRepository
 	GameplayRates      *manager.GameplayRateManager
+	COSPolicy          *manager.COSPolicyManager
 	COS                *service.COSService
 	DisconnectSaver    *service.DisconnectSaver
+	ChatFilter         model.ChatFilterRepository
 	//SpawnEngine             *spawn.SpawnEngine
+}
+
+type agentDatabaseHealthSource struct {
+	pools  *frameworkdb.Pools
+	engine *server.Server
+}
+
+func (s agentDatabaseHealthSource) DatabaseQueryCount() int {
+	if s.pools == nil {
+		return 0
+	}
+	total := 0
+	if account, err := s.pools.Account(); err == nil {
+		total += account.Stats().InUse
+	}
+	if shard, err := s.pools.Shard(); err == nil {
+		total += shard.Stats().InUse
+	}
+	return total
+}
+
+func (s agentDatabaseHealthSource) MessageDispatch() server.DispatchMetrics {
+	if s.engine == nil {
+		return server.DispatchMetrics{}
+	}
+	return s.engine.DispatchMetrics()
 }
 
 // NewAgentServer constructs both Agent listeners but does not expose either
@@ -155,11 +194,27 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure gameplay rate cache: %w", err)
 	}
+	cosPolicy, err := manager.NewCOSPolicyManager(repositories.COSPolicy, manager.COSPolicyRefreshInterval)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure COS policy cache: %w", err)
+	}
+	cosPolicyContext, cancelCOSPolicyLoad := context.WithTimeout(context.Background(), 5*time.Second)
+	err = cosPolicy.Refresh(cosPolicyContext)
+	cancelCOSPolicyLoad()
+	if err != nil {
+		log.Errorf("initial COS policy load failed; using safe companion defaults: %v", err)
+	}
 	rateContext, cancelRateLoad := context.WithTimeout(context.Background(), 5*time.Second)
 	err = gameplayRates.Refresh(rateContext)
 	cancelRateLoad()
 	if err != nil {
 		log.Errorf("initial gameplay rate load failed; using hardcoded 100%% EXP, skill EXP, mob count, and mob respawn: %v", err)
+	}
+	chatFilterContext, cancelChatFilterLoad := context.WithTimeout(context.Background(), 5*time.Second)
+	err = repositories.ChatFilter.Refresh(chatFilterContext)
+	cancelChatFilterLoad()
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("load database-backed chat abuse filter: %w", err)
 	}
 
 	serv := server.NewEngine(
@@ -222,14 +277,31 @@ func NewAgentServer() (AgentServer, error) {
 		UnhandledPacketsLogger: logging.UnhandledPacketLogger(),
 		Pools:                  pools,
 		ReferenceData:          repositories.ReferenceData,
+		MonsterDropCatalog:     repositories.MonsterDropCatalog,
+		World:                  service.GetWorldServiceInstance(),
 		LevelTable:             levelTable,
 		GameplayRates:          gameplayRates,
+		COSPolicy:              cosPolicy,
 		Lifecycle:              lifecycle,
 		Features:               features,
 		DisconnectSaver:        disconnectSaver,
 	})
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("compose Agent runtime: %w", err)
+	}
+	var groundItemLifecycle *service.GroundItemLifecycle
+	if agentServer.GroundItems != nil {
+		agentServer.GroundItems.ConfigureMaterializer(repositories.GroundItemMaterializer)
+		// 0x0048F9B0 compares the ownership accumulator with 30.0. The
+		// lifecycle scheduler expresses that recovered boundary as a duration;
+		// final despawn remains reference-driven and is deliberately disabled
+		// until the corresponding runtime decay source is wired.
+		groundItemLifecycle = service.NewGroundItemLifecycle(service.GetWorldServiceInstance())
+		agentServer.GroundItemLifecycle = groundItemLifecycle
+		agentServer.GroundItems.ConfigureLifecycle(groundItemLifecycle, 30*time.Second, 0)
+		if agentServer.Inventory != nil {
+			agentServer.Inventory.ConfigureGroundItemLifecycle(groundItemLifecycle)
+		}
 	}
 	if err := lifecycle.Transition(agentruntime.Loading, ""); err != nil {
 		return AgentServer{}, fmt.Errorf("enter Agent loading lifecycle: %w", err)
@@ -260,6 +332,9 @@ func NewAgentServer() (AgentServer, error) {
 	if err := characterSelection.ConfigureQuickSlotRepository(repositories.QuickSlots); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot bootstrap: %w", err)
 	}
+	if err := characterSelection.ConfigureAutoPotionSettingsRepository(repositories.AutoPotionSettings); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent auto-potion settings bootstrap: %w", err)
+	}
 	if err := characterSelection.ConfigureSpeedEffectRepository(repositories.SpeedEffects); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character speed-effect bootstrap: %w", err)
 	}
@@ -277,6 +352,7 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent movement settings: %w", err)
 	}
 	agentServer.CharacterSelection = characterSelection
+	agentServer.ChatFilter = repositories.ChatFilter
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv, repositories.CharacterRename)
 	gameReadyHandler := character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
 	character.RegisterGuideHandler(&serv)
@@ -291,19 +367,33 @@ func NewAgentServer() (AgentServer, error) {
 	character.RegisterDeselectEntityHandler(&serv)
 	cos.RegisterMountStateHandler(&serv)
 	cosLifecycle := cos.RegisterLifecycleHandlers(&serv, repositories.COS)
-	if err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime); err != nil {
+	if cosLifecycle == nil || cosLifecycle.Service() == nil {
+		return AgentServer{}, fmt.Errorf("configure Agent COS lifecycle: service is unavailable")
+	}
+	cosLifecycle.Service().ConfigurePolicy(cosPolicy)
+	service.GetWorldServiceInstance().ConfigureMountedTransportResolver(cosLifecycle.Service().ResolveMountedTransport)
+	if err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime, repositories.QuestOffers); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent NPC talk handler: %w", err)
 	}
 	if err := character.RegisterQuestHandler(&serv, repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest handlers: %w", err)
 	}
+	if _, err := character.RegisterQuestRewardSelectionHandler(&serv, questRuntime); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent quest reward selection: %w", err)
+	}
 	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
-	character.RegisterResurrectionHandler(&serv, repositories.Vitals, repositories.ItemUse)
+	character.RegisterResurrectionHandler(&serv, repositories.Vitals, teleportHandler, repositories.ItemUse)
 	manager.GetMobAIManagerInstance().ConfigureVitals(repositories.Vitals)
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
 	manager.GetRespawnManagerInstance().ConfigureGiantSpawnRatio(viper.GetInt(config.AgentGiantMonsterSpawnRatio))
 	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
+	agentServer.Combat.ConfigureMobAttackInterrupter(manager.GetMobAIManagerInstance().InterruptAttack)
+	manager.GetMobAIManagerInstance().ConfigurePlayerAttackInterrupter(agentServer.Combat.InterruptPlayerAction)
+	if agentServer.MonsterDrops != nil {
+		agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
+	}
 	agentServer.Combat.ConfigureVitals(repositories.Vitals)
+	agentServer.Combat.ConfigureRangedAmmo(repositories.RangedAmmo)
 	agentServer.Combat.ConfigureMonsterMasks(repositories.MonsterMasks)
 	agentServer.Combat.ConfigureHwan(repositories.Hwan)
 	cosLifecycle.Service().ConfigureCombat(agentServer.Combat, levelTable)
@@ -319,12 +409,20 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent skill handler: %w", err)
 	}
-	if err := character.RegisterQuickSlotHandler(&serv, repositories.QuickSlots); err != nil {
+	restorationRepository, ok := repositories.SkillLearning.(model.SkillRestorationRepository)
+	if !ok {
+		return AgentServer{}, fmt.Errorf("configure Agent skill restoration: repository does not support restoration")
+	}
+	agentServer.SkillRestoration, err = character.RegisterSkillRestorationHandler(&serv, restorationRepository, levelTable)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent skill restoration handler: %w", err)
+	}
+	if err := character.RegisterQuickSlotHandler(&serv, repositories.QuickSlots, repositories.AutoPotionSettings); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot handler: %w", err)
 	}
 	socialHandler := social.RegisterHandlers(&serv, repositories.Social)
 	gameReadyHandler.ConfigureSocial(socialHandler)
-	chat.RegisterChatHandler(&serv, repositories.Social)
+	chat.RegisterChatHandler(&serv, repositories.Social, repositories.ChatFilter)
 	logout.RegisterLogoutHandler(&serv)
 	stall.RegisterStallCreateHandler(&serv)
 	stall.RegisterStallDestroyHandler(&serv)
@@ -340,14 +438,34 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.GuildStorage = repositories.GuildStorage
 	agentServer.Vitals = repositories.Vitals
 	agentServer.Inventory = inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.AvatarInventory, repositories.ItemMall)
+	agentServer.Inventory.ConfigureGroundItemPickupRepository(repositories.GroundItemPickup)
+	agentServer.Inventory.ConfigureGroundGoldPickupRepository(repositories.GroundGoldPickup)
+	agentServer.Inventory.ConfigureGroundItemDropRepository(repositories.GroundItemDrop)
+	agentServer.Inventory.ConfigureGroundItemService(agentServer.GroundItems)
+	if groundItemLifecycle != nil {
+		agentServer.Inventory.ConfigureGroundItemLifecycle(groundItemLifecycle)
+	}
+	agentServer.Inventory.ConfigureQuestProgressRepository(questRuntime)
+	cosInventoryRepository, ok := repositories.COS.(model.COSInventoryTransferRepository)
+	if !ok {
+		return AgentServer{}, fmt.Errorf("configure Agent COS inventory transfer: repository does not support transfers")
+	}
+	agentServer.Inventory.ConfigureCOSRepository(cosInventoryRepository)
 	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse, teleportHandler)
 	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
 	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
 	agentServer.COS = cosLifecycle.Service()
+	if agentServer.COS != nil && groundItemLifecycle != nil {
+		// COS collection shares the ground-item timer cancellation edge with
+		// player pickup; the persistence transaction has already committed
+		// before the service removes the visible object.
+		agentServer.COS.ConfigureGroundItemLifecycle(groundItemLifecycle)
+	}
 	gameReadyHandler.ConfigureCOS(cosLifecycle.Service())
 	manager.GetGameTimeManagerInstance().ConfigureCOS(cosLifecycle.Service())
 	itemUseHandler.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
-	inventory.RegisterAlchemyHandler(&serv, repositories.Alchemy)
+	alchemyHandler := inventory.RegisterAlchemyHandler(&serv, repositories.Alchemy)
+	manager.GetGameTimeManagerInstance().ConfigureAlchemy(alchemyHandler)
 	party.RegisterPartyHandlers(&serv, socialHandler)
 
 	if err := world.ConfigureRepositories(service.WorldRepositories{
@@ -373,6 +491,7 @@ func NewAgentServer() (AgentServer, error) {
 			net.JoinHostPort(viper.GetString(config.AgentManagementHost), fmt.Sprintf("%d", viper.GetInt(config.AgentManagementPort))),
 			managementTLS,
 			world,
+			agentDatabaseHealthSource{pools: pools, engine: &serv},
 		)
 		if err != nil {
 			return AgentServer{}, fmt.Errorf("configure Agent management listener: %w", err)
@@ -420,6 +539,12 @@ func (a *AgentServer) Start() error {
 	if a.GameplayRates != nil {
 		a.GameplayRates.Start(a.packetContext)
 	}
+	if a.COSPolicy != nil {
+		a.COSPolicy.Start(a.packetContext)
+	}
+	if a.ChatFilter != nil {
+		go a.refreshChatFilter(a.packetContext)
+	}
 	if err := a.Lifecycle.Transition(agentruntime.Ready, ""); err != nil {
 		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Second)
 		if a.ManagementServer != nil {
@@ -446,6 +571,24 @@ func (a *AgentServer) Start() error {
 	return nil
 }
 
+func (a *AgentServer) refreshChatFilter(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := a.ChatFilter.Refresh(refreshCtx)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Warnf("database-backed chat filter refresh failed; retaining prior snapshot: %v", err)
+			}
+		}
+	}
+}
+
 // Close performs the Agent-facing portion of the ordered shutdown protocol:
 // first stop public accepts, then stop Gateway ticket installation, and only
 // then drain sessions whose terminal hooks release world/admission state. The
@@ -455,6 +598,7 @@ func (a *AgentServer) Close(ctx context.Context) error {
 	if a == nil {
 		return nil
 	}
+	manager.StopGameTimeWatchdog()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -499,9 +643,17 @@ func (a *AgentServer) Close(ctx context.Context) error {
 			closeErrors = append(closeErrors, fmt.Errorf("drain Agent world position persistence: %w", err))
 		}
 	}
+	if a.GroundItemLifecycle != nil {
+		a.GroundItemLifecycle.Close()
+	}
 	if a.GameplayRates != nil {
 		if err := a.GameplayRates.Wait(ctx); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("stop gameplay rate refresher: %w", err))
+		}
+	}
+	if a.COSPolicy != nil {
+		if err := a.COSPolicy.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop COS policy refresher: %w", err))
 		}
 	}
 	if err := a.closePools(); err != nil {
@@ -566,10 +718,14 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 		return
 	}
 	if a.AdmissionTickets != nil {
-		// Keep a fully joined character reserved until its world teardown has
-		// completed, while still releasing a successfully authenticated session
-		// that disconnected before it acquired a character UID.
-		defer a.AdmissionTickets.ReleaseAccount(closedSession.UserContext.UserID)
+		// The transport is already terminal and has been removed from Server's
+		// session registry before this hook runs. Release its account reservation
+		// before the potentially blocking persistence/world teardown below. If a
+		// teardown dependency stalls, retaining the reservation here permanently
+		// rejects otherwise valid reconnects as an already-connected login. World
+		// admission independently prevents a still-retained character instance
+		// from being joined twice while cleanup finishes.
+		a.AdmissionTickets.ReleaseAccount(closedSession.UserContext.UserID)
 	}
 	if closedSession.UserContext.UniqueID == 0 {
 		return
@@ -690,6 +846,7 @@ func main() {
 			log.Fatalf("Agent reference-data bootstrap failed: %v", err)
 		}
 		referenceCatalog := model.NewReferenceDataCatalog(snapshot)
+		service.GetWorldServiceInstance().ConfigureReferenceData(referenceCatalog)
 		agentServer.Combat.ConfigureReferenceData(referenceCatalog)
 		agentServer.Inventory.ConfigureReferenceData(referenceCatalog)
 		if err := agentServer.CharacterSelection.ConfigureReferenceData(referenceCatalog); err != nil {
@@ -697,6 +854,9 @@ func main() {
 		}
 		if err := agentServer.Skill.ConfigureReferenceData(referenceCatalog); err != nil {
 			log.Fatalf("Agent skill reference-data bootstrap failed: %v", err)
+		}
+		if err := agentServer.SkillRestoration.ConfigureReferenceData(referenceCatalog); err != nil {
+			log.Fatalf("Agent skill-restoration reference-data bootstrap failed: %v", err)
 		}
 		if err := manager.GetRespawnManagerInstance().ConfigureReferenceData(referenceCatalog); err != nil {
 			log.Fatalf("Agent respawn reference-data bootstrap failed: %v", err)
@@ -710,6 +870,22 @@ func main() {
 		model.RefChars = snapshot.Characters
 		model.RefSkills = snapshot.Skills
 		model.RefObjects = buildReferenceObjectIndex(snapshot.Items, snapshot.Characters)
+
+		if agentServer.MonsterDropCatalog != nil {
+			dropCatalog, dropErr := agentServer.MonsterDropCatalog.Load(loadContext)
+			if dropErr != nil {
+				log.Fatalf("Agent monster-drop catalog bootstrap failed: %v", dropErr)
+			}
+			agentServer.MonsterDrops = service.NewMonsterDropService(
+				dropCatalog,
+				service.NewLockedDropRandom(time.Now().UnixNano()),
+				agentServer.GroundItems,
+				agentServer.GroundItems.Materializer(),
+			)
+			if agentServer.Combat != nil {
+				agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
+			}
+		}
 	}
 
 	boot.RegisterComponent("gamedata", loadGameData, 1)
@@ -726,7 +902,9 @@ func main() {
 	boot.RegisterComponent("gamedata", setupWorld, 1)
 
 	startServices := func() {
-		manager.GetGameTimeManagerInstance().Start()
+		gameTime := manager.GetGameTimeManagerInstance()
+		gameTime.Start()
+		gameTime.StartWatchdog()
 		//manager.GetKnownListManager().Start()
 		manager.GetSpawnManagerInstance().Start()
 		manager.GetRespawnManagerInstance().Start()

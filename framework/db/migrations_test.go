@@ -429,12 +429,39 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 63 {
-		t.Fatalf("shard migration count = %d, want 63", len(shardMigrations))
+	if len(shardMigrations) != 84 {
+		t.Fatalf("shard migration count = %d, want 84", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
 		shardMigrationByVersion[migration.Version] = migration
+	}
+	mediaCatalogMigration := shardMigrationByVersion[81]
+	if mediaCatalogMigration.Version != 81 || mediaCatalogMigration.Name != "media_text_catalog" ||
+		!strings.Contains(mediaCatalogMigration.UpSQL, "REF_MEDIA_TEXT_CATALOG_ROW") ||
+		!strings.Contains(mediaCatalogMigration.DownSQL, "DROP TABLE `SRO_SHARD`.`REF_MEDIA_TEXT_CATALOG`") {
+		t.Fatalf("Media text catalog migration = %#v", mediaCatalogMigration)
+	}
+	alexandriaArrowMigration := shardMigrationByVersion[82]
+	if alexandriaArrowMigration.Version != 82 || alexandriaArrowMigration.Name != "alexandria_arrow_shop_mapping" ||
+		!strings.Contains(alexandriaArrowMigration.UpSQL, "`FK_REF_ITEM` = 62") ||
+		!strings.Contains(alexandriaArrowMigration.DownSQL, "`FK_REF_ITEM` = 10383") {
+		t.Fatalf("Alexandria arrow mapping migration = %#v", alexandriaArrowMigration)
+	}
+	potionStackMigration := shardMigrationByVersion[84]
+	if potionStackMigration.Version != 84 || potionStackMigration.Name != "player_potion_stack_limit" ||
+		!strings.Contains(potionStackMigration.UpSQL, "`Stack_Size` = 50000") ||
+		!strings.Contains(potionStackMigration.DownSQL, "`Stack_Size` = 50") ||
+		!strings.Contains(potionStackMigration.UpSQL, "ITEM\\_ETC\\_HP\\_POTION") ||
+		!strings.Contains(potionStackMigration.UpSQL, "ITEM\\_ETC\\_MP\\_POTION") {
+		t.Fatalf("player potion stack migration = %#v", potionStackMigration)
+	}
+	cosPolicyMigration := shardMigrationByVersion[85]
+	if cosPolicyMigration.Version != 85 || cosPolicyMigration.Name != "cos_gameplay_policy" ||
+		!strings.Contains(cosPolicyMigration.UpSQL, "GAMEPLAY_COS_SETTINGS") ||
+		!strings.Contains(cosPolicyMigration.UpSQL, "GAMEPLAY_COS_KIND_POLICY") ||
+		!strings.Contains(cosPolicyMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("COS gameplay policy migration = %#v", cosPolicyMigration)
 	}
 	guildRenameMigration := shardMigrationByVersion[51]
 	if guildRenameMigration.Version != 51 || guildRenameMigration.Name != "guild_forced_rename" ||
@@ -533,6 +560,22 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(questTalismanMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("quest talisman migration = %#v, want reversible talisman-collection catalog", questTalismanMigration)
 	}
+	questStartMigration := shardMigrationByVersion[65]
+	if questStartMigration.Version != 65 || questStartMigration.Name != "quest_start_requirements" ||
+		!strings.Contains(questStartMigration.UpSQL, "REF_QUEST_START_CONDITION") ||
+		!strings.Contains(questStartMigration.UpSQL, "REF_QUEST_START_NPC") ||
+		!strings.Contains(questStartMigration.UpSQL, "REF_QUEST_DEPENDENCY_ENTRY") ||
+		!strings.Contains(questStartMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest start migration = %#v, want reversible qualification, routing and dependency catalogs", questStartMigration)
+	}
+	questPolicyMigration := shardMigrationByVersion[66]
+	if questPolicyMigration.Version != 66 || questPolicyMigration.Name != "quest_policy_and_points" ||
+		!strings.Contains(questPolicyMigration.UpSQL, "REF_QUEST_COMPLETION_POLICY") ||
+		!strings.Contains(questPolicyMigration.UpSQL, "REF_QUEST_JOB_START_CONDITION") ||
+		!strings.Contains(questPolicyMigration.UpSQL, "REF_QUEST_SCRIPT_POINT_REWARD") ||
+		!strings.Contains(questPolicyMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest policy migration = %#v, want reversible completion, qualification and point-reward catalogs", questPolicyMigration)
+	}
 	buybackMigration := shardMigrationByVersion[38]
 	if buybackMigration.Version != 38 || buybackMigration.Name != "character_buyback" ||
 		!strings.Contains(buybackMigration.UpSQL, "CREATE TABLE `CHAR_BUYBACK`") ||
@@ -550,6 +593,33 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(reverseReturnMigration.UpSQL, "CREATE TABLE `CHAR_REVERSE_RETURN_POSITION`") ||
 		!strings.Contains(reverseReturnMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("reverse-return migration = %#v, want reversible version 40 reverse_return_position", reverseReturnMigration)
+	}
+	reverseDestinationsMigration := shardMigrationByVersion[67]
+	if reverseDestinationsMigration.Version != 67 || reverseDestinationsMigration.Name != "reverse_return_destinations" ||
+		!strings.Contains(reverseDestinationsMigration.UpSQL, "CREATE TABLE `CHAR_DEATH_POSITION`") ||
+		!strings.Contains(reverseDestinationsMigration.UpSQL, "CREATE TABLE `REF_OPTIONAL_TELEPORT`") ||
+		!strings.Contains(reverseDestinationsMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("reverse-return destinations migration = %#v", reverseDestinationsMigration)
+	}
+	sdMigration := shardMigrationByVersion[69]
+	if sdMigration.Version != 69 || sdMigration.Name != "enable_sd_continent" ||
+		!strings.Contains(sdMigration.UpSQL, "VALUES ('SD', 1)") ||
+		!strings.Contains(sdMigration.DownSQL, "`Continent_Name` = 'SD'") {
+		t.Fatalf("SD continent migration = %#v", sdMigration)
+	}
+	allRegionsMigration := shardMigrationByVersion[70]
+	if allRegionsMigration.Version != 70 || allRegionsMigration.Name != "enable_all_regions" ||
+		!strings.Contains(allRegionsMigration.UpSQL, "('KingsValley',1)") ||
+		!strings.Contains(allRegionsMigration.UpSQL, "('TQ',1)") ||
+		!strings.Contains(allRegionsMigration.DownSQL, "'SIEGE_DUNGEON'") {
+		t.Fatalf("all-regions migration = %#v", allRegionsMigration)
+	}
+	partyExperienceMigration := shardMigrationByVersion[75]
+	if partyExperienceMigration.Version != 75 || partyExperienceMigration.Name != "party_experience_rate" ||
+		!strings.Contains(partyExperienceMigration.UpSQL, "PARTY_EXPERIENCE_RATE_PERCENT") ||
+		!strings.Contains(partyExperienceMigration.UpSQL, "SET `PARTY_EXPERIENCE_RATE_PERCENT` = `EXPERIENCE_RATE_PERCENT`") ||
+		!strings.Contains(partyExperienceMigration.DownSQL, "DROP COLUMN `PARTY_EXPERIENCE_RATE_PERCENT`") {
+		t.Fatalf("party experience migration = %#v", partyExperienceMigration)
 	}
 	itemBuffMigration := shardMigrationByVersion[41]
 	if itemBuffMigration.Version != 41 || itemBuffMigration.Name != "character_item_buffs" ||
