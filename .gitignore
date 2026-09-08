@@ -26,6 +26,11 @@
 /tmp_read_minidump.go
 /nul
 
+# Local nested working repositories (preserved, never stage from root)
+/.local/deploy-cos-login/
+/.local/SilkroadLauncher-source/
+/.tools/clean-agent-build/
+
 # Test binary, build with `go test -c`
 *.test
 
