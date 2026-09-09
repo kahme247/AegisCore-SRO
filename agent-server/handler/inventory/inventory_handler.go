@@ -569,7 +569,7 @@ func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, sessi
 	}
 	player.CommitInventory(playerInventory)
 	pet.ReplaceInventory(cosInventory)
-	response := vsro188.BuildItemOperationObjectSlotSuccess(byte(operation), petUID, destination)
+	response := vsro188.BuildItemOperationObjectSlotSuccess(vsro188.ItemOperationCOSTransfer, petUID, destination)
 	return h.sendPacket(session, response)
 }
 

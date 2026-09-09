@@ -12,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 )
 
@@ -464,7 +465,38 @@ func TestPlayerItemMovesIntoAbilityPetInventory(t *testing.T) {
 	if len(player.GetInventory().Items) != 0 || pet.Snapshot().Inventory.Items[3].ID != 100 {
 		t.Fatalf("runtime inventories player=%+v pet=%+v", player.GetInventory().Items, pet.Snapshot().Inventory.Items)
 	}
-	want := []byte{1, byte(PutItemIntoPetInventoryOperation), 88, 0, 0, 0, 3}
+	want := []byte{1, vsro188.ItemOperationCOSTransfer, 88, 0, 0, 0, 3}
+	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
+		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
+	}
+}
+
+func TestPlayerItemMovesFromAbilityPetInventory(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(nil)}
+	pet := &model.COS{NPC: model.NPC{SRObject: model.SRObject{UniqueID: 88}}, PersistentID: 9, OwnerCharID: 44, OwnerUniqueID: 77, Kind: model.COSAbilityPet, InventorySize: 28, Inventory: model.NewInventory(map[byte]model.Item{3: {ID: 100}})}
+	nextPlayer := model.NewInventory(map[byte]model.Item{14: {ID: 100}})
+	nextCOS := model.NewInventory(nil)
+	repository := &petInventoryTransferFake{playerInventory: nextPlayer, cosInventory: nextCOS}
+	handler := NewInventoryHandler(&petInventoryWorldFake{player: player, pet: pet}, nil)
+	handler.ConfigureCOSRepository(repository)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(TakeItemFromPetInventoryOperation))
+	request.WriteUInt32(88)
+	request.WriteByte(3)
+	request.WriteByte(14)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.owner != 44 || repository.cosID != 9 || repository.itemSource != 3 || repository.itemDestination != 14 || repository.toCOS {
+		t.Fatalf("transfer = %+v", repository)
+	}
+	if player.GetInventory().Items[14].ID != 100 || len(pet.Snapshot().Inventory.Items) != 0 {
+		t.Fatalf("runtime inventories player=%+v pet=%+v", player.GetInventory().Items, pet.Snapshot().Inventory.Items)
+	}
+	want := []byte{1, vsro188.ItemOperationCOSTransfer, 88, 0, 0, 0, 14}
 	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
 		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
 	}
