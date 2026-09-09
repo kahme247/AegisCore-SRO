@@ -52,6 +52,92 @@ func TestBlockedObjectBoundaryStopsMovement(t *testing.T) {
 	}
 }
 
+func TestObjectCollisionSelectsNearestBlockedEdgeWithoutCopyingContactEdge(t *testing.T) {
+	object := rectangularTestObject(0, 0, 10, 10, LineSegment{
+		A: math32.NewVector3(8, 0, 0),
+		B: math32.NewVector3(8, 0, 10),
+	})
+	object.GlobalEdges[0].Flag = RtNavmeshEdgeFlag(1)
+	object.InternalEdges = []RtNavmeshEdgeInternal{{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+		Line: LineSegment{
+			A: math32.NewVector3(3, 0, 0),
+			B: math32.NewVector3(3, 0, 10),
+		},
+		Flag: RtNavmeshEdgeFlag(1),
+	}}}
+	identity := math32.NewMatrix4()
+	region := Region{ID: 1}
+	instance := RtNavmeshInstObj{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: object, LocalToWorld: identity, WorldToLocal: identity},
+		Region:            region,
+	}
+	current := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(1, 0, 5)}
+	next := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(9, 0, 5)}
+
+	collides, collision, _, _ := FindCollisionsInObjects(current, next, []RtNavmeshInstObj{instance})
+	if !collides || collision.VectorLocal == nil || math32.Abs(collision.VectorLocal.X-3) > 0.001 {
+		t.Fatalf("nearest collision = %+v, want internal edge at X=3", collision.VectorLocal)
+	}
+	if collision.ContactEdge != &instance.Object.InternalEdges[0] {
+		t.Fatal("collision contact edge points at a copied loop value")
+	}
+}
+
+func BenchmarkFindCollisionsInObjectBlockedEdges(b *testing.B) {
+	object := rectangularTestObject(0, 0, 100, 100, LineSegment{
+		A: math32.NewVector3(99, 0, 0),
+		B: math32.NewVector3(99, 0, 100),
+	})
+	object.GlobalEdges = make([]RtNavmeshEdgeGlobal, 64)
+	for edgeIndex := range object.GlobalEdges {
+		x := float32(edgeIndex + 1)
+		object.GlobalEdges[edgeIndex] = RtNavmeshEdgeGlobal{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+			Line: LineSegment{A: math32.NewVector3(x, 0, 0), B: math32.NewVector3(x, 0, 100)},
+			Flag: RtNavmeshEdgeFlag(1),
+		}}
+	}
+	identity := math32.NewMatrix4()
+	region := Region{ID: 1}
+	instances := []RtNavmeshInstObj{{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: object, LocalToWorld: identity, WorldToLocal: identity},
+		Region:            region,
+	}}
+	current := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(0.5, 0, 50)}
+	next := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(70, 0, 50)}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		FindCollisionsInObjects(current, next, instances)
+	}
+}
+
+func BenchmarkFindTerrainCollisionsBlockedEdges(b *testing.B) {
+	edges := make([]RtNavmeshEdgeGlobal, 64)
+	currentCell := RtNavmeshCellQuad{RtNavmeshCellBase: RtNavmeshCellBase{Index: 1}}
+	currentCell.Edges = make([]RtNavmeshEdge, len(edges))
+	for edgeIndex := range edges {
+		x := float32(edgeIndex + 1)
+		edges[edgeIndex] = RtNavmeshEdgeGlobal{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+			Line:         LineSegment{A: math32.NewVector3(x, 0, 0), B: math32.NewVector3(x, 0, 100)},
+			Flag:         RtNavmeshEdgeFlag(1 << 1),
+			SrcCellIndex: currentCell.Index,
+			DstCellIndex: 2,
+		}}
+		currentCell.Edges[edgeIndex] = &edges[edgeIndex]
+	}
+	nextCell := RtNavmeshCellQuad{RtNavmeshCellBase: RtNavmeshCellBase{Index: 2}}
+	region := Region{ID: 1}
+	current := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(0.5, 0, 50)}
+	next := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(70, 0, 50)}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		FindTerrainCollisions(current, next, currentCell, nextCell)
+	}
+}
+
 func TestObjectBoundaryOnDifferentVerticalLayerDoesNotStopMovement(t *testing.T) {
 	object := rectangularTestObject(0, 0, 10, 10, LineSegment{
 		A: math32.NewVector3(5, 0, 0),

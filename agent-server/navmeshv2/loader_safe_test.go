@@ -22,3 +22,29 @@ func TestNewLoaderSafeRejectsMalformedArchive(t *testing.T) {
 		t.Fatalf("expected checked archive-header error, got %v", err)
 	}
 }
+
+func TestLoaderCloseArchiveReleasesAndDetachesReader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive.pk2")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := pk2.NewPk2Reader(path)
+	reader.FileCache["cached"] = []byte("payload")
+	loader := newLoader(&reader, path)
+
+	if err := loader.CloseArchive(); err != nil {
+		t.Fatalf("CloseArchive() error = %v", err)
+	}
+	if loader.Pk2Reader != nil {
+		t.Fatal("CloseArchive() retained PK2 reader")
+	}
+	if len(reader.FileCache) != 0 {
+		t.Fatalf("CloseArchive() retained %d cached files", len(reader.FileCache))
+	}
+	if _, err := reader.ReadFile("cached"); !errors.Is(err, pk2.ErrArchiveClosed) {
+		t.Fatalf("ReadFile() after CloseArchive error = %v, want ErrArchiveClosed", err)
+	}
+	if err := loader.CloseArchive(); err != nil {
+		t.Fatalf("second CloseArchive() error = %v", err)
+	}
+}

@@ -33,50 +33,68 @@ type Collision struct {
 
 func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 	currentCell, nextCell RtNavmeshCellQuad) (bool, Collision) {
-	collisions := make([]Collision, 0)
+	sameRegion := currentPosition.Region.ID == nextPosition.Region.ID
 	line1 := LineSegment{
 		A: currentPosition.Offset,
 		B: nextPosition.Offset,
 	}
-	if currentPosition.Region.ID == nextPosition.Region.ID {
+	var currentGlobal *math32.Vector3
+	var nearestIntersection math32.Vector2
+	var nearestCollision Collision
+	nearestDistance := math32.Inf(1)
+	hasCollision := false
+	consider := func(intersection math32.Vector2, edge RtNavmeshEdge, region Region) {
+		var distance float32
+		if sameRegion {
+			dx := currentPosition.Offset.X - intersection.X
+			dy := currentPosition.Offset.Y
+			dz := currentPosition.Offset.Z - intersection.Y
+			distance = dx*dx + dy*dy + dz*dz
+		} else {
+			dx := currentGlobal.X - intersection.X
+			dy := currentGlobal.Y
+			dz := currentGlobal.Z - intersection.Y
+			distance = dx*dx + dy*dy + dz*dz
+		}
+		if distance <= nearestDistance {
+			nearestDistance = distance
+			nearestIntersection = intersection
+			nearestCollision = Collision{
+				ContactEdge: edge,
+				Region:      region,
+				Flag:        CollisionTerrain,
+			}
+			hasCollision = true
+		}
+	}
+
+	if sameRegion {
 
 		if currentCell.Index == nextCell.Index {
 			return false, Collision{}
 		}
 
 		for _, edge := range currentCell.Edges {
-			if intersects, vIntersection := line1.Intersects(edge.GetLine()); intersects {
+			if intersects, vIntersection := line1.IntersectsValue(edge.GetLine()); intersects {
 				if edgeBlocksMovementFrom(edge, currentCell) {
-					collisions = append(collisions, Collision{
-						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						ContactEdge:  edge,
-						Region:       currentPosition.Region,
-						Flag:         CollisionTerrain,
-					})
+					consider(vIntersection, edge, currentPosition.Region)
 				}
 			}
 		}
 
 		for _, edge := range nextCell.Edges {
-			if intersects, vIntersection := line1.Intersects(edge.GetLine()); intersects {
+			if intersects, vIntersection := line1.IntersectsValue(edge.GetLine()); intersects {
 				if edgeBlocksMovementFrom(edge, currentCell) {
-					collisions = append(collisions, Collision{
-						VectorLocal:  math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						ContactEdge:  edge,
-						Region:       nextPosition.Region,
-						Flag:         CollisionTerrain,
-					})
+					consider(vIntersection, edge, nextPosition.Region)
 				}
 			}
 		}
 
 	} else {
-		vCurGlobal := currentPosition.GetGlobalCoordinates()
+		currentGlobal = currentPosition.GetGlobalCoordinates()
 		vNextGlobal := nextPosition.GetGlobalCoordinates()
 		line1 = LineSegment{
-			A: vCurGlobal,
+			A: currentGlobal,
 			B: vNextGlobal,
 		}
 
@@ -98,15 +116,9 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 				A: a.GetGlobalCoordinates(),
 				B: b.GetGlobalCoordinates(),
 			}
-			if intersects, vIntersection := line1.Intersects(line2); intersects {
+			if intersects, vIntersection := line1.IntersectsValue(line2); intersects {
 				if edgeBlocksCrossRegionMovement(edge, currentCell, false) {
-					collisions = append(collisions, Collision{
-						VectorLocal:  global2DToRegionLocal(vIntersection, currentPosition.Region),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						ContactEdge:  edge,
-						Region:       currentPosition.Region,
-						Flag:         CollisionTerrain,
-					})
+					consider(vIntersection, edge, currentPosition.Region)
 				}
 			}
 		}
@@ -129,32 +141,25 @@ func FindTerrainCollisions(currentPosition, nextPosition RtNavmeshPosition,
 				A: a.GetGlobalCoordinates(),
 				B: b.GetGlobalCoordinates(),
 			}
-			if intersects, vIntersection := line1.Intersects(line2); intersects {
+			if intersects, vIntersection := line1.IntersectsValue(line2); intersects {
 				if edgeBlocksCrossRegionMovement(edge, nextCell, true) {
-					collisions = append(collisions, Collision{
-						VectorLocal:  global2DToRegionLocal(vIntersection, nextPosition.Region),
-						VectorGlobal: math32.NewVector3(vIntersection.X, 0, vIntersection.Y),
-						ContactEdge:  edge,
-						Region:       nextPosition.Region,
-						Flag:         CollisionTerrain,
-					})
+					consider(vIntersection, edge, nextPosition.Region)
 				}
 			}
 		}
 	}
 
-	var collision Collision
-	var err error
-	if currentPosition.Region.ID == nextPosition.Region.ID {
-		collision, err = FindNearestCollision(currentPosition.Offset, collisions)
-	} else {
-		collision, err = findNearestGlobalCollision(currentPosition.GetGlobalCoordinates(), collisions)
-	}
-	if err != nil {
+	if !hasCollision {
 		return false, Collision{}
-	} else {
-		return true, collision
 	}
+	if sameRegion {
+		nearestCollision.VectorLocal = math32.NewVector3(nearestIntersection.X, 0, nearestIntersection.Y)
+		nearestCollision.VectorGlobal = math32.NewVector3(nearestIntersection.X, 0, nearestIntersection.Y)
+	} else {
+		nearestCollision.VectorLocal = global2DToRegionLocal(&nearestIntersection, nearestCollision.Region)
+		nearestCollision.VectorGlobal = math32.NewVector3(nearestIntersection.X, 0, nearestIntersection.Y)
+	}
+	return true, nearestCollision
 }
 
 // edgeBlocksMovementFrom preserves the directional meaning of the two blocked
@@ -262,12 +267,15 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 			B: vNextLocal.Clone(),
 		}
 
-		gCollisions := make([]Collision, 0)
-		iCollisions := make([]Collision, 0)
+		var nearestCollision Collision
+		var nearestIntersection math32.Vector3
+		nearestDistance := math32.Inf(1)
+		hasCollision := false
 
-		for _, gEdge := range object.Object.GlobalEdges {
+		for edgeIndex := range object.Object.GlobalEdges {
+			gEdge := &object.Object.GlobalEdges[edgeIndex]
 			line2 := gEdge.GetLine()
-			if intersects, vIntersection := line2.Intersects3D(line1); intersects {
+			if intersects, vIntersection := line2.Intersects3DValue(line1); intersects {
 				// Object meshes can overlap in X/Z while representing a different
 				// floor, tunnel, or terrain layer. A collider far above or below
 				// the character must not become an invisible wall.
@@ -279,59 +287,47 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 				// passable in both directions; treating a bridge as blocked while
 				// exiting traps players inside structures such as Jangan's gates.
 				if gEdge.GetFlag().IsBlocked() {
-					gCollisions = append(gCollisions, Collision{
-						VectorLocal:   vIntersection,
-						VectorGlobal:  vIntersection.Clone().ApplyMatrix4(object.GetLocalToWorld()),
-						ContactEdge:   &gEdge,
+					candidate := Collision{
+						ContactEdge:   gEdge,
 						Region:        object.Region,
 						Flag:          CollisionObject,
 						ObjectWorldID: object.WorldID,
 						ObjectID:      object.ID,
-					})
+					}
+					if distance := vCurLocal.DistanceToSquared(&vIntersection); distance <= nearestDistance {
+						nearestDistance = distance
+						nearestCollision = candidate
+						nearestIntersection = vIntersection
+						hasCollision = true
+					}
 				}
 			}
 		}
 
-		for _, iEdge := range object.Object.InternalEdges {
+		for edgeIndex := range object.Object.InternalEdges {
+			iEdge := &object.Object.InternalEdges[edgeIndex]
 			line2 := iEdge.GetLine()
-			if intersects, vIntersection := line2.Intersects3D(line1); intersects {
+			if intersects, vIntersection := line2.Intersects3DValue(line1); intersects {
 				if vIntersection.Y < vCurLocal.Y && vCurLocal.Y-vIntersection.Y > objectCollisionVerticalTolerance {
 					continue
 				}
 				if iEdge.GetFlag().IsBlocked() {
-					iCollisions = append(iCollisions, Collision{
-						VectorLocal:   vIntersection,
-						VectorGlobal:  vIntersection.Clone().ApplyMatrix4(object.GetLocalToWorld()),
-						ContactEdge:   &iEdge,
+					candidate := Collision{
+						ContactEdge:   iEdge,
 						Region:        object.Region,
 						Flag:          CollisionObject,
 						ObjectWorldID: object.WorldID,
 						ObjectID:      object.ID,
-					})
+					}
+					if distance := vCurLocal.DistanceToSquared(&vIntersection); distance <= nearestDistance {
+						nearestDistance = distance
+						nearestCollision = candidate
+						nearestIntersection = vIntersection
+						hasCollision = true
+					}
 				}
 			}
 		}
-
-		filteredGlobalCollisions := make([]Collision, 0)
-		for _, collision := range gCollisions {
-			flag := collision.ContactEdge.GetFlag()
-			if flag.IsBlocked() {
-				filteredGlobalCollisions = append(filteredGlobalCollisions, collision)
-			}
-		}
-
-		finalCollisions := make([]Collision, 0)
-		nearestGlobalCollision, err1 := FindNearestCollision(vCurLocal, filteredGlobalCollisions)
-		nearestLocalCollision, err2 := FindNearestCollision(vCurLocal, iCollisions)
-
-		if err1 == nil {
-			finalCollisions = append(finalCollisions, nearestGlobalCollision)
-		}
-		if err2 == nil {
-			finalCollisions = append(finalCollisions, nearestLocalCollision)
-		}
-
-		finalCollision, err3 := FindNearestCollision(vCurLocal, finalCollisions)
 
 		if nextInObject {
 			inObj = true
@@ -341,12 +337,14 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 			objectOffset.ApplyMatrix4(object.LocalToWorld)
 			objPos = &RtNavmeshPosition{Region: object.Region, Offset: objectOffset, Heading: next.Heading}
 		}
-		if err3 == ErrEmptyCollisionList {
+		if !hasCollision {
 			// no collision!
 			continue
 		}
+		nearestCollision.VectorLocal = math32.NewVector3(nearestIntersection.X, nearestIntersection.Y, nearestIntersection.Z)
+		nearestCollision.VectorGlobal = nearestCollision.VectorLocal.Clone().ApplyMatrix4(object.GetLocalToWorld())
 
-		return true, finalCollision, nextInObject, objPos
+		return true, nearestCollision, nextInObject, objPos
 	}
 
 	return false, Collision{}, inObj, objPos

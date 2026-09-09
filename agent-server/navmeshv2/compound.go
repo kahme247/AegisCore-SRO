@@ -1,11 +1,12 @@
 package navmeshv2
 
 import (
-	"github.com/Harvi8/AegisCore/framework/pk2"
-	"github.com/Harvi8/AegisCore/framework/utils"
-	"github.com/sirupsen/logrus"
+	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Harvi8/AegisCore/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 type Compound struct {
@@ -19,18 +20,25 @@ type Compound struct {
 	NavMeshObjPath   string
 }
 
-func LoadCompoundFile(filename string, reader *pk2.Pk2Reader) *Compound {
+func LoadCompoundFile(filename string, reader *pk2.Pk2Reader) (*Compound, error) {
 	filename = strings.ReplaceAll(filename, "\\", string(os.PathSeparator))
 	filename = strings.ReplaceAll(filename, "/", string(os.PathSeparator))
+	if reader == nil {
+		return nil, &NavmeshLoadError{Operation: "read compound", Path: filename, Err: fmt.Errorf("%w: PK2 reader is nil", ErrInvalidNavmeshData)}
+	}
 	fileContent, err := reader.ReadFile(filename)
 	if err != nil {
-		logrus.Panic(err)
+		return nil, &NavmeshLoadError{Operation: "read compound", Path: filename, Err: err}
 	}
+	return loadCompoundContent(filename, fileContent)
+}
 
-	header := string(fileContent[:12])
-
-	if header != "JMXVCPD 0101" {
-		logrus.Panicf("Header did not start with JMXVCPD 0101. Got %s\n", header)
+func loadCompoundContent(filename string, fileContent []byte) (*Compound, error) {
+	if len(fileContent) < 40 {
+		return nil, &NavmeshLoadError{Operation: "read compound header", Path: filename, Err: ErrInvalidNavmeshHeader}
+	}
+	if string(fileContent[:12]) != "JMXVCPD 0101" {
+		return nil, &NavmeshLoadError{Operation: "read compound header", Path: filename, Err: ErrInvalidNavmeshHeader}
 	}
 
 	cpd := Compound{
@@ -43,12 +51,10 @@ func LoadCompoundFile(filename string, reader *pk2.Pk2Reader) *Compound {
 		Int4:             utils.ByteArrayToUint32(fileContent[36:40]),
 	}
 
-	strLen := utils.ByteArrayToUint32(fileContent[cpd.OffsetNavMeshObj : cpd.OffsetNavMeshObj+4])
-	str := string(fileContent[cpd.OffsetNavMeshObj+4 : cpd.OffsetNavMeshObj+4+strLen])
-	str = strings.ReplaceAll(str, "\\", string(os.PathSeparator))
-	str = strings.ReplaceAll(str, "/", string(os.PathSeparator))
-
-	cpd.NavMeshObjPath = str
-
-	return &cpd
+	path, err := readWrapperPath(fileContent, cpd.OffsetNavMeshObj, 40, "compound", filename)
+	if err != nil {
+		return nil, err
+	}
+	cpd.NavMeshObjPath = path
+	return &cpd, nil
 }

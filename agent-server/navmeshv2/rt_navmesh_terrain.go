@@ -2,9 +2,10 @@ package navmeshv2
 
 import (
 	"fmt"
-	"github.com/g3n/engine/math32"
-	"github.com/sirupsen/logrus"
+	"math"
 	"strings"
+
+	"github.com/g3n/engine/math32"
 )
 
 const (
@@ -73,10 +74,25 @@ func (t *RtNavmeshTerrain) GetPlane(xBlock, zBlock int) RtNavmeshPlane {
 }
 
 func (t *RtNavmeshTerrain) ResolveCell(pos *math32.Vector3) (RtNavmeshCellQuad, error) {
+	if t == nil {
+		return RtNavmeshCellQuad{}, fmt.Errorf("%w: terrain is nil", ErrInvalidNavmeshData)
+	}
+	if pos == nil {
+		return RtNavmeshCellQuad{}, fmt.Errorf("%w: position is nil", ErrInvalidNavmeshData)
+	}
 	if pos.X < 0 || pos.X >= TerrainWidth || pos.Z < 0 || pos.Z >= TerrainHeight {
 		return RtNavmeshCellQuad{}, fmt.Errorf("position %v is not in terrain", pos)
 	}
 	tile := t.GetTile(int(pos.X/TileWidth), int(pos.Z/TileHeight))
+	if tile.CellIndex < 0 || tile.CellIndex >= len(t.Cells) {
+		return RtNavmeshCellQuad{}, fmt.Errorf(
+			"%w: tile for position %v references cell %d with %d loaded",
+			ErrInvalidNavmeshData,
+			pos,
+			tile.CellIndex,
+			len(t.Cells),
+		)
+	}
 	return t.Cells[tile.CellIndex], nil
 }
 
@@ -178,9 +194,23 @@ func (t *RtNavmeshTerrain) ToBlenderObj() []byte {
 	return []byte(sb.String())
 }
 
-func (t *RtNavmeshTerrain) DetectUnmappedObjectEdges() {
-	for _, o := range t.Objects {
-		for _, ge := range o.Object.GlobalEdges {
+// DetectUnmappedObjectEdges derives terrain-side candidates for open object
+// edges without modifying the loaded runtime mesh. Callers may use the result
+// for diagnostics or export; publishing links into the authoritative topology
+// requires a separate validation step.
+func (t *RtNavmeshTerrain) DetectUnmappedObjectEdges() []RtNavmeshEdgeGlobal {
+	if t == nil {
+		return nil
+	}
+
+	derived := make([]RtNavmeshEdgeGlobal, 0)
+	for objectIndex := range t.Objects {
+		o := &t.Objects[objectIndex]
+		if o.LocalToWorld == nil {
+			continue
+		}
+		for edgeIndex := range o.Object.GlobalEdges {
+			ge := &o.Object.GlobalEdges[edgeIndex]
 			if !ge.Flag.IsBlocked() && !ge.Flag.IsBridge() {
 				// potential linking candidate
 				if ge.DstCellIndex == -1 || ge.DstCellIndex == 65535 {
@@ -189,36 +219,26 @@ func (t *RtNavmeshTerrain) DetectUnmappedObjectEdges() {
 
 					ray := math32.NewRay(a, b.Clone().SubVectors(b, a).Normalize())
 					distance := a.DistanceTo(b)
-					steps := int(distance / 5)
-					cells := make(map[int]RtNavmeshCellQuad)
-					for i := 0; i < steps; i++ {
-						p := ray.At(float32(i*5), nil)
+					steps := max(1, int(math.Ceil(float64(distance/5))))
+					cells := make(map[int]struct{})
+					for i := 0; i <= steps; i++ {
+						p := ray.At(min(float32(i*5), distance), nil)
 						cell, err := t.ResolveCell(p)
 						if err != nil {
-							logrus.Error(err)
 							continue
 						}
-
-						cells[cell.Index] = cell
-						cellContainsObject := false
-						for _, obj := range cell.Objects {
-							if obj.ID == o.ID {
-								cellContainsObject = true
-								break
-							}
-						}
-
-						if !cellContainsObject {
-							logrus.Infof("Cell %d does not contain object %d yet", cell.Index, o.ID)
-							cell.Objects = append(cell.Objects, o)
-						}
+						cells[cell.Index] = struct{}{}
 					}
 
-					for _, cell := range cells {
+					for cellIndex := range t.Cells {
+						if _, exists := cells[cellIndex]; !exists {
+							continue
+						}
+						cell := &t.Cells[cellIndex]
 						e := RtNavmeshEdgeGlobal{RtNavmeshEdgeBase{
 							RtNavmeshEdgeMeshType: RtNavmeshEdgeMeshTypeTerrain,
 							Mesh:                  t,
-							Index:                 len(t.GlobalEdges) + 1,
+							Index:                 len(t.GlobalEdges) + len(derived),
 							Line: LineSegment{
 								A: a,
 								B: b,
@@ -226,9 +246,9 @@ func (t *RtNavmeshTerrain) DetectUnmappedObjectEdges() {
 							Flag:         ge.Flag,
 							SrcDirection: 0,
 							DstDirection: 0,
-							SrcCellIndex: cell.Index,
+							SrcCellIndex: cellIndex,
 							DstCellIndex: ge.SrcCellIndex,
-							SrcCell:      &cell,
+							SrcCell:      cell,
 							DstCell:      ge.SrcCell,
 							EventData:    ge.EventData,
 						},
@@ -236,16 +256,18 @@ func (t *RtNavmeshTerrain) DetectUnmappedObjectEdges() {
 							o.WorldID,
 						}
 
-						t.GlobalEdges = append(t.GlobalEdges, e)
+						derived = append(derived, e)
 					}
 				}
 			}
 		}
 	}
+	return derived
 }
 
 func (t *RtNavmeshTerrain) ToJson() []byte {
-	t.DetectUnmappedObjectEdges()
+	globalEdges := append([]RtNavmeshEdgeGlobal(nil), t.GlobalEdges...)
+	globalEdges = append(globalEdges, t.DetectUnmappedObjectEdges()...)
 	var sb strings.Builder
 	sb.WriteString("{") // root open
 	sb.WriteString(fmt.Sprintf(`"file":"%s",`, t.Filename))
@@ -405,7 +427,7 @@ func (t *RtNavmeshTerrain) ToJson() []byte {
 	}
 	sb.WriteString("],")              // internal edges close
 	sb.WriteString(`"globalEdges":[`) // global edges open
-	for i, e := range t.GlobalEdges {
+	for i, e := range globalEdges {
 		a := e.Line.A
 		b := e.Line.B
 		sb.WriteString("{") // edge open
@@ -420,7 +442,7 @@ func (t *RtNavmeshTerrain) ToJson() []byte {
 		sb.WriteString(fmt.Sprintf(`"a":{"x":%.6f,"y":%.6f,"z":%.6f},`, a.X, a.Y, a.Z))
 		sb.WriteString(fmt.Sprintf(`"b":{"x":%.6f,"y":%.6f,"z":%.6f}`, b.X, b.Y, b.Z))
 		sb.WriteString("}")
-		if i < len(t.GlobalEdges)-1 {
+		if i < len(globalEdges)-1 {
 			sb.WriteString(",")
 		}
 	}

@@ -520,37 +520,62 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 			return fmt.Errorf("%w: %v", ErrNavmeshCacheInvalid, err)
 		}
 		log.Infof("loading prepared v2 navmesh cache")
-		if w.loader2 == nil {
-			w.loader2 = &navmeshv2.Loader{
+	}
+
+	// Build navmesh state off to the side. Publishing a loader before all
+	// decoding and partition checks finish makes a retry observe partial data.
+	// A preloaded loader is retained for direct tests and compatibility callers;
+	// production startup enters with no loader and takes one of the staged paths.
+	w.mutex.Lock()
+	loader := w.loader2
+	w.mutex.Unlock()
+	if _, stageErr := stageWorldPartitionFromLoader(loader, partition); stageErr == nil {
+		loadSource = "resident"
+	} else {
+		// Do not trust a loader left incomplete by an older failed bootstrap or
+		// supplied by a compatibility caller. Reload it transactionally.
+		loader = nil
+	}
+	if loader == nil {
+		if cachePresent {
+			loader = &navmeshv2.Loader{
 				ObjectData: make(map[uint32]navmeshv2.RtNavmeshObj),
 				RegionData: make(map[int16]*navmeshv2.RtNavmeshTerrain),
 			}
-		}
-		if err := w.loader2.LoadPrecomputedNavmeshDataFromGOB(cachePrefix); err != nil {
-			return fmt.Errorf("%w: decode cache: %v", ErrNavmeshCacheInvalid, err)
-		}
-	} else {
-		log.Infof("prepared v2 navdata cache does not exist. loading from data then")
-		if w.loader2 == nil {
-			loader, loaderErr := navmeshv2.NewLoaderSafe(viper.GetString(config.AgentDataPath))
+			if err := loader.LoadPrecomputedNavmeshDataFromGOB(cachePrefix); err != nil {
+				return fmt.Errorf("%w: decode cache: %v", ErrNavmeshCacheInvalid, err)
+			}
+		} else {
+			log.Infof("prepared v2 navdata cache does not exist. loading from data then")
+			var loaderErr error
+			loader, loaderErr = navmeshv2.NewLoaderSafe(viper.GetString(config.AgentDataPath))
 			if loaderErr != nil {
 				return fmt.Errorf("load raw navmesh archive: %w", loaderErr)
 			}
-			w.loader2 = loader
-		}
-		if err := w.loader2.LoadNavMeshInfos(); err != nil {
-			return fmt.Errorf("load raw navmesh metadata: %w", err)
-		}
-		if err := w.loader2.LoadTerrainMeshes(nil); err != nil {
-			return fmt.Errorf("load raw navmesh terrain: %w", err)
+			archiveOpen := true
+			defer func() {
+				if archiveOpen {
+					_ = loader.CloseArchive()
+				}
+			}()
+			if err := loader.LoadNavMeshInfos(); err != nil {
+				return fmt.Errorf("load raw navmesh metadata: %w", err)
+			}
+			if err := loader.LoadTerrainMeshes(nil); err != nil {
+				return fmt.Errorf("load raw navmesh terrain: %w", err)
+			}
+			if err := loader.CloseArchive(); err != nil {
+				return fmt.Errorf("close raw navmesh archive: %w", err)
+			}
+			archiveOpen = false
 		}
 	}
-	measurement.log(loadSource, w.loader2.Stats())
-	loadedRegions, err := w.stageWorldPartition(partition)
+	measurement.log(loadSource, loader.Stats())
+	loadedRegions, err := stageWorldPartitionFromLoader(loader, partition)
 	if err != nil {
 		return err
 	}
-	if err := w.commitWorldPartition(partition, loadedRegions); err != nil {
+	if err := w.commitWorldBootstrap(partition, loadedRegions, loader); err != nil {
 		return err
 	}
 
@@ -948,9 +973,13 @@ func (w *WorldService) GetKnownObjectsAroundObject(object model.ISRObject) map[u
 	// object's own synchronization is acquired.
 	objectPosition := object.GetNavmeshPosition()
 	objectUniqueID := object.GetUniqueID()
+	objectGameWorldID := object.GetGameWorldID()
 	visibleObjects := w.snapshotVisibleObjectsForNeighbourRegions(objectPosition.Region.ID)
 	for _, otherObject := range visibleObjects {
 		if otherObject == nil || objectUniqueID == otherObject.GetUniqueID() {
+			continue
+		}
+		if otherObject.GetGameWorldID() != objectGameWorldID {
 			continue
 		}
 
@@ -1111,7 +1140,11 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 	}
 	newPos.Heading = model.RadiansToHeading(math32.Atan2(walkVector.Z, walkVector.X))
 
-	hasCollision, collision, inObject, objectPosition := navmeshv2.FindObjectCollisions(curPos, newPos, currentTerrain.Objects, nextTerrain.Objects)
+	nextObjects := nextTerrain.Objects
+	if nextTerrain == currentTerrain {
+		nextObjects = nil
+	}
+	hasCollision, collision, inObject, objectPosition := navmeshv2.FindObjectCollisions(curPos, newPos, currentTerrain.Objects, nextObjects)
 	if hasCollision {
 		// Do not correct to the exact contact line. That line belongs to the
 		// blocked boundary, so a player corrected there can collide again while
@@ -1129,8 +1162,16 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 		newPos.Offset.Y = objectPosition.Offset.Y
 	}
 
-	if curCell.Index != nextCell.Index && !inObject {
-		hasCollision, collision = navmeshv2.FindTerrainCollisions(curPos, newPos, curCell, nextCell)
+	needsTerrainProbe := curPos.Region.ID != newPos.Region.ID ||
+		curCell.Index != nextCell.Index ||
+		navmeshv2.HorizontalDistance(curPos, newPos) > directMotionProbeLength
+	if !inObject && needsTerrainProbe {
+		var collisionErr error
+		hasCollision, collision, collisionErr = w.findTerrainCollisionAlongPath(curPos, newPos)
+		if collisionErr != nil {
+			log.Warn(errors.Wrap(collisionErr, "failed to validate terrain motion path"))
+			return w.StopMovingCharacter(p, curPos, "invalid-terrain-path", true)
+		}
 		if hasCollision {
 			// See the object-collision path above: the contact point is not a
 			// safe standing position for a blocked terrain edge.

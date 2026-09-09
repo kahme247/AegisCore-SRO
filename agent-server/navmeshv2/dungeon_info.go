@@ -1,20 +1,16 @@
 package navmeshv2
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
-	"github.com/Harvi8/AegisCore/framework/pk2"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
-	"io"
 	"os"
 	"regexp"
 	"strconv"
+
+	"github.com/Harvi8/AegisCore/framework/pk2"
 )
 
 const (
-	DungeonInfoEntryPattern    = `(?P<service>0|1)\t(?P<id>\d*)\t\"(?P<path>.*)\"`
+	DungeonInfoEntryPattern    = `^(0|1)\t([0-9]+)\t\"([^\"]+)\"$`
 	DungeonInfoFilePathDataPk2 = "Data" + string(os.PathSeparator) + "dungeon" + string(os.PathSeparator) + "dungeoninfo.txt"
 )
 
@@ -29,62 +25,54 @@ type DungeonInfoEntry struct {
 }
 
 var entryPattern = regexp.MustCompile(DungeonInfoEntryPattern)
-var entrySubexpNames = entryPattern.SubexpNames()
 
-func LoadDungeonInfo(reader *pk2.Pk2Reader) DungeonInfo {
-	objectInfoBytes, err := reader.ReadFile(DungeonInfoFilePathDataPk2)
+func LoadDungeonInfo(reader *pk2.Pk2Reader) (DungeonInfo, error) {
+	if reader == nil {
+		return DungeonInfo{}, &NavmeshLoadError{Operation: "read dungeon info", Path: DungeonInfoFilePathDataPk2, Err: fmt.Errorf("%w: PK2 reader is nil", ErrInvalidNavmeshData)}
+	}
+	dungeonInfoBytes, err := reader.ReadFile(DungeonInfoFilePathDataPk2)
 	if err != nil {
-		logrus.Panicf("error loading file %s. Error = %v", DungeonInfoFilePathDataPk2, err)
+		return DungeonInfo{}, &NavmeshLoadError{Operation: "read dungeon info", Path: DungeonInfoFilePathDataPk2, Err: err}
 	}
-	fileReader := bufio.NewReader(bytes.NewReader(objectInfoBytes))
-	line, _, err := fileReader.ReadLine()
-	if err != nil {
-		logrus.Panic(err)
+	return loadDungeonInfoContent(DungeonInfoFilePathDataPk2, dungeonInfoBytes)
+}
+
+func loadDungeonInfoContent(filename string, dungeonInfoBytes []byte) (DungeonInfo, error) {
+	lines := splitMetadataLines(dungeonInfoBytes)
+	if len(lines) == 0 || len(lines[0]) == 0 {
+		return DungeonInfo{}, invalidDungeonInfo(filename, "header line is empty")
 	}
 
-	if len(line) < 1 {
-		logrus.Panicf("line is empty: %v", line)
-	}
-	entries := make([]DungeonInfoEntry, 0)
-	for {
-		lineBytes, _, err := fileReader.ReadLine()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			logrus.Panic(err)
+	entries := make([]DungeonInfoEntry, 0, len(lines)-1)
+	for i, lineBytes := range lines[1:] {
+		matches := entryPattern.FindSubmatch(lineBytes)
+		if len(matches) != 4 {
+			return DungeonInfo{}, invalidDungeonInfo(filename, "entry %d does not match the expected format", i)
 		}
 
-		line := string(lineBytes)
-		matches := entryPattern.FindStringSubmatch(line)
-		matchMap := make(map[string]string)
-		for i, v := range matches {
-			matchMap[entrySubexpNames[i]] = v
-		}
-
-		service := matchMap["service"]
-		id := matchMap["id"]
-		path := matchMap["path"]
-
-		serviceInt, err := strconv.Atoi(service)
+		service, err := strconv.Atoi(string(matches[1]))
 		if err != nil {
-			logrus.Error(errors.Wrap(err, fmt.Sprintf("failed to parse dungeon service as int. got %x", lineBytes)))
-			logrus.Panicf("failed to read dungeon info")
+			return DungeonInfo{}, invalidDungeonInfo(filename, "invalid service on entry %d: %v", i, err)
 		}
-
-		idInt, err := strconv.Atoi(id)
+		id, err := strconv.Atoi(string(matches[2]))
 		if err != nil {
-			logrus.Error(errors.Wrap(err, fmt.Sprintf("failed to parse dungeon id as int. got %s", service)))
-			logrus.Panicf("failed to read dungeon info")
+			return DungeonInfo{}, invalidDungeonInfo(filename, "invalid ID on entry %d: %v", i, err)
 		}
 
-		entry := DungeonInfoEntry{
-			Service:  serviceInt,
-			ID:       idInt,
-			FilePath: path,
-		}
-
-		entries = append(entries, entry)
+		entries = append(entries, DungeonInfoEntry{
+			Service:  service,
+			ID:       id,
+			FilePath: string(matches[3]),
+		})
 	}
 
-	return DungeonInfo{Dungeons: entries}
+	return DungeonInfo{Dungeons: entries}, nil
+}
+
+func invalidDungeonInfo(filename, format string, args ...any) error {
+	return &NavmeshLoadError{
+		Operation: "read dungeon info",
+		Path:      filename,
+		Err:       fmt.Errorf("%w: %s", ErrInvalidNavmeshData, fmt.Sprintf(format, args...)),
+	}
 }

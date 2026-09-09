@@ -3,20 +3,25 @@ package navmeshv2
 // LoaderStats describes retained navmesh cardinality without estimating Go
 // object sizes. Heap profiles remain the authority for byte ownership.
 type LoaderStats struct {
-	Regions                     int
-	ObjectMeshes                int
-	TerrainInstances            int
-	TerrainCells                int
-	TerrainGlobalEdges          int
-	TerrainInternalEdges        int
-	TerrainCellObjectReferences int
-	TerrainCellEdgeReferences   int
-	ObjectCells                 int
-	ObjectGlobalEdges           int
-	ObjectInternalEdges         int
-	ObjectGridTiles             int
-	ObjectGridCellReferences    int
-	ObjectGridEdgeReferences    int
+	Regions                        int
+	ObjectMeshes                   int
+	TerrainInstances               int
+	TerrainInstancesLinked         int
+	TerrainInstancesUnlinked       int
+	TerrainObjectEdgeLinkRecords   int
+	TerrainObjectEdgeLinks         int
+	TerrainObjectEdgeLinkSentinels int
+	TerrainCells                   int
+	TerrainGlobalEdges             int
+	TerrainInternalEdges           int
+	TerrainCellObjectReferences    int
+	TerrainCellEdgeReferences      int
+	ObjectCells                    int
+	ObjectGlobalEdges              int
+	ObjectInternalEdges            int
+	ObjectGridTiles                int
+	ObjectGridCellReferences       int
+	ObjectGridEdgeReferences       int
 }
 
 func (l *Loader) Stats() LoaderStats {
@@ -32,6 +37,23 @@ func (l *Loader) Stats() LoaderStats {
 			continue
 		}
 		stats.TerrainInstances += len(terrain.Objects)
+		for i := range terrain.Objects {
+			effectiveLinks := 0
+			for _, link := range terrain.Objects[i].EdgeLinks {
+				stats.TerrainObjectEdgeLinkRecords++
+				if link.IsUnmapped() {
+					stats.TerrainObjectEdgeLinkSentinels++
+					continue
+				}
+				effectiveLinks++
+			}
+			stats.TerrainObjectEdgeLinks += effectiveLinks
+			if effectiveLinks == 0 {
+				stats.TerrainInstancesUnlinked++
+			} else {
+				stats.TerrainInstancesLinked++
+			}
+		}
 		stats.TerrainCells += len(terrain.Cells)
 		stats.TerrainGlobalEdges += len(terrain.GlobalEdges)
 		stats.TerrainInternalEdges += len(terrain.InternalEdges)

@@ -2,10 +2,10 @@ package navmeshv2
 
 import (
 	"encoding/binary"
-	"github.com/Harvi8/AegisCore/framework/pk2"
-	"github.com/sirupsen/logrus"
-	"log"
+	"fmt"
 	"os"
+
+	"github.com/Harvi8/AegisCore/framework/pk2"
 )
 
 const (
@@ -33,19 +33,28 @@ type MapProjectInfo struct {
 	EnabledRegions     map[int16]bool
 }
 
-func LoadMapProjectInfo(reader *pk2.Pk2Reader) MapProjectInfo {
+func LoadMapProjectInfo(reader *pk2.Pk2Reader) (MapProjectInfo, error) {
+	if reader == nil {
+		return MapProjectInfo{}, &NavmeshLoadError{Operation: "read map info", Path: MapFilePathDataPk2, Err: fmt.Errorf("%w: PK2 reader is nil", ErrInvalidNavmeshData)}
+	}
 	mapInfoBytes, err := reader.ReadFile(MapFilePathDataPk2)
 	if err != nil {
-		logrus.Panicf("error loading file %s. Error = %v", MapFilePathDataPk2, err)
+		return MapProjectInfo{}, &NavmeshLoadError{Operation: "read map info", Path: MapFilePathDataPk2, Err: err}
 	}
+	return loadMapProjectInfoContent(MapFilePathDataPk2, mapInfoBytes)
+}
 
+func loadMapProjectInfoContent(filename string, mapInfoBytes []byte) (MapProjectInfo, error) {
 	if length := len(mapInfoBytes); length != TotalByteLength {
-		logrus.Panicf("map info file has unexpected size (want = %d but got %d)", TotalByteLength, length)
+		return MapProjectInfo{}, &NavmeshLoadError{
+			Operation: "read map info",
+			Path:      filename,
+			Err:       fmt.Errorf("%w: file size %d, want %d", ErrInvalidNavmeshData, length, TotalByteLength),
+		}
 	}
 
-	signature := mapInfoBytes[:SignatureByteLength]
-	if string(signature) != "JMXVMFO 1000" {
-		log.Panicf("Invalid signature: %v\n", signature)
+	if string(mapInfoBytes[:SignatureByteLength]) != "JMXVMFO 1000" {
+		return MapProjectInfo{}, &NavmeshLoadError{Operation: "read map info header", Path: filename, Err: ErrInvalidNavmeshHeader}
 	}
 
 	mapWidthBytes := mapInfoBytes[SignatureByteLength : SignatureByteLength+2]
@@ -67,6 +76,20 @@ func LoadMapProjectInfo(reader *pk2.Pk2Reader) MapProjectInfo {
 		MapRegions:         totalRegionBytes,
 		EnabledRegions:     make(map[int16]bool),
 	}
+	if mapProjectInfo.MapWidth > RegionsX || mapProjectInfo.MapHeight > RegionsY {
+		return MapProjectInfo{}, &NavmeshLoadError{
+			Operation: "read map info dimensions",
+			Path:      filename,
+			Err: fmt.Errorf(
+				"%w: dimensions %dx%d exceed %dx%d region bitmap",
+				ErrInvalidNavmeshData,
+				mapProjectInfo.MapWidth,
+				mapProjectInfo.MapHeight,
+				RegionsX,
+				RegionsY,
+			),
+		}
+	}
 
 	for z := 0; z < int(mapProjectInfo.MapHeight); z++ {
 		for x := 0; x < int(mapProjectInfo.MapWidth); x++ {
@@ -78,7 +101,7 @@ func LoadMapProjectInfo(reader *pk2.Pk2Reader) MapProjectInfo {
 		}
 	}
 
-	return mapProjectInfo
+	return mapProjectInfo, nil
 }
 
 func IsEnabled(x, z byte, mapProjectInfo MapProjectInfo) bool {
@@ -91,5 +114,9 @@ func IsEnabled(x, z byte, mapProjectInfo MapProjectInfo) bool {
 	if int(x) >= int(mapProjectInfo.MapWidth) || int(z) >= int(mapProjectInfo.MapHeight) {
 		return false
 	}
-	return (mapProjectInfo.MapRegions[regionShort>>3] & byte(uint16(128>>(regionShort%8)))) != 0
+	regionIndex := int(regionShort >> 3)
+	if regionIndex >= len(mapProjectInfo.MapRegions) {
+		return false
+	}
+	return (mapProjectInfo.MapRegions[regionIndex] & byte(uint16(128>>(regionShort%8)))) != 0
 }

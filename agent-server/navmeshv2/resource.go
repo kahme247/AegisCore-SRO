@@ -1,11 +1,12 @@
 package navmeshv2
 
 import (
-	"github.com/Harvi8/AegisCore/framework/pk2"
-	"github.com/Harvi8/AegisCore/framework/utils"
-	"github.com/sirupsen/logrus"
+	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Harvi8/AegisCore/framework/pk2"
+	"github.com/Harvi8/AegisCore/framework/utils"
 )
 
 type Resource struct {
@@ -25,17 +26,25 @@ type Resource struct {
 	NavMeshObjPath           string
 }
 
-func LoadResource(filename string, reader *pk2.Pk2Reader) *Resource {
+func LoadResource(filename string, reader *pk2.Pk2Reader) (*Resource, error) {
 	filename = strings.ReplaceAll(filename, "\\", string(os.PathSeparator))
 	filename = strings.ReplaceAll(filename, "/", string(os.PathSeparator))
+	if reader == nil {
+		return nil, &NavmeshLoadError{Operation: "read resource", Path: filename, Err: fmt.Errorf("%w: PK2 reader is nil", ErrInvalidNavmeshData)}
+	}
 	fileContent, err := reader.ReadFile(filename)
 	if err != nil {
-		logrus.Panic(err)
+		return nil, &NavmeshLoadError{Operation: "read resource", Path: filename, Err: err}
 	}
-	header := string(fileContent[:12])
+	return loadResourceContent(filename, fileContent)
+}
 
-	if header != "JMXVRES 0109" {
-		logrus.Panicf("Invalid signature %s\n", header)
+func loadResourceContent(filename string, fileContent []byte) (*Resource, error) {
+	if len(fileContent) < 64 {
+		return nil, &NavmeshLoadError{Operation: "read resource header", Path: filename, Err: ErrInvalidNavmeshHeader}
+	}
+	if string(fileContent[:12]) != "JMXVRES 0109" {
+		return nil, &NavmeshLoadError{Operation: "read resource header", Path: filename, Err: ErrInvalidNavmeshHeader}
 	}
 
 	res := Resource{
@@ -54,12 +63,35 @@ func LoadResource(filename string, reader *pk2.Pk2Reader) *Resource {
 		Int4:                     utils.ByteArrayToUint32(fileContent[60:64]),
 	}
 
-	strLen := utils.ByteArrayToUint32(fileContent[res.OffsetNavMeshObj : res.OffsetNavMeshObj+4])
-	str := string(fileContent[res.OffsetNavMeshObj+4 : res.OffsetNavMeshObj+4+strLen])
+	path, err := readWrapperPath(fileContent, res.OffsetNavMeshObj, 64, "resource", filename)
+	if err != nil {
+		return nil, err
+	}
+	res.NavMeshObjPath = path
+	return &res, nil
+}
+
+func readWrapperPath(fileContent []byte, offset uint32, minimumOffset int, kind, filename string) (string, error) {
+	fileSize := uint64(len(fileContent))
+	pathOffset := uint64(offset)
+	if pathOffset < uint64(minimumOffset) || pathOffset > fileSize || fileSize-pathOffset < 4 {
+		return "", &NavmeshLoadError{
+			Operation: "read " + kind + " navmesh path",
+			Path:      filename,
+			Err:       fmt.Errorf("%w: offset %d is outside file size %d", ErrInvalidNavmeshData, offset, len(fileContent)),
+		}
+	}
+	strLen := uint64(utils.ByteArrayToUint32(fileContent[int(pathOffset) : int(pathOffset)+4]))
+	pathStart := pathOffset + 4
+	if strLen > fileSize-pathStart {
+		return "", &NavmeshLoadError{
+			Operation: "read " + kind + " navmesh path",
+			Path:      filename,
+			Err:       fmt.Errorf("%w: path length %d exceeds remaining %d bytes", ErrInvalidNavmeshData, strLen, fileSize-pathStart),
+		}
+	}
+	str := string(fileContent[int(pathStart):int(pathStart+strLen)])
 	str = strings.ReplaceAll(str, "\\", string(os.PathSeparator))
 	str = strings.ReplaceAll(str, "/", string(os.PathSeparator))
-
-	res.NavMeshObjPath = str
-
-	return &res
+	return str, nil
 }

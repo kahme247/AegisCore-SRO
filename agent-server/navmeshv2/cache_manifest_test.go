@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/g3n/engine/math32"
 )
 
 func TestCacheManifestRoundTripAndArtifactValidation(t *testing.T) {
@@ -116,9 +119,11 @@ func TestReadCacheManifestRejectsUnknownFieldsAndTrailingValues(t *testing.T) {
 
 func TestSaveAndLoadNavmeshCacheUsesDistinctObjectArtifact(t *testing.T) {
 	cachePrefix := filepath.Join(t.TempDir(), "prelinked_navdata.gob")
+	terrain := NewRtNavmeshTerrain("region", NewRegionFromInt16(1))
+	terrain.Cells = []RtNavmeshCellQuad{{RtNavmeshCellBase: RtNavmeshCellBase{Index: 0}}}
 	loader := &Loader{
 		RegionData: map[int16]*RtNavmeshTerrain{
-			1: {RtNavmeshBase: RtNavmeshBase{Filename: "region"}},
+			1: &terrain,
 		},
 		ObjectData: map[uint32]RtNavmeshObj{
 			7: {RtNavmeshBase: RtNavmeshBase{Filename: "object"}},
@@ -148,5 +153,93 @@ func TestLoadPrecomputedNavmeshDataReturnsMissingFileError(t *testing.T) {
 	err := (&Loader{}).LoadPrecomputedNavmeshDataFromGOB(filepath.Join(t.TempDir(), "missing"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing cache error = %v, want not-exist error", err)
+	}
+}
+
+func TestLoadPrecomputedNavmeshDataRejectsInvalidLinksWithoutPublishing(t *testing.T) {
+	cachePrefix := filepath.Join(t.TempDir(), "invalid_navdata.gob")
+	terrain := NewRtNavmeshTerrain("invalid.nvm", NewRegionFromInt16(1))
+	terrain.Cells = []RtNavmeshCellQuad{{RtNavmeshCellBase: RtNavmeshCellBase{Index: 0}}}
+	terrain.Objects = []RtNavmeshInstObj{{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: RtNavmeshObj{GlobalEdges: make([]RtNavmeshEdgeGlobal, 1)}},
+		EdgeLinks:         []RtNavmeshEdgeLink{{LinkedObjID: 1, LinkedObjEdgeID: 0, EdgeID: 0}},
+	}}
+	if err := writeGobAtomically(cachePrefix+"_regions", map[int16]*RtNavmeshTerrain{1: &terrain}); err != nil {
+		t.Fatalf("write region cache: %v", err)
+	}
+	if err := writeGobAtomically(cachePrefix+"_objects", map[uint32]RtNavmeshObj{}); err != nil {
+		t.Fatalf("write object cache: %v", err)
+	}
+
+	originalTerrain := NewRtNavmeshTerrain("original.nvm", NewRegionFromInt16(7))
+	originalRegions := map[int16]*RtNavmeshTerrain{7: &originalTerrain}
+	originalObjects := map[uint32]RtNavmeshObj{8: NewNavmeshObj("original.bms")}
+	loader := &Loader{RegionData: originalRegions, ObjectData: originalObjects}
+	err := loader.LoadPrecomputedNavmeshDataFromGOB(cachePrefix)
+	if !errors.Is(err, ErrInvalidNavmeshData) {
+		t.Fatalf("LoadPrecomputedNavmeshDataFromGOB() error = %v, want ErrInvalidNavmeshData", err)
+	}
+	if !reflect.DeepEqual(loader.RegionData, originalRegions) {
+		t.Fatalf("RegionData changed after invalid cache: %#v", loader.RegionData)
+	}
+	if !reflect.DeepEqual(loader.ObjectData, originalObjects) {
+		t.Fatalf("ObjectData changed after invalid cache: %#v", loader.ObjectData)
+	}
+}
+
+func TestSaveNavmeshDataRejectsInvalidRegionBeforeWriting(t *testing.T) {
+	cachePrefix := filepath.Join(t.TempDir(), "invalid_navdata.gob")
+	loader := &Loader{RegionData: map[int16]*RtNavmeshTerrain{1: nil}}
+
+	err := loader.saveNavmeshDataAsGOB(cachePrefix)
+	if !errors.Is(err, ErrInvalidNavmeshData) {
+		t.Fatalf("saveNavmeshDataAsGOB() error = %v, want ErrInvalidNavmeshData", err)
+	}
+	for _, artifact := range []string{cachePrefix + "_regions", cachePrefix + "_objects"} {
+		if _, statErr := os.Stat(artifact); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("cache artifact %q exists after validation failure: %v", artifact, statErr)
+		}
+	}
+}
+
+func TestValidateCachedRegionDataRejectsRegionIdentityMismatch(t *testing.T) {
+	terrain := NewRtNavmeshTerrain("mismatch.nvm", NewRegionFromInt16(2))
+	err := validateCachedRegionData(map[int16]*RtNavmeshTerrain{1: &terrain})
+	if !errors.Is(err, ErrInvalidNavmeshData) {
+		t.Fatalf("validateCachedRegionData() error = %v, want ErrInvalidNavmeshData", err)
+	}
+	var loadErr *NavmeshLoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("validateCachedRegionData() error type = %T, want *NavmeshLoadError", err)
+	}
+}
+
+func TestSaveAndLoadLinkedTerrainCacheRebuildsRuntimeEdges(t *testing.T) {
+	cachePrefix := filepath.Join(t.TempDir(), "linked_navdata.gob")
+	terrain := newTerrainEdgeTestTerrain(1, 1)
+	terrain.InternalEdges = []RtNavmeshEdgeInternal{{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+		Index: 0, Flag: RtNavmeshEdgeFlag((1 << 0) | (1 << 2)),
+		SrcCellIndex: 0, DstCellIndex: 65535,
+		SrcDirection: 0, DstDirection: -1,
+		Line: LineSegment{
+			A: math32.NewVector3(0, 0, 0),
+			B: math32.NewVector3(1, 0, 0),
+		},
+	}}}
+	regions := map[int16]*RtNavmeshTerrain{1: terrain}
+	if err := linkTerrainEdges(regions, true); err != nil {
+		t.Fatalf("linkTerrainEdges() error = %v", err)
+	}
+	loader := &Loader{RegionData: regions, ObjectData: make(map[uint32]RtNavmeshObj)}
+	if err := loader.saveNavmeshDataAsGOB(cachePrefix); err != nil {
+		t.Fatalf("saveNavmeshDataAsGOB() error = %v", err)
+	}
+
+	loaded := &Loader{}
+	if err := loaded.LoadPrecomputedNavmeshDataFromGOB(cachePrefix); err != nil {
+		t.Fatalf("LoadPrecomputedNavmeshDataFromGOB() error = %v", err)
+	}
+	if got := len(loaded.RegionData[1].Cells[0].Edges); got != 1 {
+		t.Fatalf("loaded cell edge count = %d, want 1", got)
 	}
 }

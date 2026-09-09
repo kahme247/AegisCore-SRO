@@ -98,7 +98,7 @@ func (obj RtNavmeshObj) TestOutlineIntersection(line LineSegment) bool {
 		return false
 	}
 
-	if obj.Grid.Rectangle.IntersectsLine(line) {
+	if !obj.Grid.Rectangle.IntersectsLine(line) {
 		return false
 	}
 

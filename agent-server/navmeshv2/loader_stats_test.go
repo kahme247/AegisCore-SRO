@@ -6,7 +6,10 @@ func TestLoaderStatsCountsRetainedRelationships(t *testing.T) {
 	loader := &Loader{
 		RegionData: map[int16]*RtNavmeshTerrain{
 			1: {
-				Objects:       make([]RtNavmeshInstObj, 2),
+				Objects: []RtNavmeshInstObj{
+					{EdgeLinks: []RtNavmeshEdgeLink{{}, {LinkedObjID: -1, LinkedObjEdgeID: -1, EdgeID: -1}}},
+					{},
+				},
 				GlobalEdges:   make([]RtNavmeshEdgeGlobal, 3),
 				InternalEdges: make([]RtNavmeshEdgeInternal, 4),
 				Cells: []RtNavmeshCellQuad{
@@ -30,20 +33,25 @@ func TestLoaderStatsCountsRetainedRelationships(t *testing.T) {
 
 	got := loader.Stats()
 	want := LoaderStats{
-		Regions:                     2,
-		ObjectMeshes:                1,
-		TerrainInstances:            2,
-		TerrainCells:                2,
-		TerrainGlobalEdges:          3,
-		TerrainInternalEdges:        4,
-		TerrainCellObjectReferences: 12,
-		TerrainCellEdgeReferences:   14,
-		ObjectCells:                 9,
-		ObjectGlobalEdges:           10,
-		ObjectInternalEdges:         11,
-		ObjectGridTiles:             1,
-		ObjectGridCellReferences:    12,
-		ObjectGridEdgeReferences:    27,
+		Regions:                        2,
+		ObjectMeshes:                   1,
+		TerrainInstances:               2,
+		TerrainInstancesLinked:         1,
+		TerrainInstancesUnlinked:       1,
+		TerrainObjectEdgeLinkRecords:   2,
+		TerrainObjectEdgeLinks:         1,
+		TerrainObjectEdgeLinkSentinels: 1,
+		TerrainCells:                   2,
+		TerrainGlobalEdges:             3,
+		TerrainInternalEdges:           4,
+		TerrainCellObjectReferences:    12,
+		TerrainCellEdgeReferences:      14,
+		ObjectCells:                    9,
+		ObjectGlobalEdges:              10,
+		ObjectInternalEdges:            11,
+		ObjectGridTiles:                1,
+		ObjectGridCellReferences:       12,
+		ObjectGridEdgeReferences:       27,
 	}
 	if got != want {
 		t.Fatalf("Stats() = %#v, want %#v", got, want)

@@ -103,7 +103,7 @@ func (r *Pk2Reader) ReadFile(filename string) ([]byte, error) {
 
 	entry, ok := r.Files[filename]
 	if !ok {
-		return nil, errors.New(fmt.Sprintf("file not found: %s", filename))
+		return nil, fmt.Errorf("%w: %s", ErrArchiveFileNotFound, filename)
 	}
 	data, err := r.readEntryLocked(&entry)
 	if err != nil {

@@ -167,6 +167,21 @@ func TestSafePk2ReaderReportsNotIndexed(t *testing.T) {
 	}
 }
 
+func TestSafePk2ReaderReportsMissingFile(t *testing.T) {
+	path := writeSyntheticPK2(t, nil)
+	reader, err := OpenPk2Reader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := reader.IndexArchiveSafe(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadFile("missing.file"); !errors.Is(err, ErrArchiveFileNotFound) {
+		t.Fatalf("ReadFile() error = %v, want ErrArchiveFileNotFound", err)
+	}
+}
+
 func writeSyntheticPK2(t *testing.T, mutate func(block []byte, fileSize uint64)) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fixture.pk2")

@@ -31,6 +31,7 @@ var (
 	ErrArchiveCycle        = errors.New("pk2 archive directory or chain cycle")
 	ErrArchiveLimit        = errors.New("pk2 archive index limit exceeded")
 	ErrArchiveEntry        = errors.New("invalid pk2 archive entry")
+	ErrArchiveFileNotFound = errors.New("pk2 archive file not found")
 	ErrArchiveNotIndexed   = errors.New("pk2 archive has not been indexed")
 )
 

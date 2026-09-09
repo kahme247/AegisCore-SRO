@@ -39,7 +39,9 @@ func TestMeshFileLoadObjectGridUsesWidthForRows(t *testing.T) {
 
 	meshFile := MeshFile{FileContent: content}
 	object := NewNavmeshObj("non-square-grid")
-	meshFile.loadObjectGrid(&object)
+	if err := meshFile.loadObjectGrid(&object); err != nil {
+		t.Fatalf("loadObjectGrid() error = %v", err)
+	}
 
 	for index, want := range []struct{ x, y int }{
 		{0, 0}, {1, 0}, {2, 0},
@@ -57,6 +59,44 @@ func TestMeshFileLoadObjectGridUsesWidthForRows(t *testing.T) {
 	}
 	if lastTile.Rectangle.X() != 210 || lastTile.Rectangle.Y() != 120 {
 		t.Fatalf("last tile rectangle origin = (%v, %v), want (210, 120)", lastTile.Rectangle.X(), lastTile.Rectangle.Y())
+	}
+}
+
+func TestMeshFileLoadObjectGridPersistsSpatialReferences(t *testing.T) {
+	content := make([]byte, 24)
+	binary.LittleEndian.PutUint32(content[8:12], 1)
+	binary.LittleEndian.PutUint32(content[12:16], 1)
+	binary.LittleEndian.PutUint32(content[16:20], 1)
+	// The only tile has no authored global-edge references.
+	binary.LittleEndian.PutUint32(content[20:24], 0)
+
+	meshFile := MeshFile{FileContent: content}
+	object := NewNavmeshObj("spatial-references")
+	object.Cells = []RtNavmeshCellTri{{
+		RtNavmeshCellBase: RtNavmeshCellBase{Index: 0},
+		Triangle: Triangle{
+			A: math32.NewVector3(10, 0, 10),
+			B: math32.NewVector3(20, 0, 10),
+			C: math32.NewVector3(10, 0, 20),
+		},
+	}}
+	object.InternalEdges = []RtNavmeshEdgeInternal{{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+		Index: 0,
+		Line: LineSegment{
+			A: math32.NewVector3(10, 0, 10),
+			B: math32.NewVector3(20, 0, 10),
+		},
+	}}}
+
+	if err := meshFile.loadObjectGrid(&object); err != nil {
+		t.Fatalf("loadObjectGrid() error = %v", err)
+	}
+	tile := object.Grid.Tiles[0]
+	if len(tile.Cells) != 1 || tile.Cells[0].Index != 0 {
+		t.Fatalf("grid tile cells = %#v, want cell 0", tile.Cells)
+	}
+	if len(tile.InternalEdges) != 1 || tile.InternalEdges[0].Index != 0 {
+		t.Fatalf("grid tile internal edges = %#v, want edge 0", tile.InternalEdges)
 	}
 }
 
@@ -104,6 +144,47 @@ func TestRtNavmeshObjTestOutlineIntersectionOutsideGridDoesNotPanic(t *testing.T
 
 	if object.TestOutlineIntersection(line) {
 		t.Fatal("line outside the object grid unexpectedly intersected its outline")
+	}
+}
+
+func TestRtNavmeshObjTestOutlineIntersectionFindsBlockingEdgeInsideGrid(t *testing.T) {
+	object := RtNavmeshObj{Grid: testRtNavmeshObjGrid(2, 1)}
+	blocking := RtNavmeshEdgeGlobal{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+		Line: LineSegment{
+			A: math32.NewVector3(100, 0, 0),
+			B: math32.NewVector3(100, 0, 100),
+		},
+		Flag: RtNavmeshEdgeFlag(1),
+	}}
+	object.Grid.Tiles[0].GlobalEdges = []RtNavmeshEdgeGlobal{blocking}
+	object.Grid.Tiles[1].GlobalEdges = []RtNavmeshEdgeGlobal{blocking}
+
+	line := LineSegment{
+		A: math32.NewVector3(50, 0, 50),
+		B: math32.NewVector3(150, 0, 50),
+	}
+	if !object.TestOutlineIntersection(line) {
+		t.Fatal("line crossing a blocking object edge was not detected")
+	}
+}
+
+func TestRtNavmeshObjTestOutlineIntersectionIgnoresBridgeEdge(t *testing.T) {
+	object := RtNavmeshObj{Grid: testRtNavmeshObjGrid(1, 1)}
+	bridge := RtNavmeshEdgeGlobal{RtNavmeshEdgeBase: RtNavmeshEdgeBase{
+		Line: LineSegment{
+			A: math32.NewVector3(50, 0, 0),
+			B: math32.NewVector3(50, 0, 100),
+		},
+		Flag: RtNavmeshEdgeFlag(1 << 4),
+	}}
+	object.Grid.Tiles[0].GlobalEdges = []RtNavmeshEdgeGlobal{bridge}
+
+	line := LineSegment{
+		A: math32.NewVector3(25, 0, 50),
+		B: math32.NewVector3(75, 0, 50),
+	}
+	if object.TestOutlineIntersection(line) {
+		t.Fatal("line crossing only a bridge edge was treated as blocked")
 	}
 }
 

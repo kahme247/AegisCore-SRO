@@ -75,12 +75,22 @@ func validateWorldPartition(catalog []model.GameServerRegion) (worldPartition, e
 }
 
 func (w *WorldService) stageWorldPartition(partition worldPartition) (map[int16]*navmeshv2.RtNavmeshTerrain, error) {
-	if w == nil || w.loader2 == nil {
+	if w == nil || w.mutex == nil {
+		return nil, fmt.Errorf("%w: navmesh loader is unavailable", ErrWorldPartitionInvalid)
+	}
+	w.mutex.Lock()
+	loader := w.loader2
+	w.mutex.Unlock()
+	return stageWorldPartitionFromLoader(loader, partition)
+}
+
+func stageWorldPartitionFromLoader(loader *navmeshv2.Loader, partition worldPartition) (map[int16]*navmeshv2.RtNavmeshTerrain, error) {
+	if loader == nil {
 		return nil, fmt.Errorf("%w: navmesh loader is unavailable", ErrWorldPartitionInvalid)
 	}
 	loaded := make(map[int16]*navmeshv2.RtNavmeshTerrain, len(partition.regions))
 	for _, region := range partition.regions {
-		terrain, exists := w.loader2.RegionData[region.id]
+		terrain, exists := loader.RegionData[region.id]
 		if !exists || terrain == nil {
 			return nil, fmt.Errorf("load game server continent %q: navmesh terrain for region %d is unavailable", region.owner, region.id)
 		}
@@ -98,7 +108,23 @@ func (w *WorldService) commitWorldPartition(partition worldPartition, loaded map
 	}
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+	return w.commitWorldPartitionLocked(partition, loaded)
+}
 
+func (w *WorldService) commitWorldBootstrap(partition worldPartition, loaded map[int16]*navmeshv2.RtNavmeshTerrain, loader *navmeshv2.Loader) error {
+	if w == nil || w.mutex == nil || loader == nil {
+		return ErrWorldRepositoryConfiguration
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if err := w.commitWorldPartitionLocked(partition, loaded); err != nil {
+		return err
+	}
+	w.loader2 = loader
+	return nil
+}
+
+func (w *WorldService) commitWorldPartitionLocked(partition worldPartition, loaded map[int16]*navmeshv2.RtNavmeshTerrain) error {
 	for _, region := range partition.regions {
 		if existingTerrain, exists := w.regions[region.id]; exists {
 			existingOwner := w.regionOwners[region.id]

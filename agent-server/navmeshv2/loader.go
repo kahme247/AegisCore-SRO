@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,17 @@ type Loader struct {
 	// caller transfers or looks up a region.
 	RegionData map[int16]*RtNavmeshTerrain
 }
+
+const (
+	terrainObjectInstanceMinBytes = 32
+	terrainCellMinBytes           = 17
+	terrainGlobalEdgeBytes        = 27
+	terrainInternalEdgeBytes      = 23
+	terrainTileMapBytes           = TilesTotal * 8
+	terrainHeightMapBytes         = VerticesTotal * 4
+	terrainPlaneMapBytes          = BlocksTotal * 5
+	terrainFixedTailBytes         = terrainTileMapBytes + terrainHeightMapBytes + terrainPlaneMapBytes
+)
 
 var navmeshGobRegistration sync.Once
 
@@ -69,34 +81,81 @@ func newLoader(reader *pk2.Pk2Reader, dataPk2Path string) *Loader {
 	}
 }
 
+// CloseArchive releases the source PK2 once all runtime navmesh data has been
+// materialized. RegionData and ObjectData are self-contained after loading;
+// retaining the reader would otherwise keep the archive handle, index, and
+// decoded file cache alive for the lifetime of the Agent.
+func (l *Loader) CloseArchive() error {
+	if l == nil || l.Pk2Reader == nil {
+		return nil
+	}
+	reader := l.Pk2Reader
+	l.Pk2Reader = nil
+	reader.ClearFileCache()
+	return reader.Close()
+}
+
 func (l *Loader) LoadNavMeshInfos() (err error) {
 	defer recoverNavmeshLoad("load metadata", l.NavMeshPath, &err)
-	mapProjectInfo := LoadMapProjectInfo(l.Pk2Reader)
-	objectInfo := LoadObjectInfo(l.Pk2Reader)
+	mapProjectInfo, err := LoadMapProjectInfo(l.Pk2Reader)
+	if err != nil {
+		return err
+	}
+	objectInfo, err := LoadObjectInfo(l.Pk2Reader)
+	if err != nil {
+		return err
+	}
 	l.MapProjectInfo = mapProjectInfo
 	l.ObjectInfo = objectInfo
-	//l.DungeonInfo = LoadDungeonInfo(l.Pk2Reader)
+	// dungeonInfo, err := LoadDungeonInfo(l.Pk2Reader)
 	return nil
 }
 
 func (l *Loader) LoadObjectMeshes() (err error) {
-	defer recoverNavmeshLoad("load object meshes", l.NavMeshPath, &err)
-	for _, objectEntry := range l.ObjectInfo.Objects {
-		switch path.Ext(objectEntry.FilePath) {
-		case ".bms":
-			l.LoadObjectFromPrimMesh(objectEntry)
-		case ".bsr":
-			l.LoadObjectFromResource(objectEntry)
-		case ".cpd":
-			l.LoadObjectFromCompound(objectEntry)
-		default:
-			return &NavmeshLoadError{Operation: "load object mesh", Path: objectEntry.FilePath, Err: ErrUnsupportedObjectMesh}
-		}
+	if l == nil {
+		return &NavmeshLoadError{Operation: "load object meshes", Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
 	}
+	defer recoverNavmeshLoad("load object meshes", l.NavMeshPath, &err)
+	return l.loadObjectMeshes(l.decodeObjectEntry)
+}
+
+func (l *Loader) loadObjectMeshes(decode func(ObjectInfoEntry) (RtNavmeshObj, error)) error {
+	if decode == nil {
+		return &NavmeshLoadError{Operation: "load object meshes", Err: fmt.Errorf("%w: object decoder is nil", ErrInvalidNavmeshData)}
+	}
+	indexes := make([]uint32, 0, len(l.ObjectInfo.Objects))
+	for index := range l.ObjectInfo.Objects {
+		indexes = append(indexes, index)
+	}
+	sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+
+	objects := make(map[uint32]RtNavmeshObj, len(indexes))
+	for _, index := range indexes {
+		entry := l.ObjectInfo.Objects[index]
+		if entry.Index != index {
+			return &NavmeshLoadError{
+				Operation: "load object mesh catalog",
+				Path:      entry.FilePath,
+				Err:       fmt.Errorf("%w: catalog index %d does not match entry index %d", ErrInvalidNavmeshData, index, entry.Index),
+			}
+		}
+		object, err := decode(entry)
+		if err != nil {
+			if errors.Is(err, ErrObjectMeshNotFound) || errors.Is(err, pk2.ErrArchiveFileNotFound) {
+				continue
+			}
+			return fmt.Errorf("load object catalog entry %d %q: %w", index, entry.FilePath, err)
+		}
+		objects[index] = object
+	}
+	l.ObjectData = objects
 	return nil
 }
 
 func (l *Loader) LoadObjectMesh(objectIndex uint32) (object RtNavmeshObj, err error) {
+	if l == nil {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: fmt.Sprintf("index %d", objectIndex), Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
 	defer recoverNavmeshLoad("load object mesh", fmt.Sprintf("index %d", objectIndex), &err)
 	if object, exists := l.ObjectData[objectIndex]; exists {
 		return object, nil
@@ -105,51 +164,132 @@ func (l *Loader) LoadObjectMesh(objectIndex uint32) (object RtNavmeshObj, err er
 	if !exists {
 		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: fmt.Sprintf("index %d", objectIndex), Err: ErrObjectMeshNotFound}
 	}
-	switch path.Ext(objectEntry.FilePath) {
-	case ".bms":
-		l.LoadObjectFromPrimMesh(objectEntry)
-	case ".bsr":
-		l.LoadObjectFromResource(objectEntry)
-	case ".cpd":
-		l.LoadObjectFromCompound(objectEntry)
-	default:
-		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: objectEntry.FilePath, Err: ErrUnsupportedObjectMesh}
+	if objectEntry.Index != objectIndex {
+		return RtNavmeshObj{}, &NavmeshLoadError{
+			Operation: "load object mesh catalog",
+			Path:      objectEntry.FilePath,
+			Err:       fmt.Errorf("%w: catalog index %d does not match entry index %d", ErrInvalidNavmeshData, objectIndex, objectEntry.Index),
+		}
 	}
-
-	object, exists = l.ObjectData[objectIndex]
-	if !exists {
-		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: objectEntry.FilePath, Err: ErrObjectMeshNotFound}
+	object, err = l.decodeObjectEntry(objectEntry)
+	if err != nil {
+		return RtNavmeshObj{}, err
 	}
+	if l.ObjectData == nil {
+		l.ObjectData = make(map[uint32]RtNavmeshObj)
+	}
+	l.ObjectData[objectIndex] = object
 	return object, nil
 }
 
 func (l *Loader) LoadTerrainMeshes(progress chan int) error {
-	counter := 0
-	for regionId, enabled := range l.MapProjectInfo.EnabledRegions {
+	if l == nil {
+		return &NavmeshLoadError{Operation: "load terrain meshes", Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
+	return l.loadTerrainMeshes(progress, func(staged *Loader, filepath string, regionID int16) error {
+		return staged.readTerrainMesh(filepath, regionID)
+	})
+}
+
+func (l *Loader) loadTerrainMeshes(progress chan<- int, load func(*Loader, string, int16) error) (err error) {
+	if load == nil {
+		return &NavmeshLoadError{Operation: "load terrain meshes", Err: fmt.Errorf("%w: terrain decoder is nil", ErrInvalidNavmeshData)}
+	}
+	defer recoverNavmeshLoad("load terrain meshes", l.NavMeshPath, &err)
+
+	regionIDs := make([]int16, 0, len(l.MapProjectInfo.EnabledRegions))
+	for regionID, enabled := range l.MapProjectInfo.EnabledRegions {
 		if !enabled {
 			continue
 		}
-		regionShortHex := fmt.Sprintf("%x", regionId)
-		navMeshHex := fmt.Sprintf("nv_%s.nvm", regionShortHex)
-		counter++
-		if progress != nil {
-			progress <- counter
+		regionIDs = append(regionIDs, regionID)
+	}
+	sort.Slice(regionIDs, func(i, j int) bool { return uint16(regionIDs[i]) < uint16(regionIDs[j]) })
+
+	staged := *l
+	staged.RegionData = make(map[int16]*RtNavmeshTerrain, len(regionIDs))
+	staged.ObjectData = cloneObjectData(l.ObjectData)
+	for i, regionID := range regionIDs {
+		filename := fmt.Sprintf("nv_%04x.nvm", uint16(regionID))
+		filepath := l.NavMeshPath + string(os.PathSeparator) + filename
+		if err := load(&staged, filepath, regionID); err != nil {
+			return errors.Wrapf(err, "failed to load terrain mesh %s", filename)
 		}
-		fmt.Printf("\rReading %s. Finished [%d / %d] files", navMeshHex, counter, l.MapProjectInfo.ActiveRegionsCount)
-		if err := l.LoadTerrainMesh(l.NavMeshPath+string(os.PathSeparator)+navMeshHex, regionId); err != nil {
-			return errors.Wrap(err, "failed to load terrain mesh")
+		completed := i + 1
+		logrus.WithFields(logrus.Fields{
+			"file":      filename,
+			"completed": completed,
+			"total":     len(regionIDs),
+		}).Trace("loaded navmesh terrain")
+		if progress != nil {
+			progress <- completed
 		}
 	}
+	if err := linkTerrainEdges(staged.RegionData, true); err != nil {
+		return err
+	}
+
+	l.RegionData = staged.RegionData
+	l.ObjectData = staged.ObjectData
 	return nil
 }
 
+func cloneObjectData(source map[uint32]RtNavmeshObj) map[uint32]RtNavmeshObj {
+	clone := make(map[uint32]RtNavmeshObj, len(source))
+	for index, object := range source {
+		clone[index] = object
+	}
+	return clone
+}
+
 func (l *Loader) LoadTerrainMesh(filepath string, regionId int16) (err error) {
+	if l == nil {
+		return &NavmeshLoadError{Operation: "load terrain", Path: filepath, Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
 	defer recoverNavmeshLoad("load terrain", filepath, &err)
+	return l.loadTerrainMeshTransaction(filepath, regionId, func(staged *Loader, filepath string, regionID int16) error {
+		return staged.readTerrainMesh(filepath, regionID)
+	})
+}
+
+func (l *Loader) loadTerrainMeshTransaction(filepath string, regionID int16, load func(*Loader, string, int16) error) error {
+	if load == nil {
+		return &NavmeshLoadError{Operation: "load terrain", Path: filepath, Err: fmt.Errorf("%w: terrain decoder is nil", ErrInvalidNavmeshData)}
+	}
+	staged := *l
+	staged.RegionData = cloneRegionData(l.RegionData)
+	staged.ObjectData = cloneObjectData(l.ObjectData)
+	if err := load(&staged, filepath, regionID); err != nil {
+		return err
+	}
+	if err := linkTerrainEdges(staged.RegionData, false); err != nil {
+		return err
+	}
+	l.RegionData = staged.RegionData
+	l.ObjectData = staged.ObjectData
+	return nil
+}
+
+func cloneRegionData(source map[int16]*RtNavmeshTerrain) map[int16]*RtNavmeshTerrain {
+	clone := make(map[int16]*RtNavmeshTerrain, len(source))
+	for regionID, terrain := range source {
+		clone[regionID] = terrain
+	}
+	return clone
+}
+
+func (l *Loader) readTerrainMesh(filepath string, regionId int16) error {
+	if l.Pk2Reader == nil {
+		return &NavmeshLoadError{Operation: "read terrain", Path: filepath, Err: fmt.Errorf("%w: PK2 reader is nil", ErrInvalidNavmeshData)}
+	}
 	fileContent, err := l.Pk2Reader.ReadFile(filepath)
 	if err != nil {
 		return &NavmeshLoadError{Operation: "read terrain", Path: filepath, Err: err}
 	}
+	return l.loadTerrainMeshContent(fileContent, filepath, regionId)
+}
 
+func (l *Loader) loadTerrainMeshContent(fileContent []byte, filepath string, regionId int16) error {
 	readIndex := 0
 	if len(fileContent) < 12 {
 		return &NavmeshLoadError{Operation: "read terrain header", Path: filepath, Err: ErrInvalidNavmeshHeader}
@@ -164,8 +304,14 @@ func (l *Loader) LoadTerrainMesh(filepath string, regionId int16) (err error) {
 	terrain := NewRtNavmeshTerrain(filepath, NewRegionFromInt16(regionId))
 
 	// 1. Read Object Instances
+	if err := requireTerrainBytes(fileContent, readIndex, 2, filepath, "object count"); err != nil {
+		return err
+	}
 	objectInstanceCount := binary.LittleEndian.Uint16(fileContent[readIndex : readIndex+2])
 	readIndex += 2
+	if err := validateTerrainRecordCount(fileContent, readIndex, uint64(objectInstanceCount), terrainObjectInstanceMinBytes, terrainFixedTailBytes+16, filepath, "object instances"); err != nil {
+		return err
+	}
 	objectInstances := make([]RtNavmeshInstObj, objectInstanceCount)
 	for i := 0; i < int(objectInstanceCount); i++ {
 		objectInstance, loadErr := l.loadTerrainObjectInstance(fileContent, &readIndex)
@@ -175,35 +321,64 @@ func (l *Loader) LoadTerrainMesh(filepath string, regionId int16) (err error) {
 		objectInstances[i] = objectInstance
 	}
 	terrain.Objects = objectInstances
+	if err := validateTerrainObjectEdgeLinks(terrain.Objects, filepath); err != nil {
+		return err
+	}
 
 	// 2. Read Cells
+	if err := requireTerrainBytes(fileContent, readIndex, 8, filepath, "cell counts"); err != nil {
+		return err
+	}
 	cellCount := binary.LittleEndian.Uint32(fileContent[readIndex : readIndex+4])
 	// openCellCount := binary.LittleEndian.Uint32(fileContent[readIndex+4 : readIndex+8])
 	readIndex += 8
+	if err := validateTerrainRecordCount(fileContent, readIndex, uint64(cellCount), terrainCellMinBytes, terrainFixedTailBytes+8, filepath, "cells"); err != nil {
+		return err
+	}
 
 	cells := make([]RtNavmeshCellQuad, cellCount)
 	for i := 0; i < int(cellCount); i++ {
-		cells[i] = l.loadTerrainNavigationCell(fileContent, &readIndex, i, &terrain)
+		cell, err := l.loadTerrainNavigationCell(fileContent, &readIndex, i, &terrain, filepath)
+		if err != nil {
+			return err
+		}
+		cells[i] = cell
 	}
 	terrain.Cells = cells
 
 	// 3. Read Global Edges
+	if err := requireTerrainBytes(fileContent, readIndex, 4, filepath, "global edge count"); err != nil {
+		return err
+	}
 	globalEdgeCount := binary.LittleEndian.Uint32(fileContent[readIndex : readIndex+4])
-	globalEdges := make([]RtNavmeshEdgeGlobal, globalEdgeCount)
 	readIndex += 4
+	if err := validateTerrainRecordCount(fileContent, readIndex, uint64(globalEdgeCount), terrainGlobalEdgeBytes, terrainFixedTailBytes+4, filepath, "global edges"); err != nil {
+		return err
+	}
+	globalEdges := make([]RtNavmeshEdgeGlobal, globalEdgeCount)
 	for i := 0; i < int(globalEdgeCount); i++ {
 		globalEdges[i] = l.loadTerrainGlobalEdge(fileContent, &readIndex, i, &terrain)
 	}
 	terrain.GlobalEdges = globalEdges
 
 	// 4. Read Internal Edges
+	if err := requireTerrainBytes(fileContent, readIndex, 4, filepath, "internal edge count"); err != nil {
+		return err
+	}
 	internalEdgeCount := binary.LittleEndian.Uint32(fileContent[readIndex : readIndex+4])
-	internalEdges := make([]RtNavmeshEdgeInternal, internalEdgeCount)
 	readIndex += 4
+	if err := validateTerrainRecordCount(fileContent, readIndex, uint64(internalEdgeCount), terrainInternalEdgeBytes, terrainFixedTailBytes, filepath, "internal edges"); err != nil {
+		return err
+	}
+	internalEdges := make([]RtNavmeshEdgeInternal, internalEdgeCount)
 	for i := 0; i < int(internalEdgeCount); i++ {
 		internalEdges[i] = l.loadTerrainInternalEdge(fileContent, &readIndex, i, &terrain)
 	}
 	terrain.InternalEdges = internalEdges
+
+	if err := requireTerrainBytes(fileContent, readIndex, terrainFixedTailBytes, filepath, "fixed maps"); err != nil {
+		return err
+	}
 
 	// 5. Read TileMap
 	terrain.TileMap = l.loadTerrainTileMap(fileContent, &readIndex)
@@ -213,9 +388,53 @@ func (l *Loader) LoadTerrainMesh(filepath string, regionId int16) (err error) {
 
 	// 7. Read Plane Map
 	terrain.PlaneMap = l.loadTerrainPlaneMap(fileContent, &readIndex)
+	// Object meshes are catalog templates copied into terrain- and cell-owned
+	// instances. Rebind runtime ownership only after those copies reach their
+	// final backing slices.
+	rehydrateTerrainRuntime(&terrain)
+	if err := validateTerrainInstanceTopology(terrain.Objects, filepath); err != nil {
+		return err
+	}
+	if err := validateTerrainCellObjectReferences(&terrain, filepath); err != nil {
+		return err
+	}
 
+	if l.RegionData == nil {
+		l.RegionData = make(map[int16]*RtNavmeshTerrain)
+	}
 	l.RegionData[regionId] = &terrain
 
+	return nil
+}
+
+func requireTerrainBytes(content []byte, index, needed int, filepath, section string) error {
+	if index < 0 || needed < 0 || index > len(content) || needed > len(content)-index {
+		remaining := 0
+		if index >= 0 && index <= len(content) {
+			remaining = len(content) - index
+		}
+		return &NavmeshLoadError{
+			Operation: "read terrain " + section,
+			Path:      filepath,
+			Err:       fmt.Errorf("%w: need %d bytes at offset %d, have %d", ErrInvalidNavmeshData, needed, index, remaining),
+		}
+	}
+	return nil
+}
+
+func validateTerrainRecordCount(content []byte, index int, count uint64, recordBytes, trailingBytes int, filepath, section string) error {
+	if err := requireTerrainBytes(content, index, trailingBytes, filepath, section); err != nil {
+		return err
+	}
+	available := len(content) - index - trailingBytes
+	maximum := uint64(available / recordBytes)
+	if count > maximum {
+		return &NavmeshLoadError{
+			Operation: "read terrain " + section,
+			Path:      filepath,
+			Err:       fmt.Errorf("%w: record count %d exceeds maximum %d for %d available bytes", ErrInvalidNavmeshData, count, maximum, available),
+		}
+	}
 	return nil
 }
 
@@ -347,12 +566,33 @@ func (l *Loader) loadTerrainGlobalEdge(content []byte, readIndex *int, index int
 	return globalEdge
 }
 
-func (l *Loader) loadTerrainNavigationCell(content []byte, readIndex *int, index int, terrain *RtNavmeshTerrain) RtNavmeshCellQuad {
+func (l *Loader) loadTerrainNavigationCell(content []byte, readIndex *int, index int, terrain *RtNavmeshTerrain, filepath string) (RtNavmeshCellQuad, error) {
+	if readIndex == nil {
+		return RtNavmeshCellQuad{}, &NavmeshLoadError{
+			Operation: "read terrain cell",
+			Path:      filepath,
+			Err:       fmt.Errorf("%w: read index is nil", ErrInvalidNavmeshData),
+		}
+	}
+	if terrain == nil {
+		return RtNavmeshCellQuad{}, &NavmeshLoadError{
+			Operation: "read terrain cell",
+			Path:      filepath,
+			Err:       fmt.Errorf("%w: terrain is nil", ErrInvalidNavmeshData),
+		}
+	}
+	if err := requireTerrainBytes(content, *readIndex, terrainCellMinBytes, filepath, "cell"); err != nil {
+		return RtNavmeshCellQuad{}, err
+	}
 
 	minVectorOffset := *readIndex
 	maxVectorOffset := minVectorOffset + 8
 	objCountOffset := maxVectorOffset + 8
 	*readIndex += 17
+	objectReferenceCount := int(content[objCountOffset])
+	if err := requireTerrainBytes(content, *readIndex, objectReferenceCount*2, filepath, "cell object references"); err != nil {
+		return RtNavmeshCellQuad{}, err
+	}
 
 	// cell data
 	cell := RtNavmeshCellQuad{
@@ -370,20 +610,41 @@ func (l *Loader) loadTerrainNavigationCell(content []byte, readIndex *int, index
 				Y: utils.Float32FromByteArray(content[maxVectorOffset+4 : objCountOffset]),
 			},
 		},
-		Objects: make([]RtNavmeshInstObj, content[objCountOffset]),
+		Objects: make([]RtNavmeshInstObj, objectReferenceCount),
 		Edges:   make([]RtNavmeshEdge, 0),
 	}
 
 	// Object instances
-	for i := 0; i < int(content[objCountOffset]); i++ {
-		cell.Objects[i] = terrain.Objects[binary.LittleEndian.Uint16(content[*readIndex:*readIndex+2])]
+	for i := 0; i < objectReferenceCount; i++ {
+		objectIndex := int(binary.LittleEndian.Uint16(content[*readIndex : *readIndex+2]))
+		if objectIndex >= len(terrain.Objects) {
+			return RtNavmeshCellQuad{}, &NavmeshLoadError{
+				Operation: "read terrain cell object reference",
+				Path:      filepath,
+				Err: fmt.Errorf(
+					"%w: cell %d reference %d selects object %d with %d loaded",
+					ErrInvalidNavmeshData,
+					index,
+					i,
+					objectIndex,
+					len(terrain.Objects),
+				),
+			}
+		}
+		cell.Objects[i] = terrain.Objects[objectIndex]
 		*readIndex += 2
 	}
 
-	return cell
+	return cell, nil
 }
 
 func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int) (RtNavmeshInstObj, error) {
+	if readIndex == nil {
+		return RtNavmeshInstObj{}, &NavmeshLoadError{Operation: "read terrain object instance", Err: fmt.Errorf("%w: read index is nil", ErrInvalidNavmeshData)}
+	}
+	if err := requireTerrainBytes(fileContent, *readIndex, terrainObjectInstanceMinBytes, "", "object instance"); err != nil {
+		return RtNavmeshInstObj{}, err
+	}
 	objIdOffset := *readIndex
 	positionOffset := objIdOffset + 4
 	objTypeOffset := positionOffset + 12
@@ -428,12 +689,15 @@ func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int) (
 	}
 
 	globalEdgeLinkCount := binary.LittleEndian.Uint16(fileContent[globalEdgeLinkCountOffset : globalEdgeLinkCountOffset+2])
-	edgeLinks := make([]RtNavmeshEdgeLink, 0)
-	if globalEdgeLinkCount > 0 {
-		logrus.Infof("Object %d (%d) has %d global edge links", objectInstance.ID, objectInstance.WorldID, globalEdgeLinkCount)
-	} else {
-		logrus.Infof("Object %d (%d) has no global edge links", objectInstance.ID, objectInstance.WorldID)
+	if err := requireTerrainBytes(fileContent, *readIndex, int(globalEdgeLinkCount)*6, "", "object edge links"); err != nil {
+		return RtNavmeshInstObj{}, err
 	}
+	edgeLinks := make([]RtNavmeshEdgeLink, 0)
+	logrus.WithFields(logrus.Fields{
+		"object_id":       objectInstance.ID,
+		"object_world_id": objectInstance.WorldID,
+		"edge_links":      globalEdgeLinkCount,
+	}).Trace("loaded navmesh object edge links")
 	for j := 0; j < int(globalEdgeLinkCount); j++ {
 		// TODO find out what this is for
 		linkedObjIdOffset := *readIndex
@@ -450,6 +714,66 @@ func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int) (
 	}
 	objectInstance.EdgeLinks = edgeLinks
 	return objectInstance, nil
+}
+
+func validateTerrainObjectEdgeLinks(objects []RtNavmeshInstObj, filepath string) error {
+	for objectIndex := range objects {
+		object := &objects[objectIndex]
+		for linkIndex, link := range object.EdgeLinks {
+			if link.IsUnmapped() {
+				continue
+			}
+			if link.HasNegativeField() {
+				return invalidTerrainObjectEdgeLink(filepath, objectIndex, linkIndex, link, "partially negative link")
+			}
+			if int(link.EdgeID) >= len(object.Object.GlobalEdges) {
+				return invalidTerrainObjectEdgeLink(
+					filepath,
+					objectIndex,
+					linkIndex,
+					link,
+					fmt.Sprintf("source edge index exceeds %d edges", len(object.Object.GlobalEdges)),
+				)
+			}
+			if int(link.LinkedObjID) >= len(objects) {
+				return invalidTerrainObjectEdgeLink(
+					filepath,
+					objectIndex,
+					linkIndex,
+					link,
+					fmt.Sprintf("linked object index exceeds %d objects", len(objects)),
+				)
+			}
+			linkedObject := &objects[int(link.LinkedObjID)]
+			if int(link.LinkedObjEdgeID) >= len(linkedObject.Object.GlobalEdges) {
+				return invalidTerrainObjectEdgeLink(
+					filepath,
+					objectIndex,
+					linkIndex,
+					link,
+					fmt.Sprintf("linked edge index exceeds %d edges", len(linkedObject.Object.GlobalEdges)),
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func invalidTerrainObjectEdgeLink(filepath string, objectIndex, linkIndex int, link RtNavmeshEdgeLink, reason string) error {
+	return &NavmeshLoadError{
+		Operation: "validate terrain object edge link",
+		Path:      filepath,
+		Err: fmt.Errorf(
+			"%w: object %d link %d (%d,%d,%d): %s",
+			ErrInvalidNavmeshData,
+			objectIndex,
+			linkIndex,
+			link.LinkedObjID,
+			link.LinkedObjEdgeID,
+			link.EdgeID,
+			reason,
+		),
+	}
 }
 
 func (l *Loader) SaveNavmeshDataAsGOB(cachePrefix string) {
@@ -489,10 +813,16 @@ func (l *Loader) saveNavmeshDataAsGOB(cachePrefix string) error {
 	if l.ObjectData == nil {
 		l.ObjectData = make(map[uint32]RtNavmeshObj)
 	}
-	if err := writeGobAtomically(cachePrefix+"_regions", l.RegionData); err != nil {
+	if err := validateCachedObjectData(l.ObjectData); err != nil {
+		return fmt.Errorf("validate object cache: %w", err)
+	}
+	if err := validateCachedRegionData(l.RegionData); err != nil {
+		return fmt.Errorf("validate region cache: %w", err)
+	}
+	if err := writeRegionCacheAtomically(cachePrefix+"_regions", l.RegionData); err != nil {
 		return fmt.Errorf("write region cache: %w", err)
 	}
-	if err := writeGobAtomically(cachePrefix+"_objects", l.ObjectData); err != nil {
+	if err := writeObjectCacheAtomically(cachePrefix+"_objects", l.ObjectData); err != nil {
 		return fmt.Errorf("write object cache: %w", err)
 	}
 	return nil
@@ -507,25 +837,80 @@ func (l *Loader) LoadPrecomputedNavmeshDataFromGOB(cachePrefix string) error {
 		gob.Register(RtNavmeshTerrain{})
 	})
 	logrus.Debugf("loading precomputed navmesh data")
-	regions := make(map[int16]*RtNavmeshTerrain)
-	objects := make(map[uint32]RtNavmeshObj)
 	decodeStartTime := time.Now()
-	if err := readGob(cachePrefix+"_regions", &regions); err != nil {
+	regions, err := readRegionCache(cachePrefix + "_regions")
+	if err != nil {
 		return fmt.Errorf("read region cache: %w", err)
 	}
 	decodeStopTime := time.Now()
 	logrus.Debugf("finished loading region navmesh data after %d ms", decodeStopTime.Sub(decodeStartTime).Milliseconds())
 
 	decodeStartTime2 := time.Now()
-	if err := readGob(cachePrefix+"_objects", &objects); err != nil {
+	objects, err := readObjectCache(cachePrefix + "_objects")
+	if err != nil {
 		return fmt.Errorf("read object cache: %w", err)
 	}
 	decodeStopTime2 := time.Now()
 	logrus.Debugf("finished loading object navmesh data after %d ms", decodeStopTime2.Sub(decodeStartTime2).Milliseconds())
+	rehydrateCachedNavmeshRuntime(regions, objects)
+	if err := validateCachedObjectData(objects); err != nil {
+		return fmt.Errorf("validate object cache: %w", err)
+	}
+	if err := validateCachedRegionData(regions); err != nil {
+		return fmt.Errorf("validate region cache: %w", err)
+	}
+	if err := linkTerrainEdges(regions, true); err != nil {
+		return fmt.Errorf("link region cache: %w", err)
+	}
 
 	l.RegionData = regions
 	l.ObjectData = objects
 	return nil
+}
+
+func validateCachedRegionData(regions map[int16]*RtNavmeshTerrain) error {
+	regionIDs := make([]int16, 0, len(regions))
+	for regionID := range regions {
+		regionIDs = append(regionIDs, regionID)
+	}
+	sort.Slice(regionIDs, func(i, j int) bool { return uint16(regionIDs[i]) < uint16(regionIDs[j]) })
+
+	for _, regionID := range regionIDs {
+		terrain := regions[regionID]
+		regionPath := fmt.Sprintf("region %04x", uint16(regionID))
+		if terrain == nil {
+			return &NavmeshLoadError{
+				Operation: "validate cached terrain",
+				Path:      regionPath,
+				Err:       fmt.Errorf("%w: terrain is nil", ErrInvalidNavmeshData),
+			}
+		}
+		if terrain.Filename != "" {
+			regionPath = terrain.Filename
+		}
+		if terrain.Region.ID != regionID {
+			return &NavmeshLoadError{
+				Operation: "validate cached terrain",
+				Path:      regionPath,
+				Err: fmt.Errorf(
+					"%w: map key %04x does not match terrain region %04x",
+					ErrInvalidNavmeshData,
+					uint16(regionID),
+					uint16(terrain.Region.ID),
+				),
+			}
+		}
+		if err := validateTerrainInstanceTopology(terrain.Objects, regionPath); err != nil {
+			return err
+		}
+		if err := validateTerrainCellObjectReferences(terrain, regionPath); err != nil {
+			return err
+		}
+		if err := validateTerrainObjectEdgeLinks(terrain.Objects, regionPath); err != nil {
+			return err
+		}
+	}
+	return validateTerrainEdgeTopology(regions, true)
 }
 
 func writeGobAtomically(path string, value interface{}) error {
@@ -578,26 +963,116 @@ func readGob(path string, target interface{}) error {
 	return nil
 }
 
-func (l *Loader) LoadObjectFromPrimMesh(entry ObjectInfoEntry) {
-	logrus.Tracef("loading object entry %d: %s", entry.Index, entry.FilePath)
-	meshFile := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
-	object := meshFile.LoadMeshObject()
-	l.ObjectData[entry.Index] = object
+func (l *Loader) LoadObjectFromPrimMesh(entry ObjectInfoEntry) error {
+	object, err := l.decodeObjectFromPrimMesh(entry)
+	if err != nil {
+		return err
+	}
+	l.publishObject(entry.Index, object)
+	return nil
 }
 
-func (l *Loader) LoadObjectFromResource(entry ObjectInfoEntry) {
+func (l *Loader) decodeObjectEntry(entry ObjectInfoEntry) (RtNavmeshObj, error) {
 	logrus.Tracef("loading object entry %d: %s", entry.Index, entry.FilePath)
-	res := LoadResource(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
-	mesh := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+res.NavMeshObjPath, l.Pk2Reader)
-	object := mesh.LoadMeshObject()
-	l.ObjectData[entry.Index] = object
+	switch strings.ToLower(path.Ext(entry.FilePath)) {
+	case ".bms":
+		return l.decodeObjectFromPrimMesh(entry)
+	case ".bsr":
+		return l.decodeObjectFromResource(entry)
+	case ".cpd":
+		return l.decodeObjectFromCompound(entry)
+	default:
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: ErrUnsupportedObjectMesh}
+	}
 }
 
-func (l *Loader) LoadObjectFromCompound(entry ObjectInfoEntry) {
-	logrus.Tracef("loading object entry %d: %s", entry.Index, entry.FilePath)
-	cpd := LoadCompoundFile(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
-	res := LoadResource(l.DataPk2Path+string(os.PathSeparator)+cpd.NavMeshObjPath, l.Pk2Reader)
-	mesh := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+res.NavMeshObjPath, l.Pk2Reader)
-	object := mesh.LoadMeshObject()
-	l.ObjectData[entry.Index] = object
+func (l *Loader) decodeObjectFromPrimMesh(entry ObjectInfoEntry) (RtNavmeshObj, error) {
+	if l == nil {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
+	meshFile, err := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	object, err := meshFile.LoadMeshObject()
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	return object, nil
+}
+
+func (l *Loader) LoadObjectFromResource(entry ObjectInfoEntry) error {
+	object, err := l.decodeObjectFromResource(entry)
+	if err != nil {
+		return err
+	}
+	l.publishObject(entry.Index, object)
+	return nil
+}
+
+func (l *Loader) decodeObjectFromResource(entry ObjectInfoEntry) (RtNavmeshObj, error) {
+	if l == nil {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
+	res, err := LoadResource(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	if strings.TrimSpace(res.NavMeshObjPath) == "" {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: ErrObjectMeshNotFound}
+	}
+	mesh, err := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+res.NavMeshObjPath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	object, err := mesh.LoadMeshObject()
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	return object, nil
+}
+
+func (l *Loader) LoadObjectFromCompound(entry ObjectInfoEntry) error {
+	object, err := l.decodeObjectFromCompound(entry)
+	if err != nil {
+		return err
+	}
+	l.publishObject(entry.Index, object)
+	return nil
+}
+
+func (l *Loader) decodeObjectFromCompound(entry ObjectInfoEntry) (RtNavmeshObj, error) {
+	if l == nil {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: fmt.Errorf("%w: loader is nil", ErrInvalidNavmeshData)}
+	}
+	cpd, err := LoadCompoundFile(l.DataPk2Path+string(os.PathSeparator)+entry.FilePath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	if strings.TrimSpace(cpd.NavMeshObjPath) == "" {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: ErrObjectMeshNotFound}
+	}
+	res, err := LoadResource(l.DataPk2Path+string(os.PathSeparator)+cpd.NavMeshObjPath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	if strings.TrimSpace(res.NavMeshObjPath) == "" {
+		return RtNavmeshObj{}, &NavmeshLoadError{Operation: "load object mesh", Path: entry.FilePath, Err: ErrObjectMeshNotFound}
+	}
+	mesh, err := LoadMeshFile(l.DataPk2Path+string(os.PathSeparator)+res.NavMeshObjPath, l.Pk2Reader)
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	object, err := mesh.LoadMeshObject()
+	if err != nil {
+		return RtNavmeshObj{}, err
+	}
+	return object, nil
+}
+
+func (l *Loader) publishObject(index uint32, object RtNavmeshObj) {
+	if l.ObjectData == nil {
+		l.ObjectData = make(map[uint32]RtNavmeshObj)
+	}
+	l.ObjectData[index] = object
 }

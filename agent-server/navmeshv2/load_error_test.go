@@ -7,7 +7,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/navmesh"
 )
 
-func TestLoadNavMeshInfosConvertsParserPanicToTypedError(t *testing.T) {
+func TestLoadNavMeshInfosReturnsTypedMetadataError(t *testing.T) {
 	loader := newLoader(nil, "test.pk2")
 	err := loader.LoadNavMeshInfos()
 	if !errors.Is(err, ErrInvalidNavmeshData) {
@@ -17,8 +17,8 @@ func TestLoadNavMeshInfosConvertsParserPanicToTypedError(t *testing.T) {
 	if !errors.As(err, &loadErr) {
 		t.Fatalf("LoadNavMeshInfos() error = %T, want *NavmeshLoadError", err)
 	}
-	if loadErr.Operation != "load metadata" {
-		t.Fatalf("operation = %q, want load metadata", loadErr.Operation)
+	if loadErr.Operation != "read map info" {
+		t.Fatalf("operation = %q, want read map info", loadErr.Operation)
 	}
 }
 
