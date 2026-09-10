@@ -87,7 +87,9 @@ func (e *Server) RegisterHandler(opcode uint16, handler SessionHandler) {
 	if e == nil || e.handlers == nil {
 		return
 	}
-	e.handlers.Register(opcode, handler)
+	if err := e.handlers.Register(opcode, handler); err != nil {
+		panic(fmt.Sprintf("register server handler: %v", err))
+	}
 }
 
 func (e *Server) DispatchMetrics() DispatchMetrics {
