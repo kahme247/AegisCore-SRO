@@ -24,6 +24,13 @@ func TestItemEconomySuccessEnvelopesMatchMaintainedLayouts(t *testing.T) {
 			want:   []byte{1, 0x09, 0x0D, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11, 0x1A},
 		},
 		{
+			name: "COS sell",
+			packet: BuildCOSSellSuccess(COSSellRequest{
+				ObjectUniqueID: 0x11223344, Source: 3, Amount: 0x1234, NPCUniqueID: 0x55667788,
+			}, 0x1A),
+			want: []byte{1, 0x14, 0x44, 0x33, 0x22, 0x11, 3, 0x34, 0x12, 0x88, 0x77, 0x66, 0x55, 0x1A},
+		},
+		{
 			name:   "buyback",
 			packet: BuildItemBuyBackSuccess(0x0E, 0x0D, 0x1234),
 			want:   []byte{1, 0x22, 0x0E, 0x0D, 0x34, 0x12},
@@ -40,5 +47,20 @@ func TestItemEconomySuccessEnvelopesMatchMaintainedLayouts(t *testing.T) {
 				t.Fatalf("payload = % X, want % X", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCOSSellRequestMatchesStockModeZeroLayout(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	packet.WriteUInt32(0x11223344)
+	packet.WriteByte(3)
+	packet.WriteUInt16(0x1234)
+	packet.WriteUInt32(0x55667788)
+	request, err := DecodeCOSSellRequest(&packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request != (COSSellRequest{ObjectUniqueID: 0x11223344, Source: 3, Amount: 0x1234, NPCUniqueID: 0x55667788}) {
+		t.Fatalf("request = %+v", request)
 	}
 }

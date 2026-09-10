@@ -20,6 +20,37 @@ func TestItemCompatibilityCoverageHasUniqueSurfaces(t *testing.T) {
 	}
 }
 
+func TestJobCompatibilityCoverageImplementsSafeTradeLifecycle(t *testing.T) {
+	entries := JobCompatibilityCoverage()
+	var safeTrade CompatibilityCoverage
+	for _, entry := range entries {
+		if entry.Surface == "tri-job safe trade" {
+			safeTrade = entry
+			break
+		}
+	}
+	if safeTrade.Status != CompatibilityImplemented || safeTrade.ResponseOpcode != 0x34D5 {
+		t.Fatalf("safe-trade coverage = %+v", safeTrade)
+	}
+	for _, opcode := range []uint16{0x70E1, 0x70E2, 0x70E3, 0x70E4, 0x70E5, 0x70E6} {
+		found := false
+		for _, entry := range entries {
+			if entry.RequestOpcode == opcode {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing JOB request opcode 0x%04X", opcode)
+		}
+	}
+	for _, entry := range entries {
+		if entry.Status != CompatibilityImplemented {
+			t.Fatalf("JOB coverage is not implemented: %+v", entry)
+		}
+	}
+}
+
 func TestItemCompatibilityCoveragePinsHighRiskBoundaries(t *testing.T) {
 	entries := ItemCompatibilityCoverage()
 	find := func(surface string) CompatibilityCoverage {
@@ -36,8 +67,11 @@ func TestItemCompatibilityCoveragePinsHighRiskBoundaries(t *testing.T) {
 	if got := find("modern item mall"); got.Status != CompatibilityPartial || got.RequestOpcode != 0x7034 || got.ResponseOpcode != 0xB034 {
 		t.Fatalf("modern mall coverage = %+v", got)
 	}
-	if got := find("specialty/job goods"); got.Status != CompatibilityFramingOnly {
-		t.Fatalf("specialty coverage = %+v", got)
+	if got := find("token package purchase"); got.Status != CompatibilityImplemented || got.Operation != "0x2B" {
+		t.Fatalf("token package coverage = %+v", got)
+	}
+	if got := find("invalid specialty operation"); got.Status != CompatibilityFailClosed || got.Operation != "0x2C" {
+		t.Fatalf("invalid specialty operation coverage = %+v", got)
 	}
 	if got := find("magic-cube lifecycle"); got.Status != CompatibilityFailClosed {
 		t.Fatalf("magic-cube coverage = %+v", got)

@@ -169,10 +169,14 @@ func BuildAlchemyAvatarResult(mutated bool) network.Packet {
 	return packet
 }
 
-func BuildAlchemyAvatarGrantResult(mutated bool) network.Packet {
+func BuildAlchemyAvatarGrantResult(mutated bool, slot byte, target AlchemyTargetPayload) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.AlchemyAvatarGrantResponse
 	packet.WriteByte(1)
 	packet.WriteBool(mutated)
+	if mutated {
+		packet.WriteByte(slot)
+		_ = packet.WriteBytes(target)
+	}
 	return packet
 }

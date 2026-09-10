@@ -70,6 +70,13 @@ func TestItemOperationCOSTransferSuccessMatchesStockB034Layout(t *testing.T) {
 	}
 }
 
+func TestItemOperationPlayerCOSTransferSuccessMatchesStockB034Layout(t *testing.T) {
+	packet := BuildItemOperationObjectSlotPairSuccess(0x1A, 0x11223344, 0x03, 0x0E)
+	if got, want := packet.Payload(), []byte{1, 0x1A, 0x44, 0x33, 0x22, 0x11, 0x03, 0x0E}; !bytes.Equal(got, want) {
+		t.Fatalf("player/COS transfer success payload = % X, want % X", got, want)
+	}
+}
+
 func TestItemOperationStorageSuccessFormsMatchMaintainedB034Layouts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -187,5 +194,39 @@ func TestPackageItemSuccessRejectsRentTail(t *testing.T) {
 	packet.WriteBytes([]byte{0, 0, 0, 0})
 	if _, err := DecodePackageItemSuccess(&packet); err == nil {
 		t.Fatal("package-item success accepted a trailing rent/item body")
+	}
+}
+
+func TestExtendedPackageItemSuccessMatchesRecoveredContinuationVector(t *testing.T) {
+	packet := BuildPackageItemSuccess(PackageItemSuccess{
+		Operation:   ItemOperationPackageItemExtended,
+		SelectorA:   0x12,
+		SelectorB:   0x34,
+		ResultBytes: []byte{0x56, 0x78},
+		Quantity:    0x9ABC,
+		Continuations: []PackageItemContinuation{
+			{Selector: 0x0D, Quantity: 3},
+			{Selector: 0x0E, Quantity: 0x1234},
+		},
+	})
+	want := []byte{1, 0x2B, 0x12, 0x34, 2, 0x56, 0x78, 0xBC, 0x9A, 2, 0x0D, 3, 0, 0x0E, 0x34, 0x12}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("0x2B success payload = % X, want % X", got, want)
+	}
+	input := packet
+	decoded, err := DecodePackageItemSuccess(&input)
+	if err != nil {
+		t.Fatalf("DecodePackageItemSuccess(0x2B): %v", err)
+	}
+	if decoded.Operation != ItemOperationPackageItemExtended || decoded.SelectorA != 0x12 || decoded.SelectorB != 0x34 || decoded.Quantity != 0x9ABC || !bytes.Equal(decoded.ResultBytes, []byte{0x56, 0x78}) || len(decoded.Continuations) != 2 || decoded.Continuations[0].Selector != 0x0D || decoded.Continuations[0].Quantity != 3 || decoded.Continuations[1].Selector != 0x0E || decoded.Continuations[1].Quantity != 0x1234 {
+		t.Fatalf("decoded 0x2B success = %+v", decoded)
+	}
+}
+
+func TestExtendedPackageItemSuccessRejectsTruncatedContinuation(t *testing.T) {
+	packet := network.EmptyPacket()
+	packet.WriteBytes([]byte{1, 0x2B, 1, 2, 0, 4, 0, 1, 3, 0xAA})
+	if _, err := DecodePackageItemSuccess(&packet); err == nil {
+		t.Fatal("DecodePackageItemSuccess accepted truncated 0x2B continuation")
 	}
 }

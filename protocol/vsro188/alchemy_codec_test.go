@@ -58,7 +58,7 @@ func TestAlchemyResultEnvelopesStayInProtocolCodec(t *testing.T) {
 		{name: "socket short result", packet: BuildAlchemySocketResult(), want: "0102"},
 		{name: "socket failure", packet: BuildAlchemySocketFailure(0x1234), want: "02023412"},
 		{name: "avatar", packet: BuildAlchemyAvatarResult(true), want: "010201"},
-		{name: "avatar grant", packet: BuildAlchemyAvatarGrantResult(false), want: "0100"},
+		{name: "avatar grant", packet: BuildAlchemyAvatarGrantResult(false, 0, nil), want: "0100"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

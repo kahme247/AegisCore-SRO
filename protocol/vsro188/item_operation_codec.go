@@ -38,6 +38,12 @@ const ItemOperationGroundDrop byte = 0x07
 // executable does not establish a public business name for these fields.
 const ItemOperationPackageItem byte = 0x08
 
+// ItemOperationPackageItemExtended is stock SP_BUY_ITEM_WITH_TOKEN. The client
+// selects it for five token categories and its success envelope adds the token
+// debit continuation vector. It enters the same package insertion engine as
+// the gold/package operation 0x08.
+const ItemOperationPackageItemExtended byte = 0x2B
+
 // PackageItemRequestBodySize is the exact number of bytes after operation
 // 0x08 in the recovered package-item sender.
 const PackageItemRequestBodySize = 4
@@ -109,25 +115,46 @@ func DecodePackageItemRequest(packet *network.Packet) (PackageItemRequest, error
 // operation-0x08 path. ResultBytes are opaque child-vector entries; they must
 // not be renamed to destination slots without stronger evidence.
 type PackageItemSuccess struct {
-	SelectorA   byte
-	SelectorB   byte
-	ResultBytes []byte
-	Quantity    uint16
+	Operation     byte
+	SelectorA     byte
+	SelectorB     byte
+	ResultBytes   []byte
+	Quantity      uint16
+	Continuations []PackageItemContinuation
+}
+
+// PackageItemContinuation is the additional child-record vector emitted only
+// by stock operation 0x2B. The server serializer reads the byte at child +3
+// and the u16 at child +6; their wider business meaning remains neutral.
+type PackageItemContinuation struct {
+	Selector byte
+	Quantity uint16
 }
 
 // BuildPackageItemSuccess writes the exact package-item success grammar. It
 // intentionally has no rent/item tail; that tail belongs to a different
 // maintained economy serializer and is not part of this response form.
 func BuildPackageItemSuccess(success PackageItemSuccess) network.Packet {
+	operation := success.Operation
+	if operation == 0 {
+		operation = ItemOperationPackageItem
+	}
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemOperationResponse
 	packet.WriteByte(1)
-	packet.WriteByte(ItemOperationPackageItem)
+	packet.WriteByte(operation)
 	packet.WriteByte(success.SelectorA)
 	packet.WriteByte(success.SelectorB)
 	packet.WriteByte(byte(len(success.ResultBytes)))
 	_ = packet.WriteBytes(success.ResultBytes)
 	packet.WriteUInt16(success.Quantity)
+	if operation == ItemOperationPackageItemExtended {
+		packet.WriteByte(byte(len(success.Continuations)))
+		for _, continuation := range success.Continuations {
+			packet.WriteByte(continuation.Selector)
+			packet.WriteUInt16(continuation.Quantity)
+		}
+	}
 	return packet
 }
 
@@ -148,10 +175,10 @@ func DecodePackageItemSuccess(packet *network.Packet) (PackageItemSuccess, error
 	if err != nil {
 		return PackageItemSuccess{}, fmt.Errorf("read package-item operation: %w", err)
 	}
-	if operation != ItemOperationPackageItem {
+	if operation != ItemOperationPackageItem && operation != ItemOperationPackageItemExtended {
 		return PackageItemSuccess{}, fmt.Errorf("package-item operation is 0x%02X", operation)
 	}
-	success := PackageItemSuccess{}
+	success := PackageItemSuccess{Operation: operation}
 	if success.SelectorA, err = packet.ReadByte(); err != nil {
 		return PackageItemSuccess{}, fmt.Errorf("read package-item selector A: %w", err)
 	}
@@ -170,6 +197,21 @@ func DecodePackageItemSuccess(packet *network.Packet) (PackageItemSuccess, error
 	}
 	if success.Quantity, err = packet.ReadUInt16(); err != nil {
 		return PackageItemSuccess{}, fmt.Errorf("read package-item quantity: %w", err)
+	}
+	if operation == ItemOperationPackageItemExtended {
+		continuationCount, readErr := packet.ReadByte()
+		if readErr != nil {
+			return PackageItemSuccess{}, fmt.Errorf("read 0x2B continuation count: %w", readErr)
+		}
+		success.Continuations = make([]PackageItemContinuation, continuationCount)
+		for index := range success.Continuations {
+			if success.Continuations[index].Selector, err = packet.ReadByte(); err != nil {
+				return PackageItemSuccess{}, fmt.Errorf("read 0x2B continuation %d selector: %w", index, err)
+			}
+			if success.Continuations[index].Quantity, err = packet.ReadUInt16(); err != nil {
+				return PackageItemSuccess{}, fmt.Errorf("read 0x2B continuation %d quantity: %w", index, err)
+			}
+		}
 	}
 	if packet.Remaining() != 0 {
 		return PackageItemSuccess{}, fmt.Errorf("package-item success has %d trailing bytes", packet.Remaining())
@@ -249,6 +291,15 @@ func BuildItemOperationObjectSlotSuccess(operation byte, objectID uint32, slot b
 	packet.WriteByte(operation)
 	packet.WriteUInt32(objectID)
 	packet.WriteByte(slot)
+	return packet
+}
+
+// BuildItemOperationObjectSlotPairSuccess writes the mode-1 completion used
+// by player/COS inventory transfers: operation, COS unique ID, source slot,
+// and destination slot.
+func BuildItemOperationObjectSlotPairSuccess(operation byte, objectID uint32, source, destination byte) network.Packet {
+	packet := BuildItemOperationObjectSlotSuccess(operation, objectID, source)
+	packet.WriteByte(destination)
 	return packet
 }
 

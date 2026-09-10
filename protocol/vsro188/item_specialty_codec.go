@@ -9,8 +9,10 @@ import (
 
 const ItemOperationSpecialty byte = 0x2B
 
-// SpecialtyRequest records the neutral operation-0x2B request fields. The
-// binary confirms widths/order, but not public selector names.
+// SpecialtyRequest records the operation-0x2B package-selection fields.
+// Stock GameServer 0x005266A0 uses FirstSelector to index the active package
+// vector and SecondSelector to select a member through 0x00616780. Neutral API
+// names are retained because the stock package catalog is not yet maintained.
 type SpecialtyRequest struct {
 	FirstSelector  byte
 	SecondSelector byte

@@ -9,13 +9,11 @@ import (
 
 // InventorySizeUpdate is the binary-confirmed wire grammar for 0x3092.
 //
-// The stock server writes two consecutive bytes and the stock client reads
-// them as two consecutive bytes. Their domain meaning is intentionally not
-// assigned here: the recovered code does not establish stable names for
-// either field.
+// The stock server writes a target byte followed by the resulting capacity.
+// Target 1 updates the player inventory and target 2 updates storage.
 type InventorySizeUpdate struct {
-	FirstByte  byte
-	SecondByte byte
+	FirstByte  byte // 1 = player inventory, 2 = storage
+	SecondByte byte // resulting capacity
 }
 
 func BuildInventorySizeUpdate(update InventorySizeUpdate) network.Packet {
