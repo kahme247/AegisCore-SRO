@@ -429,8 +429,8 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 84 {
-		t.Fatalf("shard migration count = %d, want 84", len(shardMigrations))
+	if len(shardMigrations) != 102 {
+		t.Fatalf("shard migration count = %d, want 102", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
@@ -462,6 +462,49 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(cosPolicyMigration.UpSQL, "GAMEPLAY_COS_KIND_POLICY") ||
 		!strings.Contains(cosPolicyMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("COS gameplay policy migration = %#v", cosPolicyMigration)
+	}
+	triJobMigration := shardMigrationByVersion[86]
+	if triJobMigration.Version != 86 || triJobMigration.Name != "trijob_core" ||
+		!strings.Contains(triJobMigration.UpSQL, "REF_JOB_LEVEL_EXPERIENCE") ||
+		!strings.Contains(triJobMigration.UpSQL, "PREVIOUS_JOB_TYPE") ||
+		!strings.Contains(triJobMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("tri-job core migration = %#v", triJobMigration)
+	}
+	safeTradeMigration := shardMigrationByVersion[87]
+	if safeTradeMigration.Version != 87 || safeTradeMigration.Name != "safe_trade_core" ||
+		!strings.Contains(safeTradeMigration.UpSQL, "SAFE_TRADE_MARKET_GOOD") ||
+		!strings.Contains(safeTradeMigration.UpSQL, "CHARACTER_SAFE_TRADE") ||
+		!strings.Contains(safeTradeMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("safe-trade core migration = %#v", safeTradeMigration)
+	}
+	stockSpecialtyMigration := shardMigrationByVersion[88]
+	if stockSpecialtyMigration.Version != 88 || stockSpecialtyMigration.Name != "stock_specialty_goods" ||
+		!strings.Contains(stockSpecialtyMigration.UpSQL, "ITEM_QUOTATION") ||
+		!strings.Contains(stockSpecialtyMigration.UpSQL, "CREATOR_NAME") ||
+		!strings.Contains(stockSpecialtyMigration.UpSQL, "CUR_STOCK_AMOUNT") ||
+		!strings.Contains(stockSpecialtyMigration.DownSQL, "DROP COLUMN `CREATOR_NAME`") {
+		t.Fatalf("stock specialty-goods migration = %#v", stockSpecialtyMigration)
+	}
+	triJobRewardsMigration := shardMigrationByVersion[89]
+	if triJobRewardsMigration.Version != 89 || triJobRewardsMigration.Name != "stock_trijob_rewards" ||
+		!strings.Contains(triJobRewardsMigration.UpSQL, "TRIJOB_REWARDS") ||
+		!strings.Contains(triJobRewardsMigration.UpSQL, "(2, 0)") ||
+		!strings.Contains(triJobRewardsMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("stock tri-job rewards migration = %#v", triJobRewardsMigration)
+	}
+	levelJobFieldsMigration := shardMigrationByVersion[93]
+	if levelJobFieldsMigration.Version != 93 || levelJobFieldsMigration.Name != "vsro_level_job_fields" ||
+		!strings.Contains(levelJobFieldsMigration.UpSQL, "JOB_ACTIVITY_FACTOR") ||
+		!strings.Contains(levelJobFieldsMigration.UpSQL, "'$[8]'") ||
+		!strings.Contains(levelJobFieldsMigration.DownSQL, "DROP COLUMN `JOB_ACTIVITY_FACTOR`") {
+		t.Fatalf("vSRO level/job fields migration = %#v", levelJobFieldsMigration)
+	}
+	jobLevelCapMigration := shardMigrationByVersion[94]
+	if jobLevelCapMigration.Version != 94 || jobLevelCapMigration.Name != "vsro_job_level_cap" ||
+		!strings.Contains(jobLevelCapMigration.UpSQL, "`JOB_LEVEL` > 7") ||
+		!strings.Contains(jobLevelCapMigration.UpSQL, "BETWEEN 1 AND 7") ||
+		!strings.Contains(jobLevelCapMigration.DownSQL, "BETWEEN 1 AND 10") {
+		t.Fatalf("vSRO job-level cap migration = %#v", jobLevelCapMigration)
 	}
 	guildRenameMigration := shardMigrationByVersion[51]
 	if guildRenameMigration.Version != 51 || guildRenameMigration.Name != "guild_forced_rename" ||
@@ -559,6 +602,48 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 		!strings.Contains(questTalismanMigration.UpSQL, "THEME_CODE") ||
 		!strings.Contains(questTalismanMigration.DownSQL, "DROP TABLE") {
 		t.Fatalf("quest talisman migration = %#v, want reversible talisman-collection catalog", questTalismanMigration)
+	}
+	collectionBookMigration := shardMigrationByVersion[96]
+	if collectionBookMigration.Version != 96 || collectionBookMigration.Name != "collection_book_talismans" ||
+		!strings.Contains(collectionBookMigration.UpSQL, "CHAR_COLLECTION_BOOK") ||
+		!strings.Contains(collectionBookMigration.UpSQL, "REF_COLLECTION_BOOK_ITEM") ||
+		!strings.Contains(collectionBookMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("collection-book migration = %#v, want reversible durable talisman catalog", collectionBookMigration)
+	}
+	questNamedPointMigration := shardMigrationByVersion[97]
+	if questNamedPointMigration.Version != 97 || questNamedPointMigration.Name != "quest_named_points" ||
+		!strings.Contains(questNamedPointMigration.UpSQL, "CHAR_QUEST_NAMED_POINT") ||
+		!strings.Contains(questNamedPointMigration.UpSQL, "TEMPLE_ANUBIS") ||
+		!strings.Contains(questNamedPointMigration.UpSQL, "TEMPLE_HAROERIS") ||
+		!strings.Contains(questNamedPointMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest named-point migration = %#v, want reversible durable temple-point balances", questNamedPointMigration)
+	}
+	questCountdownMigration := shardMigrationByVersion[98]
+	if questCountdownMigration.Version != 98 || questCountdownMigration.Name != "quest_countdown_remaining" ||
+		!strings.Contains(questCountdownMigration.UpSQL, "TIMER_REMAINING") ||
+		!strings.Contains(questCountdownMigration.UpSQL, "BETWEEN 1 AND 255") ||
+		!strings.Contains(questCountdownMigration.DownSQL, "DROP COLUMN") {
+		t.Fatalf("quest countdown migration = %#v, want reversible countdown checkpoints", questCountdownMigration)
+	}
+	questInstanceMigration := shardMigrationByVersion[99]
+	if questInstanceMigration.Version != 99 || questInstanceMigration.Name != "quest_instance_members" ||
+		!strings.Contains(questInstanceMigration.UpSQL, "CHAR_QUEST_INSTANCE_WORLD") ||
+		!strings.Contains(questInstanceMigration.UpSQL, "DUNGEON_KEY_ID") ||
+		!strings.Contains(questInstanceMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest instance migration = %#v, want reversible durable instance membership", questInstanceMigration)
+	}
+	dropProfileMigration := shardMigrationByVersion[100]
+	if dropProfileMigration.Version != 100 || dropProfileMigration.Name != "drop_profile_catalog" ||
+		!strings.Contains(dropProfileMigration.UpSQL, "REF_DROP_CLASS_SELECTION") ||
+		!strings.Contains(dropProfileMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("drop profile migration = %#v, want reversible drop profile catalog", dropProfileMigration)
+	}
+	questInstanceWorldMigration := shardMigrationByVersion[101]
+	if questInstanceWorldMigration.Version != 101 || questInstanceWorldMigration.Name != "quest_instance_world_catalog" ||
+		!strings.Contains(questInstanceWorldMigration.UpSQL, "REF_GAME_WORLD") ||
+		!strings.Contains(questInstanceWorldMigration.UpSQL, "QUEST_INSTANCE_SCOPE_RESERVATION") ||
+		!strings.Contains(questInstanceWorldMigration.DownSQL, "DROP TABLE") {
+		t.Fatalf("quest instance world migration = %#v, want reversible catalog and scope reservations", questInstanceWorldMigration)
 	}
 	questStartMigration := shardMigrationByVersion[65]
 	if questStartMigration.Version != 65 || questStartMigration.Name != "quest_start_requirements" ||

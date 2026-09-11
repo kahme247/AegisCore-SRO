@@ -7,6 +7,17 @@ AegisCore uses MySQL with two logical schemas:
   persistence. Some shard tables reference `SRO_ACCOUNT`, so the schemas are
   logically separate but not fully independent.
 
+Use this guide for database bootstrap, backup, restore, and reference-data
+maintenance. For the complete first start, begin with the
+[root setup guide](../README.md#first-time-setup).
+
+Quick health check from `go-sro/`:
+
+```text
+docker compose ps db
+docker compose logs --tail=200 db
+```
+
 Compose builds `aegiscore-db:8.4.10` from the repository-owned `db/Dockerfile`, whose
 official MySQL base is pinned by digest. A new server restores the SQL dump
 selected by `DB_BACKUP_FILE`, then applies the application-user grants. The
@@ -39,7 +50,7 @@ not update an existing `mysql-data` volume. Backup contents may include login,
 character, and inventory records and must remain ignored and access-controlled.
 
 The account catalog currently ends at `000004`, including the controlled patch
-release catalog. The shard catalog reaches `000066` and covers normalized
+release catalog. The shard catalog reaches `000102` and covers normalized
 identity, character limits and creation policy, Item Mall balances and
 purchases, timed services, inventory constraints, quests, economy/storage,
 shops, teleports, mastery/skills, guild storage, reference catalogs, movement
@@ -50,7 +61,8 @@ systems, alchemy references, Hwan progression, three-page inventory and social
 systems plus aggregate versions, command idempotency, the durable outbox and
 lease-based outbox dispatch recovery plus persistent scheduler definitions,
 leased execution and run history, character deletion lifecycle and recovered PK
-administration state.
+administration state, native quest runtime extensions, tri-job and safe-trade
+state, shop/package authority, and drop-profile catalogs.
 Version `000007` is absent; preserve that gap until deployed ledgers
 and historical intent are reconciled.
 
@@ -88,6 +100,7 @@ go run ./cmd/sro-data import-media-catalogs --media Media/Media
 go run ./cmd/sro-data import-vsro-skills --export-dir <export-directory>
 go run ./cmd/sro-data import-vsro-items --export-dir <export-directory>
 go run ./cmd/sro-data import-item-mall --media Media/Media
+go run ./cmd/sro-data import-specialty-quotations --source .local/itemquotation.psv
 go run ./cmd/sro-data import-event-rewards --media Media/Media
 go run ./cmd/sro-data export-media --output .local/media-export-189
 ```

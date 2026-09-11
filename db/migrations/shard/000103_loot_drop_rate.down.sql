@@ -1,0 +1,3 @@
+ALTER TABLE `SRO_SHARD`.`GAMEPLAY_MOB_RATES`
+    DROP CHECK `chk_gameplay_loot_drop_rate_positive`,
+    DROP COLUMN `LOOT_DROP_RATE_PERCENT`;

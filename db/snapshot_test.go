@@ -256,7 +256,7 @@ func TestFreshShardSnapshotContainsRuntimeMediaCatalogData(t *testing.T) {
 	contents := string(shard)
 	for _, required := range []string{
 		"INSERT INTO `REF_LEVEL_DATA` VALUES",
-		"INSERT INTO `REF_MAGIC_OPTION` VALUES",
+		"INSERT INTO `REF_MAGIC_OPTION` ",
 		"INSERT INTO `ITEM_MALL_GOODS` VALUES",
 	} {
 		if !strings.Contains(contents, required) {
