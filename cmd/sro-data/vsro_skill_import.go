@@ -155,6 +155,26 @@ func normalizeVSROColumn(source string) string {
 		return "PACKAGE_CODE_NAME"
 	case "PaymentDevice":
 		return "PAYMENT_DEVICE"
+	case "RefItemCodeName":
+		return "ITEM_CODE_NAME"
+	case "RefTabCodeName":
+		return "TAB_CODE_NAME"
+	case "RefNPCCodeName":
+		return "NPC_CODE_NAME"
+	case "RefShopGroupCodeName":
+		return "SHOP_GROUP_CODE_NAME"
+	case "RefShopCodeName":
+		return "SHOP_CODE_NAME"
+	case "RefTabGroupCodeName":
+		return "TAB_GROUP_CODE_NAME"
+	case "SlotIndex":
+		return "SLOT_INDEX"
+	case "Index":
+		return "MEMBER_INDEX"
+	case "OptLevel":
+		return "OPT_LEVEL"
+	case "MagParamNum":
+		return "MAG_PARAM_NUM"
 	case "RefItemID":
 		return "REF_ITEM_ID"
 	case "ItemOptLevel":

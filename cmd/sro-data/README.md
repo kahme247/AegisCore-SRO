@@ -3,6 +3,23 @@
 `sro-data` provides offline archive verification and explicit reference-data
 maintenance. None of its commands run during Agent or Gateway startup.
 
+Use `verify` for a read-only archive check. Every `import-*` command writes to
+`SRO_SHARD` and must be treated as database maintenance.
+
+| Need | Start here |
+| --- | --- |
+| Check `Data.pk2` without changing the database | [Verify Data.pk2](#verify-datapk2) |
+| Export database-backed Media files | [Export Media files](#export-database-backed-media-files) |
+| Load Media reference catalogs | [Import Media references](#import-media-references) |
+| Load drops, Item Mall, skills, items, or quests | Open the matching import section below |
+| Review write and replacement behavior | [Import safety](#import-safety) |
+
+`distribute-weekly-job-rewards` is an explicit shard maintenance write. It
+proportionally distributes the accumulated Thief/Hunter global pools by weekly
+contribution, caps pending rewards, clears both pools, and resets weekly
+contribution atomically. The reference backup does not preserve the legacy
+execution schedule; invoke it from an operator-owned weekly scheduler.
+
 ## Verify Data.pk2
 
 ```powershell
@@ -139,8 +156,9 @@ go run ./cmd/sro-data import-drop-catalog --data-dir <drop-table-directory>
 ```
 
 The directory must contain `_RefDropGold.csv`, `_RefDropItemGroup.csv`,
-`_RefMonster_AssignedItemRndDrop.csv`, and
-`_RefMonster_AssignedItemDrop.csv`, including their header rows. The import
+`_RefMonster_AssignedItemRndDrop.csv`, `_RefMonster_AssignedItemDrop.csv`,
+`_RefDropItemAssign.csv`, `_RefDropOptLvlSel.csv`, and all ten
+`_RefDropClassSel_*.csv` files, including their header rows. The import
 replaces all four normalized tables in one transaction and preserves the
 binary field boundaries for amount ranges, ratios, overlap, option IDs, and
 custom values. Drop selection remains disabled until this catalog is loaded
@@ -183,6 +201,27 @@ docker compose restart agent-server
 ```
 
 Shard migration `000030` provides `ITEM_MALL_GOODS`.
+
+## Import specialty quotations
+
+`_ItemQuotation` is a server database catalog; it is not present in client
+Media. Export the ten stock columns from the pinned v188 shard backup without
+headers, then replace the maintained quotation catalog transactionally:
+
+```powershell
+$quotationExport = ".local/itemquotation.psv"
+docker exec gosro-sql-reference /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "GoSroReference!2026" -d SRO_VT_SHARD -h -1 -W -s "|" -Q "SET NOCOUNT ON; SELECT ID,Service,AssocNPC,RefItemID,BaseQuot,Quot_LB,Quot_UB,BaseStockAmount,FluctuateAmount,CurStockAmount FROM dbo._ItemQuotation ORDER BY ID" | Set-Content -Encoding utf8 $quotationExport
+go run ./cmd/migrate --target=shard
+go run ./cmd/sro-data import-specialty-quotations --source $quotationExport
+```
+
+The importer requires exactly ten pipe-delimited fields per row, preserves
+SQL Server `REAL` precision, rejects duplicate IDs and NPC/item pairs, checks
+quotation bounds and stock counters, and deletes/inserts `ITEM_QUOTATION` in
+one MySQL transaction. Foreign keys require the matching `CHAR_REF_DATA` and
+`ITEMDATA` catalogs to be imported first. The export remains an ignored local
+artifact; do not commit the proprietary rows. Migration `000088` provides the
+destination schema.
 
 ## Import reverse-return map locations
 
@@ -240,11 +279,21 @@ Required files and targets:
 | `ref_obj_struct.json` | `REF_OBJ_STRUCT_VSRO` |
 | `ref_package_item.json` | `REF_PACKAGE_ITEM_VSRO` |
 | `ref_price_policy_item.json` | `REF_PRICE_POLICY_ITEM_VSRO` |
+| `ref_scrap_of_package_item.json` | `REF_SCRAP_OF_PACKAGE_ITEM_VSRO` |
+| `ref_shop_group.json` | `REF_SHOP_GROUP_VSRO` |
+| `ref_mapping_shop_group.json` | `REF_MAPPING_SHOP_GROUP_VSRO` |
+| `ref_mapping_shop_with_tab.json` | `REF_MAPPING_SHOP_WITH_TAB_VSRO` |
+| `ref_shop_tab.json` | `REF_SHOP_TAB_VSRO` |
+| `ref_shop_goods.json` | `REF_SHOP_GOODS_PACKAGE_VSRO` |
 | `ref_ability_item_opt_level.json` | `REF_ABILITY_ITEM_OPT_LEVEL_VSRO` |
 | `ref_magic_opt_item_opt_level.json` | `REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO` |
 | `ref_set_item_group.json` | `REF_SET_ITEM_GROUP_VSRO` |
 
-Shard migration `000020` provides these tables. No checked-in exporter exists;
+Shard migrations `000020`, `000091`, and `000092` provide these tables. The package
+import retains every `_RefScrapOfPackageItem` member and its stock `Index`, so
+multi-member vectors are not flattened to one item. It also retains shop-tab
+placement, the NPC-to-shop-to-tab authority chain, and the actual price-policy
+`Cost`. No checked-in exporter exists;
 operators must generate JSON arrays with exact filenames and source columns.
 
 ## Import native vSRO quests
@@ -270,6 +319,9 @@ can be decoded without executing Lua or loading native extensions:
 
 ```powershell
 go run ./cmd/sro-data inspect-vsro-quest-script --script Script/VIETNAM/Quest.sct
+go run ./cmd/sro-data inspect-vsro-quest-script --script Script/VIETNAM/Quest.sct --runtime-coverage
+go run ./cmd/sro-data inspect-vsro-quest-script --script Script/VIETNAM/Quest.sct --extended-kill
+go run ./cmd/sro-data inspect-vsro-quest-script --script Script/VIETNAM/Quest.sct --kill-player
 go run ./cmd/sro-data import-vsro-quest-script --script Script/VIETNAM/Quest.sct
 ```
 
@@ -299,50 +351,99 @@ all 64 standard deliver-item objectives and their 66 item entries. The importer
 runtime-enables only variant-zero quests with mission index zero and exactly
 one objective across all recovered mission families. Agent locks the active
 quest and inventory together at the authored target NPC, verifies and consumes
-the required stacks (including partial stacks), promotes the quest to reward
-ready, then publishes inventory changes and the typed `0x30D5` delta. Other
+the required stacks (including partial stacks) only after the authenticated
+delivery prompt and final `0x30D4` selection, promotes the quest to reward
+ready, then publishes inventory changes and the typed `0x30D5` delta. Initial
+NPC contact only lists eligible deliveries and never consumes an item. Other
 standard delivery variants remain disabled.
 
 Migration `000060` similarly normalizes all 48 fixed-layout
 `LuaSetDialLogMissionData` objectives, preserving their objective, parameter and
-dialogue keys. They remain runtime-disabled pending the same packet evidence.
+dialogue keys. The binary-confirmed event completes only after the final
+authenticated `0x30D4` dialogue selection, rather than on initial NPC contact.
+Migration `000095` preserves the matching NPC/menu route. The importer enables
+only variant-zero, mission-zero, single-objective dialog quests; Agent retains
+the selected route in its authenticated NPC interaction and publishes progress
+only after the final confirmation. Multi-page and multi-objective shapes stay
+disabled.
 
 Migration `000061` normalizes the nine `LuaSetKillPlayerMissionData`
 declarations and their variable job-state filter lists. Region and other filter
-parameters are preserved exactly; runtime remains disabled until PvP target
-qualification and quest-result packets are capture-backed.
+parameters are preserved exactly; the scalar after the Temple region is the
+minimum victim level (`105` for all nine rows). The importer enables only variant-zero,
+mission-zero, single-objective rows using the recovered `MKP_LEVEL`, `MKP_JOB`,
+and `MKP_REGION` trio with recognized trader, robber/thief, and hunter states.
+Agent qualifies lethal PvP events from the victim's authoritative level, job,
+and signed navmesh region, persists the counter, and publishes it through the
+ordinary `0x30D5` quest delta. Unknown filter vocabularies remain disabled.
 
 Migration `000062` normalizes all 258 standard and two extended
 monster-item collection declarations plus their 726 monster-source entries.
 The source numeric field and all EX trailing fields retain their exact script
-values without assigning unproven probability semantics; runtime remains
-disabled pending drop-generation and quest-progress packet evidence.
+values. The importer runtime-enables only the recovered standard,
+variant-zero, mission-zero, single-objective shape when every source chance is
+within `1..100` and the generated stack count fits the wire/materializer
+width. Extended and multi-objective shapes remain disabled. Agent now resolves
+the active objective at monster death, rolls its authored source percentage,
+materializes the quest item as ground loot, and advances progress after the
+committed pickup.
 
 Migration `000063` normalizes all 77 extended kill declarations and their 280
 target references. The 20 classified and 57 multi-target layouts remain
 distinct, and the complete positional arguments preserve the authored
-fractional value without assigning unproven count semantics. Runtime remains
-disabled pending target-selection and progress packet evidence.
+fractional value. GameServer converts that value to an integer goal (the lone
+`1.5` Giant value becomes `1`) and keeps separate normal, champion and giant
+counters. Classified declarations remain runtime-disabled because their
+multi-mission task-state projection is not implemented.
 
 Migration `000064` normalizes all four `LuaSetTalismanMissionData`
 declarations. Each exact seven-argument layout retains its objective key,
 mission NPC, Forgotten World theme code and final positional numeric field.
-Runtime remains disabled pending talisman collection-event and progress-packet
-evidence.
+GameServer `0x0049ACA0` and `0x004A0780` prove that using a
+`TypeID3=12, TypeID4=5` talisman registers and consumes it; ordinary ground
+pickup does not register it. The registration is persisted through
+`_AddCollectionBook_Item(CharID, ThemeID, SlotIndex)`, then internal event
+`243` reaches `0x00922080`. `0x0091E050` proves that completion is the collection-book
+theme-accomplished predicate; the final numeric field is only a non-zero
+callback gate. Migration `000096` installs the four stock themes and 32 item
+slots; successful `0x704C` use now persists the registration, consumes one
+talisman, completes matching enabled quests when all eight slots exist, and
+publishes the zero-valued `0x30D5` delta confirmed by the binary. The same
+safe single-objective shape participates in normal quest offer discovery,
+script-reward validation and reconnect hydration.
 
 Migration `000065` normalizes the 534 `LuaSetStartCodition` level-window
 declarations, 534 conversation start methods and their one or two NPC routes,
 plus 239 dependency groups. Dependency groups retain the authored all-clear or
 one-clear mode and resolve every referenced quest by identity. Original
 positional arguments and the script checksum remain available for evidence
-auditing. Runtime qualification remains disabled until generic accept/result
-packet handling replaces the capture-specific NPC flows.
+auditing. Non-empty variant-zero groups are runtime-enabled; Agent evaluates
+both modes during offer discovery against completed
+status-`4` rows with a positive achievement count. Rewarded completion
+increments that count, reconnect retains the completed-ID projection, and
+repeat activation remains bounded by the authored achievement limit.
 
 Migration `000066` normalizes 534 completion policies, including authored
 achievement, division, real-time, day, time-limit and Hwan fields, plus 39 job
-and four race start conditions. It also stores all 433 skill-point and 36 named
-point reward declarations as 469 typed rows. Positional values remain intact
-where runtime meaning is not yet proven, and all rows remain runtime-disabled.
+and four race start conditions. The exact variant-zero `QSC_RACE` forms for
+`COUNTRY_CHINA` and `COUNTRY_EUROPE` are runtime-enabled and evaluated against
+the character reference's stock country discriminator (`0`/`1`); unknown
+condition or country keys remain disabled. The four variant-zero
+`LuaSetHwanLevel` declarations (levels `3`/`4`) are also enabled and require an
+exact match with the character's durable Hwan level; real-time, day/night and
+day-limit policies remain disabled. The two exact `LuaSetLimitTimeStartCondition(120)`
+rows are enabled with durable ten-second checkpoints and reconnect resume via
+migration `000098`. It also stores all 433 skill-point and 36 named
+point reward declarations as 469 typed rows. The 433 variant-zero fixed
+skill-point rows are enabled and cross-checked against the SQL reward scalar.
+All 36 variant-zero named-point rows use the binary-whitelisted
+`TEMPLE_ANUBIS` or `TEMPLE_HAROERIS` key and are enabled; migration `000097`
+stores their additive balances independently from skill and Academy points.
+
+All 39 job declarations also share the recovered variant-zero
+`(1, OBJ_JOBSTATE_TRADER|ROBBER|HUNTER, 1)` form. They are runtime-enabled and
+offer discovery matches them against `CHARACTER_JOB.JOB_TYPE` for every
+independently supported objective family.
 
 ## Import safety
 

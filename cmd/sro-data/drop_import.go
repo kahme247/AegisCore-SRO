@@ -21,7 +21,13 @@ import (
 var errDropCatalogImportUsage = errors.New("usage: sro-data import-drop-catalog --data-dir <drop table directory>")
 
 type dropCatalogImport struct {
-	gold, groups, random, direct [][]string
+	gold, groups, random, direct, itemAssign, optLevels [][]string
+	classSelections                                     []dropClassSelectionImport
+}
+
+type dropClassSelectionImport struct {
+	family string
+	rows   [][]string
 }
 
 func importDropCatalog(ctx context.Context, arguments []string, output io.Writer) error {
@@ -44,7 +50,11 @@ func importDropCatalog(ctx context.Context, arguments []string, output io.Writer
 	if err := writeDropCatalogImport(ctx, database, data); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d gold, %d groups, %d random assignments, and %d direct assignments\n", len(data.gold), len(data.groups), len(data.random), len(data.direct))
+	classRows := 0
+	for _, source := range data.classSelections {
+		classRows += len(source.rows)
+	}
+	_, err = fmt.Fprintf(output, "imported %d gold, %d groups, %d random assignments, %d direct assignments, %d class-selection rows, %d item assignments, and %d option levels\n", len(data.gold), len(data.groups), len(data.random), len(data.direct), classRows, len(data.itemAssign), len(data.optLevels))
 	return err
 }
 
@@ -70,6 +80,35 @@ func loadDropCatalogImport(directory string) (dropCatalogImport, error) {
 		if err != nil {
 			return dropCatalogImport{}, err
 		}
+	}
+	for _, source := range []struct {
+		file   string
+		family string
+	}{
+		{"_RefDropClassSel_Equip.csv", "EQUIP"},
+		{"_RefDropClassSel_RareEquip.csv", "RAREEQUIP"},
+		{"_RefDropClassSel_Recover.csv", "RECOVER"},
+		{"_RefDropClassSel_Cure.csv", "CURE"},
+		{"_RefDropClassSel_Ammo.csv", "AMMO"},
+		{"_RefDropClassSel_Scroll.csv", "SCROLL"},
+		{"_RefDropClassSel_Reinforce.csv", "REINFORCE"},
+		{"_RefDropClassSel_Alchemy_Tablet.csv", "ALCHEMY_TABLET"},
+		{"_RefDropClassSel_Alchemy_MagicStone.csv", "ALCHEMY_MAGICSTONE"},
+		{"_RefDropClassSel_Alchemy_ATTRStone.csv", "ALCHEMY_ATTRSTONE"},
+	} {
+		rows, readErr := readDropCSV(filepath.Join(directory, source.file), 2)
+		if readErr != nil {
+			return dropCatalogImport{}, readErr
+		}
+		result.classSelections = append(result.classSelections, dropClassSelectionImport{family: source.family, rows: rows})
+	}
+	result.itemAssign, err = readDropCSV(filepath.Join(directory, "_RefDropItemAssign.csv"), 6)
+	if err != nil {
+		return dropCatalogImport{}, err
+	}
+	result.optLevels, err = readDropCSV(filepath.Join(directory, "_RefDropOptLvlSel.csv"), 3)
+	if err != nil {
+		return dropCatalogImport{}, err
 	}
 	return result, nil
 }
@@ -110,7 +149,7 @@ func writeDropCatalogImport(ctx context.Context, database *sql.DB, data dropCata
 		return fmt.Errorf("begin drop catalog import: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, table := range []string{"REF_MONSTER_ASSIGNED_ITEM_DROP", "REF_MONSTER_ASSIGNED_ITEM_RND_DROP", "REF_DROP_ITEM_GROUP", "REF_DROP_GOLD"} {
+	for _, table := range []string{"REF_MONSTER_ASSIGNED_ITEM_DROP", "REF_MONSTER_ASSIGNED_ITEM_RND_DROP", "REF_DROP_ITEM_GROUP", "REF_DROP_GOLD", "REF_DROP_CLASS_SELECTION", "REF_DROP_ITEM_ASSIGN", "REF_DROP_OPT_LEVEL_SELECTION"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM `SRO_SHARD`.`"+table+"`"); err != nil {
 			return fmt.Errorf("clear %s: %w", table, err)
 		}
@@ -127,8 +166,77 @@ func writeDropCatalogImport(ctx context.Context, database *sql.DB, data dropCata
 	if err := insertDirectDrops(ctx, tx, data.direct); err != nil {
 		return err
 	}
+	if err := insertDropClassSelections(ctx, tx, data.classSelections); err != nil {
+		return err
+	}
+	if err := insertDropItemAssignments(ctx, tx, data.itemAssign); err != nil {
+		return err
+	}
+	if err := insertDropOptLevels(ctx, tx, data.optLevels); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit drop catalog import: %w", err)
+	}
+	return nil
+}
+
+func insertDropClassSelections(ctx context.Context, tx *sql.Tx, sources []dropClassSelectionImport) error {
+	const query = "INSERT INTO `SRO_SHARD`.`REF_DROP_CLASS_SELECTION` (`FAMILY`,`MON_LEVEL`,`PROB_GROUP`,`PROB`) VALUES (?,?,?,?)"
+	for _, source := range sources {
+		if source.family == "" {
+			return errors.New("drop class-selection family is empty")
+		}
+		for line, row := range source.rows {
+			level, err := dropUint(row[0])
+			if err != nil || level == 0 {
+				return fmt.Errorf("invalid %s class-selection row %d: %w", source.family, line+2, err)
+			}
+			for group := 1; group < len(row); group++ {
+				probability, probabilityErr := dropFloat(row[group])
+				if probabilityErr != nil || probability < 0 {
+					return fmt.Errorf("invalid %s class-selection row %d group %d: %w", source.family, line+2, group, probabilityErr)
+				}
+				if _, err = tx.ExecContext(ctx, query, source.family, level, group, probability); err != nil {
+					return fmt.Errorf("insert %s class-selection row %d group %d: %w", source.family, line+2, group, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func insertDropItemAssignments(ctx context.Context, tx *sql.Tx, rows [][]string) error {
+	const query = "INSERT INTO `SRO_SHARD`.`REF_DROP_ITEM_ASSIGN` (`SOURCE_ROW`,`SERVICE`,`REF_ITEM_ID`,`PROB_RELATIVE`,`PROB_ABSOLUTE`,`ASSIGNED_GROUP`,`DROP_COUNT`) VALUES (?,?,?,?,?,?,?)"
+	for line, row := range rows {
+		service, err := dropUint(row[0])
+		itemID, itemErr := dropUint(row[1])
+		relative, relativeErr := dropFloat(row[2])
+		absolute, absoluteErr := dropFloat(row[3])
+		group, groupErr := dropInt(row[4])
+		count, countErr := dropUint(row[5])
+		if err = errors.Join(err, itemErr, relativeErr, absoluteErr, groupErr, countErr); err != nil || itemID == 0 || relative < 0 || absolute < 0 {
+			return fmt.Errorf("invalid drop-item-assignment row %d: %w", line+2, err)
+		}
+		if _, err = tx.ExecContext(ctx, query, line+2, service, itemID, relative, absolute, group, count); err != nil {
+			return fmt.Errorf("insert drop-item-assignment row %d: %w", line+2, err)
+		}
+	}
+	return nil
+}
+
+func insertDropOptLevels(ctx context.Context, tx *sql.Tx, rows [][]string) error {
+	const query = "INSERT INTO `SRO_SHARD`.`REF_DROP_OPT_LEVEL_SELECTION` (`OPT_LEVEL`,`PROB`,`REQ_ONLINE_TIME`) VALUES (?,?,?)"
+	for line, row := range rows {
+		level, err := dropUint(row[0])
+		probability, probabilityErr := dropFloat(row[1])
+		requiredTime, timeErr := dropUint(row[2])
+		if err = errors.Join(err, probabilityErr, timeErr); err != nil || probability < 0 {
+			return fmt.Errorf("invalid drop-option-level row %d: %w", line+2, err)
+		}
+		if _, err = tx.ExecContext(ctx, query, level, probability, requiredTime); err != nil {
+			return fmt.Errorf("insert drop-option-level row %d: %w", line+2, err)
+		}
 	}
 	return nil
 }

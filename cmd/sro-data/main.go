@@ -19,7 +19,7 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
-var errUsage = errors.New("usage: sro-data <verify|export-media|import-media-catalogs|import-reference|import-drop-catalog|import-event-rewards|import-server-event-rewards|import-item-mall|import-optional-teleports|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
+var errUsage = errors.New("usage: sro-data <verify|export-media|import-media-catalogs|import-reference|import-drop-catalog|import-event-rewards|import-server-event-rewards|import-item-mall|import-specialty-quotations|distribute-weekly-job-rewards|import-optional-teleports|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -63,6 +63,12 @@ func runWithCanonicalProfile(ctx context.Context, arguments []string, output io.
 	}
 	if arguments[0] == "import-item-mall" {
 		return importItemMall(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "import-specialty-quotations" {
+		return importSpecialtyQuotations(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "distribute-weekly-job-rewards" {
+		return distributeWeeklyJobRewards(ctx, arguments[1:], output)
 	}
 	if arguments[0] == "import-optional-teleports" {
 		return importOptionalTeleports(ctx, arguments[1:], output)

@@ -30,6 +30,7 @@ type levelReferenceRow struct {
 	DropGoldMin        uint64
 	DropGoldMax        uint64
 	Unknown1, Unknown2 int64
+	JobActivityFactor  uint64
 	JobExperience      [3]int64
 	Raw                string
 }
@@ -46,11 +47,28 @@ type skillReferenceRow struct {
 }
 
 type magicOptionReferenceRow struct {
-	ID         uint64
-	CodeName   string
-	Level      uint64
-	ParamType  uint64
-	ParamValue uint64
+	ID            uint64
+	CodeName      string
+	Level         uint64
+	DropRatio     float64
+	ParamType     uint64
+	ParamValue    uint64
+	Applicability []magicOptionApplicabilityRow
+}
+
+type magicOptionApplicabilityRow struct {
+	Slot, MinItemClass uint64
+	ItemFamily         string
+}
+
+type dropMagicOptionAssignmentRow struct {
+	Service, Country, TypeID3, TypeID4, Slot uint64
+	CodeName                                 string
+}
+
+type gameWorldReferenceRow struct {
+	WorldID, WorldType, MaxInstanceCount, MaxUserCount uint64
+	CodeName, ConfigGroupCodeName                      string
 }
 
 func importReferenceData(ctx context.Context, arguments []string, output io.Writer) (runErr error) {
@@ -81,6 +99,14 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err != nil {
 		return err
 	}
+	dropMagicAssignments, err := loadDropMagicOptionAssignments(filepath.Join(textDataDirectory, "magicoptionassign.txt"))
+	if err != nil {
+		return err
+	}
+	gameWorlds, err := loadGameWorldReferenceData(filepath.Join(textDataDirectory, "gameworlddata.txt"))
+	if err != nil {
+		return err
+	}
 	eventRewards, eventRewardItems, err := loadEventRewardReferenceData(textDataDirectory)
 	if err != nil {
 		return err
@@ -92,14 +118,50 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 		return fmt.Errorf("open shard database: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, pool.Close()) }()
-	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions); err != nil {
+	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions, dropMagicAssignments, gameWorlds); err != nil {
 		return err
 	}
 	if err := importEventRewardRows(ctx, pool, eventRewards, eventRewardItems); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, %d magic-option rows, %d event rewards, and %d event reward items\n", len(levels), len(skills), len(magicOptions), len(eventRewards), len(eventRewardItems))
+	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, %d magic-option rows, %d drop magic-option assignments, %d game-world rows, %d event rewards, and %d event reward items\n", len(levels), len(skills), len(magicOptions), len(dropMagicAssignments), len(gameWorlds), len(eventRewards), len(eventRewardItems))
 	return err
+}
+
+func loadGameWorldReferenceData(path string) ([]gameWorldReferenceRow, error) {
+	contents, err := readClientTextFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open game-world data %q: %w", path, err)
+	}
+	var rows []gameWorldReferenceRow
+	seenIDs := make(map[uint64]bool)
+	seenCodes := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(contents))
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 6 {
+			return nil, fmt.Errorf("game-world line %d: want 6 fields, got %d", lineNumber, len(fields))
+		}
+		worldID, idErr := positiveUint(fields[0])
+		worldType, typeErr := positiveUint(fields[2])
+		maxInstances, instancesErr := positiveUint(fields[3])
+		maxUsers, usersErr := positiveUint(fields[4])
+		if err := errors.Join(idErr, typeErr, instancesErr, usersErr); err != nil || worldID == 0 || worldID >= 0xffff || maxInstances == 0 || maxInstances >= 0xffff || seenIDs[worldID] || seenCodes[fields[1]] {
+			return nil, fmt.Errorf("game-world line %d has invalid or duplicate identity: %w", lineNumber, err)
+		}
+		seenIDs[worldID], seenCodes[fields[1]] = true, true
+		rows = append(rows, gameWorldReferenceRow{WorldID: worldID, CodeName: fields[1], WorldType: worldType, MaxInstanceCount: maxInstances, MaxUserCount: maxUsers, ConfigGroupCodeName: fields[5]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read game-world data %q: %w", path, err)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("game-world data contains no rows")
+	}
+	return rows, nil
 }
 
 func loadMagicOptionReferenceData(path string) ([]magicOptionReferenceRow, error) {
@@ -121,21 +183,77 @@ func loadMagicOptionReferenceData(path string) ([]magicOptionReferenceRow, error
 		if len(fields) == 0 || fields[0] == "0" {
 			continue
 		}
-		if len(fields) < 9 {
-			return nil, fmt.Errorf("magic option line %d: want at least 9 fields, got %d", lineNumber, len(fields))
+		if len(fields) < 49 {
+			return nil, fmt.Errorf("magic option line %d: want at least 49 fields, got %d", lineNumber, len(fields))
 		}
 		id, idErr := positiveUint(fields[1])
 		level, levelErr := positiveUint(fields[4])
 		paramType, typeErr := positiveUint(fields[7])
 		paramValue, valueErr := positiveUint(fields[8])
-		if err := errors.Join(idErr, levelErr, typeErr, valueErr); err != nil || id == 0 || level == 0 || seen[id] {
+		dropRatio, ratioErr := strconv.ParseFloat(fields[5], 64)
+		if err := errors.Join(idErr, levelErr, typeErr, valueErr, ratioErr); err != nil || id == 0 || level == 0 || dropRatio < 0 || seen[id] {
 			return nil, fmt.Errorf("magic option line %d has invalid or duplicate identity: %w", lineNumber, err)
 		}
 		seen[id] = true
-		rows = append(rows, magicOptionReferenceRow{ID: id, CodeName: fields[2], Level: level, ParamType: paramType, ParamValue: paramValue})
+		row := magicOptionReferenceRow{ID: id, CodeName: fields[2], Level: level, DropRatio: dropRatio, ParamType: paramType, ParamValue: paramValue}
+		for slot, index := 0, 29; index+1 < len(fields) && slot < 10; slot, index = slot+1, index+2 {
+			if strings.EqualFold(fields[index], "xxx") {
+				continue
+			}
+			minimum, minimumErr := positiveUint(fields[index+1])
+			if minimumErr != nil {
+				return nil, fmt.Errorf("magic option line %d applicability slot %d: %w", lineNumber, slot, minimumErr)
+			}
+			row.Applicability = append(row.Applicability, magicOptionApplicabilityRow{Slot: uint64(slot), ItemFamily: strings.ToLower(fields[index]), MinItemClass: minimum})
+		}
+		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read magic option data %q: %w", path, err)
+	}
+	return rows, nil
+}
+
+func loadDropMagicOptionAssignments(path string) ([]dropMagicOptionAssignmentRow, error) {
+	contents, err := readClientTextFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open drop magic-option assignments %q: %w", path, err)
+	}
+	var rows []dropMagicOptionAssignmentRow
+	seen := make(map[string]bool)
+	scanner := bufio.NewScanner(strings.NewReader(contents))
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 || fields[0] == "0" {
+			continue
+		}
+		if len(fields) != 29 {
+			return nil, fmt.Errorf("drop magic-option assignment line %d: want 29 fields, got %d", lineNumber, len(fields))
+		}
+		service, serviceErr := positiveUint(fields[0])
+		country, countryErr := positiveUint(fields[1])
+		typeID3, type3Err := positiveUint(fields[2])
+		typeID4, type4Err := positiveUint(fields[3])
+		if err := errors.Join(serviceErr, countryErr, type3Err, type4Err); err != nil || service > 1 || country > 3 || typeID3 > 255 || typeID4 > 255 {
+			return nil, fmt.Errorf("drop magic-option assignment line %d has invalid key: %w", lineNumber, err)
+		}
+		for slot, code := range fields[4:] {
+			if strings.EqualFold(code, "xxx") {
+				continue
+			}
+			key := fmt.Sprintf("%d/%d/%d/%d", country, typeID3, typeID4, slot)
+			if code == "" || seen[key] {
+				return nil, fmt.Errorf("drop magic-option assignment line %d has invalid or duplicate slot %d", lineNumber, slot)
+			}
+			seen[key] = true
+			rows = append(rows, dropMagicOptionAssignmentRow{Service: service, Country: country, TypeID3: typeID3, TypeID4: typeID4, Slot: uint64(slot), CodeName: code})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read drop magic-option assignments %q: %w", path, err)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("drop magic-option assignments contain no enabled rows")
 	}
 	return rows, nil
 }
@@ -183,9 +301,13 @@ func loadLevelReferenceData(path string) ([]levelReferenceRow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("level data line %d: unknown_2: %w", lineNumber, err)
 		}
+		activityFactor, err := positiveUint(fields[5])
+		if err != nil {
+			return nil, fmt.Errorf("level data line %d: job activity factor: %w", lineNumber, err)
+		}
 		var job [3]int64
 		for i := range job {
-			job[i], err = strconv.ParseInt(fields[i+5], 10, 64)
+			job[i], err = strconv.ParseInt(fields[i+6], 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("level data line %d: job experience: %w", lineNumber, err)
 			}
@@ -193,7 +315,7 @@ func loadLevelReferenceData(path string) ([]levelReferenceRow, error) {
 		raw, _ := json.Marshal(fields)
 		rows = append(rows, levelReferenceRow{
 			Level: level, SkillPoints: sp, Experience: experience,
-			Unknown1: unknown1, Unknown2: unknown2, JobExperience: job, Raw: string(raw),
+			Unknown1: unknown1, Unknown2: unknown2, JobActivityFactor: activityFactor, JobExperience: job, Raw: string(raw),
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -355,19 +477,19 @@ func positiveUint(value string) (uint64, error) {
 	return parsed, nil
 }
 
-func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow, magicOptions []magicOptionReferenceRow) error {
+func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow, magicOptions []magicOptionReferenceRow, dropMagicAssignments []dropMagicOptionAssignmentRow, gameWorlds []gameWorldReferenceRow) error {
 	tx, err := pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin reference import: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	levelStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_LEVEL_DATA` (`LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,`DROP_GOLD_MIN`,`DROP_GOLD_MAX`,`UNKNOWN_1`,`UNKNOWN_2`,`REQUIRED_JOB_EXPERIENCE`,`REQUIRED_JOB_EXPERIENCE_2`,`REQUIRED_JOB_EXPERIENCE_3`,`RAW_FIELDS`) VALUES (?,?,?,?,?,?,?,?,?,?,CAST(? AS JSON)) ON DUPLICATE KEY UPDATE `REQUIRED_EXPERIENCE`=VALUES(`REQUIRED_EXPERIENCE`),`REQUIRED_SKILL_POINTS`=VALUES(`REQUIRED_SKILL_POINTS`),`DROP_GOLD_MIN`=VALUES(`DROP_GOLD_MIN`),`DROP_GOLD_MAX`=VALUES(`DROP_GOLD_MAX`),`UNKNOWN_1`=VALUES(`UNKNOWN_1`),`UNKNOWN_2`=VALUES(`UNKNOWN_2`),`REQUIRED_JOB_EXPERIENCE`=VALUES(`REQUIRED_JOB_EXPERIENCE`),`REQUIRED_JOB_EXPERIENCE_2`=VALUES(`REQUIRED_JOB_EXPERIENCE_2`),`REQUIRED_JOB_EXPERIENCE_3`=VALUES(`REQUIRED_JOB_EXPERIENCE_3`),`RAW_FIELDS`=VALUES(`RAW_FIELDS`)")
+	levelStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_LEVEL_DATA` (`LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,`DROP_GOLD_MIN`,`DROP_GOLD_MAX`,`UNKNOWN_1`,`UNKNOWN_2`,`JOB_ACTIVITY_FACTOR`,`REQUIRED_JOB_EXPERIENCE`,`REQUIRED_JOB_EXPERIENCE_2`,`REQUIRED_JOB_EXPERIENCE_3`,`RAW_FIELDS`) VALUES (?,?,?,?,?,?,?,?,?,?,?,CAST(? AS JSON)) ON DUPLICATE KEY UPDATE `REQUIRED_EXPERIENCE`=VALUES(`REQUIRED_EXPERIENCE`),`REQUIRED_SKILL_POINTS`=VALUES(`REQUIRED_SKILL_POINTS`),`DROP_GOLD_MIN`=VALUES(`DROP_GOLD_MIN`),`DROP_GOLD_MAX`=VALUES(`DROP_GOLD_MAX`),`UNKNOWN_1`=VALUES(`UNKNOWN_1`),`UNKNOWN_2`=VALUES(`UNKNOWN_2`),`JOB_ACTIVITY_FACTOR`=VALUES(`JOB_ACTIVITY_FACTOR`),`REQUIRED_JOB_EXPERIENCE`=VALUES(`REQUIRED_JOB_EXPERIENCE`),`REQUIRED_JOB_EXPERIENCE_2`=VALUES(`REQUIRED_JOB_EXPERIENCE_2`),`REQUIRED_JOB_EXPERIENCE_3`=VALUES(`REQUIRED_JOB_EXPERIENCE_3`),`RAW_FIELDS`=VALUES(`RAW_FIELDS`)")
 	if err != nil {
 		return fmt.Errorf("prepare level import: %w", err)
 	}
 	defer levelStatement.Close()
 	for _, row := range levels {
-		if _, err := levelStatement.ExecContext(ctx, row.Level, row.Experience, row.SkillPoints, row.DropGoldMin, row.DropGoldMax, row.Unknown1, row.Unknown2, row.JobExperience[0], row.JobExperience[1], row.JobExperience[2], row.Raw); err != nil {
+		if _, err := levelStatement.ExecContext(ctx, row.Level, row.Experience, row.SkillPoints, row.DropGoldMin, row.DropGoldMax, row.Unknown1, row.Unknown2, row.JobActivityFactor, row.JobExperience[0], row.JobExperience[1], row.JobExperience[2], row.Raw); err != nil {
 			return fmt.Errorf("import level %d: %w", row.Level, err)
 		}
 	}
@@ -382,14 +504,52 @@ func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelRefere
 			return fmt.Errorf("import skill %d: %w", r.ID, err)
 		}
 	}
-	magicOptionStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_MAGIC_OPTION` (`ID`,`CODE_NAME`,`OPTION_LEVEL`,`PARAM_TYPE`,`PARAM_VALUE`) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`OPTION_LEVEL`=VALUES(`OPTION_LEVEL`),`PARAM_TYPE`=VALUES(`PARAM_TYPE`),`PARAM_VALUE`=VALUES(`PARAM_VALUE`)")
+	magicOptionStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_MAGIC_OPTION` (`ID`,`CODE_NAME`,`OPTION_LEVEL`,`DROP_RATIO`,`PARAM_TYPE`,`PARAM_VALUE`) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`OPTION_LEVEL`=VALUES(`OPTION_LEVEL`),`DROP_RATIO`=VALUES(`DROP_RATIO`),`PARAM_TYPE`=VALUES(`PARAM_TYPE`),`PARAM_VALUE`=VALUES(`PARAM_VALUE`)")
 	if err != nil {
 		return fmt.Errorf("prepare magic option import: %w", err)
 	}
 	defer magicOptionStatement.Close()
 	for _, option := range magicOptions {
-		if _, err := magicOptionStatement.ExecContext(ctx, option.ID, option.CodeName, option.Level, option.ParamType, option.ParamValue); err != nil {
+		if _, err := magicOptionStatement.ExecContext(ctx, option.ID, option.CodeName, option.Level, option.DropRatio, option.ParamType, option.ParamValue); err != nil {
 			return fmt.Errorf("import magic option %d: %w", option.ID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM `REF_MAGIC_OPTION_APPLICABILITY`"); err != nil {
+		return fmt.Errorf("clear magic-option applicability: %w", err)
+	}
+	applicabilityStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_MAGIC_OPTION_APPLICABILITY` (`REF_MAGIC_OPTION_ID`,`SLOT`,`ITEM_FAMILY`,`MIN_ITEM_CLASS`) VALUES (?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("prepare magic-option applicability import: %w", err)
+	}
+	defer applicabilityStatement.Close()
+	for _, option := range magicOptions {
+		for _, applicability := range option.Applicability {
+			if _, err := applicabilityStatement.ExecContext(ctx, option.ID, applicability.Slot, applicability.ItemFamily, applicability.MinItemClass); err != nil {
+				return fmt.Errorf("import magic-option %d applicability slot %d: %w", option.ID, applicability.Slot, err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM `REF_DROP_MAGIC_OPTION_ASSIGN`"); err != nil {
+		return fmt.Errorf("clear drop magic-option assignments: %w", err)
+	}
+	dropMagicStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_DROP_MAGIC_OPTION_ASSIGN` (`SERVICE`,`COUNTRY`,`TYPE_ID3`,`TYPE_ID4`,`SLOT`,`OPTION_CODE_NAME`) VALUES (?,?,?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("prepare drop magic-option assignment import: %w", err)
+	}
+	defer dropMagicStatement.Close()
+	for _, assignment := range dropMagicAssignments {
+		if _, err := dropMagicStatement.ExecContext(ctx, assignment.Service, assignment.Country, assignment.TypeID3, assignment.TypeID4, assignment.Slot, assignment.CodeName); err != nil {
+			return fmt.Errorf("import drop magic-option assignment %d/%d/%d/%d: %w", assignment.Country, assignment.TypeID3, assignment.TypeID4, assignment.Slot, err)
+		}
+	}
+	gameWorldStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_GAME_WORLD` (`WORLD_ID`,`CODE_NAME`,`WORLD_TYPE`,`MAX_INSTANCE_COUNT`,`MAX_USER_COUNT`,`CONFIG_GROUP_CODE_NAME`) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`WORLD_TYPE`=VALUES(`WORLD_TYPE`),`MAX_INSTANCE_COUNT`=VALUES(`MAX_INSTANCE_COUNT`),`MAX_USER_COUNT`=VALUES(`MAX_USER_COUNT`),`CONFIG_GROUP_CODE_NAME`=VALUES(`CONFIG_GROUP_CODE_NAME`)")
+	if err != nil {
+		return fmt.Errorf("prepare game-world import: %w", err)
+	}
+	defer gameWorldStatement.Close()
+	for _, world := range gameWorlds {
+		if _, err := gameWorldStatement.ExecContext(ctx, world.WorldID, world.CodeName, world.WorldType, world.MaxInstanceCount, world.MaxUserCount, world.ConfigGroupCodeName); err != nil {
+			return fmt.Errorf("import game world %d: %w", world.WorldID, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

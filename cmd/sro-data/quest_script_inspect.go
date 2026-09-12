@@ -13,13 +13,17 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/questscript"
 )
 
-var errQuestScriptInspectUsage = errors.New("usage: sro-data inspect-vsro-quest-script --script <Quest.sct> [--source <substring>]")
+var errQuestScriptInspectUsage = errors.New("usage: sro-data inspect-vsro-quest-script --script <Quest.sct> [--source <substring>] [--function <name>] [--extended-kill] [--kill-player] [--runtime-coverage]")
 
 func inspectVSROQuestScript(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("sro-data inspect-vsro-quest-script", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	scriptPath := flags.String("script", "", "Lua 5.1 quest chunk")
 	sourceFilter := flags.String("source", "", "optional prototype source substring")
+	functionFilter := flags.String("function", "", "optional declarative function name")
+	showExtendedKill := flags.Bool("extended-kill", false, "print recovered extended-kill declarations as JSON")
+	showKillPlayer := flags.Bool("kill-player", false, "print recovered kill-player declarations as JSON")
+	showRuntimeCoverage := flags.Bool("runtime-coverage", false, "print retained objective and policy runtime admission as JSON")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *scriptPath == "" {
 		return errQuestScriptInspectUsage
 	}
@@ -135,6 +139,50 @@ func inspectVSROQuestScript(arguments []string, output io.Writer) error {
 	}
 	if *sourceFilter != "" {
 		encoded, marshalErr := json.MarshalIndent(matched, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	if *functionFilter != "" {
+		matchedDefinitions := make([]questscript.Definition, 0)
+		for _, definition := range definitions {
+			filtered := definition
+			filtered.Declarations = nil
+			for _, call := range definition.Declarations {
+				if call.Function == *functionFilter {
+					filtered.Declarations = append(filtered.Declarations, call)
+				}
+			}
+			if len(filtered.Declarations) != 0 {
+				matchedDefinitions = append(matchedDefinitions, filtered)
+			}
+		}
+		encoded, marshalErr := json.MarshalIndent(matchedDefinitions, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	if *showExtendedKill {
+		encoded, marshalErr := json.MarshalIndent(extendedKillObjectives, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	if *showKillPlayer {
+		encoded, marshalErr := json.MarshalIndent(killPlayerObjectives, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		_, err = fmt.Fprintln(output, string(encoded))
+	}
+	if *showRuntimeCoverage {
+		coverage := retainedQuestRuntimeCoverage(startConditions, completionPolicies, dependencies, jobStartConditions,
+			raceStartConditions, pointRewards, killObjectives, deliverObjectives, standardDeliverObjectives, dialogObjectives,
+			killPlayerObjectives, collectionObjectives, extendedKillObjectives, talismanObjectives, rewards)
+		encoded, marshalErr := json.MarshalIndent(coverage, "", "  ")
 		if marshalErr != nil {
 			return marshalErr
 		}

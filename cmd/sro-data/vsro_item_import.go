@@ -25,8 +25,14 @@ var vsroItemTables = []vsroItemTable{
 	{"ref_obj_common.json", "REF_OBJ_COMMON_VSRO", []string{"ID", "Service", "CodeName128", "TypeID1", "TypeID2", "TypeID3", "TypeID4"}},
 	{"ref_obj_item.json", "REF_OBJ_ITEM_VSRO", []string{"ID", "SetID", "ItemClass"}},
 	{"ref_obj_struct.json", "REF_OBJ_STRUCT_VSRO", []string{"ID"}},
-	{"ref_package_item.json", "REF_PACKAGE_ITEM_VSRO", []string{"Country", "ID", "CodeName128"}},
-	{"ref_price_policy_item.json", "REF_PRICE_POLICY_ITEM_VSRO", []string{"Country", "RefPackageItemCodeName", "PaymentDevice"}},
+	{"ref_package_item.json", "REF_PACKAGE_ITEM_VSRO", []string{"Country", "Service", "ID", "CodeName128"}},
+	{"ref_price_policy_item.json", "REF_PRICE_POLICY_ITEM_VSRO", []string{"Country", "Service", "RefPackageItemCodeName", "PaymentDevice", "Cost"}},
+	{"ref_scrap_of_package_item.json", "REF_SCRAP_OF_PACKAGE_ITEM_VSRO", []string{"Service", "Country", "RefPackageItemCodeName", "Index", "RefItemCodeName", "OptLevel", "Variance", "Data", "MagParamNum"}},
+	{"ref_shop_group.json", "REF_SHOP_GROUP_VSRO", []string{"Service", "Country", "ID", "CodeName128", "RefNPCCodeName"}},
+	{"ref_mapping_shop_group.json", "REF_MAPPING_SHOP_GROUP_VSRO", []string{"Service", "Country", "RefShopGroupCodeName", "RefShopCodeName"}},
+	{"ref_mapping_shop_with_tab.json", "REF_MAPPING_SHOP_WITH_TAB_VSRO", []string{"Service", "Country", "RefShopCodeName", "RefTabGroupCodeName"}},
+	{"ref_shop_tab.json", "REF_SHOP_TAB_VSRO", []string{"Service", "Country", "ID", "CodeName128", "RefTabGroupCodeName"}},
+	{"ref_shop_goods.json", "REF_SHOP_GOODS_PACKAGE_VSRO", []string{"Service", "Country", "RefTabCodeName", "SlotIndex", "RefPackageItemCodeName"}},
 	{"ref_ability_item_opt_level.json", "REF_ABILITY_ITEM_OPT_LEVEL_VSRO", []string{"ID", "RefItemID", "ItemOptLevel"}},
 	{"ref_magic_opt_item_opt_level.json", "REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO", []string{"Link", "RefMagicOptID"}},
 	{"ref_set_item_group.json", "REF_SET_ITEM_GROUP_VSRO", []string{"ID", "CodeName128"}},
@@ -66,7 +72,7 @@ func importVSROItemRows(ctx context.Context, pool *sql.DB, data [][]map[string]a
 		return err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO", "REF_ABILITY_ITEM_OPT_LEVEL_VSRO", "REF_PRICE_POLICY_ITEM_VSRO", "REF_PACKAGE_ITEM_VSRO", "REF_OBJ_STRUCT_VSRO", "REF_OBJ_ITEM_VSRO", "REF_SET_ITEM_GROUP_VSRO", "REF_OBJ_COMMON_VSRO"} {
+	for _, table := range []string{"REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO", "REF_ABILITY_ITEM_OPT_LEVEL_VSRO", "REF_SHOP_GOODS_PACKAGE_VSRO", "REF_SHOP_TAB_VSRO", "REF_MAPPING_SHOP_WITH_TAB_VSRO", "REF_MAPPING_SHOP_GROUP_VSRO", "REF_SHOP_GROUP_VSRO", "REF_SCRAP_OF_PACKAGE_ITEM_VSRO", "REF_PRICE_POLICY_ITEM_VSRO", "REF_PACKAGE_ITEM_VSRO", "REF_OBJ_STRUCT_VSRO", "REF_OBJ_ITEM_VSRO", "REF_SET_ITEM_GROUP_VSRO", "REF_OBJ_COMMON_VSRO"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM `"+table+"`"); err != nil {
 			return fmt.Errorf("clear %s: %w", table, err)
 		}
