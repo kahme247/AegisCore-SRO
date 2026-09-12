@@ -76,6 +76,70 @@ func TestSelectEntityAdmitsKnownInRangeMobAndSendsResponse(t *testing.T) {
 	// Mobs are selectable for combat but must not open an NPC interaction menu.
 }
 
+func TestSelectEntityAdmitsKnownInRangePlayerAndSendsStockResponse(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	target := &model.Player{
+		SRObject: model.SRObject{
+			UniqueID:          102,
+			TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 1},
+			RtNavmeshPosition: selectEntityPosition(30000, 20, 0, 20),
+		},
+		ID:       43,
+		CharName: "Target",
+	}
+	if !player.GetKnownObjectList().AddObject(target) {
+		t.Fatal("fixture could not add player target")
+	}
+	world := &selectEntityWorldFake{
+		player:   player,
+		objects:  map[uint32]model.ISRObject{target.GetUniqueID(): target},
+		distance: selectionKnownRange,
+	}
+	var sent network.Packet
+	handler := NewSelectEntityHandler(world)
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = packet
+		return nil
+	}
+
+	if err := handler.handlePacket(context.Background(), session, selectEntityPacket(t, target.GetUniqueID())); err != nil {
+		t.Fatalf("handlePacket() error = %v", err)
+	}
+	if sent.MessageID != opcode.EntitySelectResponse {
+		t.Fatalf("message id = 0x%04X, want 0x%04X", sent.MessageID, opcode.EntitySelectResponse)
+	}
+	if got, want := sent.Payload(), []byte{1, 102, 0, 0, 0, 1, 5, 4}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want %x", got, want)
+	}
+}
+
+func TestSelectEntityIncludesActiveJobLevel(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	target := &model.Player{
+		SRObject: model.SRObject{
+			UniqueID:          103,
+			TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 1},
+			RtNavmeshPosition: selectEntityPosition(30000, 20, 0, 20),
+		},
+		ID:       44,
+		CharName: "Hunter",
+		Job:      model.PlayerJob{Type: model.PlayerJobHunter, Level: 6},
+	}
+	if !player.GetKnownObjectList().AddObject(target) {
+		t.Fatal("fixture could not add player target")
+	}
+	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{target.GetUniqueID(): target}, distance: selectionKnownRange}
+	var sent network.Packet
+	handler := NewSelectEntityHandler(world)
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = packet; return nil }
+	if err := handler.handlePacket(context.Background(), session, selectEntityPacket(t, target.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sent.Payload(), []byte{1, 103, 0, 0, 0, 1, 5, model.PlayerJobHunter, 6}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want %x", got, want)
+	}
+}
+
 func TestBuildMobSelectionResponseIncludesCurrentHealth(t *testing.T) {
 	packet := buildMobSelectionResponse(0x12345678, 1234)
 	if packet.MessageID != opcode.EntitySelectResponse {
@@ -92,6 +156,16 @@ func TestBuildNPCSelectionResponseUsesCountedMerchantActions(t *testing.T) {
 		t.Fatalf("message id = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntitySelectResponse)
 	}
 	if got, want := packet.Payload(), []byte{1, 0x78, 0x56, 0x34, 0x12, 0, 1, 1, 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want %x", got, want)
+	}
+}
+
+func TestBuildEntitySelectionFailureClearsClientSelectionWait(t *testing.T) {
+	packet := buildEntitySelectionFailure()
+	if packet.MessageID != opcode.EntitySelectResponse {
+		t.Fatalf("message id = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntitySelectResponse)
+	}
+	if got, want := packet.Payload(), []byte{0}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("payload = %x, want %x", got, want)
 	}
 }
@@ -128,7 +202,7 @@ func TestTeleportGateIsSelectableOnlyWhenKnownAndInRange(t *testing.T) {
 		t.Fatal("fixture could not add teleport gate")
 	}
 	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{gate.GetUniqueID(): gate}, distance: selectionKnownRange}
-	if err := validateNPCSelection(world, player, gate.GetUniqueID()); err != nil {
+	if err := validateEntitySelection(world, player, gate.GetUniqueID()); err != nil {
 		t.Fatalf("known teleport gate rejected: %v", err)
 	}
 	session.UserContext.UniqueID = player.GetUniqueID()
@@ -147,7 +221,7 @@ func TestTeleportGateUsesExtendedSelectionRange(t *testing.T) {
 	world := &selectEntityWorldFake{
 		player: player, objects: map[uint32]model.ISRObject{gate.GetUniqueID(): gate}, distance: selectionKnownRange + 500,
 	}
-	if err := validateNPCSelection(world, player, gate.GetUniqueID()); err != nil {
+	if err := validateEntitySelection(world, player, gate.GetUniqueID()); err != nil {
 		t.Fatalf("teleport gate inside extended range rejected: %v", err)
 	}
 }
@@ -161,7 +235,7 @@ func TestValidateNPCSelectionAdmitsKnownMobAcrossAdjacentRegionBoundary(t *testi
 		distance: 20,
 	}
 
-	if err := validateNPCSelection(world, player, npc.GetUniqueID()); err != nil {
+	if err := validateEntitySelection(world, player, npc.GetUniqueID()); err != nil {
 		t.Fatalf("known adjacent-region mob rejected: %v", err)
 	}
 	if world.distanceCalls != 1 {

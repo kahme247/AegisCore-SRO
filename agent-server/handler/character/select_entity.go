@@ -52,6 +52,7 @@ type SelectEntityHandler struct {
 	// world service still has a mixture of locked and unlocked accessors.
 	mu    sync.Mutex
 	world selectEntityWorld
+	send  func(*server.Session, network.Packet) error
 }
 
 // NewSelectEntityHandler permits focused tests and future region-command
@@ -87,23 +88,40 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 	if err != nil {
 		return err
 	}
-	if err := validateNPCSelection(world, player, uniqueID); err != nil {
+	if err := validateEntitySelection(world, player, uniqueID); err != nil {
 		// A stale visible NPC is normal at a region boundary: the client can
 		// select it in the same frame that the server moves the player to the
 		// adjacent region. Reject the interaction without tearing down the game
 		// session; only malformed packets and invalid session ownership above
 		// remain protocol errors.
 		logrus.Warnf("ignored entity selection player=%s uid=%d: %v", player.CharName, uniqueID, err)
-		return nil
+		clearSelectedNPC(session)
+		return h.sendPacket(session, buildEntitySelectionFailure())
 	}
 	object, err := world.GetObjectByUniqueId(uniqueID)
 	if err != nil || object == nil {
-		return nil
+		clearSelectedNPC(session)
+		return h.sendPacket(session, buildEntitySelectionFailure())
+	}
+	if targetPlayer, ok := object.(*model.Player); ok && targetPlayer != nil && targetPlayer.GetTypeInfo().IsPlayerCharacter() {
+		job := targetPlayer.GetJob()
+		response, err := (vsro188.EntityPlayerSelectResponseCodec{}).Encode(vsro188.EntityPlayerSelectResponse{
+			UniqueID:    targetPlayer.GetUniqueID(),
+			JobType:     job.Type,
+			JobLevel:    job.Level,
+			HasJobLevel: job.Active(),
+		})
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, response)
 	}
 	if mob, ok := object.(*model.NPC); ok && mob != nil && mob.GetTypeInfo().IsNPCMob() {
-		return session.Send(buildMobSelectionResponse(uniqueID, mob.CurrentHitPoints()))
+		return h.sendPacket(session, buildMobSelectionResponse(uniqueID, mob.CurrentHitPoints()))
 	}
 	if object.GetTypeInfo().IsNPCNpc() || model.IsTeleportGateObject(object) {
+		session.UserContext.SelectedNPCUniqueID = object.GetUniqueID()
+		session.UserContext.SelectedNPCRefObjID = object.GetRefObjectID()
 		selectionData := model.NPCSelectionTalkData(object.GetName())
 		if gate, ok := object.(*model.TeleportGate); ok && model.IsTeleportGateObject(gate) {
 			// TeleportBuilding has its own B045 layout: task count followed directly
@@ -116,9 +134,32 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 			npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), teleportTaskUse)
 		}
 		logrus.Infof("NPC_SELECT player=%s uid=%d code=%s selectionData=%x", player.CharName, uniqueID, object.GetName(), selectionData)
-		return session.Send(buildNPCSelectionResponse(uniqueID, selectionData))
+		return h.sendPacket(session, buildNPCSelectionResponse(uniqueID, selectionData))
 	}
-	return nil
+	clearSelectedNPC(session)
+	return h.sendPacket(session, buildEntitySelectionFailure())
+}
+
+func clearSelectedNPC(session *server.Session) {
+	if session == nil {
+		return
+	}
+	session.UserContext.SelectedNPCUniqueID = 0
+	session.UserContext.SelectedNPCRefObjID = 0
+}
+
+func buildEntitySelectionFailure() network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntitySelectResponse
+	p.WriteByte(0)
+	return p
+}
+
+func (h *SelectEntityHandler) sendPacket(session *server.Session, packet network.Packet) error {
+	if h != nil && h.send != nil {
+		return h.send(session, packet)
+	}
+	return session.Send(packet)
 }
 
 func teleportGateSelectionData(gate *model.TeleportGate) []byte {
@@ -187,6 +228,10 @@ func resolveSelectingPlayer(world selectEntityWorld, session *server.Session) (*
 }
 
 func validateNPCSelection(world selectEntityWorld, player *model.Player, uniqueID uint32) error {
+	return validateEntitySelection(world, player, uniqueID)
+}
+
+func validateEntitySelection(world selectEntityWorld, player *model.Player, uniqueID uint32) error {
 	if world == nil || player == nil || uniqueID == 0 {
 		return ErrSelectEntityTargetNotFound
 	}
@@ -207,10 +252,19 @@ func validateNPCSelection(world selectEntityWorld, player *model.Player, uniqueI
 		return ErrSelectEntityTargetNotKnown
 	}
 
-	// Normal NPCs, mobs, and catalog-backed teleport structures share the same UID-based selection admission. Combat
-	// performs its own stricter alive/range validation before accepting damage.
-	// Players, COS, siege objects, and malformed generic objects remain closed.
+	// Players, normal NPCs, mobs, and catalog-backed teleport structures share
+	// the same UID-based selection admission. Combat performs its own stricter
+	// alive/range validation before accepting damage. COS, siege objects, self
+	// selection, and malformed generic objects remain closed.
 	switch typed := target.(type) {
+	case *model.Player:
+		if typed == nil || typed == player || !typed.GetTypeInfo().IsPlayerCharacter() {
+			return ErrSelectEntityTargetUnsupported
+		}
+		knownPlayer, ok := knownTarget.(*model.Player)
+		if !ok || knownPlayer != typed {
+			return ErrSelectEntityTargetNotKnown
+		}
 	case *model.NPC:
 		if typed == nil || !typed.GetTypeInfo().IsNPC() {
 			return ErrSelectEntityTargetUnsupported

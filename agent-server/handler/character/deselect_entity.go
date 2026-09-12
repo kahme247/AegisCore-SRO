@@ -50,6 +50,10 @@ func (h *DeselectEntityHandler) handlePacket(_ context.Context, session *server.
 	if interaction, ok := npcInteractions.Get(player.GetUniqueID()); ok && interaction.NPCUniqueID == targetUID {
 		npcInteractions.Clear(player.GetUniqueID())
 	}
+	if session.UserContext.SelectedNPCUniqueID == targetUID {
+		session.UserContext.SelectedNPCUniqueID = 0
+		session.UserContext.SelectedNPCRefObjID = 0
+	}
 
 	response := buildEntityDeselectResponse()
 	if h.send != nil {

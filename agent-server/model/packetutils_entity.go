@@ -112,8 +112,7 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		if typeInfo.IsPlayerCharacter() {
 			player := character.(IPlayer)
 			p.WriteString(player.GetName())
-			p.WriteByte(0) // TODO JobType
-			p.WriteByte(1) // TODO JobLevel
+			writePlayerJobState(p, player.GetJob())
 			p.WriteByte(byte(player.GetPKState()))
 			WritePlayerTransportState(p, player)
 			p.WriteByte(0) // TODO ScrollMode / 0 = None / 1 = Return Scroll / 2 = Bandit Return Scroll
@@ -294,11 +293,12 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		if typeInfo.IsCharacter() || typeInfo.IsStructure() {
 			p.WriteByte(0) // TODO unkByte5
 		} else if typeInfo.IsItem() {
-			// Stock 0x3015 appends the drop source and dropper UID after the
-			// ordinary item record. Omitting this tail makes the vSRO 1.188
-			// client terminate while creating the ground-item visual.
-			p.WriteByte(0)   // DropSource: ordinary world drop
-			p.WriteUInt32(0) // Dropper.UniqueID: no attributed dropper
+			// SR_GameServer 0x00533F70 appends one update-state byte after the
+			// item's polymorphic mode-2 record. Only states 5 and 6 append the
+			// following u32 association. The ordinary ground-entry state is 0.
+			// Writing an unconditional u32 leaves four bytes unread by client
+			// CIItem update parser 0x009E1A30 and triggers its packet assertion.
+			p.WriteByte(0)
 		}
 	}
 }
@@ -385,8 +385,7 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 	p.WriteByte(0)                        // TODO BuffCount
 
 	p.WriteString(player.GetName())
-	p.WriteByte(0) // TODO JobType
-	p.WriteByte(1) // TODO JobLevel
+	writePlayerJobState(p, player.GetJob())
 	p.WriteByte(byte(player.GetPKState()))
 	WritePlayerTransportState(p, player)
 	p.WriteByte(0) // TODO ScrollMode / 0 = None / 1 = Return Scroll / 2 = Bandit Return Scroll
@@ -406,6 +405,15 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 	if p.MessageID == opcode.EntitySingleSpawn {
 		p.WriteByte(0) // TODO find out what this is
 	}
+}
+
+func writePlayerJobState(packet *network.Packet, job PlayerJob) {
+	if job.Active() {
+		packet.WriteByte(job.Type)
+		packet.WriteByte(job.Level)
+		return
+	}
+	packet.WriteByte(PlayerJobNone)
 }
 
 func equippedAppearanceSlots(inventory Inventory) []byte {
