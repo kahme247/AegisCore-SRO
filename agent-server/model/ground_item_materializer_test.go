@@ -43,15 +43,16 @@ func TestSQLGroundItemMaterializerPersistsAllItemFields(t *testing.T) {
 		StackCount:      321,
 		OptLevel:        7,
 		Data:            1234,
+		CreatorName:     "TraderAlias",
 		Rent:            RentInfo{Type: 2, CanDelete: 3, CanRecharge: 4, PeriodBeginTime: 5, PeriodEndTime: 6, MeterRateTime: 7, PackingTime: 8},
 	})
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	if item.ID != 41 || item.GetRefObjectID() != 900 || item.StackSize != 321 || item.OptLevel != 7 || item.Data != 1234 || item.DropType != 3 || item.MagicGroupID != 71 || item.Name != "ITEM_ETC_TEST" {
+	if item.ID != 41 || item.GetRefObjectID() != 900 || item.StackSize != 321 || item.OptLevel != 7 || item.Data != 1234 || item.CreatorName != "TraderAlias" || item.DropType != 3 || item.MagicGroupID != 71 || item.Name != "ITEM_ETC_TEST" {
 		t.Fatalf("materialized item = %+v", item)
 	}
-	if len(execer.args) != 12 || execer.args[0] != uint32(900) || execer.args[2] != uint16(321) || execer.args[11] != uint32(8) {
+	if len(execer.args) != 13 || execer.args[0] != uint32(900) || execer.args[2] != uint16(321) || execer.args[5] != "TraderAlias" || execer.args[12] != uint32(8) {
 		t.Fatalf("insert args = %+v", execer.args)
 	}
 	if execer.query != insertGroundItem {

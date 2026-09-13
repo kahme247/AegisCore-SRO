@@ -101,7 +101,7 @@ func (s *GroundItemService) Spawn(item *model.Item, partyNumber uint32) error {
 	if s == nil || s.world == nil {
 		return ErrGroundItemWorldUnavailable
 	}
-	if item == nil || item.ID <= 0 || item.GetRefObjectID() == 0 {
+	if item == nil || (item.ID <= 0 && !item.TransientGroundItem) || item.GetRefObjectID() == 0 {
 		return ErrGroundItemInvalid
 	}
 	var distribution network.Packet

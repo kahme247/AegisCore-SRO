@@ -32,6 +32,7 @@ type GroundItemSpec struct {
 	StackCount      uint16
 	OptLevel        byte
 	Data            uint32
+	CreatorName     string
 	DropType        byte
 	DropRarity      byte
 	MagicOptions    []MagicOption
@@ -46,7 +47,7 @@ type GroundItemMaterializer interface {
 	Materialize(context.Context, GroundItemSpec) (*Item, error)
 }
 
-const insertGroundItem = "INSERT INTO `SRO_SHARD`.`ITEM` (`FK_REF_ITEM`,`VARIANCE`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+const insertGroundItem = "INSERT INTO `SRO_SHARD`.`ITEM` (`FK_REF_ITEM`,`VARIANCE`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
 const insertGroundItemMagicOption = "INSERT INTO `SRO_SHARD`.`ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,?)"
 
 // SQLGroundItemMaterializer is the live shard-backed ITEM-row creator. It
@@ -74,7 +75,7 @@ func (r *SQLGroundItemMaterializer) Materialize(ctx context.Context, spec Ground
 	if r == nil || r.shard == nil {
 		return nil, ErrGroundItemMaterializerUnavailable
 	}
-	if spec.ReferenceItemID == 0 || spec.StackCount == 0 {
+	if spec.ReferenceItemID == 0 || spec.StackCount == 0 || len(spec.CreatorName) > 17 {
 		return nil, ErrGroundItemMaterializationInvalid
 	}
 	if ctx == nil {
@@ -108,6 +109,7 @@ func materializeGroundItem(ctx context.Context, execer frameworkdb.Execer, spec 
 		spec.StackCount,
 		spec.OptLevel,
 		spec.Data,
+		spec.CreatorName,
 		spec.Rent.Type,
 		spec.Rent.CanDelete,
 		spec.Rent.CanRecharge,
@@ -136,6 +138,7 @@ func materializeGroundItem(ctx context.Context, execer frameworkdb.Execer, spec 
 		StackSize:    int(spec.StackCount),
 		OptLevel:     spec.OptLevel,
 		Data:         spec.Data,
+		CreatorName:  spec.CreatorName,
 		DropRarity:   spec.DropRarity,
 		MagicOptions: append([]MagicOption(nil), spec.MagicOptions...),
 		RentInfo:     spec.Rent,

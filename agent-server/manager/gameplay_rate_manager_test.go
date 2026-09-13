@@ -23,18 +23,18 @@ func (f *gameplayRateRepositoryFake) GameplayRates(context.Context) (model.Gamep
 }
 
 func TestGameplayRateManagerRefreshesAtomicallyAndRetainsLastGoodRates(t *testing.T) {
-	repository := &gameplayRateRepositoryFake{rates: model.GameplayRates{ExperienceRatePercent: 200, PartyExperienceRatePercent: 250, SkillExperienceRatePercent: 300, MobCountRatePercent: 400, MobRespawnRatePercent: 500}}
+	repository := &gameplayRateRepositoryFake{rates: model.GameplayRates{ExperienceRatePercent: 200, PartyExperienceRatePercent: 250, SkillExperienceRatePercent: 300, MobCountRatePercent: 400, MobRespawnRatePercent: 500, LootDropRatePercent: 600}}
 	manager, err := NewGameplayRateManager(repository, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := manager.Current(); got.ExperienceRatePercent != 100 || got.PartyExperienceRatePercent != 100 || got.SkillExperienceRatePercent != 100 || got.MobCountRatePercent != 100 || got.MobRespawnRatePercent != 100 {
+	if got := manager.Current(); got.ExperienceRatePercent != 100 || got.PartyExperienceRatePercent != 100 || got.SkillExperienceRatePercent != 100 || got.MobCountRatePercent != 100 || got.MobRespawnRatePercent != 100 || got.LootDropRatePercent != 100 {
 		t.Fatalf("hardcoded safe rates = %#v", got)
 	}
 	if err := manager.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := manager.Current(); got.ExperienceRatePercent != 200 || got.PartyExperienceRatePercent != 250 || got.SkillExperienceRatePercent != 300 || got.MobCountRatePercent != 400 || got.MobRespawnRatePercent != 500 {
+	if got := manager.Current(); got.ExperienceRatePercent != 200 || got.PartyExperienceRatePercent != 250 || got.SkillExperienceRatePercent != 300 || got.MobCountRatePercent != 400 || got.MobRespawnRatePercent != 500 || got.LootDropRatePercent != 600 {
 		t.Fatalf("refreshed rates = %#v", got)
 	}
 	repository.mu.Lock()
@@ -44,13 +44,13 @@ func TestGameplayRateManagerRefreshesAtomicallyAndRetainsLastGoodRates(t *testin
 	if err := manager.Refresh(context.Background()); err == nil {
 		t.Fatal("failed refresh returned nil")
 	}
-	if got := manager.Current(); got.ExperienceRatePercent != 200 || got.PartyExperienceRatePercent != 250 || got.SkillExperienceRatePercent != 300 || got.MobCountRatePercent != 400 || got.MobRespawnRatePercent != 500 {
+	if got := manager.Current(); got.ExperienceRatePercent != 200 || got.PartyExperienceRatePercent != 250 || got.SkillExperienceRatePercent != 300 || got.MobCountRatePercent != 400 || got.MobRespawnRatePercent != 500 || got.LootDropRatePercent != 600 {
 		t.Fatalf("rates after failed refresh = %#v", got)
 	}
 }
 
 func TestGameplayRateManagerStopsWithContext(t *testing.T) {
-	repository := &gameplayRateRepositoryFake{rates: model.GameplayRates{ExperienceRatePercent: 100, SkillExperienceRatePercent: 100}}
+	repository := &gameplayRateRepositoryFake{rates: model.GameplayRates{ExperienceRatePercent: 100, SkillExperienceRatePercent: 100, MobCountRatePercent: 100, MobRespawnRatePercent: 100, LootDropRatePercent: 100}}
 	manager, err := NewGameplayRateManager(repository, time.Millisecond)
 	if err != nil {
 		t.Fatal(err)

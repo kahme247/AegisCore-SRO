@@ -19,6 +19,7 @@ var safeGameplayRates = model.GameplayRates{
 	SkillExperienceRatePercent: 100,
 	MobCountRatePercent:        100,
 	MobRespawnRatePercent:      100,
+	LootDropRatePercent:        100,
 }
 
 type GameplayRateManager struct {
@@ -64,7 +65,7 @@ func (m *GameplayRateManager) Refresh(ctx context.Context) error {
 	previous := m.Current()
 	m.current.Store(&rates)
 	if rates != previous {
-		log.Infof("gameplay rates refreshed experience=%d%% party-experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%%", rates.ExperienceRatePercent, rates.PartyExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent)
+		log.Infof("gameplay rates refreshed experience=%d%% party-experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%% loot-drop=%d%%", rates.ExperienceRatePercent, rates.PartyExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent, rates.LootDropRatePercent)
 	}
 	return nil
 }

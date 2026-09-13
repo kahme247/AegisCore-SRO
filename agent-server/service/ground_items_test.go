@@ -70,6 +70,17 @@ func TestGroundItemServiceRejectsUnmaterializedItem(t *testing.T) {
 	}
 }
 
+func TestGroundItemServiceAcceptsTransientCargoWithoutPersistedIdentity(t *testing.T) {
+	world := &groundItemWorldFake{}
+	item := &model.Item{CreatorName: "TraderAlias", TransientGroundItem: true, SRObject: model.SRObject{RefObjectID: 900}}
+	if err := NewGroundItemService(world, nil).Spawn(item, 0); err != nil {
+		t.Fatal(err)
+	}
+	if world.object != item {
+		t.Fatalf("world object = %v, want transient specialty", world.object)
+	}
+}
+
 func TestGroundItemServiceMaterializesBeforePartyWorldHandoff(t *testing.T) {
 	player := &model.Player{ID: 7, LifeState: model.Alive, Session: &server.Session{}, SRObject: model.SRObject{UniqueID: 88}}
 	party := NewPartyService(groundPartyLookup{player: player})
