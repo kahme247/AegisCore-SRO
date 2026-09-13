@@ -12,10 +12,10 @@ const (
 	QuestTimerModeFour byte   = 4
 )
 
-// PackQuestTimerDuration reproduces GameServer 0x00570650 without assigning
-// an unproved wall-clock unit to the authored duration byte. The start path
-// divides it by 60; the packer divides that quotient by 24 and places the
-// remainder, quotient remainder, and quotient-of-24 in bits 20, 15, and 10.
+// PackQuestTimerDuration reproduces GameServer 0x00570650. Authored durations
+// are seconds: the start path sends duration/60 and duration%60 as minutes and
+// seconds, while this packer further splits the minute quotient at 24 hours.
+// The packed remainders occupy bits 20, 15, and 10.
 func PackQuestTimerDuration(duration uint32) uint32 {
 	quotient60 := duration / 60
 	remainder60 := duration % 60
@@ -101,7 +101,6 @@ func (p *Player) TickQuestTimer(questID int, generation uint64) (QuestTimerTick,
 		timer.PackedValue = 0
 		result.Timer = timer
 		result.DispatchEvent = true
-		result.DisplayUpdate = true
 		return result, true
 	}
 	timer.PackedValue = PackQuestTimerDuration(timer.Remaining)

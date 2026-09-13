@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
 
 var (
@@ -16,6 +17,11 @@ var (
 	ErrEconomyStorageFull           = errors.New("storage is full")
 	ErrEconomyShopGoodNotFound      = errors.New("shop good is unavailable")
 	ErrEconomyOutcomeUnknown        = errors.New("economy transaction outcome is unknown")
+	ErrSpecialtyTraderOnly          = errors.New("specialty goods require a trader")
+	ErrSpecialtyNoCart              = errors.New("specialty goods require an active job cart")
+	ErrSpecialtyNotBuyer            = errors.New("NPC is not a specialty-goods buyer")
+	ErrSpecialtyCartTooFar          = errors.New("job cart is too far away")
+	ErrSpecialtyStolen              = errors.New("specialty goods creator does not match")
 )
 
 type ShopGood struct {
@@ -36,11 +42,19 @@ type EconomyResult struct {
 	Gold             uint64
 	StorageGold      uint64
 	Inventory        Inventory
+	COSInventory     Inventory
 	Item             Item
 	SourceSlot       byte
 	BuybackSlot      byte
 	DestinationSlots []byte
 	Amount           uint16
+	Specialty        bool
+	TriJobType       byte
+	TriJobReward     uint64
+	TradeScale       byte
+	SafeTradeReset   bool
+	Job              JobSnapshot
+	JobAdvanced      bool
 }
 
 type StorageSnapshot struct {
@@ -51,7 +65,7 @@ type StorageSnapshot struct {
 
 type EconomyRepository interface {
 	Buy(context.Context, int64, uint32, string, byte, byte, uint16) (EconomyResult, error)
-	Sell(context.Context, int64, uint32, byte, uint16, bool) (EconomyResult, error)
+	Sell(context.Context, int64, uint32, uint32, byte, uint16, bool) (EconomyResult, error)
 	BuyBack(context.Context, int64, uint32, byte) (EconomyResult, error)
 	LoadStorage(context.Context, uint32) (StorageSnapshot, error)
 	Deposit(context.Context, int64, uint32, byte, byte) (EconomyResult, error)
@@ -59,6 +73,10 @@ type EconomyRepository interface {
 	DepositStorageGold(context.Context, int64, uint32, uint64) (EconomyResult, error)
 	WithdrawStorageGold(context.Context, int64, uint32, uint64) (EconomyResult, error)
 	MoveStorage(context.Context, uint32, byte, byte, uint16) error
+}
+
+type COSEconomyRepository interface {
+	SellCOS(context.Context, int64, uint32, uint32, uint64, byte, uint16, bool) (EconomyResult, error)
 }
 
 type SQLEconomyRepository struct{ shard *sql.DB }
@@ -151,7 +169,7 @@ func (r *SQLEconomyRepository) Buy(ctx context.Context, characterID int64, userI
 	return EconomyResult{Gold: gold, Inventory: inventory, Item: first, DestinationSlots: free, Amount: quantity}, err
 }
 
-func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, userID uint32, source byte, amount uint16, resetBuyback bool) (EconomyResult, error) {
+func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, userID, npcRefObjectID uint32, source byte, amount uint16, resetBuyback bool) (EconomyResult, error) {
 	ctx = normalizeEconomyContext(ctx)
 	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || amount == 0 {
 		return EconomyResult{}, ErrEconomyConflict
@@ -182,10 +200,15 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	var variance uint64
 	var opt byte
 	var data uint32
+	var creatorName string
 	var rent RentInfo
-	err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,d.`SellPrice`,it.`VARIANCE`,it.`OPT_LEVEL`,it.`DATA`,it.`RENT_TYPE`,it.`RENT_CAN_DELETE`,it.`RENT_CAN_RECHARGE`,it.`RENT_PERIOD_BEGIN_TIME`,it.`RENT_PERIOD_END_TIME`,it.`RENT_METER_RATE_TIME`,it.`RENT_PACKING_TIME` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? AND d.`CanSell`<>0 FOR UPDATE", characterID, source).Scan(&itemID, &refID, &stack, &sellPrice, &variance, &opt, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime)
+	err = tx.QueryRowContext(ctx, "SELECT i.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,d.`SellPrice`,it.`VARIANCE`,it.`OPT_LEVEL`,it.`DATA`,it.`CREATOR_NAME`,it.`RENT_TYPE`,it.`RENT_CAN_DELETE`,it.`RENT_CAN_RECHARGE`,it.`RENT_PERIOD_BEGIN_TIME`,it.`RENT_PERIOD_END_TIME`,it.`RENT_METER_RATE_TIME`,it.`RENT_PACKING_TIME` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? AND d.`CanSell`<>0 FOR UPDATE", characterID, source).Scan(&itemID, &refID, &stack, &sellPrice, &variance, &opt, &data, &creatorName, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime)
 	if err != nil || stack < int(amount) {
 		return EconomyResult{}, ErrEconomyConflict
+	}
+	sellPrice, triJobType, specialty, err := specialtySellPrice(ctx, tx, characterID, npcRefObjectID, refID, sellPrice, creatorName)
+	if err != nil {
+		return EconomyResult{}, err
 	}
 	if sellPrice > math.MaxUint64/uint64(amount) || gold > math.MaxUint64-sellPrice*uint64(amount) {
 		return EconomyResult{}, ErrEconomyConflict
@@ -196,7 +219,7 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 			return EconomyResult{}, err
 		}
 	} else {
-		inserted, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) SELECT `VARIANCE`,`FK_REF_ITEM`,?,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME` FROM `ITEM` WHERE `id`=?", amount, itemID)
+		inserted, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) SELECT `VARIANCE`,`FK_REF_ITEM`,?,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME` FROM `ITEM` WHERE `id`=?", amount, itemID)
 		if insertErr != nil {
 			return EconomyResult{}, insertErr
 		}
@@ -227,7 +250,208 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	if err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
-	return EconomyResult{Gold: gold, Inventory: inventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount}, nil
+	soldItem.CreatorName = creatorName
+	reward := sellPrice * uint64(amount)
+	triJobReward := SpecialtyTriJobReward(reward)
+	return EconomyResult{Gold: gold, Inventory: inventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: triJobReward}, nil
+}
+
+func (r *SQLEconomyRepository) SellCOS(ctx context.Context, characterID int64, userID, npcRefObjectID uint32, cosID uint64, source byte, amount uint16, resetBuyback bool) (EconomyResult, error) {
+	ctx = normalizeEconomyContext(ctx)
+	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || npcRefObjectID == 0 || cosID == 0 || amount == 0 {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	owner, gold, err := lockEconomyCharacter(ctx, tx, characterID)
+	if err != nil || owner != userID {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	var kind byte
+	if err = tx.QueryRowContext(ctx, "SELECT `KIND` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", cosID, characterID).Scan(&kind); err != nil || kind != byte(COSJobTransport) {
+		return EconomyResult{}, ErrSpecialtyNoCart
+	}
+	if resetBuyback {
+		if err = clearBuybackItems(ctx, tx, characterID); err != nil {
+			return EconomyResult{}, err
+		}
+	}
+	var itemID int64
+	var refID uint32
+	var stack int
+	var sellPrice, variance uint64
+	var opt byte
+	var data uint32
+	var creatorName string
+	var rent RentInfo
+	err = tx.QueryRowContext(ctx, "SELECT ci.`FK_ITEM`,it.`FK_REF_ITEM`,it.`STACK_COUNT`,d.`SellPrice`,it.`VARIANCE`,it.`OPT_LEVEL`,it.`DATA`,it.`CREATOR_NAME`,it.`RENT_TYPE`,it.`RENT_CAN_DELETE`,it.`RENT_CAN_RECHARGE`,it.`RENT_PERIOD_BEGIN_TIME`,it.`RENT_PERIOD_END_TIME`,it.`RENT_METER_RATE_TIME`,it.`RENT_PACKING_TIME` FROM `COS_INVENTORY` ci JOIN `ITEM` it ON it.`id`=ci.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=it.`FK_REF_ITEM` WHERE ci.`COS_ID`=? AND ci.`SLOT`=? AND d.`CanSell`<>0 FOR UPDATE", cosID, source).Scan(&itemID, &refID, &stack, &sellPrice, &variance, &opt, &data, &creatorName, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime)
+	if err != nil || stack < int(amount) {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	sellPrice, triJobType, specialty, err := specialtySellPrice(ctx, tx, characterID, npcRefObjectID, refID, sellPrice, creatorName)
+	if err != nil || sellPrice > math.MaxUint64/uint64(amount) || gold > math.MaxUint64-sellPrice*uint64(amount) {
+		return EconomyResult{}, ErrEconomyConflict
+	}
+	var preSaleTradeScale byte
+	if specialty {
+		score, thresholds, scaleErr := safeTradeScaleData(ctx, tx, int(characterID), cosID)
+		if scaleErr != nil {
+			return EconomyResult{}, scaleErr
+		}
+		preSaleTradeScale = SafeTradeScale(score, thresholds)
+	}
+	soldItemID := itemID
+	if stack == int(amount) {
+		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", cosID, source, itemID)
+		if deleteErr != nil || !singleAffectedRow(result) {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+	} else {
+		inserted, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) SELECT `VARIANCE`,`FK_REF_ITEM`,?,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME` FROM `ITEM` WHERE `id`=?", amount, itemID)
+		if insertErr != nil {
+			return EconomyResult{}, insertErr
+		}
+		if soldItemID, err = inserted.LastInsertId(); err != nil {
+			return EconomyResult{}, err
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`-? WHERE `id`=?", amount, itemID); err != nil {
+			return EconomyResult{}, err
+		}
+	}
+	reward := sellPrice * uint64(amount)
+	var job JobSnapshot
+	if specialty {
+		jobExperience := SpecialtyDeliveryJobExperience(reward, preSaleTradeScale)
+		jobContribution := SpecialtyDeliveryContribution(reward)
+		job, err = advanceJobInTransaction(ctx, tx, int(characterID), jobExperience, jobContribution)
+		if err != nil {
+			return EconomyResult{}, err
+		}
+	}
+	var tradeScale byte
+	if specialty {
+		score, thresholds, scaleErr := safeTradeScaleData(ctx, tx, int(characterID), cosID)
+		if scaleErr != nil {
+			return EconomyResult{}, scaleErr
+		}
+		tradeScale = SafeTradeScale(score, thresholds)
+		// SR_GameServer 0x004C8D10 clears the trader's active safe-trade
+		// state before completing a specialty delivery. Keep that state change
+		// atomic with the cargo removal and gold credit.
+		reset, resetErr := tx.ExecContext(ctx, "UPDATE `CHARACTER_SAFE_TRADE` SET `STATUS`=0,`LAST_SAFE_TRADE`=CURRENT_TIMESTAMP(6) WHERE `FK_CHAR`=? AND `STATUS`<>0", characterID)
+		if resetErr != nil {
+			return EconomyResult{}, resetErr
+		}
+		if affected, affectedErr := reset.RowsAffected(); affectedErr != nil {
+			return EconomyResult{}, affectedErr
+		} else if affected > 1 {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+	}
+	buybackSlot, err := appendBuybackItem(ctx, tx, characterID, soldItemID, reward)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	gold += reward
+	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
+		return EconomyResult{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	committed = true
+	cosRepository, err := NewCOSRepository(r.shard)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	cosInventory, err := cosRepository.LoadInventory(ctx, int(characterID), cosID)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
+	}
+	soldItem.CreatorName = creatorName
+	return EconomyResult{Gold: gold, COSInventory: cosInventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: SpecialtyTriJobReward(reward), TradeScale: tradeScale, SafeTradeReset: specialty, Job: job, JobAdvanced: specialty}, nil
+}
+
+func SpecialtyDeliveryJobExperience(payout uint64, tradeScale byte) uint64 {
+	if payout == 0 {
+		return 1
+	}
+	if tradeScale == 1 {
+		return max(uint64(1), payout/5*4+payout%5*4/5)
+	}
+	return max(uint64(1), payout/2)
+}
+
+func SpecialtyDeliveryContribution(payout uint64) uint64 { return payout / 10 }
+
+func specialtySellPrice(ctx context.Context, tx *sql.Tx, characterID int64, npcRefObjectID, refID uint32, ordinarySellPrice uint64, creatorName string) (uint64, byte, bool, error) {
+	if creatorName == "" {
+		return ordinarySellPrice, 0, false, nil
+	}
+	var jobType byte
+	var alias string
+	if err := tx.QueryRowContext(ctx, "SELECT `JOB_TYPE`,COALESCE(`ALIAS`,'') FROM `CHARACTER_JOB` WHERE `FK_CHAR`=? FOR UPDATE", characterID).Scan(&jobType, &alias); err != nil || jobType != JobTrader {
+		return 0, 0, true, ErrSpecialtyTraderOnly
+	}
+	if !strings.EqualFold(alias, creatorName) {
+		return 0, 0, true, ErrSpecialtyStolen
+	}
+	if ordinarySellPrice == 0 || ordinarySellPrice > math.MaxUint32 {
+		return 0, 0, true, ErrEconomyConflict
+	}
+	var baseStock, fluctuate, currentStock int
+	if err := tx.QueryRowContext(ctx, "SELECT `BASE_STOCK_AMOUNT`,`FLUCTUATE_AMOUNT`,`CUR_STOCK_AMOUNT` FROM `ITEM_QUOTATION` WHERE `ASSOC_NPC`=? AND `REF_ITEM_ID`=? AND `SERVICE`=1", npcRefObjectID, refID).Scan(&baseStock, &fluctuate, &currentStock); err != nil {
+		return 0, 0, true, ErrSpecialtyNotBuyer
+	}
+	currentQuotation, err := SpecialtyCurrentQuotation(uint32(ordinarySellPrice), baseStock, fluctuate, currentStock)
+	if err != nil || currentQuotation < uint32(ordinarySellPrice) {
+		return 0, 0, true, ErrEconomyConflict
+	}
+	return uint64(currentQuotation) - ordinarySellPrice, jobType, true, nil
+}
+
+// AddTriJobReward mirrors stock _AddTrijobReward as an intentionally separate
+// statement from item sale persistence. The caller logs failure but does not
+// roll back an already completed sale.
+func (r *SQLEconomyRepository) AddTriJobReward(ctx context.Context, jobType byte, reward uint64) error {
+	rewardType, ok := triJobRewardType(jobType)
+	if r == nil || r.shard == nil || !ok || reward > math.MaxInt32 {
+		return ErrEconomyConflict
+	}
+	result, err := r.shard.ExecContext(normalizeEconomyContext(ctx), "UPDATE `TRIJOB_REWARDS` SET `REWARD`=`REWARD`+? WHERE `JOB_TYPE`=?", reward, rewardType)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return ErrEconomyConflict
+	}
+	return nil
+}
+
+// triJobRewardType mirrors SR_GameServer's _AddTrijobReward adapter: Trader
+// role 1 contributes to bucket 3, while Thief role 2 contributes to bucket 2.
+func triJobRewardType(jobType byte) (byte, bool) {
+	switch jobType {
+	case JobTrader:
+		return 3, true
+	case JobThief:
+		return 2, true
+	default:
+		return 0, false
+	}
 }
 
 func clearBuybackItems(ctx context.Context, tx *sql.Tx, characterID int64) error {

@@ -127,6 +127,35 @@ func TestPlanInventoryRelocationRetainsExistingEquipRulesWithoutMutating(t *test
 	}
 }
 
+func TestPlanInventoryRelocationAllowsOnlyMatchingJobSuitInExtraSlot(t *testing.T) {
+	previous := RefItems
+	t.Cleanup(func() { RefItems = previous })
+	RefItems = map[uint32]RefItem{
+		2001: {RefObject: RefObject{ID: 2001, CodeName: "ITEM_CH_M_TRADE_THIEF_02"}},
+		2002: {RefObject: RefObject{ID: 2002, CodeName: "ITEM_CH_M_TRADE_HUNTER_02"}},
+	}
+	player := relocationTestPlayer()
+	player.SetJob(PlayerJob{Type: PlayerJobThief, Level: 1})
+	items := map[byte]Item{14: relocationTestItem(101, 2001, TypeInfo{})}
+	plan, err := PlanInventoryRelocation(items, 14, SlotExtra, player)
+	if err != nil || plan.Action != InventoryRelocationEquip {
+		t.Fatalf("matching thief suit plan = %+v, err=%v", plan, err)
+	}
+	player.Inventory.Items = map[byte]Item{SlotExtra: relocationTestItem(101, 2001, TypeInfo{})}
+	if !HasActiveJobSuit(player) {
+		t.Fatal("equipped matching thief suit was not recognized as active")
+	}
+	player.SetJob(PlayerJob{Type: PlayerJobHunter, Level: 1})
+	if HasActiveJobSuit(player) {
+		t.Fatal("hunter was authorized for a trade transport")
+	}
+	player.SetJob(PlayerJob{Type: PlayerJobThief, Level: 1})
+	items[14] = relocationTestItem(102, 2002, TypeInfo{})
+	if _, err = PlanInventoryRelocation(items, 14, SlotExtra, player); !errors.Is(err, ErrInventoryRelocationNotAllowed) {
+		t.Fatalf("hunter suit error = %v, want not allowed", err)
+	}
+}
+
 func TestPlanInventoryRelocationUsesCharacterCapacityWithinWireRange(t *testing.T) {
 	weapon := relocationTestItem(101, 1001, TypeInfo{
 		TypeID1: TypeID1Item,

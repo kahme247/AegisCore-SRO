@@ -11,6 +11,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const academyPageSize = 10
@@ -23,9 +24,27 @@ type worldLookup interface {
 // Handler owns the GameServer-equivalent protocol and online-publication
 // layer. Durable authority and transitions remain in SocialRepository.
 type Handler struct {
-	repo  model.SocialRepository
-	world worldLookup
-	send  func(*server.Session, network.Packet) error
+	repo           model.SocialRepository
+	world          worldLookup
+	safeTrade      model.SafeTradeRepository
+	safeTradeLimit byte
+	send           func(*server.Session, network.Packet) error
+}
+
+func (h *Handler) ConfigureSafeTrade(repository model.SafeTradeRepository, limit uint) error {
+	if h == nil || repository == nil || limit == 0 || limit > math.MaxUint8 {
+		return model.ErrSafeTradeInvalidRequest
+	}
+	h.safeTrade = repository
+	h.safeTradeLimit = byte(limit)
+	return nil
+}
+
+func safeTradeRestoreUpdate(state model.SafeTradeState, limit byte) vsro188.SafeTradeUpdate {
+	if state.Status == 0 {
+		return vsro188.SafeTradeUpdate{Code: vsro188.JobSafeTradeCodeTransition40}
+	}
+	return vsro188.SafeTradeUpdate{Active: true, Code: vsro188.JobSafeTradeCodeRestore51, Current: state.AbleCount, Limit: limit}
 }
 
 func RegisterHandlers(target *server.Server, repo model.SocialRepository) *Handler {
@@ -786,13 +805,26 @@ func (h *Handler) academyHonorRank(ctx context.Context, session *server.Session,
 	if _, err := socialCharacter(session); err != nil {
 		return err
 	}
-	if packet.Remaining() > 1 {
-		return fmt.Errorf("invalid academy honor rank request")
-	}
-	if packet.Remaining() == 1 {
+	switch packet.Remaining() {
+	case 0:
+		// Retain the empty legacy request accepted by older clients.
+	case 1:
 		if _, err := packet.ReadByte(); err != nil {
 			return err
 		}
+	case 4:
+		// The stock vSRO 1.188 client sends the selected academy NPC's runtime
+		// UID. SR_GameServer's 0x00519AD0 handler consumes and validates this
+		// four-byte request value before producing the honor ranking response.
+		npcUID, err := packet.ReadUInt32()
+		if err != nil {
+			return err
+		}
+		if session.UserContext.SelectedNPCUniqueID != 0 && npcUID != session.UserContext.SelectedNPCUniqueID {
+			return h.sendPacket(session, operationPacket(opcode.AcademyHonorRankResponse, model.ErrSocialInvalidRequest))
+		}
+	default:
+		return fmt.Errorf("invalid academy honor rank request")
 	}
 	ranking, err := h.repo.AcademyHonorRanking(ctx, 20)
 	response := operationPacket(opcode.AcademyHonorRankResponse, err)
@@ -937,166 +969,153 @@ func (h *Handler) jobJoin(ctx context.Context, session *server.Session, packet n
 	if err != nil {
 		return err
 	}
-	if packet.Remaining() != 5 {
-		return fmt.Errorf("invalid job join")
-	}
-	if _, err = packet.ReadUInt32(); err != nil {
-		return err
-	}
-	jobType, err := packet.ReadByte()
+	request, err := (vsro188.JobJoinRequestCodec{}).Decode(packet)
 	if err != nil {
 		return err
 	}
-	job, gold, err := h.repo.JoinJob(ctx, actor, jobType)
+	job, gold, err := h.repo.JoinJob(ctx, actor, request.JobType, request.NPCUID)
 	response := operationPacket(opcode.JobJoinResponse, err)
 	if err == nil {
-		response.WriteByte(job.Type)
-		response.WriteByte(job.Level)
-		response.WriteUInt32(uint32(min(job.Experience, math.MaxUint32)))
+		if encodeErr := (vsro188.JobJoinResponseCodec{}).AppendSuccess(&response, jobProtocolState(job)); encodeErr != nil {
+			return encodeErr
+		}
 	}
 	if sendErr := h.sendPacket(session, response); sendErr != nil {
 		return sendErr
 	}
 	if err == nil {
 		h.commitGold(actor, gold)
+		h.commitJob(actor, job)
 	}
 	return nil
 }
+
 func (h *Handler) jobLeave(ctx context.Context, session *server.Session, packet network.Packet) error {
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
 	}
-	if packet.Remaining() != 4 {
-		return fmt.Errorf("invalid job leave")
-	}
-	if _, err = packet.ReadUInt32(); err != nil {
+	request, err := (vsro188.JobLeaveRequestCodec{}).Decode(packet)
+	if err != nil {
 		return err
 	}
-	err = h.repo.LeaveJob(ctx, actor)
+	gold, err := h.repo.LeaveJob(ctx, actor, request.EnrollmentFee)
+	if err == nil {
+		h.commitGold(actor, gold)
+		h.clearJob(actor)
+	}
 	return h.sendPacket(session, operationPacket(opcode.JobLeaveResponse, err))
 }
+
 func (h *Handler) jobAlias(ctx context.Context, session *server.Session, packet network.Packet) error {
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
 	}
-	if packet.Remaining() < 7 {
-		return fmt.Errorf("invalid job alias")
-	}
-	if _, err = packet.ReadUInt32(); err != nil {
-		return err
-	}
-	action, err := packet.ReadByte()
+	request, err := (vsro188.JobAliasRequestCodec{}).Decode(packet)
 	if err != nil {
 		return err
 	}
-	alias, err := packet.ReadString()
-	if err != nil || packet.Remaining() != 0 {
-		return fmt.Errorf("invalid job alias")
-	}
 	response := network.EmptyPacket()
 	response.MessageID = opcode.JobAliasResponse
-	switch action {
+	switch request.Action {
 	case 0:
-		available, checkErr := h.repo.JobAliasAvailable(ctx, alias)
-		if checkErr != nil {
-			response = operationPacket(opcode.JobAliasResponse, checkErr)
-		} else {
-			response.WriteByte(1)
-			if available {
-				response.WriteByte(1)
-			} else {
-				response.WriteByte(2)
+		available, checkErr := h.repo.JobAliasAvailable(ctx, request.Alias)
+		if checkErr == nil && !available {
+			checkErr = model.ErrSocialConflict
+		}
+		response = operationPacket(opcode.JobAliasResponse, checkErr)
+		if checkErr == nil {
+			if encodeErr := (vsro188.JobAliasResponseCodec{}).AppendSuccess(&response, request.Action, request.Alias); encodeErr != nil {
+				return encodeErr
 			}
-			response.WriteString(alias)
+		} else if encodeErr := (vsro188.JobAliasResponseCodec{}).AppendFailure(&response, request.Action, request.Alias); encodeErr != nil {
+			return encodeErr
 		}
 	case 1:
-		err = h.repo.SetJobAlias(ctx, actor, alias)
+		err = h.repo.SetJobAlias(ctx, actor, request.Alias)
 		response = operationPacket(opcode.JobAliasResponse, err)
 		if err == nil {
-			response.WriteString(alias)
+			h.commitJobAlias(actor, request.Alias)
+			if encodeErr := (vsro188.JobAliasResponseCodec{}).AppendSuccess(&response, request.Action, request.Alias); encodeErr != nil {
+				return encodeErr
+			}
+		} else if encodeErr := (vsro188.JobAliasResponseCodec{}).AppendFailure(&response, request.Action, request.Alias); encodeErr != nil {
+			return encodeErr
 		}
-	default:
-		return fmt.Errorf("unknown job alias action")
 	}
 	return h.sendPacket(session, response)
 }
+
 func (h *Handler) jobRanking(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if _, err := socialCharacter(session); err != nil {
 		return err
 	}
-	if packet.Remaining() != 6 {
-		return fmt.Errorf("invalid job ranking")
-	}
-	if _, err := packet.ReadUInt32(); err != nil {
-		return err
-	}
-	jobType, err := packet.ReadByte()
+	request, err := (vsro188.JobRankingRequestCodec{}).Decode(packet)
 	if err != nil {
 		return err
 	}
-	kind, err := packet.ReadByte()
-	if err != nil || kind > 1 {
-		return fmt.Errorf("invalid job ranking kind")
-	}
-	ranking, err := h.repo.JobRanking(ctx, jobType, kind == 1, 20)
+	ranking, err := h.repo.JobRanking(ctx, request.JobType, request.Kind == 1, 20)
 	response := operationPacket(opcode.JobRankingResponse, err)
 	if err == nil {
-		response.WriteByte(jobType)
-		response.WriteByte(kind)
-		response.WriteByte(byte(len(ranking)))
-		for i, j := range ranking {
-			response.WriteByte(byte(i + 1))
-			response.WriteString(j.Alias)
-			response.WriteByte(j.Level)
-			response.WriteUInt32(uint32(min(j.Experience, math.MaxUint32)))
+		entries := make([]vsro188.JobRankingEntry, 0, len(ranking))
+		for i, job := range ranking {
+			entries = append(entries, vsro188.JobRankingEntry{Rank: byte(i + 1), Alias: job.Alias, Level: job.Level, Experience: uint32(min(job.Experience, math.MaxUint32))})
+		}
+		if encodeErr := (vsro188.JobRankingResponseCodec{}).AppendSuccess(&response, request, entries); encodeErr != nil {
+			return encodeErr
 		}
 	}
 	return h.sendPacket(session, response)
 }
+
 func (h *Handler) jobOutcome(ctx context.Context, session *server.Session, packet network.Packet) error {
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
 	}
-	if packet.Remaining() != 5 {
-		return fmt.Errorf("invalid job outcome")
-	}
-	if _, err = packet.ReadUInt32(); err != nil {
-		return err
-	}
-	if _, err = packet.ReadByte(); err != nil {
+	request, err := (vsro188.JobOutcomeRequestCodec{}).Decode(packet)
+	if err != nil {
 		return err
 	}
 	amount, gold, err := h.repo.ClaimJobReward(ctx, actor)
 	response := operationPacket(opcode.JobOutcomeResponse, err)
 	if err == nil {
-		response.WriteUInt64(amount)
+		if encodeErr := (vsro188.JobOutcomeResponseCodec{}).AppendSuccess(&response, request.Action, amount); encodeErr != nil {
+			return encodeErr
+		}
 		h.commitGold(actor, gold)
+	} else if encodeErr := (vsro188.JobOutcomeResponseCodec{}).AppendFailure(&response, request.Action); encodeErr != nil {
+		return encodeErr
 	}
 	return h.sendPacket(session, response)
 }
+
 func (h *Handler) jobPrevious(ctx context.Context, session *server.Session, packet network.Packet) error {
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
 	}
-	if packet.Remaining() != 4 {
-		return fmt.Errorf("invalid previous job info")
-	}
-	if _, err = packet.ReadUInt32(); err != nil {
+	if _, err = (vsro188.JobPreviousInfoRequestCodec{}).Decode(packet); err != nil {
 		return err
 	}
-	job, err := h.repo.Job(ctx, actor)
+	job, err := h.repo.JobPreviousInfo(ctx, actor)
 	response := operationPacket(opcode.JobPreviousInfoResponse, err)
 	if err == nil {
-		response.WriteByte(job.Type)
-		response.WriteByte(job.Level)
-		response.WriteUInt32(uint32(min(job.Experience, math.MaxUint32)))
-		response.WriteString(job.Alias)
+		if encodeErr := (vsro188.JobPreviousInfoResponseCodec{}).AppendSuccess(&response, vsro188.JobPreviousInfo{
+			Current:              jobProtocolState(job),
+			PreviousType:         job.PreviousType,
+			PreviousExperience:   uint32(min(job.PreviousExperience, math.MaxUint32)),
+			PreviousContribution: uint32(min(job.PreviousContribution, math.MaxUint32)),
+		}); encodeErr != nil {
+			return encodeErr
+		}
 	}
 	return h.sendPacket(session, response)
+}
+
+func jobProtocolState(job model.JobSnapshot) vsro188.JobState {
+	return vsro188.JobState{Type: job.Type, Level: job.Level, Experience: uint32(min(job.Experience, math.MaxUint32))}
 }
 func (h *Handler) commitGold(characterID int, gold uint64) {
 	player, err := h.world.GetPlayerByCharacterID(characterID)
@@ -1106,6 +1125,53 @@ func (h *Handler) commitGold(characterID int, gold uint64) {
 	player.Mutex.Lock()
 	player.Gold = gold
 	player.Mutex.Unlock()
+}
+
+func (h *Handler) commitJob(characterID int, job model.JobSnapshot) {
+	player, err := h.world.GetPlayerByCharacterID(characterID)
+	if err != nil || player == nil {
+		return
+	}
+	player.SetJob(model.PlayerJob{Type: job.Type, Level: job.Level, Experience: job.Experience, Alias: job.Alias})
+}
+
+func (h *Handler) clearJob(characterID int) {
+	player, err := h.world.GetPlayerByCharacterID(characterID)
+	if err != nil || player == nil {
+		return
+	}
+	player.SetJob(model.PlayerJob{})
+}
+
+func (h *Handler) commitJobAlias(characterID int, alias string) {
+	player, err := h.world.GetPlayerByCharacterID(characterID)
+	if err != nil || player == nil {
+		return
+	}
+	job := player.GetJob()
+	if !job.Active() {
+		return
+	}
+	job.Alias = alias
+	player.SetJob(job)
+}
+
+// PreparePlayer loads social state that is part of the player spawn contract.
+// GameReady calls it while the player is still staged and invisible.
+func (h *Handler) PreparePlayer(ctx context.Context, player *model.Player) error {
+	if player == nil || player.ID <= 0 {
+		return model.ErrSocialInvalidRequest
+	}
+	job, err := h.repo.Job(ctx, player.ID)
+	if errors.Is(err, model.ErrSocialNotFound) {
+		player.SetJob(model.PlayerJob{})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	player.SetJob(model.PlayerJob{Type: job.Type, Level: job.Level, Experience: job.Experience, Alias: job.Alias})
+	return nil
 }
 
 // Bootstrap sends the persistent social snapshots after the stock GameReady
@@ -1136,15 +1202,23 @@ func (h *Handler) Bootstrap(ctx context.Context, session *server.Session) error 
 	} else if !errors.Is(loadErr, model.ErrSocialNotFound) {
 		return loadErr
 	}
-	if job, loadErr := h.repo.Job(ctx, characterID); loadErr == nil {
-		p := network.EmptyPacket()
-		p.MessageID = opcode.JobUpdateExperience
-		p.WriteByte(job.Type)
-		p.WriteByte(job.Level)
-		p.WriteUInt32(uint32(min(job.Experience, math.MaxUint32)))
-		return h.sendPacket(session, p)
-	} else if !errors.Is(loadErr, model.ErrSocialNotFound) {
-		return loadErr
+	if player, loadErr := h.world.GetPlayerByCharacterID(characterID); loadErr == nil && player != nil && player.GetJob().Active() {
+		job := player.GetJob()
+		// GameReady's 0x3013 body already initializes the local player's job
+		// type and level. Replaying 0x30E6 during bootstrap races that object
+		// initialization; the stock client asserts at 0x00884E67 when the two
+		// types differ. Reserve 0x30E6 for later progression changes.
+		if job.Type == model.PlayerJobTrader && h.safeTrade != nil {
+			state, stateErr := h.safeTrade.State(ctx, characterID)
+			if stateErr != nil {
+				return stateErr
+			}
+			restore, encodeErr := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeRestoreUpdate(state, h.safeTradeLimit))
+			if encodeErr != nil {
+				return encodeErr
+			}
+			return h.sendPacket(session, restore)
+		}
 	}
 	return nil
 }

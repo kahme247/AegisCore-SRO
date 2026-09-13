@@ -148,6 +148,33 @@ func TestItemUseResponseMatchesExactVSRO188Parser(t *testing.T) {
 	}
 }
 
+func TestTalismanUsePublishesCommittedQuestCompletion(t *testing.T) {
+	original := model.RefItems
+	t.Cleanup(func() { model.RefItems = original })
+	ref := model.RefItem{RefObject: model.RefObject{ID: 33893, IsUseable: true, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 12, TypeID4: 5}}}
+	model.RefItems = map[uint32]model.RefItem{ref.ID: ref}
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	quest := model.CharacterQuest{QuestID: 910, Status: model.QuestRewardReady, AchievementCount: 1, ObjectiveKey: "SN_CON_TALISMAN", TaskCount: 1}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 7, Session: session, BaseStats: model.BaseStats{HP: 600, MP: 250}, Inventory: model.NewInventory(map[byte]model.Item{14: {SRObject: model.SRObject{RefObjectID: ref.ID}, StackSize: 1}})}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{
+		Inventory: player.Inventory, HP: 600, MP: 250, SourceSlot: 14, ItemType: model.InventoryItemType(ref),
+		CollectionThemeID: 1, CollectionSlotIndex: 1, CollectionThemeComplete: true,
+		CollectionQuestProgress: []model.QuestProgressResult{{Quest: quest, Changed: true}},
+	}}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	var sent []network.Packet
+	h.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(14)
+	request.WriteUInt16(model.InventoryItemType(ref))
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("use talisman: %v", err)
+	}
+	if len(sent) != 2 || sent[0].MessageID != opcode.InventoryItemUseResponse || sent[1].MessageID != opcode.QuestUpdate {
+		t.Fatalf("talisman packets = %+v", sent)
+	}
+}
+
 func TestDevilSpiritActivationUsesInventoryItem(t *testing.T) {
 	original := model.RefItems
 	model.RefItems = map[uint32]model.RefItem{24405: {

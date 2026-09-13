@@ -112,7 +112,7 @@ type inventoryRepositoryTestRows struct {
 }
 
 func (r *inventoryRepositoryTestRows) Columns() []string {
-	return []string{"SLOT", "FK_ITEM", "VARIANCE", "FK_REF_ITEM", "STACK_COUNT", "OPT_LEVEL", "DATA", "RENT_TYPE", "RENT_CAN_DELETE", "RENT_CAN_RECHARGE", "RENT_PERIOD_BEGIN_TIME", "RENT_PERIOD_END_TIME", "RENT_METER_RATE_TIME", "RENT_PACKING_TIME", "COS_REF_OBJECT_ID", "COS_KIND", "COS_STATE", "COS_NAME", "COS_LEVEL", "COS_RENT_ENDS_AT", "COS_INVENTORY_SLOT", "COS_HEALTH", "MAGIC_OPTIONS", "SOCKET_OPTIONS", "ADVANCED_ELIXIRS", "ASTRAL", "IMMORTAL", "STEADY"}
+	return []string{"SLOT", "FK_ITEM", "VARIANCE", "FK_REF_ITEM", "STACK_COUNT", "OPT_LEVEL", "DATA", "CREATOR_NAME", "RENT_TYPE", "RENT_CAN_DELETE", "RENT_CAN_RECHARGE", "RENT_PERIOD_BEGIN_TIME", "RENT_PERIOD_END_TIME", "RENT_METER_RATE_TIME", "RENT_PACKING_TIME", "COS_REF_OBJECT_ID", "COS_KIND", "COS_STATE", "COS_NAME", "COS_LEVEL", "COS_RENT_ENDS_AT", "COS_INVENTORY_SLOT", "COS_HEALTH", "MAGIC_OPTIONS", "SOCKET_OPTIONS", "ADVANCED_ELIXIRS", "ASTRAL", "IMMORTAL", "STEADY"}
 }
 
 func (*inventoryRepositoryTestRows) Close() error { return nil }
@@ -138,7 +138,7 @@ func cloneInventoryRepositoryRows(rows [][]driver.Value) [][]driver.Value {
 }
 
 func inventoryTestRow(values ...driver.Value) []driver.Value {
-	return append(values, int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), "", int64(0), nil, int64(0), int64(0), []byte("[]"), []byte("[]"), []byte("[]"), int64(0), int64(0), int64(0))
+	return append(values, "", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), "", int64(0), nil, int64(0), int64(0), []byte("[]"), []byte("[]"), []byte("[]"), int64(0), int64(0), int64(0))
 }
 
 func openInventoryRepositoryTestDB(t *testing.T, store *inventoryRepositoryTestStore) *sql.DB {
@@ -249,10 +249,10 @@ func TestSQLInventoryRepositoryPreservesPersistedInactiveCOSState(t *testing.T) 
 	row := inventoryTestRow(int64(15), int64(133), int64(0), int64(9279), int64(1), int64(0), int64(2))
 	row[14] = int64(9384)
 	row[15] = int64(COSGrowthPet)
-	row[16] = int64(COSItemInactive)
-	row[18] = int64(1)
-	row[20] = int64(15)
-	row[21] = int64(360)
+	row[17] = int64(COSItemInactive)
+	row[19] = int64(1)
+	row[21] = int64(15)
+	row[22] = int64(360)
 	repository, _ := newInventoryRepositoryForTest(t, &inventoryRepositoryTestStore{queryRows: [][]driver.Value{row}})
 
 	inventory, err := repository.GetCharacterInventory(context.Background(), 7)

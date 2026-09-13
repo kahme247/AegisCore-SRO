@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
@@ -21,14 +22,24 @@ type PartyHandler struct {
 	invitationFallback interface {
 		AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
 	}
+	instanceExit interface {
+		SubmitPartyQuestInstanceExit(context.Context, *model.Player) error
+	}
 }
 
-func RegisterPartyHandlers(target *server.Server, fallback ...interface {
-	AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
-}) {
+func RegisterPartyHandlers(target *server.Server, dependencies ...any) {
 	handler := &PartyHandler{service: service.GetPartyServiceInstance()}
-	if len(fallback) > 0 {
-		handler.invitationFallback = fallback[0]
+	for _, dependency := range dependencies {
+		if fallback, ok := dependency.(interface {
+			AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
+		}); ok {
+			handler.invitationFallback = fallback
+		}
+		if exit, ok := dependency.(interface {
+			SubmitPartyQuestInstanceExit(context.Context, *model.Player) error
+		}); ok {
+			handler.instanceExit = exit
+		}
 	}
 	target.RegisterHandler(opcode.PartyCreateRequest, handler.handleCreateInvite)
 	target.RegisterHandler(opcode.PartyLeaveRequest, handler.handleLeave)

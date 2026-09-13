@@ -1,13 +1,16 @@
 package character
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/questwire"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -27,7 +30,19 @@ type NPCTalkHandler struct {
 	repository model.CharacterQuestRepository
 	runtime    model.QuestRuntimeRepository
 	offers     model.QuestOfferRepository
-	send       func(*server.Session, network.Packet) error
+	countdowns *QuestCountdownService
+	dayLimits  *QuestDayLimitService
+	quotations interface {
+		Prices(context.Context, uint32) (map[uint32]uint32, error)
+	}
+	safeTrade        model.SafeTradeRepository
+	safeTradeOption  byte
+	safeTradeLimit   byte
+	send             func(*server.Session, network.Packet) error
+	instanceEntries  *service.QuestInstanceEntryService
+	instanceTeleport interface {
+		SubmitQuestInstanceEntry(model.QuestInstance, []*model.Player) error
+	}
 }
 
 // npcTalkActionConversation is the stock menu's "Talk to this person"
@@ -37,6 +52,14 @@ type NPCTalkHandler struct {
 const npcTalkActionConversation = byte(2)
 
 const questTalkNoticeChoice = "SN_TALK_COMMON_OK"
+
+func safeTradeAdmissionUpdate(admission model.SafeTradeAdmission, limit byte) vsro188.SafeTradeUpdate {
+	update := vsro188.SafeTradeUpdate{Code: admission.Code}
+	if admission.Code == vsro188.JobSafeTradeCodeProgress {
+		update.Active, update.Current, update.Limit = true, admission.State.AbleCount, limit
+	}
+	return update
+}
 
 const (
 	chulsanRefObjectID    = uint32(2003)
@@ -61,32 +84,57 @@ var chulsanQuests = []chulsanQuestDefinition{
 }
 
 func NewNPCTalkHandler(world selectEntityWorld, repositories ...model.CharacterQuestRepository) *NPCTalkHandler {
-	handler := &NPCTalkHandler{world: world}
+	handler := &NPCTalkHandler{world: world, dayLimits: NewQuestDayLimitService(manager.GetGameTimeManagerInstance().CurrentWorldTime)}
 	if len(repositories) != 0 {
 		handler.repository = repositories[0]
 	}
 	return handler
 }
 
-func RegisterNPCTalkHandler(target *server.Server, repository model.CharacterQuestRepository, runtime model.QuestRuntimeRepository, offers model.QuestOfferRepository) error {
+func (h *NPCTalkHandler) ConfigureQuotations(repository interface {
+	Prices(context.Context, uint32) (map[uint32]uint32, error)
+}) {
+	if h != nil {
+		h.quotations = repository
+	}
+}
+
+func RegisterNPCTalkHandler(target *server.Server, repository model.CharacterQuestRepository, runtime model.QuestRuntimeRepository, offers model.QuestOfferRepository, safeTrade model.SafeTradeRepository, safeTradeOption, safeTradeLimit byte, countdowns ...*QuestCountdownService) (*NPCTalkHandler, error) {
 	if target == nil {
-		return fmt.Errorf("NPC talk server is required")
+		return nil, fmt.Errorf("NPC talk server is required")
 	}
 	if repository == nil {
-		return model.ErrCharacterQuestRepositoryUnavailable
+		return nil, model.ErrCharacterQuestRepositoryUnavailable
 	}
 	handler := NewNPCTalkHandler(service.GetWorldServiceInstance(), repository)
 	if runtime == nil {
-		return model.ErrQuestRuntimeUnavailable
+		return nil, model.ErrQuestRuntimeUnavailable
 	}
 	if offers == nil {
-		return model.ErrQuestOfferRepositoryUnavailable
+		return nil, model.ErrQuestOfferRepositoryUnavailable
 	}
 	handler.runtime = runtime
 	handler.offers = offers
+	if len(countdowns) != 0 {
+		handler.countdowns = countdowns[0]
+	}
+	if safeTrade != nil {
+		handler.ConfigureQuotations(safeTrade)
+		handler.safeTrade = safeTrade
+		handler.safeTradeOption = safeTradeOption
+		handler.safeTradeLimit = safeTradeLimit
+	}
 	target.RegisterHandler(opcode.EntityTalkRequest, handler.handlePacket)
 	target.RegisterHandler(opcode.QuestTalk, handler.handleQuestTalkPacket)
-	return nil
+	return handler, nil
+}
+
+func (h *NPCTalkHandler) ConfigureQuestInstanceEntry(entries *service.QuestInstanceEntryService, teleport interface {
+	SubmitQuestInstanceEntry(model.QuestInstance, []*model.Player) error
+}) {
+	if h != nil {
+		h.instanceEntries, h.instanceTeleport = entries, teleport
+	}
 }
 
 func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -158,12 +206,41 @@ func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Sessi
 	if err := h.sendPacket(session, buildNPCTalkResponse(action)); err != nil {
 		return err
 	}
+	if isNormalNPC {
+		specialMerchant, priceErr := h.publishJobPrices(ctx, session, object.GetRefObjectID())
+		if priceErr != nil {
+			return priceErr
+		}
+		if specialMerchant && player.GetJob().Type == model.PlayerJobTrader && h.safeTrade != nil {
+			admission, admitErr := h.safeTrade.Admit(ctx, player.ID, h.safeTradeOption, h.safeTradeLimit)
+			if admitErr != nil {
+				return admitErr
+			}
+			status, encodeErr := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeAdmissionUpdate(admission, h.safeTradeLimit))
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if err := h.sendPacket(session, status); err != nil {
+				return err
+			}
+		}
+	}
 	if action == npcTalkActionConversation {
+		if handled, instanceErr := h.handleQuestInstanceDialogue(session, player, object.GetName()); handled || instanceErr != nil {
+			return instanceErr
+		}
 		delivered, deliveryErr := h.handleStandardDeliveries(ctx, session, player, object.GetRefObjectID())
 		if deliveryErr != nil {
 			return deliveryErr
 		}
 		if delivered {
+			return nil
+		}
+		dialog, dialogErr := h.handleDialogObjectives(ctx, session, player, object.GetRefObjectID())
+		if dialogErr != nil {
+			return dialogErr
+		}
+		if dialog {
 			return nil
 		}
 	}
@@ -192,8 +269,17 @@ func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Sessi
 		if offerErr != nil {
 			return offerErr
 		}
+		offers = h.availableDayLimitOffers(offers)
 		if len(offers) == 0 {
-			return nil
+			// npcchat.txt associates the ordinary conversation action with the
+			// NPC's _QS speech key. Without this packet B046 acknowledges action
+			// 2, but the client has no dialogue body to display and the button
+			// appears inert whenever the NPC has no currently available quest.
+			greeting, buildErr := buildQuestTalkPacket(2, npcQuestSpeechKey(object.GetName()), nil)
+			if buildErr != nil {
+				return buildErr
+			}
+			return h.sendPacket(session, greeting)
 		}
 		entries := make([]string, len(offers))
 		questIDs := make([]int, len(offers))
@@ -213,18 +299,119 @@ func (h *NPCTalkHandler) handlePacket(ctx context.Context, session *server.Sessi
 	return nil
 }
 
+func npcQuestSpeechKey(codeName string) string {
+	return "SN_" + strings.ToUpper(strings.TrimSpace(codeName)) + "_QS"
+}
+
+func (h *NPCTalkHandler) handleQuestInstanceDialogue(session *server.Session, player *model.Player, npcCodeName string) (bool, error) {
+	if h == nil || h.instanceEntries == nil || h.instanceTeleport == nil || session == nil || player == nil {
+		return false, nil
+	}
+	questID, promptKey, choices := 0, "", []string(nil)
+	switch {
+	case strings.EqualFold(npcCodeName, "NPC_RM_SLAVE2") && service.QuestInstanceEligible(player, 141):
+		questID, promptKey = 141, "SN_TALK_QNO_RM_OLDWOMAN_6_07"
+		choices = []string{"SN_TALK_QNO_RM_OLDWOMAN_6_28", "SN_TALK_COMMON_DENY"}
+	case strings.EqualFold(npcCodeName, "NPC_CH_MOONSHADOW") && service.QuestInstanceEligible(player, 311):
+		questID, promptKey = 311, "SN_TALK_QNO_TQ_BAEKRYEONG_17_24"
+		choices = []string{"SN_TALK_QNO_TQ_BAEKRYEONG_17_23"}
+	default:
+		return false, nil
+	}
+	if !npcInteractions.SetInstanceEntry(player.GetUniqueID(), questID) {
+		return true, nil
+	}
+	prompt, err := buildQuestTalkPacket(questTalkExtendedTypeMin, promptKey, choices)
+	if err != nil {
+		return true, err
+	}
+	return true, h.sendPacket(session, prompt)
+}
+
+func (h *NPCTalkHandler) handleDialogObjectives(ctx context.Context, session *server.Session, player *model.Player, npcRefObjectID uint32) (bool, error) {
+	if h == nil || h.runtime == nil || session == nil || player == nil || npcRefObjectID == 0 {
+		return false, nil
+	}
+	prompts, err := h.runtime.ListDialogsAtNPC(ctx, player.ID, npcRefObjectID)
+	if err != nil {
+		return false, err
+	}
+	if len(prompts) == 0 {
+		return false, nil
+	}
+	if !npcInteractions.SetDialogs(player.GetUniqueID(), prompts) {
+		return false, nil
+	}
+	entries := make([]string, len(prompts))
+	for index, prompt := range prompts {
+		entries[index] = prompt.DialogueKey
+	}
+	menu, err := buildQuestTalkPacket(questTalkExtendedTypeMin, "", entries)
+	if err != nil {
+		return false, err
+	}
+	return true, h.sendPacket(session, menu)
+}
+
+func (h *NPCTalkHandler) publishJobPrices(ctx context.Context, session *server.Session, npcRefObjectID uint32) (bool, error) {
+	if h == nil || h.quotations == nil || npcRefObjectID == 0 {
+		return false, nil
+	}
+	prices, err := h.quotations.Prices(ctx, npcRefObjectID)
+	if err != nil {
+		return false, err
+	}
+	if len(prices) == 0 {
+		return false, nil
+	}
+	entries := make([]vsro188.JobPrice, 0, len(prices))
+	for refItemID, price := range prices {
+		entries = append(entries, vsro188.JobPrice{RefItemID: refItemID, Price: price})
+	}
+	slices.SortFunc(entries, func(left, right vsro188.JobPrice) int {
+		return cmp.Compare(left.RefItemID, right.RefItemID)
+	})
+	packet, err := (vsro188.JobPriceUpdateCodec{}).Encode(entries)
+	if err != nil {
+		return false, err
+	}
+	return true, h.sendPacket(session, packet)
+}
+
 func (h *NPCTalkHandler) handleStandardDeliveries(ctx context.Context, session *server.Session, player *model.Player, npcRefObjectID uint32) (bool, error) {
 	if h == nil || h.runtime == nil || player == nil || npcRefObjectID == 0 {
 		return false, nil
 	}
-	player.LockEconomy()
-	defer player.UnlockEconomy()
-	batch, err := h.runtime.DeliverItemsAtNPC(ctx, player.ID, npcRefObjectID)
+	prompts, err := h.runtime.ListDeliveriesAtNPC(ctx, player.ID, npcRefObjectID)
 	if err != nil {
 		return false, err
 	}
-	if len(batch.Results) == 0 {
+	if len(prompts) == 0 {
 		return false, nil
+	}
+	if !npcInteractions.SetDeliveries(player.GetUniqueID(), prompts) {
+		return false, nil
+	}
+	entries := make([]string, len(prompts))
+	for index, prompt := range prompts {
+		entries[index] = prompt.DialogueKey
+	}
+	menu, err := buildQuestTalkPacket(questTalkExtendedTypeMin, "", entries)
+	if err != nil {
+		return false, err
+	}
+	return true, h.sendPacket(session, menu)
+}
+
+func (h *NPCTalkHandler) completeStandardDelivery(ctx context.Context, session *server.Session, player *model.Player, questID int, npcRefObjectID uint32) error {
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	batch, err := h.runtime.DeliverItemsAtNPC(ctx, player.ID, questID, npcRefObjectID)
+	if err != nil {
+		return err
+	}
+	if len(batch.Results) != 1 {
+		return model.ErrQuestStateConflict
 	}
 	player.CommitInventory(batch.Inventory)
 	for _, result := range batch.Results {
@@ -232,31 +419,31 @@ func (h *NPCTalkHandler) handleStandardDeliveries(ctx context.Context, session *
 	}
 	for _, slot := range batch.ChangedSlots {
 		if err = h.sendPacket(session, buildQuestItemRemoved(slot)); err != nil {
-			return true, err
+			return err
 		}
 		if item, exists := batch.Inventory.Items[slot]; exists {
 			if err = h.sendPacket(session, buildQuestItemAdded(model.QuestItemMutation{Slot: slot, Item: item})); err != nil {
-				return true, err
+				return err
 			}
 		}
 	}
 	for _, result := range batch.Results {
 		update, buildErr := buildQuestStatePacket(result.Quest)
 		if buildErr != nil {
-			return true, buildErr
+			return buildErr
 		}
 		if err = h.sendPacket(session, update); err != nil {
-			return true, err
+			return err
 		}
 	}
 	for _, result := range batch.Results {
 		if result.DialogueKey != "" {
 			if err = h.sendQuestNotice(session, result.DialogueKey); err != nil {
-				return true, err
+				return err
 			}
 		}
 	}
-	return true, nil
+	return nil
 }
 
 func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -278,6 +465,118 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *ser
 		return nil
 	}
 	logrus.Infof("quest trace selection characterID=%d playerUID=%d selector=%d pendingQuestID=%d", session.UserContext.CharacterID, session.UserContext.UniqueID, selector, interaction.PendingQuestID)
+	if interaction.PendingInstanceQuestID != 0 {
+		if selector != questListSelectorBase || h.instanceEntries == nil || h.instanceTeleport == nil {
+			npcInteractions.Clear(session.UserContext.UniqueID)
+			return nil
+		}
+		world := h.world
+		if world == nil {
+			world = service.GetWorldServiceInstance()
+		}
+		player, playerErr := resolveSelectingPlayer(world, session)
+		if playerErr != nil {
+			return playerErr
+		}
+		if err = validateNPCSelection(world, player, interaction.NPCUniqueID); err != nil {
+			return nil
+		}
+		prepared, prepareErr := h.instanceEntries.Prepare(ctx, player, interaction.PendingInstanceQuestID)
+		if prepareErr != nil {
+			return nil
+		}
+		if err = h.instanceTeleport.SubmitQuestInstanceEntry(prepared.Instance, prepared.Members); err != nil {
+			_ = h.instanceEntries.Abort(ctx, prepared)
+			return err
+		}
+		npcInteractions.Clear(session.UserContext.UniqueID)
+		return nil
+	}
+	if interaction.PendingDeliveryQuestID != 0 {
+		if selector != questListSelectorBase || h.runtime == nil {
+			return nil
+		}
+		world := h.world
+		if world == nil {
+			world = service.GetWorldServiceInstance()
+		}
+		player, playerErr := resolveSelectingPlayer(world, session)
+		if playerErr != nil {
+			return playerErr
+		}
+		if err = validateNPCSelection(world, player, interaction.NPCUniqueID); err != nil {
+			return nil
+		}
+		err = h.completeStandardDelivery(ctx, session, player, interaction.PendingDeliveryQuestID, interaction.NPCRefObjectID)
+		if errors.Is(err, model.ErrQuestStateConflict) {
+			npcInteractions.ClearSelectedDelivery(session.UserContext.UniqueID)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		npcInteractions.ClearSelectedDelivery(session.UserContext.UniqueID)
+		return nil
+	}
+	if len(interaction.DeliveryQuestIDs) != 0 {
+		index := int(selector - questListSelectorBase)
+		if selector < questListSelectorBase || index >= len(interaction.DeliveryQuestIDs) || index >= len(interaction.DeliveryKeys) {
+			return nil
+		}
+		if !npcInteractions.SelectDelivery(session.UserContext.UniqueID, interaction.DeliveryQuestIDs[index]) {
+			return nil
+		}
+		prompt, buildErr := buildQuestTalkPacket(questTalkExtendedTypeMin, interaction.DeliveryKeys[index], []string{questTalkNoticeChoice})
+		if buildErr != nil {
+			return buildErr
+		}
+		return h.sendPacket(session, prompt)
+	}
+	if interaction.PendingDialogQuestID != 0 {
+		if selector != questListSelectorBase || h.runtime == nil {
+			return nil
+		}
+		progress, completeErr := h.runtime.CompleteDialog(ctx, session.UserContext.CharacterID, interaction.PendingDialogQuestID, interaction.NPCRefObjectID)
+		if completeErr != nil {
+			if errors.Is(completeErr, model.ErrQuestStateConflict) {
+				npcInteractions.ClearSelectedDialog(session.UserContext.UniqueID)
+				return nil
+			}
+			return completeErr
+		}
+		world := h.world
+		if world == nil {
+			world = service.GetWorldServiceInstance()
+		}
+		player, playerErr := resolveSelectingPlayer(world, session)
+		if playerErr != nil {
+			return playerErr
+		}
+		player.CommitQuestMutation(progress.Quest)
+		update, buildErr := buildQuestStatePacket(progress.Quest)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err := h.sendPacket(session, update); err != nil {
+			return err
+		}
+		npcInteractions.ClearSelectedDialog(session.UserContext.UniqueID)
+		return h.sendQuestNotice(session, questTalkNoticeChoice)
+	}
+	if len(interaction.DialogQuestIDs) != 0 {
+		index := int(selector - questListSelectorBase)
+		if selector < questListSelectorBase || index >= len(interaction.DialogQuestIDs) || index >= len(interaction.DialogKeys) {
+			return nil
+		}
+		if !npcInteractions.SelectDialog(session.UserContext.UniqueID, interaction.DialogQuestIDs[index]) {
+			return nil
+		}
+		prompt, buildErr := buildQuestTalkPacket(questTalkExtendedTypeMin, interaction.DialogKeys[index], []string{questTalkNoticeChoice})
+		if buildErr != nil {
+			return buildErr
+		}
+		return h.sendPacket(session, prompt)
+	}
 	if interaction.PendingQuestID != 0 {
 		offer, exists, offerErr := h.availableOffer(ctx, session.UserContext.CharacterID, interaction.NPCRefObjectID, interaction.PendingQuestID)
 		if offerErr != nil {
@@ -405,10 +704,24 @@ func (h *NPCTalkHandler) handleOfferSelection(ctx context.Context, session *serv
 		return nil
 	}
 	logrus.Infof("quest trace activating characterID=%d questID=%d", session.UserContext.CharacterID, quest.questID)
-	activated, err := h.repository.Activate(ctx, session.UserContext.CharacterID, model.CharacterQuest{
-		QuestID: quest.questID, Status: model.QuestActive, AchievementCount: 1,
-		ObjectiveKey: offer.ObjectiveKey, TaskCount: offer.TaskCount,
-	})
+	achievementCount := uint16(0)
+	if existing, exists := playerQuest(player, quest.questID); exists {
+		achievementCount = existing.AchievementCount
+	}
+	var objectiveKeys [4]string
+	copy(objectiveKeys[:], offer.ObjectiveKeys)
+	activate := func() (model.CharacterQuest, error) {
+		status := model.QuestActive
+		if offer.InstantReady {
+			status = model.QuestRewardReady
+		}
+		return h.repository.Activate(ctx, session.UserContext.CharacterID, model.CharacterQuest{
+			QuestID: quest.questID, Status: status, AchievementCount: achievementCount,
+			QuestCodeName: offer.CodeName, ObjectiveKey: offer.ObjectiveKey, ObjectiveKeys: objectiveKeys, TaskCount: offer.TaskCount,
+			TimerDuration: offer.TimerDuration, SharedProgress: offer.SharedProgress,
+		})
+	}
+	activated, err := h.dayLimits.WithActivation(offer, activate)
 	if errors.Is(err, model.ErrCharacterQuestNotAvailable) {
 		logrus.Infof("quest trace activation unavailable characterID=%d questID=%d", session.UserContext.CharacterID, quest.questID)
 		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
@@ -426,6 +739,11 @@ func (h *NPCTalkHandler) handleOfferSelection(ctx context.Context, session *serv
 	}
 	if err := h.sendPacket(session, added); err != nil {
 		return err
+	}
+	if h.countdowns != nil && activated.TimerDuration != 0 {
+		if err := h.countdowns.Start(ctx, session, player, activated); err != nil {
+			return err
+		}
 	}
 	return h.sendQuestNotice(session, quest.acceptedKey)
 }
@@ -452,11 +770,24 @@ func (h *NPCTalkHandler) availableOffer(ctx context.Context, characterID int, np
 		return model.QuestOffer{}, false, err
 	}
 	for _, offer := range offers {
-		if offer.QuestID == questID {
+		if offer.QuestID == questID && (h.dayLimits == nil || h.dayLimits.Available(offer)) {
 			return offer, true, nil
 		}
 	}
 	return model.QuestOffer{}, false, nil
+}
+
+func (h *NPCTalkHandler) availableDayLimitOffers(offers []model.QuestOffer) []model.QuestOffer {
+	if h == nil || h.dayLimits == nil {
+		return offers
+	}
+	available := offers[:0]
+	for _, offer := range offers {
+		if h.dayLimits.Available(offer) {
+			available = append(available, offer)
+		}
+	}
+	return available
 }
 
 func questDefinitionForOffer(offer model.QuestOffer) chulsanQuestDefinition {
@@ -551,6 +882,23 @@ func (h *NPCTalkHandler) publishQuestCompletion(session *server.Session, player 
 			return err
 		}
 	}
+	addedBySlot := make(map[byte]struct{}, len(result.AddedItems))
+	for _, added := range result.AddedItems {
+		addedBySlot[added.Slot] = struct{}{}
+	}
+	for _, slot := range result.ChangedSlots {
+		if err := h.sendPacket(session, buildQuestItemRemoved(slot)); err != nil {
+			return err
+		}
+		if _, replaced := addedBySlot[slot]; replaced {
+			continue
+		}
+		if item, exists := result.Inventory.Items[slot]; exists {
+			if err := h.sendPacket(session, buildQuestItemAdded(model.QuestItemMutation{Slot: slot, Item: item})); err != nil {
+				return err
+			}
+		}
+	}
 	for _, added := range result.AddedItems {
 		if err := h.sendPacket(session, buildQuestItemAdded(added)); err != nil {
 			return err
@@ -563,6 +911,21 @@ func (h *NPCTalkHandler) publishQuestCompletion(session *server.Session, player 
 	}
 	if err := h.sendPacket(session, buildExperienceUpdate(sourceUID, result.Experience, result.SkillExp, result.Progress)); err != nil {
 		return err
+	}
+	if result.FixedSkillPoints != 0 {
+		if err := h.sendPacket(session, buildSkillPointBalance(uint32(result.Progress.SkillPoints))); err != nil {
+			return err
+		}
+	}
+	if result.InventoryExpanded {
+		if err := h.sendPacket(session, vsro188.BuildInventorySizeUpdate(vsro188.InventorySizeUpdate{FirstByte: 1, SecondByte: result.InventorySize})); err != nil {
+			return err
+		}
+	}
+	if result.HwanChanged {
+		if err := h.sendPacket(session, model.BuildHwanLevelUpdatePacket(player.GetUniqueID(), result.HwanLevel)); err != nil {
+			return err
+		}
 	}
 	if result.Progress.LevelsGained > 0 {
 		stats := player.BuildStatsUpdatePacket()

@@ -2,12 +2,33 @@ package manager
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/g3n/engine/math32"
 )
+
+func TestQuestSpawnOffsetUsesRecoveredPolarRadius(t *testing.T) {
+	tests := []struct {
+		angle, distance float64
+		wantX, wantZ    float32
+	}{
+		{angle: 0, distance: 1, wantX: 20, wantZ: 0},
+		{angle: 0.25, distance: 0.5, wantX: 0, wantZ: 10},
+		{angle: 0.5, distance: 1, wantX: -20, wantZ: 0},
+	}
+	for _, test := range tests {
+		x, z := questSpawnOffset(20, test.angle, test.distance)
+		if math.Abs(float64(x-test.wantX)) > 0.0001 || math.Abs(float64(z-test.wantZ)) > 0.0001 {
+			t.Fatalf("offset(%v,%v) = (%v,%v), want (%v,%v)", test.angle, test.distance, x, z, test.wantX, test.wantZ)
+		}
+		if math.Hypot(float64(x), float64(z)) > 20.0001 {
+			t.Fatalf("offset radius exceeds 20: (%v,%v)", x, z)
+		}
+	}
+}
 
 type respawnPositionWorldFake struct {
 	resolve func(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)

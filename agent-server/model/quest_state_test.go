@@ -20,6 +20,7 @@ func TestTransitionQuestConfirmedMatrix(t *testing.T) {
 		{"active reward ready", QuestActive, QuestTransitionRewardReady, QuestRewardReady},
 		{"progressed reward ready", QuestProgressed, QuestTransitionRewardReady, QuestRewardReady},
 		{"close", QuestRewardReady, QuestTransitionClose, QuestClosed},
+		{"achieve", QuestRewardReady, QuestTransitionAchieve, QuestInactive},
 		{"abort active", QuestActive, QuestTransitionAbort, QuestAborted},
 		{"abort progressed", QuestProgressed, QuestTransitionAbort, QuestAborted},
 		{"abort reward ready", QuestRewardReady, QuestTransitionAbort, QuestAborted},
@@ -34,6 +35,26 @@ func TestTransitionQuestConfirmedMatrix(t *testing.T) {
 	}
 }
 
+func TestCommitQuestAbandonRemovesLiveInventorySlotsAndMarksQuest(t *testing.T) {
+	player := &Player{
+		Inventory: NewInventory(map[byte]Item{14: {ID: 140}, 19: {ID: 190}, 20: {ID: 200}}),
+		Quests:    []CharacterQuest{{QuestID: 101, Status: QuestProgressed}, {QuestID: 102, Status: QuestActive}},
+	}
+	player.CommitQuestAbandon(101, QuestAbandonResult{RemovedSlots: []byte{14, 19}})
+	if _, exists := player.Inventory.Items[14]; exists {
+		t.Fatal("removed quest item remains in slot 14")
+	}
+	if _, exists := player.Inventory.Items[19]; exists {
+		t.Fatal("removed quest item remains in slot 19")
+	}
+	if _, exists := player.Inventory.Items[20]; !exists {
+		t.Fatal("unrelated inventory slot was removed")
+	}
+	if player.Quests[0].Status != QuestAborted || player.Quests[1].Status != QuestActive {
+		t.Fatalf("quest snapshot = %#v", player.Quests)
+	}
+}
+
 func TestTransitionQuestRejectsEveryUnconfirmedEdge(t *testing.T) {
 	allowed := map[[2]byte]struct{}{
 		{byte(QuestInactive), byte(QuestTransitionActivate)}:      {},
@@ -43,6 +64,7 @@ func TestTransitionQuestRejectsEveryUnconfirmedEdge(t *testing.T) {
 		{byte(QuestActive), byte(QuestTransitionRewardReady)}:     {},
 		{byte(QuestProgressed), byte(QuestTransitionRewardReady)}: {},
 		{byte(QuestRewardReady), byte(QuestTransitionClose)}:      {},
+		{byte(QuestRewardReady), byte(QuestTransitionAchieve)}:    {},
 		{byte(QuestActive), byte(QuestTransitionAbort)}:           {},
 		{byte(QuestProgressed), byte(QuestTransitionAbort)}:       {},
 		{byte(QuestRewardReady), byte(QuestTransitionAbort)}:      {},
@@ -65,6 +87,7 @@ func TestQuestTransitionSourcesAreExact(t *testing.T) {
 		QuestTransitionProgress:    {QuestActive, QuestProgressed},
 		QuestTransitionRewardReady: {QuestActive, QuestProgressed},
 		QuestTransitionClose:       {QuestRewardReady},
+		QuestTransitionAchieve:     {QuestRewardReady},
 		QuestTransitionAbort:       {QuestActive, QuestProgressed, QuestRewardReady},
 	}
 	for transition, statuses := range want {

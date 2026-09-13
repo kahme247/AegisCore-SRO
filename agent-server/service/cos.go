@@ -11,7 +11,10 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/g3n/engine/math32"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -104,6 +107,9 @@ type COSService struct {
 		Current() model.COSPolicySnapshot
 	}
 	groundItemLifecycle interface{ Cancel(*model.Item) }
+	cargoGround         interface {
+		Spawn(*model.Item, uint32) error
+	}
 }
 
 func NewCOSService(repository model.COSRepository, world COSWorld) *COSService {
@@ -155,6 +161,17 @@ func (s *COSService) ConfigureGroundItemLifecycle(lifecycle interface{ Cancel(*m
 	}
 	s.mu.Lock()
 	s.groundItemLifecycle = lifecycle
+	s.mu.Unlock()
+}
+
+func (s *COSService) ConfigureCargoGroundItems(ground interface {
+	Spawn(*model.Item, uint32) error
+}) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.cargoGround = ground
 	s.mu.Unlock()
 }
 
@@ -321,6 +338,19 @@ func (s *COSService) ResolveMountedTransport(owner *model.Player) (*model.COS, b
 	return transport, true
 }
 
+func (s *COSService) ResolveActiveOwned(owner *model.Player, kind model.COSKind) (*model.COS, bool) {
+	if s == nil || owner == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	candidate := s.byOwnerKind[owner.ID][kind]
+	if candidate == nil || candidate.OwnerUniqueID != owner.GetUniqueID() {
+		return nil, false
+	}
+	return candidate, true
+}
+
 func (s *COSService) ResolveActivePersistentTarget(owner *model.Player, kind model.COSKind) (uint64, bool) {
 	if s == nil || owner == nil {
 		return 0, false
@@ -448,6 +478,18 @@ func (s *COSService) MarkDead(ctx context.Context, owner *model.Player, uid uint
 	if !pet.MarkDead() {
 		return model.ErrItemUseInvalidRequest
 	}
+	destroyed, releaseErr := s.releaseJobTransportCargo(ctx, pet)
+	if releaseErr != nil && !destroyed {
+		return releaseErr
+	}
+	if destroyed {
+		owner.SetCOSItemState(pet.InventorySlot, pet, model.COSItemDead)
+		state := model.BuildCOSItemStateUpdate(pet.InventorySlot, model.COSItemDead)
+		owner.SendToSelf(&state)
+		s.detachRuntime(owner, pet, model.COSItemDead)
+		owner.ClearCOSItem(pet.InventorySlot, pet)
+		return releaseErr
+	}
 	record := model.COSRecordFromSnapshot(pet.Snapshot())
 	record.State = model.COSItemDead
 	if err = s.repository.Save(ctx, record); err != nil {
@@ -457,6 +499,39 @@ func (s *COSService) MarkDead(ctx context.Context, owner *model.Player, uid uint
 	state := model.BuildCOSItemStateUpdate(pet.InventorySlot, model.COSItemDead)
 	owner.SendToSelf(&state)
 	return nil
+}
+
+func (s *COSService) releaseJobTransportCargo(ctx context.Context, pet *model.COS) (bool, error) {
+	if s == nil || pet == nil || pet.Kind != model.COSJobTransport || pet.PersistentID == 0 {
+		return false, nil
+	}
+	repository, ok := s.repository.(model.COSCargoLossRepository)
+	if !ok {
+		return false, model.ErrCOSRepositoryUnavailable
+	}
+	s.mu.Lock()
+	ground := s.cargoGround
+	s.mu.Unlock()
+	if ground == nil {
+		return false, ErrGroundItemWorldUnavailable
+	}
+	items, err := repository.DestroyJobTransport(ctx, pet.OwnerCharID, pet.PersistentID)
+	if err != nil {
+		return false, err
+	}
+	position := pet.GetNavmeshPosition()
+	for index := range items {
+		item := &items[index]
+		item.SetNavmeshPosition(position)
+		if item.CreatorName != "" {
+			item.OwnerUniqueID = 0
+		}
+		if err = ground.Spawn(item, 0); err != nil {
+			return true, err
+		}
+	}
+	pet.ReplaceInventory(model.NewInventory(nil))
+	return true, nil
 }
 
 func (s *COSService) Owned(owner *model.Player, uid uint32) (*model.COS, error) {
@@ -1196,22 +1271,45 @@ func (s *COSService) applyGrowthPetRetaliation(owner *model.Player, pet *model.C
 	vitals := model.BuildVitalsUpdatePacket(pet.GetUniqueID(), int(pet.Snapshot().Health), 0)
 	owner.SendToSelfAndKnown(&vitals)
 	recordSnapshot := model.COSRecordFromSnapshot(pet.Snapshot())
+	destroyed := false
 	if killed {
+		var releaseErr error
+		destroyed, releaseErr = s.releaseJobTransportCargo(context.Background(), pet)
+		if releaseErr != nil {
+			logrus.WithError(releaseErr).WithField("cos_id", pet.PersistentID).Error("failed to release dead job-transport cargo")
+		}
 		recordSnapshot.State = model.COSItemDead
 		owner.SetCOSItemState(pet.InventorySlot, pet, model.COSItemDead)
 		itemState := model.BuildCOSItemStateUpdate(pet.InventorySlot, model.COSItemDead)
 		owner.SendToSelf(&itemState)
+		if owner.COSState.Snapshot().TransportUniqueID == pet.GetUniqueID() {
+			// The lethal COS packets do not release the client's mounted owner
+			// controller by themselves. Publish the stock unmount transition
+			// before removing the dead transport from the world.
+			unmount := network.EmptyPacket()
+			unmount.MessageID = opcode.COSUpdateMountStateResponse
+			unmount.WriteByte(1)
+			unmount.WriteUInt32(owner.GetUniqueID())
+			unmount.WriteBool(false)
+			unmount.WriteUInt32(pet.GetUniqueID())
+			owner.SendToSelfAndKnown(&unmount)
+		}
 		life := model.BuildLifeStateUpdatePacket(pet.GetUniqueID(), model.Dead)
 		owner.SendToSelfAndKnown(&life)
 		attacker.ClearAggroTarget(pet.GetUniqueID())
 		_ = s.ClearAttackTarget(owner, pet.GetUniqueID())
 	}
-	_ = s.repository.Save(context.Background(), recordSnapshot)
+	if !destroyed {
+		_ = s.repository.Save(context.Background(), recordSnapshot)
+	}
 	if killed {
 		// A dead growth COS must leave the active world registry. Keeping its
 		// corpse as the owner's active companion leaves the v188 client action
 		// controller bound to a dead target and can lock owner movement/attacks.
 		s.detachRuntime(owner, pet, model.COSItemDead)
+		if destroyed {
+			owner.ClearCOSItem(pet.InventorySlot, pet)
+		}
 	}
 }
 

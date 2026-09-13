@@ -6,9 +6,25 @@ import (
 	"database/sql/driver"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestCharacterQuestHydrationIncludesEveryEnabledObjectiveFamily(t *testing.T) {
+	for _, required := range []string{
+		"REF_QUEST_COLLECTION_ITEM_OBJECTIVE collection",
+		"REF_QUEST_EXTENDED_KILL_OBJECTIVE extended_kill",
+		"REF_QUEST_TALISMAN_OBJECTIVE talisman",
+		"collection.OBJECTIVE_KEY",
+		"extended_kill.OBJECTIVE_KEY",
+		"talisman.OBJECTIVE_KEY",
+	} {
+		if !strings.Contains(selectCharacterQuests, required) {
+			t.Fatalf("character quest hydration query is missing %q", required)
+		}
+	}
+}
 
 type questExecer struct {
 	query string
@@ -66,9 +82,10 @@ func TestCharacterQuestRepositoryActivatesNewOrAbandonedQuest(t *testing.T) {
 		if database.query != activateCharacterQuest {
 			t.Fatalf("query = %q", database.query)
 		}
-		wantArgs := []any{77, 3, QuestActive, uint16(1), uint64(0), uint64(0),
+		wantArgs := []any{77, 3, QuestActive, uint16(1), uint64(0), uint64(0), uint32(0),
 			QuestInactive, QuestAborted, QuestInactive, QuestAborted, QuestInactive, QuestAborted,
-			QuestInactive, QuestAborted, QuestInactive, QuestAborted, QuestInactive, QuestAborted}
+			QuestInactive, QuestAborted, QuestInactive, QuestAborted, QuestInactive, QuestAborted,
+			QuestInactive, QuestAborted}
 		if !reflect.DeepEqual(database.args, wantArgs) {
 			t.Fatalf("args = %#v, want %#v", database.args, wantArgs)
 		}
@@ -86,6 +103,22 @@ func TestCharacterQuestRepositoryDoesNotOverwriteUnavailableQuest(t *testing.T) 
 	_, err = repository.Activate(context.Background(), 77, CharacterQuest{QuestID: 3, Status: QuestActive, AchievementCount: 1})
 	if !errors.Is(err, ErrCharacterQuestNotAvailable) {
 		t.Fatalf("Activate error = %v, want ErrCharacterQuestNotAvailable", err)
+	}
+}
+
+func TestCharacterQuestRepositoryActivatesExactZeroMissionFerryAsRewardReady(t *testing.T) {
+	repository, err := NewCharacterQuestRepository(&questExecer{rows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quest := CharacterQuest{QuestID: 88, QuestCodeName: "QNO_WC_FERRY4_1", Status: QuestRewardReady}
+	activated, err := repository.Activate(context.Background(), 77, quest)
+	if err != nil || activated.Status != QuestRewardReady {
+		t.Fatalf("ferry activation = %#v error=%v", activated, err)
+	}
+	quest.QuestCodeName = "QNO_UNKNOWN"
+	if _, err = repository.Activate(context.Background(), 77, quest); err == nil {
+		t.Fatal("unrecognized reward-ready activation was accepted")
 	}
 }
 
@@ -121,8 +154,8 @@ func TestCharacterQuestRepositoryLoadsProtocolMetadataForBootstrap(t *testing.T)
 	resetCatalogRepositoryTestState()
 	now := time.Now()
 	setCatalogRepositoryTestResponse(selectCharacterQuests, catalogRepositoryTestResponse{
-		columns: []string{"QUEST_ID", "STATUS", "ACHIEVEMENT_COUNT", "STARTED_AT", "COMPLETED_AT", "QUEST_DATA_1", "QUEST_DATA_2", "OBJECTIVE_KEY", "TASK_COUNT"},
-		rows:    [][]driver.Value{{int64(101), int64(QuestProgressed), int64(1), now, nil, int64(4), int64(0), "SN_CON_QUEST", int64(1)}},
+		columns: []string{"QUEST_ID", "CODE_NAME", "STATUS", "ACHIEVEMENT_COUNT", "STARTED_AT", "COMPLETED_AT", "QUEST_DATA_1", "QUEST_DATA_2", "OBJECTIVE_KEY", "TASK_COUNT", "TIMER_DURATION", "TIMER_REMAINING", "SHARED_PROGRESS"},
+		rows:    [][]driver.Value{{int64(101), "QUEST", int64(QuestProgressed), int64(1), now, nil, int64(4), int64(0), "SN_CON_QUEST", int64(1), int64(0), int64(0), false}},
 	})
 	repository, err := NewCharacterQuestRepository(openCatalogRepositoryTestDB(t))
 	if err != nil {
@@ -134,5 +167,20 @@ func TestCharacterQuestRepositoryLoadsProtocolMetadataForBootstrap(t *testing.T)
 	}
 	if len(quests) != 1 || quests[0].ObjectiveKey != "SN_CON_QUEST" || quests[0].TaskCount != 1 || quests[0].Data1 != 4 {
 		t.Fatalf("quests = %#v", quests)
+	}
+}
+
+func TestCharacterQuestRepositorySavesCountdownForActiveState(t *testing.T) {
+	database := &questExecer{rows: 1}
+	repository, err := NewCharacterQuestRepository(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.SaveCountdown(context.Background(), 77, 101, 110); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(database.query, "SET TIMER_REMAINING=?") ||
+		!reflect.DeepEqual(database.args, []any{uint32(110), 77, 101}) {
+		t.Fatalf("countdown write query=%q args=%#v", database.query, database.args)
 	}
 }

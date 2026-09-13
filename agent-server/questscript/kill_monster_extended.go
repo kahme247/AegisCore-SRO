@@ -17,6 +17,7 @@ type ExtendedKillMonsterObjective struct {
 	Kind          string
 	ObjectiveKey  string
 	TargetClass   string
+	RequiredCount uint32
 	Targets       []string
 	Parameters    []Value
 }
@@ -56,6 +57,17 @@ func ExtendedKillMonsterObjectives(definitions []Definition) ([]ExtendedKillMons
 				}
 				objective.Targets = append(objective.Targets, call.Args[5].String)
 				objective.TargetClass = call.Args[7].String
+				// SR_GameServer's Lua callback converts this value through
+				// __ftol2_sse before the mission descriptor consumes it as an
+				// integer goal. Preserve that truncation for the one authored 1.5
+				// giant goal instead of rejecting an otherwise valid declaration.
+				if call.Args[8].Number > math.MaxUint32 {
+					return nil, fmt.Errorf("%w: %s variant %d has invalid classified extended kill required count", ErrInvalidChunk, definition.CodeName, definition.Variant)
+				}
+				objective.RequiredCount = uint32(math.Trunc(call.Args[8].Number))
+				if objective.RequiredCount == 0 {
+					return nil, fmt.Errorf("%w: %s variant %d has invalid classified extended kill required count", ErrInvalidChunk, definition.CodeName, definition.Variant)
+				}
 			} else {
 				objective.Kind = ExtendedKillMultiTarget
 				if uint64(len(call.Args)) != uint64(targetCount)+9 {
@@ -73,6 +85,11 @@ func ExtendedKillMonsterObjectives(definitions []Definition) ([]ExtendedKillMons
 						return nil, fmt.Errorf("%w: %s variant %d has malformed multi-target parameter %d", ErrInvalidChunk, definition.CodeName, definition.Variant, index)
 					}
 				}
+				requiredCount, ok := unsignedInteger(call.Args[6+int(targetCount)])
+				if !ok || requiredCount == 0 {
+					return nil, fmt.Errorf("%w: %s variant %d has invalid extended kill required count", ErrInvalidChunk, definition.CodeName, definition.Variant)
+				}
+				objective.RequiredCount = requiredCount
 			}
 			objectives = append(objectives, objective)
 		}

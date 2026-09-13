@@ -39,6 +39,7 @@ type ItemUseResult struct {
 	BuffModifiers               BuffModifiers
 	COSPersistentID             uint64
 	COSTemporaryRideRefObjectID uint32
+	QuestInstanceEntryQuestID   int
 	COSRevivedPersistentID      uint64
 	COSRevivedHealth            int32
 	COSRevivedItemState         COSItemState
@@ -55,6 +56,10 @@ type ItemUseResult struct {
 	COSTimedServiceData1        int
 	MaskRefCharID               uint32
 	MaskDuration                time.Duration
+	CollectionThemeID           uint32
+	CollectionSlotIndex         uint16
+	CollectionThemeComplete     bool
+	CollectionQuestProgress     []QuestProgressResult
 }
 
 // COSItemTarget is the item-family-specific target carried by 0x704C.
@@ -252,12 +257,16 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	isCOSPetService := IsCOSPetTimedService(ref)
 	isCOSRevival := IsCOSRevival(ref)
 	isMonsterMask := ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 2 && itemData != 0
+	isCollectionTalisman := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 12 && ref.TypeID4 == 5
+	questInstanceEntryQuestID, isQuestInstanceEntry := QuestInstanceEntryQuestID(ref.CodeName)
 	linkedSkill, hasLinkedSkill := RefSkills[uint32(skillID)]
 	isSkillBuff := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1 &&
 		hasLinkedSkill && linkedSkill.ExecutionKind() == SkillExecutionBuff && linkedSkill.BuffDuration > 0 && linkedSkill.BuffModifiers != (BuffModifiers{})
 	switch {
 	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
+	case isQuestInstanceEntry:
+		result.QuestInstanceEntryQuestID = questInstanceEntryQuestID
 	case isCOSScroll:
 		if itemData != 0 {
 			var cosOwnerID int64
@@ -287,7 +296,7 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 		}
 		result.COSPersistentID = uint64(itemData)
 	case isCOSTransportScroll:
-		refObjectID, resolveErr := resolveTemporaryRideReference(ctx, tx, ref)
+		refObjectID, resolveErr := resolveTemporaryRideReference(ctx, tx, ref, vitals.Level)
 		if resolveErr != nil {
 			return result, resolveErr
 		}
@@ -468,6 +477,35 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 		}
 		result.MaskRefCharID = itemData
 		result.MaskDuration = time.Duration(max(0, ref.DecayTime)) * time.Millisecond
+	case isCollectionTalisman:
+		var themeID uint32
+		var slotIndex, completeCount uint16
+		if err = tx.QueryRowContext(ctx, "SELECT item.`THEME_ID`,item.`SLOT_INDEX`,theme.`COMPLETE_COUNT` FROM `REF_COLLECTION_BOOK_ITEM` item JOIN `REF_COLLECTION_BOOK_THEME` theme ON theme.`THEME_ID`=item.`THEME_ID` WHERE item.`ITEM_REF_OBJECT_ID`=?", ref.ID).Scan(&themeID, &slotIndex, &completeCount); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseUnsupported
+			}
+			return result, fmt.Errorf("resolve collection-book talisman: %w", err)
+		}
+		registration, registrationErr := tx.ExecContext(ctx, "INSERT IGNORE INTO `CHAR_COLLECTION_BOOK` (`CHAR_ID`,`THEME_ID`,`SLOT_INDEX`,`ITEM_REF_OBJECT_ID`) VALUES (?,?,?,?)", characterID, themeID, slotIndex, ref.ID)
+		if registrationErr != nil {
+			return result, fmt.Errorf("register collection-book talisman: %w", registrationErr)
+		}
+		if affected, affectedErr := registration.RowsAffected(); affectedErr != nil || affected != 1 {
+			return result, ErrItemUseNoEffect
+		}
+		var registered uint16
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM `CHAR_COLLECTION_BOOK` WHERE `CHAR_ID`=? AND `THEME_ID`=?", characterID, themeID).Scan(&registered); err != nil {
+			return result, fmt.Errorf("count collection-book theme: %w", err)
+		}
+		result.CollectionThemeID = themeID
+		result.CollectionSlotIndex = slotIndex
+		result.CollectionThemeComplete = completeCount > 0 && registered >= completeCount
+		if result.CollectionThemeComplete {
+			result.CollectionQuestProgress, err = completeTalismanQuestsInItemUseTransaction(ctx, tx, characterID, themeID)
+			if err != nil {
+				return ItemUseResult{}, err
+			}
+		}
 	case isRecovery:
 		var changed bool
 		newHP, newMP, changed = recoveryValues(ref, vitals)
@@ -621,6 +659,56 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	return result, nil
 }
 
+func completeTalismanQuestsInItemUseTransaction(ctx context.Context, tx *sql.Tx, characterID int64, themeID uint32) ([]QuestProgressResult, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT quest.QUEST_ID,quest.STATUS,quest.ACHIEVEMENT_COUNT,quest.STARTED_AT,
+		quest.COMPLETED_AT,quest.QUEST_DATA_1,quest.QUEST_DATA_2,objective.OBJECTIVE_KEY
+		FROM CHAR_QUEST quest
+		JOIN REF_QUEST_TALISMAN_OBJECTIVE objective ON objective.QUEST_ID=quest.QUEST_ID
+		JOIN REF_COLLECTION_BOOK_THEME theme ON theme.CODE_NAME=objective.THEME_CODE
+		WHERE quest.FK_CHAR=? AND quest.STATUS IN (?,?) AND objective.RUNTIME_ENABLED=1
+		  AND objective.VARIANT_INDEX=0 AND objective.MISSION_INDEX=0 AND objective.PARAMETER_6<>0
+		  AND theme.THEME_ID=? ORDER BY quest.QUEST_ID FOR UPDATE`,
+		characterID, QuestActive, QuestProgressed, themeID)
+	if err != nil {
+		return nil, fmt.Errorf("lock talisman quests: %w", err)
+	}
+	var quests []CharacterQuest
+	for rows.Next() {
+		var quest CharacterQuest
+		if err = rows.Scan(&quest.QuestID, &quest.Status, &quest.AchievementCount, &quest.StartedAt,
+			&quest.CompletedAt, &quest.Data1, &quest.Data2, &quest.ObjectiveKey); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan talisman quest: %w", err)
+		}
+		quest.TaskCount = 1
+		quests = append(quests, quest)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate talisman quests: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, fmt.Errorf("close talisman quests: %w", err)
+	}
+	results := make([]QuestProgressResult, 0, len(quests))
+	for _, quest := range quests {
+		previousStatus := quest.Status
+		quest.Status, err = TransitionQuest(quest.Status, QuestTransitionRewardReady)
+		if err != nil {
+			return nil, err
+		}
+		mutation, updateErr := tx.ExecContext(ctx, "UPDATE `CHAR_QUEST` SET `STATUS`=? WHERE `FK_CHAR`=? AND `QUEST_ID`=? AND `STATUS`=?", quest.Status, characterID, quest.QuestID, previousStatus)
+		if updateErr != nil {
+			return nil, fmt.Errorf("complete talisman quest: %w", updateErr)
+		}
+		if updateErr = requireQuestRow(mutation, "complete talisman quest"); updateErr != nil {
+			return nil, updateErr
+		}
+		results = append(results, QuestProgressResult{Quest: quest, Changed: true})
+	}
+	return results, nil
+}
+
 func validateCOSItemRental(kind COSKind, endsAt sql.NullTime, now time.Time) error {
 	if kind != COSAbilityPet {
 		return nil
@@ -761,7 +849,7 @@ func IsCOSRevival(ref RefItem) bool {
 		(ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 == 6 && strings.Contains(name, "COS_P_"))
 }
 
-func resolveTemporaryRideReference(ctx context.Context, tx *sql.Tx, item RefItem) (uint32, error) {
+func resolveTemporaryRideReference(ctx context.Context, tx *sql.Tx, item RefItem, characterLevel int) (uint32, error) {
 	codeName := strings.TrimSpace(item.Param1Desc)
 	if tx == nil || codeName == "" || strings.EqualFold(codeName, "xxx") {
 		return 0, ErrItemUseNoEffect
@@ -772,7 +860,15 @@ func resolveTemporaryRideReference(ctx context.Context, tx *sql.Tx, item RefItem
 		&refObjectID, &typeID1, &typeID2, &typeID3, &typeID4,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrItemUseNoEffect
+		// Stock trade transports such as the white elephant reference a base
+		// family in ITEMDATA while CHAR_REF_DATA stores only level-suffixed
+		// variants. Select the strongest variant the character may summon.
+		err = tx.QueryRowContext(ctx, "SELECT `RefObjID`,`TypeID_1`,`TypeID_2`,`TypeID_3`,`TypeID_4` FROM `CHAR_REF_DATA` WHERE `CodeName` LIKE CONCAT(?, '\\_%') ESCAPE '\\\\' AND `Lvl`<=? ORDER BY `Lvl` DESC,`RefObjID` DESC LIMIT 1", codeName, characterLevel).Scan(
+			&refObjectID, &typeID1, &typeID2, &typeID3, &typeID4,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrItemUseNoEffect
+		}
 	}
 	if err != nil {
 		return 0, fmt.Errorf("resolve temporary ride COS reference: %w", err)

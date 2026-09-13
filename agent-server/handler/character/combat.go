@@ -7,7 +7,9 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,46 +84,85 @@ type growthPetCombatSupport interface {
 	AwardOwnerKillExperience(context.Context, *model.Player, *model.NPC) error
 }
 
+type jobProgressionRepository interface {
+	AdvanceJob(context.Context, int, uint64, uint64) (model.JobSnapshot, error)
+}
+
+type questCollectionDropRepository interface {
+	CollectionDropsForKill(context.Context, int, uint32) ([]model.QuestCollectionDrop, error)
+}
+
+type questUniqueDeadRepository interface {
+	GrantUniqueDeadMissionItem(context.Context, int, uint32, int16) (model.QuestUniqueDeadGrantResult, bool, error)
+}
+
+type questPlayerKillRepository interface {
+	RecordPlayerKill(context.Context, int, model.QuestPlayerKillTarget) ([]model.QuestProgressResult, error)
+}
+
+type nativeQuestInstanceTeleportSubmitter interface {
+	SubmitNativeQuestInstanceTeleport(*model.QuestInstanceRegistry, model.NativeQuestInstanceDeathPlan, *model.Player) error
+}
+
 type CombatHandler struct {
-	mu             sync.Mutex
-	dropsMu        sync.RWMutex
-	world          combatWorld
-	referenceData  *model.ReferenceDataCatalog
-	progress       model.CharacterProgressRepository
-	quests         model.QuestRuntimeRepository
-	vitals         model.CharacterVitalsRepository
-	rangedAmmo     model.RangedAmmoRepository
-	monsterMasks   model.MonsterMaskRepository
-	hwan           model.HwanRepository
-	levels         *model.LevelTable
-	rates          combatRateProvider
-	party          *service.PartyService
-	companions     growthPetCombatSupport
-	drops          *service.MonsterDropService
-	schedule       func(time.Duration, func())
-	move           func(*model.Player, navmeshv2.RtNavmeshPosition) uint64
-	send           func(*server.Session, network.Packet) error
-	broadcast      func(*model.Player, *network.Packet)
-	pending        map[uint32]*pendingAttack
-	repeating      map[uint32]*pendingAttack
-	nextAttack     map[uint32]time.Time
-	nextSkill      map[skillCooldownKey]time.Time
-	nextCoolTime   map[uint32]time.Time
-	delayedCasts   map[uint32]delayedCast
-	linkedBuffs    map[uint32]map[uint32]*model.Player
-	linkedParents  map[uint32]uint32
-	now            func() time.Time
-	rollPercent    func(int) bool
-	hitRollPercent func(int) bool
-	criticalRoll   func(int) bool
-	blockRoll      func(int) bool
-	damageRoll     func() int
-	rollHwanPoint  func(int) bool
-	ownerTargets   func(*model.NPC, model.RefSkill, int) []*model.NPC
-	actionTime     func(*model.Player, model.RefSkill) float64
-	pvpAdmission   func(*model.Player, *model.Player, model.RefSkill) bool
-	longCooldown   func(*model.Player, model.RefSkill, time.Time)
-	interruptMob   func(*model.NPC)
+	mu               sync.Mutex
+	dropsMu          sync.RWMutex
+	world            combatWorld
+	referenceData    *model.ReferenceDataCatalog
+	progress         model.CharacterProgressRepository
+	jobProgress      jobProgressionRepository
+	quests           model.QuestRuntimeRepository
+	vitals           model.CharacterVitalsRepository
+	rangedAmmo       model.RangedAmmoRepository
+	monsterMasks     model.MonsterMaskRepository
+	hwan             model.HwanRepository
+	levels           *model.LevelTable
+	rates            combatRateProvider
+	party            *service.PartyService
+	companions       growthPetCombatSupport
+	drops            *service.MonsterDropService
+	schedule         func(time.Duration, func())
+	move             func(*model.Player, navmeshv2.RtNavmeshPosition) uint64
+	send             func(*server.Session, network.Packet) error
+	broadcast        func(*model.Player, *network.Packet)
+	pending          map[uint32]*pendingAttack
+	repeating        map[uint32]*pendingAttack
+	nextAttack       map[uint32]time.Time
+	nextSkill        map[skillCooldownKey]time.Time
+	nextCoolTime     map[uint32]time.Time
+	delayedCasts     map[uint32]delayedCast
+	linkedBuffs      map[uint32]map[uint32]*model.Player
+	linkedParents    map[uint32]uint32
+	now              func() time.Time
+	rollPercent      func(int) bool
+	hitRollPercent   func(int) bool
+	criticalRoll     func(int) bool
+	blockRoll        func(int) bool
+	damageRoll       func() int
+	rollHwanPoint    func(int) bool
+	ownerTargets     func(*model.NPC, model.RefSkill, int) []*model.NPC
+	actionTime       func(*model.Player, model.RefSkill) float64
+	pvpAdmission     func(*model.Player, *model.Player, model.RefSkill) bool
+	longCooldown     func(*model.Player, model.RefSkill, time.Time)
+	interruptMob     func(*model.NPC)
+	questInstances   *model.QuestInstanceRegistry
+	instanceTeleport nativeQuestInstanceTeleportSubmitter
+}
+
+func (h *CombatHandler) ConfigureNativeQuestInstanceDeaths(registry *model.QuestInstanceRegistry, teleport nativeQuestInstanceTeleportSubmitter) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.questInstances = registry
+	h.instanceTeleport = teleport
+	h.mu.Unlock()
+}
+
+func (h *CombatHandler) ConfigureJobProgression(repository jobProgressionRepository) {
+	if h != nil {
+		h.jobProgress = repository
+	}
 }
 
 // ConfigureMobAttackInterrupter connects forced NPC displacement to the mob
@@ -2528,6 +2569,9 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 		if linkedApplication.Killed {
 			life := model.BuildLifeStateUpdatePacket(linkedTarget.GetUniqueID(), model.Dead)
 			linkedTarget.SendToSelfAndKnown(&life)
+			if err := h.recordPlayerKill(ctx, player, linkedTarget); err != nil {
+				return err
+			}
 		}
 		if linkedBuff != 0 {
 			removed := model.BuildBuffRemove(linkedBuff)
@@ -2578,7 +2622,7 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 	if !application.Killed {
 		return h.applyPlayerPVPTransfers(ctx, session, player, target, skill, now)
 	}
-	return nil
+	return h.recordPlayerKill(ctx, player, target)
 }
 
 func (h *CombatHandler) applyPlayerPVPTransfers(ctx context.Context, session *server.Session, source, primary *model.Player, skill model.RefSkill, now time.Time) error {
@@ -2801,6 +2845,9 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 		if linkedApplication.Killed {
 			life := model.BuildLifeStateUpdatePacket(linkedTarget.GetUniqueID(), model.Dead)
 			linkedTarget.SendToSelfAndKnown(&life)
+			if err := h.recordPlayerKill(ctx, source, linkedTarget); err != nil {
+				return err
+			}
 		}
 	}
 	castUID := model.NextActionUID()
@@ -2812,6 +2859,7 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 	if application.Killed {
 		life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
 		h.publishCombatPacket(source, &life)
+		return h.recordPlayerKill(ctx, source, target)
 	}
 	return nil
 }
@@ -2974,6 +3022,9 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 			if linkedApplication.Killed {
 				life := model.BuildLifeStateUpdatePacket(linkedTarget.GetUniqueID(), model.Dead)
 				linkedTarget.SendToSelfAndKnown(&life)
+				if err := h.recordPlayerKill(context.Background(), source, linkedTarget); err != nil {
+					logrus.WithError(err).Warn("linked player-kill quest progress failed")
+				}
 			}
 		}
 		castUID := model.NextActionUID()
@@ -2996,10 +3047,47 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 		if application.Killed {
 			life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
 			h.publishCombatPacket(source, &life)
+			if err := h.recordPlayerKill(context.Background(), source, target); err != nil {
+				logrus.WithError(err).Warn("player-kill quest progress failed")
+			}
 			return
 		}
 		h.schedulePlayerStatusDamageTick(source, target, status, now.Add(5*time.Second))
 	})
+}
+
+func (h *CombatHandler) recordPlayerKill(ctx context.Context, killer, target *model.Player) error {
+	if h == nil || killer == nil || target == nil || killer == target {
+		return nil
+	}
+	repository, ok := h.quests.(questPlayerKillRepository)
+	if !ok {
+		return nil
+	}
+	targetJob := target.GetJob()
+	if !targetJob.Active() {
+		return nil
+	}
+	progress, err := repository.RecordPlayerKill(ctx, killer.ID, model.QuestPlayerKillTarget{
+		Level: target.Level, JobType: targetJob.Type, RegionID: target.GetNavmeshPosition().Region.ID,
+	})
+	if err != nil {
+		return err
+	}
+	for _, result := range progress {
+		if !result.Changed {
+			continue
+		}
+		killer.CommitQuestMutation(result.Quest)
+		packet, buildErr := buildQuestStatePacket(result.Quest)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err = h.sendPlayerPacket(killer.GetSession(), packet); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *CombatHandler) schedulePlayerBadEffectExpiration(target *model.Player, expected model.CombatStatus) {
@@ -4281,6 +4369,14 @@ func (h *CombatHandler) awardPartyKill(ctx context.Context, killer *model.Player
 	partyExperienceRate := partyExperienceRate(rates)
 	experienceShares := service.SharedRewardShares(scaleCombatReward(baseReward, int(partyExperienceRate)), len(recipients))
 	skillShares := service.SharedRewardShares(scaleCombatReward(baseReward, int(rates.SkillExperienceRatePercent)), len(recipients))
+	jobRecipients := combatJobRecipients(killer, recipients)
+	if !h.isJobExperienceTarget(target) {
+		jobRecipients = nil
+	}
+	totalJobLevel := 0
+	for _, recipient := range jobRecipients {
+		totalJobLevel += recipient.Level
+	}
 	for index, recipient := range recipients {
 		if recipient == nil || recipient.GetSession() == nil {
 			continue
@@ -4297,6 +4393,11 @@ func (h *CombatHandler) awardPartyKill(ctx context.Context, killer *model.Player
 			return err
 		}
 		publishLevelUpAnimation(recipient, progress)
+		if slices.Contains(jobRecipients, recipient) {
+			base := model.CombatJobExperience(h.levels, recipient.Level, h.combatTargetLevel(target), recipient.GetJob().Type)
+			jobReward := model.PartyCombatJobExperience(base, recipient.Level, totalJobLevel, len(jobRecipients))
+			h.tryAwardCombatJobExperience(ctx, recipient, jobReward, targetUID)
+		}
 	}
 
 	// Kill-side effects remain owned by the player whose attack resolved the
@@ -4340,10 +4441,89 @@ func (h *CombatHandler) awardKill(ctx context.Context, session *server.Session, 
 		return err
 	}
 	publishLevelUpAnimation(player, progress)
+	if h.isJobExperienceTarget(target) {
+		h.tryAwardCombatJobExperience(ctx, player, model.CombatJobExperience(h.levels, player.Level, h.combatTargetLevel(target), player.GetJob().Type), targetUID)
+	}
 	return h.finishKill(ctx, session, player, target, targetUID, shareGrowthPetExperience)
 }
 
+func (h *CombatHandler) isJobExperienceTarget(target *model.NPC) bool {
+	if h == nil || h.referenceData == nil || target == nil {
+		return false
+	}
+	ref, exists := h.referenceData.Character(target.GetRefObjectID())
+	if !exists {
+		return false
+	}
+	code := strings.ToUpper(strings.TrimSpace(ref.CodeName))
+	return strings.HasPrefix(code, "MOB_THIEF_NPC_") || strings.HasPrefix(code, "MOB_HUNTER_NPC_")
+}
+
+func (h *CombatHandler) combatTargetLevel(target *model.NPC) int {
+	if h == nil || h.referenceData == nil || target == nil {
+		return 0
+	}
+	character, exists := h.referenceData.Character(target.GetRefObjectID())
+	if !exists {
+		return 0
+	}
+	return character.Level
+}
+
+func combatJobRecipients(killer *model.Player, recipients []*model.Player) []*model.Player {
+	if killer == nil || !killer.GetJob().Active() {
+		return nil
+	}
+	killerJob := killer.GetJob().Type
+	result := make([]*model.Player, 0, len(recipients))
+	for _, recipient := range recipients {
+		if recipient == nil || recipient.GetSession() == nil || !recipient.GetJob().Active() {
+			continue
+		}
+		if killerJob == model.PlayerJobHunter && recipient.GetJob().Type != model.PlayerJobHunter {
+			continue
+		}
+		result = append(result, recipient)
+	}
+	return result
+}
+
+func (h *CombatHandler) awardCombatJobExperience(ctx context.Context, player *model.Player, amount uint64) error {
+	if h == nil || h.jobProgress == nil || player == nil || amount == 0 || !player.GetJob().Active() {
+		return nil
+	}
+	snapshot, err := h.jobProgress.AdvanceJob(ctx, player.ID, amount, 0)
+	if err != nil {
+		return err
+	}
+	player.SetJob(model.PlayerJob{Type: snapshot.Type, Alias: snapshot.Alias, Level: snapshot.Level, Experience: snapshot.Experience})
+	packet, err := (vsro188.JobUpdateCodec{}).Encode(vsro188.JobState{Type: snapshot.Type, Level: snapshot.Level, Experience: uint32(min(snapshot.Experience, math.MaxUint32))})
+	if err != nil {
+		return err
+	}
+	return h.sendPlayerPacket(player.GetSession(), packet)
+}
+
+// tryAwardCombatJobExperience preserves the stock update boundary: normal
+// character EXP and the rest of the kill lifecycle have independent durable
+// owners and must not be rolled back or skipped after a job update fails.
+func (h *CombatHandler) tryAwardCombatJobExperience(ctx context.Context, player *model.Player, amount uint64, targetUID uint32) {
+	if err := h.awardCombatJobExperience(ctx, player, amount); err != nil {
+		characterID := 0
+		if player != nil {
+			characterID = player.ID
+		}
+		logrus.WithError(err).WithFields(logrus.Fields{"character_id": characterID, "target_uid": targetUID, "job_experience": amount}).Warn("combat job experience award failed")
+	}
+}
+
 func (h *CombatHandler) finishKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32, shareGrowthPetExperience bool) error {
+	if err := h.handleNativeQuestInstanceDeath(player, target); err != nil {
+		// The native OnDead callback reports action failure to its quest engine;
+		// it does not resurrect the already-dead mob or roll back ordinary kill
+		// rewards. Keep that boundary here as well.
+		logrus.WithError(err).WithField("target_uid", targetUID).Warn("native quest instance teleport submission failed")
+	}
 	if shareGrowthPetExperience && h.companions != nil {
 		if err := h.companions.AwardOwnerKillExperience(ctx, player, target); err != nil {
 			logrus.Warnf("growth pet EXP award failed owner=%d target=%d: %v", player.ID, targetUID, err)
@@ -4381,11 +4561,25 @@ func (h *CombatHandler) finishKill(ctx context.Context, session *server.Session,
 		if _, err := drops.SpawnForKill(ctx, player, target); err != nil {
 			logrus.Warnf("monster drop materialization failed target=%d: %v", targetUID, err)
 		}
+		if resolver, ok := h.quests.(questCollectionDropRepository); ok {
+			questDrops, err := resolver.CollectionDropsForKill(ctx, player.ID, target.GetRefObjectID())
+			if err != nil {
+				return err
+			}
+			for _, questDrop := range questDrops {
+				if _, _, spawnErr := drops.SpawnQuestCollectionItem(ctx, player, target, questDrop); spawnErr != nil {
+					logrus.Warnf("quest collection drop materialization failed quest=%d target=%d: %v", questDrop.QuestID, targetUID, spawnErr)
+				}
+			}
+		}
 	}
 	if h.quests == nil {
 		return nil
 	}
-	questProgress, err := h.quests.RecordMobKill(ctx, player.ID, target.GetRefObjectID())
+	if err := h.recordUniqueDead(ctx, session, player, target.GetRefObjectID(), targetUID); err != nil {
+		return err
+	}
+	questProgress, err := h.quests.RecordMobKill(ctx, player.ID, target.GetRefObjectID(), target.MonsterRarity())
 	if err != nil {
 		return err
 	}
@@ -4403,6 +4597,77 @@ func (h *CombatHandler) finishKill(ctx context.Context, session *server.Session,
 				return sendErr
 			}
 		} else if sendErr := session.Send(update); sendErr != nil {
+			return sendErr
+		}
+	}
+	return nil
+}
+
+func (h *CombatHandler) handleNativeQuestInstanceDeath(player *model.Player, target *model.NPC) error {
+	if h == nil || player == nil || target == nil || h.questInstances == nil || h.instanceTeleport == nil {
+		return nil
+	}
+	scope := model.GameWorldScope(player.GetGameWorldID())
+	if !scope.ValidInstance() || target.GetGameWorldID() != uint32(scope) {
+		return nil
+	}
+	instance, err := h.questInstances.Instance(scope)
+	if err != nil {
+		return err
+	}
+	variables, err := h.questInstances.Variables(scope)
+	if err != nil {
+		return err
+	}
+	elapsed := variables[model.NativeQuestInstanceElapsedTimeKey(instance.QuestID)]
+	stagePlan, stageMatched, err := h.questInstances.PrepareNativeBaekryeongStageDeath(scope, target.GetName(), elapsed)
+	if err != nil {
+		return err
+	}
+	if stageMatched {
+		_, err = h.questInstances.CommitNativeBaekryeongStageDeath(stagePlan)
+		return err
+	}
+	plan, matched, err := h.questInstances.PrepareNativeQuestInstanceDeath(scope, instance.QuestID, target.GetName(), elapsed)
+	if err != nil || !matched {
+		return err
+	}
+	return h.instanceTeleport.SubmitNativeQuestInstanceTeleport(h.questInstances, plan, player)
+}
+
+func (h *CombatHandler) recordUniqueDead(ctx context.Context, session *server.Session, player *model.Player, monsterRefObjectID, targetUID uint32) error {
+	uniqueDead, ok := h.quests.(questUniqueDeadRepository)
+	if !ok || player == nil {
+		return nil
+	}
+	result, granted, grantErr := uniqueDead.GrantUniqueDeadMissionItem(ctx, player.ID, monsterRefObjectID, player.GetNavmeshPosition().Region.ID)
+	if grantErr != nil {
+		if !errors.Is(grantErr, model.ErrQuestInventoryFull) {
+			return grantErr
+		}
+		logrus.WithFields(logrus.Fields{"character_id": player.ID, "target_uid": targetUID}).Info("UNIQUE_DEAD quest item grant skipped: inventory full")
+	} else if granted {
+		player.CommitQuestItemGrant(model.QuestItemGrantResult{Quest: result.Quest, Inventory: result.Inventory, Added: result.Added})
+		if result.RemovedSlot != nil {
+			if sendErr := h.sendPlayerPacket(session, buildQuestItemRemoved(*result.RemovedSlot)); sendErr != nil {
+				return sendErr
+			}
+			if *result.RemovedSlot != result.Added.Slot {
+				if remaining, exists := result.Inventory.Items[*result.RemovedSlot]; exists {
+					if sendErr := h.sendPlayerPacket(session, buildQuestItemAdded(model.QuestItemMutation{Slot: *result.RemovedSlot, Item: remaining})); sendErr != nil {
+						return sendErr
+					}
+				}
+			}
+		}
+		if sendErr := h.sendPlayerPacket(session, buildQuestItemAdded(result.Added)); sendErr != nil {
+			return sendErr
+		}
+		update, buildErr := buildQuestStatePacket(result.Quest)
+		if buildErr != nil {
+			return buildErr
+		}
+		if sendErr := h.sendPlayerPacket(session, update); sendErr != nil {
 			return sendErr
 		}
 	}

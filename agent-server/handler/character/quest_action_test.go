@@ -102,3 +102,44 @@ func TestQuestActionHandlerDoesNotAcknowledgeInternalFailure(t *testing.T) {
 		t.Fatalf("handleLocalAction error = %v, sent=%t", err, sent)
 	}
 }
+
+func TestNativeQuestInteractionPublishesTalkBeforeResponse(t *testing.T) {
+	dispatcher := &questEventDispatcherStub{}
+	handler := &QuestActionHandler{dispatcher: dispatcher}
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		packets = append(packets, packet)
+		return nil
+	}
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 77}}
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(307)
+	if err := handler.handleInteraction(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 2 || packets[0].MessageID != opcode.QuestNotification || packets[1].MessageID != opcode.QuestInteractionResponse {
+		t.Fatalf("packets = %+v", packets)
+	}
+}
+
+func TestMeetRocInteractionRecountsInventoryForRelatedQuestUpdates(t *testing.T) {
+	dispatcher := &questEventDispatcherStub{}
+	handler := &QuestActionHandler{dispatcher: dispatcher}
+	item := model.Item{SRObject: model.SRObject{RefObjectID: model.MeetRocProgressItemRefID}, StackSize: 3}
+	player := &model.Player{ID: 77, Inventory: model.NewInventory(map[byte]model.Item{13: item}), Quests: []model.CharacterQuest{
+		{QuestID: 374, QuestCodeName: "QNO_RM_MEETROC_ECT_1", Status: model.QuestProgressed, TaskCount: 1, ObjectiveKey: "SN_CON_QNO_RM_MEETROC_ECT_1"},
+		{QuestID: 375, QuestCodeName: "QNO_RM_MEETROC_ECT_2", Status: model.QuestProgressed, TaskCount: 1, ObjectiveKey: "SN_CON_QNO_RM_MEETROC_ECT_2"},
+	}}
+	handler.playerByUID = func(uint32) (*model.Player, error) { return player, nil }
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 77, UniqueID: 88}}
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(model.MeetRocInteractionQuestID)
+	if err := handler.handleInteraction(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if len(packets) != 3 || packets[0].MessageID != opcode.QuestUpdate || packets[1].MessageID != opcode.QuestUpdate || packets[2].MessageID != opcode.QuestInteractionResponse {
+		t.Fatalf("packets = %+v", packets)
+	}
+}

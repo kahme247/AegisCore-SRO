@@ -78,7 +78,7 @@ func TestQuestTimerCountdownAndGenerationSafety(t *testing.T) {
 		t.Fatal("stale generation ticked replacement timer")
 	}
 	tick, ok = player.TickQuestTimer(100, replacement.Generation)
-	if !ok || !tick.DispatchEvent || !tick.DisplayUpdate || tick.Timer.Remaining != 0 {
+	if !ok || !tick.DispatchEvent || tick.DisplayUpdate || tick.Timer.Remaining != 0 {
 		t.Fatalf("expiry tick = (%+v, %v)", tick, ok)
 	}
 	if _, exists := player.QuestTimerSnapshot(100); exists {

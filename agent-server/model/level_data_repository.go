@@ -69,7 +69,7 @@ func (r *SQLLevelTableRepository) Load(ctx context.Context) (*LevelTable, error)
 	levels := make([]LevelDataRow, 0)
 	for rows.Next() {
 		var row LevelDataRow
-		if err := rows.Scan(&row.Level, &row.RequiredExperience, &row.RequiredSkillPoints, &row.DropGoldMin, &row.DropGoldMax); err != nil {
+		if err := rows.Scan(&row.Level, &row.RequiredExperience, &row.RequiredSkillPoints, &row.DropGoldMin, &row.DropGoldMax, &row.JobActivityFactor); err != nil {
 			return nil, &LevelTableRepositoryError{Operation: "scan", Err: err}
 		}
 		levels = append(levels, row)
@@ -88,4 +88,4 @@ func (r *SQLLevelTableRepository) Load(ctx context.Context) (*LevelTable, error)
 // progression rows legitimately remain NULL until that maintenance import is
 // run, so expose zero to the runtime (which disables restoration pricing for
 // that level) instead of making Agent startup fail.
-const selectAllLevelData = "SELECT `LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,COALESCE(`DROP_GOLD_MIN`,0),COALESCE(`DROP_GOLD_MAX`,0) FROM `SRO_SHARD`.`REF_LEVEL_DATA` ORDER BY `LEVEL`"
+const selectAllLevelData = "SELECT `LEVEL`,`REQUIRED_EXPERIENCE`,`REQUIRED_SKILL_POINTS`,COALESCE(`DROP_GOLD_MIN`,0),COALESCE(`DROP_GOLD_MAX`,0),`JOB_ACTIVITY_FACTOR` FROM `SRO_SHARD`.`REF_LEVEL_DATA` ORDER BY `LEVEL`"

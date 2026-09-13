@@ -66,7 +66,7 @@ func TestSingleObjectDespawnUsesDedicatedOpcode(t *testing.T) {
 	}
 }
 
-func TestGroundItemSpawnUsesSingle3015Boundary(t *testing.T) {
+func TestGroundItemSpawnUsesExactSingle3015Boundary(t *testing.T) {
 	_, player := mobAIFixture(100)
 	conn := &mobAICaptureConn{}
 	player.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "ground-item-single-spawn-test")
@@ -86,11 +86,27 @@ func TestGroundItemSpawnUsesSingle3015Boundary(t *testing.T) {
 		t.Fatalf("ground-item spawn amount = %d, want 777", got)
 	}
 	payload := packets[0].Payload()
-	if got, want := len(payload), 35; got != want {
+	if got, want := len(payload), 31; got != want {
 		t.Fatalf("ground-item 0x3015 payload length = %d, want %d", got, want)
 	}
-	if got, want := payload[len(payload)-5:], []byte{0, 0, 0, 0, 0}; !bytes.Equal(got, want) {
-		t.Fatalf("ground-item 0x3015 drop tail = % X, want % X", got, want)
+	if got := payload[len(payload)-1]; got != 0 {
+		t.Fatalf("ground-item 0x3015 update state = %d, want ordinary state 0", got)
+	}
+	want := []byte{
+		0x01, 0x00, 0x00, 0x00, // reference item
+		0x09, 0x03, 0x00, 0x00, // gold amount 777
+		0x2C, 0x01, 0x00, 0x00, // runtime UID 300
+		0xA8, 0x61, // region 25000
+		0x00, 0x00, 0x00, 0x40, // X 2
+		0x00, 0x00, 0x00, 0x00, // Y 0
+		0x00, 0x00, 0x00, 0x40, // Z 2
+		0x00, 0x00, // heading
+		0x00, // no ownership marker
+		0x00, // item rarity/state
+		0x00, // 0x3015 update state
+	}
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("ground-item 0x3015 payload = % X, want % X", payload, want)
 	}
 }
 

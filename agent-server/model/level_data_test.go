@@ -28,6 +28,9 @@ func TestLoadLevelTableParsesProgressionFields(t *testing.T) {
 	if row.RequiredSkillPoints != 1 {
 		t.Fatalf("Level(2) = %+v, want mastery SP=1", row)
 	}
+	if row.JobActivityFactor != 47 {
+		t.Fatalf("Level(2) = %+v, want job activity factor=47", row)
+	}
 }
 
 func TestLoadLevelTableAcceptsPK2UTF16LE(t *testing.T) {

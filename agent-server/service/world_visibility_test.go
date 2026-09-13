@@ -39,6 +39,36 @@ func TestWorldVisibilityActivationAddsStationaryPlayersReciprocally(t *testing.T
 	}
 }
 
+func TestWorldVisibilityIsolatesGameWorldInstancesInSharedRegion(t *testing.T) {
+	regionID := int16(25000)
+	public := newVisibilityTestPlayer(1, "Public", visibilityTestPosition(regionID, 100, 100))
+	instanceA := newVisibilityTestPlayer(2, "InstanceA", visibilityTestPosition(regionID, 110, 100))
+	instanceB := newVisibilityTestPlayer(3, "InstanceB", visibilityTestPosition(regionID, 120, 100))
+	instanceA.SetGameWorldID(41)
+	instanceB.SetGameWorldID(42)
+	world := newVisibilityTestWorld(t, public, instanceA, instanceB)
+	public.SetLifeState(model.Alive)
+	instanceA.SetLifeState(model.Alive)
+	instanceB.SetLifeState(model.Alive)
+
+	world.ActivatePlayer(instanceA)
+	if instanceA.GetKnownObjectList().Knows(public) ||
+		instanceA.GetKnownObjectList().Knows(instanceB) ||
+		public.GetKnownObjectList().Knows(instanceA) ||
+		instanceB.GetKnownObjectList().Knows(instanceA) {
+		t.Fatal("players in distinct game-world scopes became mutually visible")
+	}
+
+	member := newVisibilityTestPlayer(4, "Member", visibilityTestPosition(regionID, 130, 100))
+	member.SetGameWorldID(41)
+	world.AddVisibleObject(member)
+	member.SetLifeState(model.Alive)
+	world.ActivatePlayer(member)
+	if !member.GetKnownObjectList().Knows(instanceA) || !instanceA.GetKnownObjectList().Knows(member) {
+		t.Fatal("members of the same game-world instance were not mutually visible")
+	}
+}
+
 func TestWorldVisibilityActivationQueuesExistingNPC(t *testing.T) {
 	regionID := int16(25000)
 	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))

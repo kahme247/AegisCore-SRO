@@ -2,6 +2,12 @@ package chat
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -10,12 +16,10 @@ import (
 	"github.com/g3n/engine/math32"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"regexp"
-	"strconv"
-	"sync"
 )
 
 var adminCommandRegex = regexp.MustCompile("^\\.(?P<command>\\w+)\\s?(?P<args>.*)$")
+var cheatCommandRegex = regexp.MustCompile("^(?P<command>\\w+)\\s?(?P<args>.*)$")
 
 type GmMessageHandler struct {
 }
@@ -27,6 +31,11 @@ const (
 	Takla1          string = "takla1"
 	Takla2          string = "takla2"
 	LogLevel        string = "loglvl"
+	SpawnMonster    string = "spawn"
+
+	defaultGMSpawnCount  = 1
+	maximumGMSpawnCount  = 20
+	defaultGMSpawnRadius = 100
 )
 
 var gmMessageHandlerInstance *GmMessageHandler
@@ -53,10 +62,7 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 		logrus.Warnf("rejected GM chat from non-GM uid=%d", session.UserContext.UniqueID)
 		return nil
 	}
-	if adminCommandRegex.MatchString(request.Message) {
-		strComponents := adminCommandRegex.FindStringSubmatch(request.Message)
-		command := strComponents[1]
-		args := strComponents[2]
+	if command, args, commandOK := parseAdminCommand(request.Message, request.ChatType == Notice); commandOK {
 		logrus.Debugf("[GM] - gm command %v with args %v\n", command, args)
 		switch command {
 		case SetSpeed:
@@ -109,6 +115,25 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 			if err := player.Session.Send(p); err != nil {
 				return err
 			}
+		case SpawnMonster:
+			codeName, count, parseErr := parseGMSpawnArgs(args)
+			if parseErr != nil {
+				return sendGMSystemMessage(player.Session, parseErr.Error())
+			}
+			spawned := 0
+			for spawned < count {
+				if _, spawnErr := manager.GetRespawnManagerInstance().SpawnQuestNPC(
+					codeName,
+					player.GetNavmeshPosition(),
+					defaultGMSpawnRadius,
+				); spawnErr != nil {
+					logrus.WithError(spawnErr).Warnf("[GM] failed to spawn %s for %s after %d successful spawns", codeName, player.CharName, spawned)
+					return sendGMSystemMessage(player.Session, fmt.Sprintf("Spawn failed for %s after %d/%d: %v", codeName, spawned, count, spawnErr))
+				}
+				spawned++
+			}
+			logrus.Infof("[GM] spawned %d x %s near %s", spawned, codeName, player.CharName)
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("Spawned %d x %s nearby.", spawned, codeName))
 		case JanganWest:
 			warpPlayer(
 				session.UserContext.UniqueID,
@@ -156,6 +181,53 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 		}
 	}
 	return nil
+}
+
+func parseAdminCommand(message string, allowBare bool) (string, string, bool) {
+	matcher := adminCommandRegex
+	if allowBare && !strings.HasPrefix(message, ".") {
+		matcher = cheatCommandRegex
+	}
+	components := matcher.FindStringSubmatch(message)
+	if len(components) != 3 {
+		return "", "", false
+	}
+	return components[1], components[2], true
+}
+
+func parseGMSpawnArgs(arguments string) (string, int, error) {
+	fields := strings.Fields(arguments)
+	if len(fields) < 1 || len(fields) > 2 {
+		return "", 0, errors.New("Usage: .spawn MOB_CODE_NAME [count]")
+	}
+	codeName := fields[0]
+	if !strings.HasPrefix(codeName, "MOB_") {
+		return "", 0, errors.New("Spawn code name must begin with MOB_")
+	}
+	count := defaultGMSpawnCount
+	if len(fields) == 2 {
+		parsed, err := strconv.Atoi(fields[1])
+		if err != nil || parsed < 1 || parsed > maximumGMSpawnCount {
+			return "", 0, fmt.Errorf("Spawn count must be between 1 and %d", maximumGMSpawnCount)
+		}
+		count = parsed
+	}
+	return codeName, count, nil
+}
+
+func sendGMSystemMessage(session *server.Session, message string) error {
+	if session == nil {
+		return errors.New("GM session is unavailable")
+	}
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ChatUpdate
+	packet.WriteByte(PM)
+	packet.WriteString("System")
+	packet.WriteString(message)
+	if err := packet.WriteError(); err != nil {
+		return err
+	}
+	return session.Send(packet)
 }
 
 func warpPlayer(playerUniqueId uint32, x, y, z float32, regionId int16) {

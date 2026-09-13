@@ -87,19 +87,21 @@ type AgentServer struct {
 	Exchange *exchange.Manager
 	// GuildStorage owns the database-backed exclusive guild chest lease and is
 	// retained so disconnect teardown can release it immediately.
-	GuildStorage       model.GuildStorageRepository
-	Combat             *character.CombatHandler
-	Hwan               *character.HwanHandler
-	Skill              *character.SkillHandler
-	SkillRestoration   *character.SkillRestorationHandler
-	Inventory          *inventory.InventoryHandler
-	CharacterSelection *lobby.CharacterSelectionHandler
-	Vitals             model.CharacterVitalsRepository
-	GameplayRates      *manager.GameplayRateManager
-	COSPolicy          *manager.COSPolicyManager
-	COS                *service.COSService
-	DisconnectSaver    *service.DisconnectSaver
-	ChatFilter         model.ChatFilterRepository
+	GuildStorage           model.GuildStorageRepository
+	Combat                 *character.CombatHandler
+	QuestInstances         *model.QuestInstanceRegistry
+	QuestInstanceLifecycle *model.QuestInstanceLifecycle
+	Hwan                   *character.HwanHandler
+	Skill                  *character.SkillHandler
+	SkillRestoration       *character.SkillRestorationHandler
+	Inventory              *inventory.InventoryHandler
+	CharacterSelection     *lobby.CharacterSelectionHandler
+	Vitals                 model.CharacterVitalsRepository
+	GameplayRates          *manager.GameplayRateManager
+	COSPolicy              *manager.COSPolicyManager
+	COS                    *service.COSService
+	DisconnectSaver        *service.DisconnectSaver
+	ChatFilter             model.ChatFilterRepository
 	//SpawnEngine             *spawn.SpawnEngine
 }
 
@@ -224,12 +226,11 @@ func NewAgentServer() (AgentServer, error) {
 			None:       false,
 			Disabled:   false,
 			Encryption: true,
-			// The stock client starts a fresh Agent connection after an in-game
-			// restart but does not reliably reset its sequence/CRC state. Keeping
-			// EDC enabled makes that otherwise valid reconnect fail before it can
-			// redeem its Gateway-issued admission ticket. Encryption and the key
-			// exchange remain enabled.
-			EDC:          false,
+			// The stock client expects the same sequence/CRC negotiation on a
+			// fresh Agent connection that it receives from Gateway. Omitting this
+			// bit leaves the client waiting after the initial 0x5000 challenge and
+			// it never sends the Agent authentication request.
+			EDC:          true,
 			KeyExchange:  true,
 			KeyChallenge: false,
 		},
@@ -355,6 +356,8 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.ChatFilter = repositories.ChatFilter
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv, repositories.CharacterRename)
 	gameReadyHandler := character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
+	questCountdowns := character.NewQuestCountdownService(repositories.CharacterQuests)
+	gameReadyHandler.ConfigureQuestCountdowns(questCountdowns)
 	character.RegisterGuideHandler(&serv)
 	agentServer.Hwan, err = character.RegisterHwanHandler(&serv, repositories.Hwan)
 	if err != nil {
@@ -372,21 +375,60 @@ func NewAgentServer() (AgentServer, error) {
 	}
 	cosLifecycle.Service().ConfigurePolicy(cosPolicy)
 	service.GetWorldServiceInstance().ConfigureMountedTransportResolver(cosLifecycle.Service().ResolveMountedTransport)
-	if err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime, repositories.QuestOffers); err != nil {
+	tradeSafetyOption, tradeSafetyLimit := viper.GetUint(config.AgentTradeSafetyOption), viper.GetUint(config.AgentTradeSafetyNum)
+	if tradeSafetyOption > 2 || tradeSafetyLimit == 0 || tradeSafetyLimit > 255 {
+		return AgentServer{}, fmt.Errorf("configure Agent safe trade: option=%d limit=%d", tradeSafetyOption, tradeSafetyLimit)
+	}
+	npcTalkHandler, err := character.RegisterNPCTalkHandler(&serv, repositories.CharacterQuests, questRuntime, repositories.QuestOffers, repositories.SafeTrade, byte(tradeSafetyOption), byte(tradeSafetyLimit), questCountdowns)
+	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent NPC talk handler: %w", err)
 	}
 	if err := character.RegisterQuestHandler(&serv, repositories.CharacterQuests); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest handlers: %w", err)
 	}
+	questEvents, err := model.NewQuestEventDispatcher(shardPool)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent quest event dispatcher: %w", err)
+	}
+	if err = model.RegisterOldWomanSearchEvents(questEvents); err != nil {
+		return AgentServer{}, fmt.Errorf("register QNO_RM_OLDWOMAN_5 events: %w", err)
+	}
+	if err = model.RegisterNativeCatchEvents(questEvents); err != nil {
+		return AgentServer{}, fmt.Errorf("register native catch-action events: %w", err)
+	}
+	if err = model.RegisterNativeInteractionEvents(questEvents); err != nil {
+		return AgentServer{}, fmt.Errorf("register native quest interaction events: %w", err)
+	}
+	if err = character.RegisterQuestActionHandler(&serv, questEvents); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent quest action handlers: %w", err)
+	}
 	if _, err := character.RegisterQuestRewardSelectionHandler(&serv, questRuntime); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest reward selection: %w", err)
 	}
 	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
+	agentServer.QuestInstances = model.NewQuestInstanceRegistry()
+	questInstanceMembers, err := model.NewQuestInstanceMemberRepository(shardPool)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure quest instance member repository: %w", err)
+	}
+	questInstanceAllocator, err := model.NewQuestInstanceScopeAllocator(shardPool)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure quest instance scope allocator: %w", err)
+	}
+	agentServer.QuestInstanceLifecycle, err = model.NewQuestInstanceLifecycle(agentServer.QuestInstances, questInstanceMembers, questInstanceAllocator)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure quest instance lifecycle: %w", err)
+	}
+	teleportHandler.ConfigureQuestInstanceExit(agentServer.QuestInstanceLifecycle)
+	instanceEntries := service.NewQuestInstanceEntryService(agentServer.QuestInstanceLifecycle, service.GetPartyServiceInstance(), model.NextActionUID)
+	npcTalkHandler.ConfigureQuestInstanceEntry(instanceEntries, teleportHandler)
 	character.RegisterResurrectionHandler(&serv, repositories.Vitals, teleportHandler, repositories.ItemUse)
 	manager.GetMobAIManagerInstance().ConfigureVitals(repositories.Vitals)
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
 	manager.GetRespawnManagerInstance().ConfigureGiantSpawnRatio(viper.GetInt(config.AgentGiantMonsterSpawnRatio))
 	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
+	agentServer.Combat.ConfigureNativeQuestInstanceDeaths(agentServer.QuestInstances, teleportHandler)
+	agentServer.Combat.ConfigureJobProgression(repositories.Social)
 	agentServer.Combat.ConfigureMobAttackInterrupter(manager.GetMobAIManagerInstance().InterruptAttack)
 	manager.GetMobAIManagerInstance().ConfigurePlayerAttackInterrupter(agentServer.Combat.InterruptPlayerAction)
 	if agentServer.MonsterDrops != nil {
@@ -421,6 +463,12 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot handler: %w", err)
 	}
 	socialHandler := social.RegisterHandlers(&serv, repositories.Social)
+	if err := characterSelection.ConfigurePlayerPreparer(socialHandler); err != nil {
+		return AgentServer{}, fmt.Errorf("configure character-selection social state: %w", err)
+	}
+	if err := socialHandler.ConfigureSafeTrade(repositories.SafeTrade, tradeSafetyLimit); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent safe-trade bootstrap: %w", err)
+	}
 	gameReadyHandler.ConfigureSocial(socialHandler)
 	chat.RegisterChatHandler(&serv, repositories.Social, repositories.ChatFilter)
 	logout.RegisterLogoutHandler(&serv)
@@ -446,15 +494,24 @@ func NewAgentServer() (AgentServer, error) {
 		agentServer.Inventory.ConfigureGroundItemLifecycle(groundItemLifecycle)
 	}
 	agentServer.Inventory.ConfigureQuestProgressRepository(questRuntime)
+	agentServer.Inventory.ConfigureOldWomanSearch(questRuntime)
+	agentServer.Inventory.ConfigureNativeCatchActions(questRuntime)
+	agentServer.Inventory.ConfigureJobSuitTeleport(teleportHandler)
 	cosInventoryRepository, ok := repositories.COS.(model.COSInventoryTransferRepository)
 	if !ok {
 		return AgentServer{}, fmt.Errorf("configure Agent COS inventory transfer: repository does not support transfers")
 	}
 	agentServer.Inventory.ConfigureCOSRepository(cosInventoryRepository)
+	agentServer.Inventory.ConfigureSafeTrade(repositories.SafeTrade, cosLifecycle.Service(), world)
+	agentServer.Inventory.ConfigurePackageItems(repositories.PackageItems)
 	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse, teleportHandler)
+	itemUseHandler.ConfigureQuestInstanceEntry(agentServer.QuestInstanceLifecycle, teleportHandler)
 	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
 	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
 	agentServer.COS = cosLifecycle.Service()
+	if agentServer.COS != nil && agentServer.GroundItems != nil {
+		agentServer.COS.ConfigureCargoGroundItems(agentServer.GroundItems)
+	}
 	if agentServer.COS != nil && groundItemLifecycle != nil {
 		// COS collection shares the ground-item timer cancellation edge with
 		// player pickup; the persistence transaction has already committed
@@ -466,7 +523,10 @@ func NewAgentServer() (AgentServer, error) {
 	itemUseHandler.ConfigureTimedBuffDuration(viper.GetBool(config.AgentTimedBuffDuration))
 	alchemyHandler := inventory.RegisterAlchemyHandler(&serv, repositories.Alchemy)
 	manager.GetGameTimeManagerInstance().ConfigureAlchemy(alchemyHandler)
-	party.RegisterPartyHandlers(&serv, socialHandler)
+	manager.GetGameTimeManagerInstance().ConfigureNativeQuests(
+		manager.NewNativeQuestManager(questRuntime, manager.GetRespawnManagerInstance()),
+	)
+	party.RegisterPartyHandlers(&serv, socialHandler, teleportHandler)
 
 	if err := world.ConfigureRepositories(service.WorldRepositories{
 		RegionCatalog: repositories.Regions,
@@ -882,6 +942,7 @@ func main() {
 				agentServer.GroundItems,
 				agentServer.GroundItems.Materializer(),
 			)
+			agentServer.MonsterDrops.ConfigureGameplayRates(agentServer.GameplayRates)
 			if agentServer.Combat != nil {
 				agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
 			}

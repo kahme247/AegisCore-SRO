@@ -15,6 +15,24 @@ import (
 
 const PlayerType = "Player"
 
+const (
+	PlayerJobTrader byte = 1
+	PlayerJobThief  byte = 2
+	PlayerJobHunter byte = 3
+	PlayerJobNone   byte = 4
+)
+
+type PlayerJob struct {
+	Type       byte
+	Level      byte
+	Experience uint64
+	Alias      string
+}
+
+func (j PlayerJob) Active() bool {
+	return j.Type >= PlayerJobTrader && j.Type <= PlayerJobHunter
+}
+
 // PKState is deliberately separate from BattleState. It represents legacy PvP
 // reputation/cape state, not the entity's peace/battle mode.
 type PKState int
@@ -49,6 +67,7 @@ const (
 type IPlayer interface {
 	ICharacter
 	GetPKState() PKState
+	GetJob() PlayerJob
 	GetInventory() Inventory
 	GetSession() *server.Session
 	GetScale() byte
@@ -91,6 +110,7 @@ type Player struct {
 	ExpOffset             uint64
 	SkillExpOffset        uint
 	Gold                  uint64
+	Job                   PlayerJob
 	Masteries             map[uint32]byte
 	Skills                map[uint32]byte
 	ActiveBuffs           map[uint32]ActiveBuff
@@ -166,6 +186,32 @@ func (p *Player) AutoPotionSettingsSnapshot() (AutoPotionSettings, bool) {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	return p.AutoPotionSettings, p.HasAutoPotionSettings
+}
+
+func (p *Player) GetJob() PlayerJob {
+	if p == nil {
+		return PlayerJob{Type: PlayerJobNone}
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	job := p.Job
+	if !job.Active() {
+		job.Type = PlayerJobNone
+		job.Level = 0
+	}
+	return job
+}
+
+func (p *Player) SetJob(job PlayerJob) {
+	if p == nil {
+		return
+	}
+	if !job.Active() {
+		job = PlayerJob{Type: PlayerJobNone}
+	}
+	p.Mutex.Lock()
+	p.Job = job
+	p.Mutex.Unlock()
 }
 
 func (p *Player) GetInventorySize() byte {
@@ -284,6 +330,22 @@ func (p *Player) SetCOSItemState(slot byte, cos *COS, state COSItemState) bool {
 	return true
 }
 
+func (p *Player) ClearCOSItem(slot byte, cos *COS) bool {
+	if p == nil || cos == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	item, exists := p.Inventory.Items[slot]
+	if !exists || item.Data != uint32(cos.PersistentID) {
+		return false
+	}
+	item.Data = 0
+	item.COS = COSItemInfo{}
+	p.Inventory.Items[slot] = item
+	return true
+}
+
 // SetGold applies a persistence-backed balance change without replacing the
 // independently mutable inventory snapshot.
 func (p *Player) SetGold(gold uint64) {
@@ -317,6 +379,39 @@ func (p *Player) MarkQuestAborted(questID int) {
 		if p.Quests[i].QuestID == questID {
 			p.Quests[i].Status = QuestAborted
 			return
+		}
+	}
+}
+
+// CommitQuestAbandon publishes the atomic event-8 result to the live player
+// snapshot after persistence commits. Removed quest-item slots must disappear
+// here as well as from SQL and the client, otherwise later inventory actions
+// can operate on stale item identities.
+func (p *Player) CommitQuestAbandon(questID int, result QuestAbandonResult) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	for _, slot := range result.RemovedSlots {
+		delete(p.Inventory.Items, slot)
+	}
+	for index := range p.Quests {
+		if p.Quests[index].QuestID == questID {
+			p.Quests[index].Status = QuestAborted
+			p.Quests[index].AchievementCount = 0
+			p.Quests[index].Data1 = 0
+			p.Quests[index].Data2 = 0
+		}
+	}
+	for _, relatedQuestID := range result.ResetQuestIDs {
+		for index := range p.Quests {
+			if p.Quests[index].QuestID == relatedQuestID && p.Quests[index].Status.ClientActive() {
+				p.Quests[index].Status = QuestAborted
+				p.Quests[index].AchievementCount = 0
+				p.Quests[index].Data1 = 0
+				p.Quests[index].Data2 = 0
+			}
 		}
 	}
 }
@@ -370,6 +465,12 @@ func (p *Player) CommitQuestCompletion(result QuestCompletionResult) {
 	}
 	p.SkillPoints = result.Progress.SkillPoints
 	p.StatPoints = result.Progress.StatPoints
+	if result.InventorySize != 0 {
+		p.InventorySize = result.InventorySize
+	}
+	if result.HwanChanged {
+		p.HwanLevel = result.HwanLevel
+	}
 	if p.MaxLevel < p.Level {
 		p.MaxLevel = p.Level
 	}

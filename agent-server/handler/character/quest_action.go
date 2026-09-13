@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/questwire"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -13,8 +15,9 @@ import (
 )
 
 type QuestActionHandler struct {
-	dispatcher model.QuestEventDispatcher
-	send       func(*server.Session, network.Packet) error
+	dispatcher  model.QuestEventDispatcher
+	send        func(*server.Session, network.Packet) error
+	playerByUID func(uint32) (*model.Player, error)
 }
 
 // RegisterQuestActionHandler admits the two legacy authored-event requests
@@ -25,7 +28,7 @@ func RegisterQuestActionHandler(target *server.Server, dispatcher model.QuestEve
 	if target == nil || dispatcher == nil {
 		return model.ErrQuestRuntimeUnavailable
 	}
-	handler := &QuestActionHandler{dispatcher: dispatcher}
+	handler := &QuestActionHandler{dispatcher: dispatcher, playerByUID: service.GetWorldServiceInstance().GetPlayerByUniqueId}
 	target.RegisterHandler(opcode.QuestInteractionRequest, handler.handleInteraction)
 	target.RegisterHandler(opcode.QuestLocalActionRequest, handler.handleLocalAction)
 	return nil
@@ -61,6 +64,11 @@ func (h *QuestActionHandler) handle(ctx context.Context, session *server.Session
 	} else if err != nil {
 		return err
 	}
+	if success && event == model.QuestAuthoredInteraction {
+		if err = h.publishNativeInteraction(session, int(request.QuestID)); err != nil {
+			return err
+		}
+	}
 	response, buildErr := vsro188.BuildQuestResponse(responseOpcode, success, request.QuestID, reason)
 	if buildErr != nil {
 		return buildErr
@@ -69,4 +77,51 @@ func (h *QuestActionHandler) handle(ctx context.Context, session *server.Session
 		return h.send(session, response)
 	}
 	return session.Send(response)
+}
+
+func (h *QuestActionHandler) publishNativeInteraction(session *server.Session, questID int) error {
+	if key, exists := model.NativeInteractionTalkKey(questID); exists {
+		packet, err := vsro188.BuildQuestNotification(key)
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, packet)
+	}
+	if questID != model.MeetRocInteractionQuestID || session == nil || session.UserContext.UniqueID == 0 {
+		return nil
+	}
+	if h.playerByUID == nil {
+		return nil
+	}
+	player, err := h.playerByUID(session.UserContext.UniqueID)
+	if err != nil || player == nil {
+		return nil
+	}
+	count := uint64(0)
+	for _, item := range player.GetInventory().Items {
+		if item.GetRefObjectID() == model.MeetRocProgressItemRefID && item.StackSize > 0 {
+			count += uint64(item.StackSize)
+		}
+	}
+	for _, quest := range player.QuestSnapshot() {
+		if quest.QuestID != 374 && quest.QuestID != 375 {
+			continue
+		}
+		quest.Data1 = count
+		packet, buildErr := questwire.BuildUpdate(quest, vsro188.QuestUpdateDelta)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err = h.sendPacket(session, packet); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *QuestActionHandler) sendPacket(session *server.Session, packet network.Packet) error {
+	if h.send != nil {
+		return h.send(session, packet)
+	}
+	return session.Send(packet)
 }

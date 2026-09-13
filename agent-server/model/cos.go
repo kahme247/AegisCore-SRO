@@ -62,6 +62,25 @@ type COS struct {
 	TimedServices     map[int]COSTimedService
 	ownerSpeed        float32
 	ownerSpeedEnabled bool
+	tradeScale        byte
+}
+
+func (c *COS) GetTradeScale() byte {
+	if c == nil {
+		return 0
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.tradeScale
+}
+
+func (c *COS) SetTradeScale(scale byte) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.tradeScale = scale
+	c.stateMu.Unlock()
 }
 
 func NewCOS(ref RefChar, owner *Player) (*COS, error) {

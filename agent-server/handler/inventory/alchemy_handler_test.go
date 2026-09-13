@@ -221,8 +221,28 @@ func TestAlchemyAvatarResultLayouts(t *testing.T) {
 	if avatar.MessageID != opcode.AlchemyAvatarResponse || !bytes.Equal(avatar.Payload(), []byte{1, 2, 1}) {
 		t.Fatalf("avatar response = opcode %#x payload % X", avatar.MessageID, avatar.Payload())
 	}
-	grant := buildAlchemyAvatarGrantResult(true)
-	if grant.MessageID != opcode.AlchemyAvatarGrantResponse || !bytes.Equal(grant.Payload(), []byte{1, 1}) {
+	grant := buildAlchemyAvatarGrantResult(model.AlchemyResult{
+		Success:    true,
+		TargetSlot: 13,
+		Target: model.Item{
+			SRObject: model.SRObject{RefObjectID: 0x11223344, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1}},
+			OptLevel: 7,
+			Variance: 0x0102030405060708,
+			Data:     900,
+		},
+	})
+	wantGrant := []byte{
+		1, 1, 13,
+		0, 0, 0, 0,
+		0x44, 0x33, 0x22, 0x11,
+		7,
+		8, 7, 6, 5, 4, 3, 2, 1,
+		0x84, 0x03, 0, 0,
+		0,
+		1, 0,
+		2, 0,
+	}
+	if grant.MessageID != opcode.AlchemyAvatarGrantResponse || !bytes.Equal(grant.Payload(), wantGrant) {
 		t.Fatalf("avatar grant response = opcode %#x payload % X", grant.MessageID, grant.Payload())
 	}
 }

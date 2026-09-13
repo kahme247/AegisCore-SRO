@@ -26,6 +26,8 @@ type GameplayRepositories struct {
 	MonsterMasks            model.MonsterMaskRepository
 	InventoryRelocator      model.InventoryRelocator
 	Economy                 model.EconomyRepository
+	SafeTrade               model.SafeTradeRepository
+	PackageItems            model.PackageItemCatalog
 	ItemMall                model.ItemMallRepository
 	GuildStorage            model.GuildStorageRepository
 	Social                  model.SocialRepository
@@ -102,6 +104,12 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.Economy, err = model.NewEconomyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent economy repository: %w", err)
+	}
+	if repositories.SafeTrade, err = model.NewSafeTradeRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent safe-trade repository: %w", err)
+	}
+	if repositories.PackageItems, err = model.NewPackageItemRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent package-item repository: %w", err)
 	}
 	if repositories.ItemMall, err = model.NewItemMallRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent item mall repository: %w", err)

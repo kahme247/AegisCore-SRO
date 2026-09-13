@@ -403,8 +403,8 @@ func buildAlchemyAvatarResult(mutated bool) network.Packet {
 	return vsro188.BuildAlchemyAvatarResult(mutated)
 }
 
-func buildAlchemyAvatarGrantResult(mutated bool) network.Packet {
-	return vsro188.BuildAlchemyAvatarGrantResult(mutated)
+func buildAlchemyAvatarGrantResult(result model.AlchemyResult) network.Packet {
+	return vsro188.BuildAlchemyAvatarGrantResult(result.Success, result.TargetSlot, alchemyTargetPayload(result.Target))
 }
 
 func buildAlchemyAvatarFailure() network.Packet {
@@ -463,7 +463,7 @@ func (h *AlchemyHandler) handleAvatarGrantPacket(ctx context.Context, session *s
 		return nil
 	}
 	player.CommitInventory(result.Inventory)
-	return h.sendPacket(session, buildAlchemyAvatarGrantResult(result.Success))
+	return h.sendPacket(session, buildAlchemyAvatarGrantResult(result))
 }
 
 func parseAlchemyPairRequest(packet *network.Packet) (alchemyPairRequest, error) {

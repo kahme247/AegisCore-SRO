@@ -77,9 +77,9 @@ func groupSpawnObjects(player model.IPlayer, objects map[uint32]model.ISRObject,
 			return
 		}
 	}
-	// Ground items use the binary-confirmed single-object visibility edge
-	// (0x3015). Character/NPC batches continue to use the established 3017 /
-	// 3019 / 3018 grouping because their record layouts are different.
+	// A single ground item uses the native direct 0x3015 edge. Its item record
+	// includes the exact one-byte update tail consumed by CIItem after the
+	// polymorphic initial parser; character/NPC visibility remains grouped.
 	if spawning && len(objects) == 1 {
 		for _, object := range objects {
 			if _, isItem := object.(model.IItem); !isItem {

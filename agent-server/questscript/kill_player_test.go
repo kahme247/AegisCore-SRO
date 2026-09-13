@@ -18,7 +18,9 @@ func TestKillPlayerObjectivesRecoversVariableJobStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("KillPlayerObjectives: %v", err)
 	}
-	if len(objectives) != 1 || objectives[0].RegionValue != -32752 || len(objectives[0].JobStates) != 2 ||
+	if len(objectives) != 1 || objectives[0].RegionValue != -32752 || objectives[0].RegionID != -32752 ||
+		objectives[0].RequiredCount != 20 || objectives[0].MinimumLevel != 105 || len(objectives[0].FilterKeys) != 3 ||
+		len(objectives[0].JobStates) != 2 ||
 		objectives[0].JobStates[1] != "OBJ_JOBSTATE_HUNTER" {
 		t.Fatalf("objectives = %#v", objectives)
 	}

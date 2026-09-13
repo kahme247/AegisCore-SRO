@@ -344,6 +344,7 @@ func (w *WorldService) reconcilePlayerObject(player *model.Player, object model.
 	objectList := object.GetKnownObjectList()
 	rangeLimit := objectVisibilityRange(object, playerList != nil && playerList.Knows(object))
 	inRange := playerList != nil && visibilityEligible(player) &&
+		player.GetGameWorldID() == object.GetGameWorldID() &&
 		navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), object.GetNavmeshPosition()) <= rangeLimit
 	if inRange {
 		playerList.AddObject(object)
@@ -403,6 +404,7 @@ func (w *WorldService) reconcilePlayerPair(player, other *model.Player) []Visibi
 		rangeLimit = visibilityExitRange
 	}
 	inRange := playerList != nil && otherList != nil &&
+		player.GetGameWorldID() == other.GetGameWorldID() &&
 		visibilityObserverEligible(player) && visibilityObserverEligible(other) &&
 		w.playersAreWithinVisibilityRange(player, other, rangeLimit)
 

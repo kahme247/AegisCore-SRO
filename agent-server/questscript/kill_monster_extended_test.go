@@ -17,6 +17,9 @@ func TestExtendedKillMonsterObjectivesRecoversClassifiedFraction(t *testing.T) {
 	if len(objectives) != 1 || objectives[0].Kind != ExtendedKillClassified || objectives[0].TargetClass != "MONSTER_CLASS_GIANT" || len(objectives[0].Targets) != 1 {
 		t.Fatalf("objectives = %#v", objectives)
 	}
+	if objectives[0].RequiredCount != 1 {
+		t.Fatalf("required count = %d, want server-truncated value 1", objectives[0].RequiredCount)
+	}
 }
 
 func TestExtendedKillMonsterObjectivesRecoversMultiTargetList(t *testing.T) {
@@ -32,6 +35,9 @@ func TestExtendedKillMonsterObjectivesRecoversMultiTargetList(t *testing.T) {
 	}
 	if len(objectives) != 1 || objectives[0].Kind != ExtendedKillMultiTarget || len(objectives[0].Targets) != 2 || objectives[0].Targets[1] != "MOB_TWO" {
 		t.Fatalf("objectives = %#v", objectives)
+	}
+	if objectives[0].RequiredCount != 500 {
+		t.Fatalf("required count = %d, want 500", objectives[0].RequiredCount)
 	}
 }
 

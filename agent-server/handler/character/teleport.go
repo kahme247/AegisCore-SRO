@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 
 	"github.com/Harvi8/AegisCore/agent-server/handler/lobby"
@@ -33,12 +34,226 @@ type TeleportHandler struct {
 	repository model.TeleportRepository
 	send       func(*server.Session, network.Packet) error
 	bootstrap  func(*server.Session, *model.Player) error
+	roll       func() int
+	instances  *model.QuestInstanceLifecycle
 	mu         sync.Mutex
 	pending    map[*server.Session]*model.Player
 }
 
+func (h *TeleportHandler) ConfigureQuestInstanceExit(lifecycle *model.QuestInstanceLifecycle) {
+	if h != nil {
+		h.instances = lifecycle
+	}
+}
+
+func (h *TeleportHandler) SubmitPartyQuestInstanceExit(ctx context.Context, player *model.Player) error {
+	if h == nil || h.world == nil || h.instances == nil || player == nil || player.Session == nil || player.Session.LifecyclePhase() != server.SessionInWorld {
+		return model.ErrQuestInstanceInvalid
+	}
+	state, err := h.instances.PrepareExit(ctx, player)
+	if err != nil {
+		if errors.Is(err, model.ErrQuestInstanceNotMember) || errors.Is(err, model.ErrQuestInstanceMissing) {
+			return nil
+		}
+		return err
+	}
+	instance, err := h.instances.Instance(state.Scope)
+	if err != nil {
+		return err
+	}
+	if _, handled := model.NativePartyInstanceHookForQuest(instance.QuestID); !handled {
+		return nil
+	}
+	region, err := h.world.GetRegion(state.RegionID)
+	if err != nil {
+		return err
+	}
+	offset := math32.NewVector3(state.X, state.Y, state.Z)
+	cell, err := region.ResolveCell(offset)
+	if err != nil {
+		return err
+	}
+	destination := navmeshv2.RtNavmeshPosition{Offset: offset, Region: region.Region, Cell: &cell}
+	h.mu.Lock()
+	pending := h.pending[player.Session] != nil
+	h.mu.Unlock()
+	if pending || !player.Session.BeginTeleportLoading() {
+		return model.ErrQuestInstanceInvalid
+	}
+	notice, err := vsro188.BuildQuestNotification("UIIT_MSG_QUEST_INS_CONDITION")
+	if err != nil {
+		player.Session.AbortTeleportLoading()
+		return err
+	}
+	if err = h.sendPacket(player.Session, notice); err != nil {
+		player.Session.AbortTeleportLoading()
+		return err
+	}
+	if _, err = h.instances.Exit(ctx, state.Scope, player); err != nil {
+		player.Session.AbortTeleportLoading()
+		return err
+	}
+	player.SetLifeState(model.Spawning)
+	player.RemoveCharacterMask(0)
+	h.world.ResetPlayerVisibilityForTeleport(player)
+	h.world.StopMovingCharacter(player, destination, "quest-instance-party-exit", false)
+	npcInteractions.Clear(player.GetUniqueID())
+	h.mu.Lock()
+	h.pending[player.Session] = player
+	h.mu.Unlock()
+	return h.sendPacket(player.Session, buildTeleportReadyRequest(state.RegionID))
+}
+
 func NewTeleportHandler(world teleportWorld, repository model.TeleportRepository) *TeleportHandler {
-	return &TeleportHandler{world: world, repository: repository, pending: make(map[*server.Session]*model.Player)}
+	return &TeleportHandler{world: world, repository: repository, pending: make(map[*server.Session]*model.Player), roll: func() int { return rand.Intn(32768) }}
+}
+
+// SubmitSamePositionReload performs the stock world-reset exchange without
+// changing coordinates. Job-clothes equip and removal use it after the
+// inventory commit so the client reloads its job-mode object state and
+// respawns the character at the same authoritative position.
+func (h *TeleportHandler) SubmitSamePositionReload(player *model.Player) error {
+	if h == nil || h.world == nil || player == nil || player.Session == nil || player.Session.LifecyclePhase() != server.SessionInWorld {
+		return fmt.Errorf("same-position teleport is unavailable")
+	}
+	session := player.Session
+	h.mu.Lock()
+	pending := h.pending[session] != nil
+	h.mu.Unlock()
+	if pending || !session.BeginTeleportLoading() {
+		return fmt.Errorf("same-position teleport could not begin while session is %s", session.LifecyclePhase())
+	}
+	position := player.GetNavmeshPosition()
+	player.SetLifeState(model.Spawning)
+	player.RemoveCharacterMask(0)
+	h.world.ResetPlayerVisibilityForTeleport(player)
+	h.world.StopMovingCharacter(player, position, "job-suit-unequip", false)
+	npcInteractions.Clear(player.GetUniqueID())
+	h.mu.Lock()
+	h.pending[session] = player
+	h.mu.Unlock()
+	if err := h.sendPacket(session, buildTeleportReadyRequest(position.Region.ID)); err != nil {
+		h.mu.Lock()
+		delete(h.pending, session)
+		h.mu.Unlock()
+		session.AbortTeleportLoading()
+		return err
+	}
+	return nil
+}
+
+// SubmitNativeQuestInstanceTeleport stages one shared destination for every
+// current GameWorld member and starts the stock 0x34B5/0x34B6 reset exchange.
+// The instance variables commit only after all reset requests are submitted.
+func (h *TeleportHandler) SubmitNativeQuestInstanceTeleport(registry *model.QuestInstanceRegistry, plan model.NativeQuestInstanceDeathPlan, source *model.Player) error {
+	if h == nil || h.world == nil || registry == nil || source == nil || source.Session == nil || source.GetGameWorldID() != uint32(plan.Scope) || len(plan.MemberUIDs) == 0 {
+		return model.ErrQuestInstanceInvalid
+	}
+	position := source.GetNavmeshPosition()
+	relocation, err := model.BuildNativeQuestInstanceRelocation(position.Region.ID, position.Offset.X, position.Offset.Y, position.Offset.Z, h.roll)
+	if err != nil {
+		return err
+	}
+	region, err := h.world.GetRegion(relocation.RegionID)
+	if err != nil {
+		return err
+	}
+	offset := math32.NewVector3(relocation.X, relocation.Y, relocation.Z)
+	cell, err := region.ResolveCell(offset)
+	if err != nil {
+		return err
+	}
+	destination := navmeshv2.RtNavmeshPosition{Offset: offset, Heading: relocation.Heading, Region: region.Region, Cell: &cell}
+	members := make([]*model.Player, 0, len(plan.MemberUIDs))
+	for _, uid := range plan.MemberUIDs {
+		member, lookupErr := h.world.GetPlayerByUniqueId(uid)
+		if lookupErr != nil || member == nil || member.Session == nil || member.GetGameWorldID() != uint32(plan.Scope) || member.Session.LifecyclePhase() != server.SessionInWorld {
+			return model.ErrQuestInstanceNotMember
+		}
+		members = append(members, member)
+	}
+	h.mu.Lock()
+	for _, member := range members {
+		if h.pending[member.Session] != nil {
+			h.mu.Unlock()
+			return fmt.Errorf("quest instance member %d already has a pending teleport", member.GetUniqueID())
+		}
+	}
+	h.mu.Unlock()
+	notice, err := vsro188.BuildQuestNotification(plan.TalkToken)
+	if err != nil {
+		return err
+	}
+	if err = h.sendPacket(source.Session, notice); err != nil {
+		return err
+	}
+	begun := make([]*server.Session, 0, len(members))
+	for _, member := range members {
+		if !member.Session.BeginTeleportLoading() {
+			for _, session := range begun {
+				session.AbortTeleportLoading()
+			}
+			return fmt.Errorf("quest instance member %d could not begin teleport loading", member.GetUniqueID())
+		}
+		begun = append(begun, member.Session)
+	}
+	for _, member := range members {
+		member.SetLifeState(model.Spawning)
+		member.RemoveCharacterMask(0)
+		h.world.ResetPlayerVisibilityForTeleport(member)
+		h.world.StopMovingCharacter(member, destination, "quest-instance-teleport", false)
+		npcInteractions.Clear(member.GetUniqueID())
+		h.mu.Lock()
+		h.pending[member.Session] = member
+		h.mu.Unlock()
+		if err = h.sendPacket(member.Session, buildTeleportReadyRequest(relocation.RegionID)); err != nil {
+			return err
+		}
+	}
+	_, err = registry.CommitNativeQuestInstanceDeath(plan)
+	return err
+}
+
+func (h *TeleportHandler) SubmitQuestInstanceEntry(instance model.QuestInstance, members []*model.Player) error {
+	if h == nil || h.world == nil || !instance.Scope.ValidInstance() || len(members) == 0 {
+		return model.ErrQuestInstanceInvalid
+	}
+	for _, member := range members {
+		if member == nil || member.Session == nil || member.GetGameWorldID() != uint32(instance.Scope) || member.Session.LifecyclePhase() != server.SessionInWorld {
+			return model.ErrQuestInstanceNotMember
+		}
+		h.mu.Lock()
+		pending := h.pending[member.Session] != nil
+		h.mu.Unlock()
+		if pending {
+			return fmt.Errorf("quest instance member %d already has a pending teleport", member.GetUniqueID())
+		}
+	}
+	begun := make([]*server.Session, 0, len(members))
+	for _, member := range members {
+		if !member.Session.BeginTeleportLoading() {
+			for _, session := range begun {
+				session.AbortTeleportLoading()
+			}
+			return model.ErrQuestInstanceInvalid
+		}
+		begun = append(begun, member.Session)
+	}
+	for _, member := range members {
+		position := member.GetNavmeshPosition()
+		member.SetLifeState(model.Spawning)
+		member.RemoveCharacterMask(0)
+		h.world.ResetPlayerVisibilityForTeleport(member)
+		h.world.StopMovingCharacter(member, position, "quest-instance-entry", false)
+		npcInteractions.Clear(member.GetUniqueID())
+		h.mu.Lock()
+		h.pending[member.Session] = member
+		h.mu.Unlock()
+		if err := h.sendPacket(member.Session, buildTeleportReadyRequest(position.Region.ID)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func RegisterTeleportHandler(target *server.Server, repository model.TeleportRepository) *TeleportHandler {

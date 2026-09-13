@@ -18,16 +18,17 @@ type questTimerWireMetadata struct {
 	QuestDefinitionByte byte
 }
 
-// questTimerPublisher owns timer display and callback ordering. tickCadence
-// deliberately has no semantic name such as "second": the executable proves
-// one decrement per callback, but the callback manager's real-time unit has
-// not yet been recovered.
+// questTimerPublisher owns timer display and callback ordering. The authored
+// duration is seconds: GameServer presents duration/60 and duration%60 as the
+// minute/second pair and persists one decrement per event-0x0E callback.
 type questTimerPublisher struct {
 	dispatcher  model.QuestEventDispatcher
 	send        func(network.Packet) error
 	schedule    func(time.Duration, func())
 	tickCadence time.Duration
 	onError     func(error)
+	isActive    func(*model.Player, int) bool
+	checkpoint  func(context.Context, model.QuestTimer) error
 }
 
 func (p questTimerPublisher) start(ctx context.Context, player *model.Player, questID int, duration uint32, mode byte, metadata questTimerWireMetadata) (model.QuestTimer, bool, error) {
@@ -81,14 +82,23 @@ func (p questTimerPublisher) cancel(player *model.Player, questID int, metadata 
 }
 
 func (p questTimerPublisher) tick(ctx context.Context, player *model.Player, timer model.QuestTimer, metadata questTimerWireMetadata) {
-	if err := p.processTick(ctx, player, timer.QuestID, timer.Generation, metadata, true); err != nil && p.onError != nil {
-		p.onError(err)
+	if err := p.processTick(ctx, player, timer.QuestID, timer.Generation, metadata, true); err != nil {
+		if p.onError != nil {
+			p.onError(err)
+		}
+		if current, active := player.QuestTimerSnapshot(timer.QuestID); active && current.Generation == timer.Generation && p.schedule != nil {
+			p.schedule(p.tickCadence, func() { p.tick(ctx, player, current, metadata) })
+		}
 	}
 }
 
 func (p questTimerPublisher) processTick(ctx context.Context, player *model.Player, questID int, generation uint64, metadata questTimerWireMetadata, reschedule bool) error {
 	if player == nil || p.dispatcher == nil {
 		return fmt.Errorf("quest timer event dispatcher is unavailable")
+	}
+	if p.isActive != nil && !p.isActive(player, questID) {
+		player.CancelQuestTimer(questID)
+		return nil
 	}
 	tick, exists := player.TickQuestTimer(questID, generation)
 	if !exists {
@@ -97,6 +107,11 @@ func (p questTimerPublisher) processTick(ctx context.Context, player *model.Play
 	if tick.DispatchEvent {
 		if err := p.dispatcher.DispatchQuestEvent(ctx, player.ID, questID, tick.Timer.Event); err != nil {
 			return fmt.Errorf("dispatch quest %d timer event 0x%02X: %w", questID, tick.Timer.Event, err)
+		}
+	}
+	if tick.Timer.Remaining > 0 && p.checkpoint != nil {
+		if err := p.checkpoint(ctx, tick.Timer); err != nil {
+			return fmt.Errorf("checkpoint quest %d countdown: %w", questID, err)
 		}
 	}
 	if tick.DisplayUpdate {

@@ -14,11 +14,20 @@ func BuildUpdate(quest model.CharacterQuest, subtype byte) (network.Packet, erro
 	if err != nil {
 		return network.Packet{}, err
 	}
+	missionRecords, err := model.ProjectActiveQuestMissionProtocol(quest)
+	if err != nil {
+		return network.Packet{}, err
+	}
+	missions := make([]vsro188.QuestMissionDelta, len(missionRecords))
+	for index, mission := range missionRecords {
+		missions[index] = vsro188.QuestMissionDelta{
+			EntryKey: mission.EntryKey, TransitionCode: mission.TransitionCode,
+			Text: mission.Text, Values: mission.Values,
+		}
+	}
 	return vsro188.BuildQuestUpdate(vsro188.QuestUpdateMessage{
 		Subtype: subtype, QuestID: uint32(quest.QuestID), PackedQuestByte: record.PackedQuestByte,
 		QuestDefinitionByte: record.QuestDefinitionByte, Flags: record.Flags, Status: record.Status,
-		Missions: []vsro188.QuestMissionDelta{{
-			EntryKey: record.EntryKey, TransitionCode: record.TransitionCode, Text: record.Text, Values: record.Values,
-		}},
+		Missions: missions,
 	})
 }

@@ -87,8 +87,14 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 
 	player, err := h.loadSelectedPlayer(ctx, char, session)
 	if err != nil {
-		log.Debugf("rejecting character join for account %d: %v", owner.UserID, err)
+		log.Warnf("rejecting character join for account %d character=%d: %v", owner.UserID, char.ID, err)
 		return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
+	}
+	if h.playerPreparer != nil {
+		if err := h.playerPreparer.PreparePlayer(ctx, player); err != nil {
+			log.Warnf("rejecting character join while loading social state character=%d: %v", char.ID, err)
+			return sendJoinResult(session, ResultFalse, JOIN_SMERR_FAILED_TO_ENTERLOBBY)
+		}
 	}
 	if !session.BeginCharacterLoading() {
 		return fmt.Errorf("character join could not begin loading while session is %s", session.LifecyclePhase())
@@ -525,9 +531,19 @@ func sendCharacterBootstrapBody(session *server.Session, player *model.Player) e
 	pDataBody.WriteFloat32(player.GetHwanSpeed())
 	pDataBody.WriteByte(0) // Buff count
 	pDataBody.WriteString(player.CharName)
-	pDataBody.WriteUInt16(0)
-	pDataBody.WriteByte(0)
-	pDataBody.WriteByte(1)
+	job := player.GetJob()
+	if job.Active() {
+		pDataBody.WriteString(job.Alias)
+		pDataBody.WriteByte(job.Type)
+		pDataBody.WriteByte(job.Level)
+	} else {
+		// Preserve the established no-job bootstrap representation until the
+		// inactive branch is independently captured; active state must not be
+		// replaced with these legacy placeholders.
+		pDataBody.WriteUInt16(0)
+		pDataBody.WriteByte(0)
+		pDataBody.WriteByte(1)
+	}
 	pDataBody.WriteUInt32(0)
 	pDataBody.WriteUInt32(0)
 	pDataBody.WriteUInt32(0)

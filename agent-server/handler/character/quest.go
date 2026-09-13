@@ -39,7 +39,12 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 		return fmt.Errorf("malformed quest abandon request")
 	}
 	questID := request.QuestID
-	err = h.repository.Abandon(ctx, session.UserContext.CharacterID, int(questID))
+	var cleanup model.QuestAbandonResult
+	if repository, ok := h.repository.(model.QuestAbandonCleanupRepository); ok {
+		cleanup, err = repository.AbandonWithCleanup(ctx, session.UserContext.CharacterID, int(questID))
+	} else {
+		err = h.repository.Abandon(ctx, session.UserContext.CharacterID, int(questID))
+	}
 	if err != nil && !errors.Is(err, model.ErrCharacterQuestNotActive) {
 		return err
 	}
@@ -47,15 +52,47 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 	if success && session.UserContext.UniqueID != 0 {
 		if object, lookupErr := service.GetWorldServiceInstance().GetObjectByUniqueId(session.UserContext.UniqueID); lookupErr == nil {
 			if player, ok := object.(*model.Player); ok {
-				player.MarkQuestAborted(int(questID))
+				player.CommitQuestAbandon(int(questID), cleanup)
 			}
 		}
 	}
 	response := buildQuestAbandonResponse(success, questID)
 	if h.send != nil {
-		return h.send(session, response)
+		if sendErr := h.send(session, response); sendErr != nil {
+			return sendErr
+		}
+	} else if sendErr := session.Send(response); sendErr != nil {
+		return sendErr
 	}
-	return session.Send(response)
+	if success {
+		for _, relatedQuestID := range cleanup.ResetQuestIDs {
+			questUpdate, buildErr := vsro188.BuildQuestUpdate(vsro188.QuestUpdateMessage{
+				Subtype: vsro188.QuestUpdateAbort,
+				QuestID: uint32(relatedQuestID),
+			})
+			if buildErr != nil {
+				return buildErr
+			}
+			if h.send != nil {
+				if sendErr := h.send(session, questUpdate); sendErr != nil {
+					return sendErr
+				}
+			} else if sendErr := session.Send(questUpdate); sendErr != nil {
+				return sendErr
+			}
+		}
+		for _, slot := range cleanup.RemovedSlots {
+			itemUpdate := buildQuestItemRemoved(slot)
+			if h.send != nil {
+				if sendErr := h.send(session, itemUpdate); sendErr != nil {
+					return sendErr
+				}
+			} else if sendErr := session.Send(itemUpdate); sendErr != nil {
+				return sendErr
+			}
+		}
+	}
+	return nil
 }
 
 func buildQuestAbandonResponse(success bool, questID uint32) network.Packet {

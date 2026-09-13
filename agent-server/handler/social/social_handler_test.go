@@ -1,12 +1,31 @@
 package social
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
+
+func TestSafeTradeRestoreUpdateMatchesGameServerDowngrade(t *testing.T) {
+	active, err := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeRestoreUpdate(model.SafeTradeState{AbleCount: 3, Status: 1}, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := active.Payload(), []byte{1, 0x51, 3, 8}; !bytes.Equal(got, want) {
+		t.Fatalf("active restore = % X, want % X", got, want)
+	}
+	inactive, err := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeRestoreUpdate(model.SafeTradeState{AbleCount: 3}, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := inactive.Payload(), []byte{0, 0x40}; !bytes.Equal(got, want) {
+		t.Fatalf("inactive restore = % X, want % X", got, want)
+	}
+}
 
 func TestOperationPacketUsesStockResultEnvelope(t *testing.T) {
 	success := operationPacket(opcode.GuildLeaveResponse, nil)

@@ -28,6 +28,7 @@ type LevelDataRow struct {
 	RequiredSkillPoints uint64
 	DropGoldMin         uint64
 	DropGoldMax         uint64
+	JobActivityFactor   uint64
 }
 
 // LevelTable is loaded from the client-matched reference rows stored in the
@@ -74,10 +75,15 @@ func LoadLevelTable(reader io.Reader) (*LevelTable, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w at line %d: required skill points", ErrLevelDataMalformed, lineNumber)
 		}
+		jobActivityFactor, err := strconv.ParseUint(fields[5], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%w at line %d: job activity factor", ErrLevelDataMalformed, lineNumber)
+		}
 		rows = append(rows, LevelDataRow{
 			Level:               level,
 			RequiredExperience:  requiredExperience,
 			RequiredSkillPoints: requiredSkillPoints,
+			JobActivityFactor:   jobActivityFactor,
 		})
 	}
 	if err := scanner.Err(); err != nil {

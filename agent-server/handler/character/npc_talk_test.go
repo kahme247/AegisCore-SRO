@@ -7,10 +7,52 @@ import (
 	"testing"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
+
+type npcQuestInstanceTeleportStub struct{}
+
+func (*npcQuestInstanceTeleportStub) SubmitQuestInstanceEntry(model.QuestInstance, []*model.Player) error {
+	return nil
+}
+
+func TestNativeQuestInstanceDialoguesUseRecoveredMovementChoices(t *testing.T) {
+	tests := []struct {
+		questID int
+		npc     string
+		prompt  string
+		choice  string
+	}{
+		{141, "NPC_RM_SLAVE2", "SN_TALK_QNO_RM_OLDWOMAN_6_07", "SN_TALK_QNO_RM_OLDWOMAN_6_28"},
+		{311, "NPC_CH_MOONSHADOW", "SN_TALK_QNO_TQ_BAEKRYEONG_17_24", "SN_TALK_QNO_TQ_BAEKRYEONG_17_23"},
+	}
+	for _, test := range tests {
+		t.Run(test.npc, func(t *testing.T) {
+			player := &model.Player{SRObject: model.SRObject{UniqueID: uint32(test.questID)}, Quests: []model.CharacterQuest{{QuestID: test.questID, Status: model.QuestActive}}}
+			npcInteractions.Record(player.GetUniqueID(), 900, 901, npcTalkActionConversation)
+			t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+			handler := &NPCTalkHandler{instanceEntries: service.NewQuestInstanceEntryService(nil, nil, nil), instanceTeleport: &npcQuestInstanceTeleportStub{}}
+			var sent network.Packet
+			handler.send = func(_ *server.Session, packet network.Packet) error { sent = packet; return nil }
+			handled, err := handler.handleQuestInstanceDialogue(&server.Session{}, player, test.npc)
+			if err != nil || !handled {
+				t.Fatalf("handled=%t err=%v", handled, err)
+			}
+			payload := sent.Payload()
+			if !bytes.Contains(payload, []byte(test.prompt)) || !bytes.Contains(payload, []byte(test.choice)) {
+				t.Fatalf("payload %q missing prompt %q or choice %q", payload, test.prompt, test.choice)
+			}
+			interaction, ok := npcInteractions.Get(player.GetUniqueID())
+			if !ok || interaction.PendingInstanceQuestID != test.questID {
+				t.Fatalf("interaction=%+v present=%t", interaction, ok)
+			}
+		})
+	}
+}
 
 func TestBuildQuestItemAddedMatchesStockB034Layout(t *testing.T) {
 	packet := buildQuestItemAdded(model.QuestItemMutation{Slot: 0x0E, Item: model.Item{}})
@@ -20,19 +62,90 @@ func TestBuildQuestItemAddedMatchesStockB034Layout(t *testing.T) {
 }
 
 type questRuntimeStub struct {
-	grantResult    model.QuestItemGrantResult
-	progressResult []model.QuestProgressResult
-	completeResult model.QuestCompletionResult
-	deliveryResult model.QuestDeliveryBatch
-	deliveryCharID int
-	deliveryNPCID  uint32
-	deliveryCalls  int
-	err            error
+	grantResult         model.QuestItemGrantResult
+	progressResult      []model.QuestProgressResult
+	completeResult      model.QuestCompletionResult
+	deliveryResult      model.QuestDeliveryBatch
+	deliveryCharID      int
+	deliveryNPCID       uint32
+	deliveryQuestID     int
+	deliveryCalls       int
+	deliveryPrompts     []model.QuestDeliveryPrompt
+	dialogPrompts       []model.QuestDialogPrompt
+	dialogResult        model.QuestProgressResult
+	dialogListCalls     int
+	dialogCompleteCalls int
+	playerKillTarget    model.QuestPlayerKillTarget
+	playerKillCalls     int
+	uniqueDeadResult    model.QuestUniqueDeadGrantResult
+	uniqueDeadGranted   bool
+	uniqueDeadCharacter int
+	uniqueDeadMonster   uint32
+	uniqueDeadRegion    int16
+	uniqueDeadCalls     int
+	err                 error
 }
 
 type questOfferStub struct {
 	offers []model.QuestOffer
 	err    error
+}
+
+type jobPriceStub struct {
+	prices map[uint32]uint32
+	err    error
+}
+
+func (s *jobPriceStub) Prices(context.Context, uint32) (map[uint32]uint32, error) {
+	return s.prices, s.err
+}
+
+func TestNPCTalkPublishesSortedSpecialtyQuotationSnapshot(t *testing.T) {
+	handler := NewNPCTalkHandler(nil)
+	handler.ConfigureQuotations(&jobPriceStub{prices: map[uint32]uint32{300: 900, 100: 700}})
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	if published, err := handler.publishJobPrices(context.Background(), &server.Session{}, 2003); err != nil || !published {
+		t.Fatalf("publish job prices: %v", err)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.JobUpdatePrice {
+		t.Fatalf("sent packets = %+v", sent)
+	}
+	want := []byte{2, 100, 0, 0, 0, 0xbc, 0x02, 0, 0, 0x2c, 0x01, 0, 0, 0x84, 0x03, 0, 0}
+	if got := sent[0].Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("quotation payload = %x, want %x", got, want)
+	}
+
+	handler.ConfigureQuotations(&jobPriceStub{prices: map[uint32]uint32{}})
+	if published, err := handler.publishJobPrices(context.Background(), &server.Session{}, 2003); err != nil || published {
+		t.Fatalf("publish empty job prices: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("empty quotation catalog sent %d additional packets", len(sent)-1)
+	}
+}
+
+func TestSafeTradeAdmissionPacketMapping(t *testing.T) {
+	tests := []struct {
+		admission model.SafeTradeAdmission
+		want      []byte
+	}{
+		{admission: model.SafeTradeAdmission{Code: 0x50, State: model.SafeTradeState{AbleCount: 3, Status: 1}}, want: []byte{1, 0x50, 3, 8}},
+		{admission: model.SafeTradeAdmission{Code: 0x41}, want: []byte{0, 0x41}},
+		{admission: model.SafeTradeAdmission{Code: 0x40}, want: []byte{0, 0x40}},
+	}
+	for _, test := range tests {
+		packet, err := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeAdmissionUpdate(test.admission, 8))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := packet.Payload(); !bytes.Equal(got, test.want) {
+			t.Fatalf("admission payload = % X, want % X", got, test.want)
+		}
+	}
 }
 
 func (s *questOfferStub) ListAvailable(context.Context, int, uint32) ([]model.QuestOffer, error) {
@@ -43,17 +156,45 @@ func (r *questRuntimeStub) GrantMissionItem(context.Context, int, int) (model.Qu
 	return r.grantResult, r.err
 }
 
-func (r *questRuntimeStub) RecordMobKill(context.Context, int, uint32) ([]model.QuestProgressResult, error) {
+func (r *questRuntimeStub) RecordMobKill(context.Context, int, uint32, model.MonsterRarity) ([]model.QuestProgressResult, error) {
 	return r.progressResult, r.err
+}
+
+func (r *questRuntimeStub) GrantUniqueDeadMissionItem(_ context.Context, characterID int, monsterRefObjectID uint32, regionID int16) (model.QuestUniqueDeadGrantResult, bool, error) {
+	r.uniqueDeadCalls++
+	r.uniqueDeadCharacter = characterID
+	r.uniqueDeadMonster = monsterRefObjectID
+	r.uniqueDeadRegion = regionID
+	return r.uniqueDeadResult, r.uniqueDeadGranted, r.err
 }
 
 func (r *questRuntimeStub) RecordCollectedItem(context.Context, int, uint32, uint32) ([]model.QuestProgressResult, error) {
 	return r.progressResult, r.err
 }
 
-func (r *questRuntimeStub) DeliverItemsAtNPC(_ context.Context, characterID int, npcRefID uint32) (model.QuestDeliveryBatch, error) {
+func (r *questRuntimeStub) RecordPlayerKill(_ context.Context, _ int, target model.QuestPlayerKillTarget) ([]model.QuestProgressResult, error) {
+	r.playerKillCalls++
+	r.playerKillTarget = target
+	return r.progressResult, r.err
+}
+
+func (r *questRuntimeStub) ListDialogsAtNPC(context.Context, int, uint32) ([]model.QuestDialogPrompt, error) {
+	r.dialogListCalls++
+	return append([]model.QuestDialogPrompt(nil), r.dialogPrompts...), r.err
+}
+
+func (r *questRuntimeStub) CompleteDialog(context.Context, int, int, uint32) (model.QuestProgressResult, error) {
+	r.dialogCompleteCalls++
+	return r.dialogResult, r.err
+}
+
+func (r *questRuntimeStub) ListDeliveriesAtNPC(_ context.Context, _ int, _ uint32) ([]model.QuestDeliveryPrompt, error) {
+	return append([]model.QuestDeliveryPrompt(nil), r.deliveryPrompts...), r.err
+}
+
+func (r *questRuntimeStub) DeliverItemsAtNPC(_ context.Context, characterID, questID int, npcRefID uint32) (model.QuestDeliveryBatch, error) {
 	r.deliveryCalls++
-	r.deliveryCharID, r.deliveryNPCID = characterID, npcRefID
+	r.deliveryCharID, r.deliveryQuestID, r.deliveryNPCID = characterID, questID, npcRefID
 	return r.deliveryResult, r.err
 }
 
@@ -70,9 +211,9 @@ func TestStandardDeliveryPublishesCommittedInventoryAndQuestState(t *testing.T) 
 	var sent []network.Packet
 	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
 
-	handled, err := handler.handleStandardDeliveries(context.Background(), session, player, 2003)
-	if err != nil || !handled {
-		t.Fatalf("delivery = (handled=%v, err=%v)", handled, err)
+	err := handler.completeStandardDelivery(context.Background(), session, player, quest.QuestID, 2003)
+	if err != nil {
+		t.Fatalf("delivery: %v", err)
 	}
 	if runtime.deliveryCalls != 1 || runtime.deliveryCharID != 44 || runtime.deliveryNPCID != 2003 {
 		t.Fatalf("runtime delivery call = %+v", runtime)
@@ -88,6 +229,112 @@ func TestStandardDeliveryPublishesCommittedInventoryAndQuestState(t *testing.T) 
 	}
 	if got := player.Inventory.Items[13].StackSize; got != 2 {
 		t.Fatalf("runtime stack = %d, want 2", got)
+	}
+	if active, exists := playerQuest(player, quest.QuestID); !exists || active.Status != model.QuestRewardReady {
+		t.Fatalf("runtime quest = (%+v, %v)", active, exists)
+	}
+}
+
+func TestStandardDeliveryConversationDoesNotConsumeBeforeSelection(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 78, CharacterID: 45}}
+	player := &model.Player{ID: 45, SRObject: model.SRObject{UniqueID: 78}, Session: session}
+	runtime := &questRuntimeStub{deliveryPrompts: []model.QuestDeliveryPrompt{{QuestID: 901, DialogueKey: "SN_TALK_DELIVER"}}}
+	handler := &NPCTalkHandler{runtime: runtime}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	npcInteractions.Record(player.GetUniqueID(), 3001, 2003, npcTalkActionConversation)
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+
+	handled, err := handler.handleStandardDeliveries(context.Background(), session, player, 2003)
+	if err != nil || !handled {
+		t.Fatalf("open delivery = (%t, %v)", handled, err)
+	}
+	if runtime.deliveryCalls != 0 {
+		t.Fatalf("delivery consumed before selection: calls=%d", runtime.deliveryCalls)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.QuestTalk {
+		t.Fatalf("delivery prompt packets = %+v", sent)
+	}
+}
+
+func TestStandardDeliveryRequiresConfirmedPendingSelection(t *testing.T) {
+	session, player, npc := selectEntityFixture(t)
+	npc.RefObjectID = 2003
+	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
+	quest := model.CharacterQuest{QuestID: 902, Status: model.QuestRewardReady, AchievementCount: 1, ObjectiveKey: "SN_CON_DELIVER"}
+	runtime := &questRuntimeStub{
+		deliveryPrompts: []model.QuestDeliveryPrompt{{QuestID: quest.QuestID, DialogueKey: "SN_TALK_DELIVER"}},
+		deliveryResult:  model.QuestDeliveryBatch{Results: []model.QuestDeliveryResult{{Quest: quest}}, Inventory: model.NewInventory(nil)},
+	}
+	handler := &NPCTalkHandler{runtime: runtime, world: world}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	npcInteractions.Record(player.GetUniqueID(), npc.GetUniqueID(), npc.GetRefObjectID(), npcTalkActionConversation)
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+
+	if handled, err := handler.handleStandardDeliveries(context.Background(), session, player, npc.GetRefObjectID()); err != nil || !handled {
+		t.Fatalf("open delivery = (%t, %v)", handled, err)
+	}
+	selectDelivery := network.EmptyClientPacket()
+	_ = selectDelivery.WriteByte(questListSelectorBase)
+	if err := handler.handleQuestTalkPacket(context.Background(), session, selectDelivery); err != nil {
+		t.Fatalf("select delivery: %v", err)
+	}
+	if runtime.deliveryCalls != 0 {
+		t.Fatalf("selection consumed delivery before confirmation: calls=%d", runtime.deliveryCalls)
+	}
+	confirm := network.EmptyClientPacket()
+	_ = confirm.WriteByte(questListSelectorBase)
+	if err := handler.handleQuestTalkPacket(context.Background(), session, confirm); err != nil {
+		t.Fatalf("confirm delivery: %v", err)
+	}
+	if runtime.deliveryCalls != 1 || runtime.deliveryCharID != player.ID || runtime.deliveryQuestID != quest.QuestID || runtime.deliveryNPCID != npc.GetRefObjectID() {
+		t.Fatalf("confirmed delivery call = %+v", runtime)
+	}
+	if len(sent) != 3 || sent[0].MessageID != opcode.QuestTalk || sent[1].MessageID != opcode.QuestTalk || sent[2].MessageID != opcode.QuestUpdate {
+		t.Fatalf("delivery packets = %+v", sent)
+	}
+}
+
+func TestDialogObjectiveRequiresSelectedPendingConfirmation(t *testing.T) {
+	session, player, npc := selectEntityFixture(t)
+	npc.RefObjectID = 2003
+	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
+	quest := model.CharacterQuest{QuestID: 900, Status: model.QuestRewardReady, AchievementCount: 1, Data1: 1, ObjectiveKey: "SN_CON_DIALOG", TaskCount: 1}
+	runtime := &questRuntimeStub{
+		dialogPrompts: []model.QuestDialogPrompt{{QuestID: quest.QuestID, DialogueKey: "SN_TALK_DIALOG"}},
+		dialogResult:  model.QuestProgressResult{Quest: quest, Changed: true},
+	}
+	handler := &NPCTalkHandler{runtime: runtime, world: world}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	npcInteractions.Record(player.GetUniqueID(), npc.GetUniqueID(), npc.GetRefObjectID(), npcTalkActionConversation)
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+
+	handled, err := handler.handleDialogObjectives(context.Background(), session, player, npc.GetRefObjectID())
+	if err != nil || !handled {
+		t.Fatalf("open dialog objectives = (%v, %v)", handled, err)
+	}
+	if runtime.dialogCompleteCalls != 0 || len(sent) != 1 || sent[0].MessageID != opcode.QuestTalk {
+		t.Fatalf("initial dialog state = calls:%d packets:%+v", runtime.dialogCompleteCalls, sent)
+	}
+
+	selectObjective := network.EmptyClientPacket()
+	_ = selectObjective.WriteByte(questListSelectorBase)
+	if err = handler.handleQuestTalkPacket(context.Background(), session, selectObjective); err != nil {
+		t.Fatalf("select dialog objective: %v", err)
+	}
+	if runtime.dialogCompleteCalls != 0 || len(sent) != 2 || sent[1].MessageID != opcode.QuestTalk {
+		t.Fatalf("pending confirmation state = calls:%d packets:%+v", runtime.dialogCompleteCalls, sent)
+	}
+
+	confirm := network.EmptyClientPacket()
+	_ = confirm.WriteByte(questListSelectorBase)
+	if err = handler.handleQuestTalkPacket(context.Background(), session, confirm); err != nil {
+		t.Fatalf("confirm dialog objective: %v", err)
+	}
+	if runtime.dialogCompleteCalls != 1 || len(sent) != 4 || sent[2].MessageID != opcode.QuestUpdate || sent[3].MessageID != opcode.QuestTalk {
+		t.Fatalf("completed dialog state = calls:%d packets:%+v", runtime.dialogCompleteCalls, sent)
 	}
 	if active, exists := playerQuest(player, quest.QuestID); !exists || active.Status != model.QuestRewardReady {
 		t.Fatalf("runtime quest = (%+v, %v)", active, exists)
@@ -252,7 +499,7 @@ func TestNPCTalkAcceptsDataDrivenQuestWithProtocolMetadata(t *testing.T) {
 	if !reflect.DeepEqual(player.QuestSnapshot()[0].ObjectiveKey, "SN_CON_QUEST") {
 		t.Fatalf("player quests = %#v", player.QuestSnapshot())
 	}
-	wantPrefix := []byte{1, 101, 0, 0, 0, 1, 0, 0x18, byte(model.QuestActive), 1, 1, 1, 12, 0}
+	wantPrefix := []byte{1, 101, 0, 0, 0, 0, 0, 0x18, byte(model.QuestActive), 1, 1, 1, 12, 0}
 	wantPrefix = append(wantPrefix, "SN_CON_QUEST"...)
 	wantPrefix = append(wantPrefix, 1, 0, 0, 0, 0)
 	if got := sent[3].Payload(); !reflect.DeepEqual(got, wantPrefix) {
@@ -354,7 +601,7 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 	if sent[3].MessageID != opcode.QuestUpdate {
 		t.Fatalf("quest add opcode = 0x%04X, want 0x%04X", sent[3].MessageID, opcode.QuestUpdate)
 	}
-	wantAdd := []byte{1, 3, 0, 0, 0, 1, 0, 0x18, byte(model.QuestActive), 1, 1, 1, 21, 0}
+	wantAdd := []byte{1, 3, 0, 0, 0, 0, 0, 0x18, byte(model.QuestActive), 1, 1, 1, 21, 0}
 	wantAdd = append(wantAdd, "SN_CON_QNO_CH_SMITH_1"...)
 	wantAdd = append(wantAdd, 0)
 	if got := sent[3].Payload(); !reflect.DeepEqual(got, wantAdd) {
@@ -375,6 +622,28 @@ func TestNPCTalkAcceptsSelectedChulsanQuest(t *testing.T) {
 		t.Fatalf("player quests = %#v", quests)
 	}
 	npcInteractions.Clear(player.GetUniqueID())
+}
+
+func TestNPCTalkActivatesZeroMissionFerryAsImmediatelyRewardReady(t *testing.T) {
+	session, player, npc := selectEntityFixture(t)
+	world := &selectEntityWorldFake{player: player, objects: map[uint32]model.ISRObject{npc.GetUniqueID(): npc}, distance: selectionKnownRange}
+	repository := &questRepositoryStub{}
+	var sent []network.Packet
+	handler := NewNPCTalkHandler(world, repository)
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	offer := model.QuestOffer{QuestID: 88, CodeName: "QNO_WC_FERRY4_1", NameKey: "SN_FERRY", PayKey: "SN_PAY_FERRY",
+		PayContentsKey: "SN_PAYCON_FERRY", InstantReady: true}
+	interaction := NPCInteraction{NPCUniqueID: npc.GetUniqueID(), NPCRefObjectID: npc.GetRefObjectID()}
+	if err := handler.handleOfferSelection(context.Background(), session, interaction, offer, 1); err != nil {
+		t.Fatal(err)
+	}
+	if repository.activatedQuest.Status != model.QuestRewardReady || repository.activatedQuest.TaskCount != 0 || repository.activatedQuest.ObjectiveKey != "" {
+		t.Fatalf("ferry activation = %#v", repository.activatedQuest)
+	}
+	quests := player.QuestSnapshot()
+	if len(quests) != 1 || quests[0].Status != model.QuestRewardReady || len(sent) != 2 {
+		t.Fatalf("ferry state quests=%#v packets=%d", quests, len(sent))
+	}
 }
 
 func TestNPCTalkJingyoGrantsWeaponListAndAdvancesQuest(t *testing.T) {
@@ -560,6 +829,12 @@ func TestNPCTalkOpensKnownTeleportGateAction(t *testing.T) {
 		t.Fatalf("teleport interaction = %#v, present=%t", interaction, ok)
 	}
 	npcInteractions.Clear(player.GetUniqueID())
+}
+
+func TestNPCQuestSpeechKeyMatchesNPCChatCatalogConvention(t *testing.T) {
+	if got, want := npcQuestSpeechKey("npc_sd_t_area_thief"), "SN_NPC_SD_T_AREA_THIEF_QS"; got != want {
+		t.Fatalf("npcQuestSpeechKey() = %q, want %q", got, want)
+	}
 }
 
 func npcTalkPacket(t *testing.T, uniqueID uint32) network.Packet {

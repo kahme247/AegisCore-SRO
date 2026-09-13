@@ -7,7 +7,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 )
 
-func (h *PartyHandler) handleKick(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *PartyHandler) handleKick(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || packet.Remaining() != 4 {
 		return fmt.Errorf("invalid party-kick request")
 	}
@@ -19,5 +19,5 @@ func (h *PartyHandler) handleKick(_ context.Context, session *server.Session, pa
 	if err != nil {
 		return err
 	}
-	return publishRemoval(h, transition)
+	return publishRemoval(ctx, h, transition)
 }

@@ -1,6 +1,7 @@
 package party
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"testing"
@@ -8,9 +9,54 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/g3n/engine/math32"
 )
+
+type partyInstanceExitRecorder struct{ ids []uint32 }
+
+func (r *partyInstanceExitRecorder) SubmitPartyQuestInstanceExit(_ context.Context, player *model.Player) error {
+	r.ids = append(r.ids, player.GetUniqueID())
+	return nil
+}
+
+func TestPartyRemovalPublishesNativeInstanceExitScope(t *testing.T) {
+	first := &model.Player{SRObject: model.SRObject{UniqueID: 10}}
+	second := &model.Player{SRObject: model.SRObject{UniqueID: 20}}
+	recorder := &partyInstanceExitRecorder{}
+	handler := &PartyHandler{instanceExit: recorder}
+	if err := publishRemoval(context.Background(), handler, service.PartyTransition{Target: first, AllBefore: []*model.Player{first, second}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.ids) != 1 || recorder.ids[0] != 10 {
+		t.Fatalf("single removal exits=%v", recorder.ids)
+	}
+	recorder.ids = nil
+	if err := publishRemoval(context.Background(), handler, service.PartyTransition{Target: first, AllBefore: []*model.Player{first, second}, Dismissed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.ids) != 2 || recorder.ids[0] != 10 || recorder.ids[1] != 20 {
+		t.Fatalf("dismiss exits=%v", recorder.ids)
+	}
+}
+
+func TestWritePartyPositionPublishesInstanceWorldAndLayer(t *testing.T) {
+	scope, err := model.NewGameWorldScope(41, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := network.EmptyPacket()
+	writePartyPosition(&packet, navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(25000),
+		Offset: math32.NewVector3(10, 20, 30),
+	}, scope)
+	reader := newPartyPacketReader(t, packet.Payload())
+	if region, x, z, y, worldID, layerID := reader.uint16(), reader.uint16(), reader.uint16(), reader.uint16(), reader.uint16(), reader.uint16(); region != 25000 || x != 10 || z != 30 || y != 20 || worldID != 41 || layerID != 3 {
+		t.Fatalf("party position = region=%d xyz=%d/%d/%d world/layer=%d/%d", region, x, y, z, worldID, layerID)
+	}
+	reader.done()
+}
 
 type partyPacketReader struct {
 	t       *testing.T

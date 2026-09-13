@@ -18,6 +18,8 @@ type ISRObject interface {
 	GetNavmeshPosition() navmeshv2.RtNavmeshPosition
 	GetUniqueID() uint32
 	SetUniqueID(uniqueId uint32)
+	GetGameWorldID() uint32
+	SetGameWorldID(gameWorldID uint32)
 	GetRefObjectID() uint32
 	GetKnownObjectList() IKnownObjectList
 	GetName() string
@@ -37,6 +39,7 @@ type SRObject struct {
 	movementData           *MovementData
 	KnownObjectList        IKnownObjectList
 	UniqueID               uint32
+	GameWorldID            uint32
 	RefObjectID            uint32
 	Type                   string
 	mutex                  *sync.RWMutex
@@ -129,6 +132,23 @@ func (o *SRObject) SetUniqueID(uniqueID uint32) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	o.UniqueID = uniqueID
+}
+
+// GetGameWorldID returns the server-owned visibility/interaction scope.
+// Zero is the ordinary public world; non-zero values identify isolated
+// game-world instances even when they reuse the same region and coordinates.
+func (o *SRObject) GetGameWorldID() uint32 {
+	mutex := o.mutexForObject()
+	mutex.RLock()
+	defer mutex.RUnlock()
+	return o.GameWorldID
+}
+
+func (o *SRObject) SetGameWorldID(gameWorldID uint32) {
+	mutex := o.mutexForObject()
+	mutex.Lock()
+	defer mutex.Unlock()
+	o.GameWorldID = gameWorldID
 }
 
 func (o *SRObject) GetType() string {

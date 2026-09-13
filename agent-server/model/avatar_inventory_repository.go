@@ -19,7 +19,7 @@ var (
 	ErrAvatarInventoryFull         = errors.New("normal inventory has no free slot for avatar item")
 )
 
-const selectAvatarInventory = "SELECT inv.SLOT,inv.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,0,0,0,'',0,NULL,0,0,COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),0,0,0 FROM `SRO_SHARD`.`AVATAR_INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? ORDER BY inv.SLOT"
+const selectAvatarInventory = "SELECT inv.SLOT,inv.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.CREATOR_NAME,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,0,0,0,'',0,NULL,0,0,COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),0,0,0 FROM `SRO_SHARD`.`AVATAR_INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? ORDER BY inv.SLOT"
 
 type AvatarInventoryRepository interface {
 	GetCharacterAvatarInventory(context.Context, int64) (Inventory, error)
@@ -147,21 +147,25 @@ func (r *SQLAvatarInventoryRepository) ActivateDevilSpirit(ctx context.Context, 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var itemID int
-	var refID, durationMS, periodEnd uint32
-	if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &durationMS, &periodEnd); err != nil {
+	var refID, durationSeconds, periodEnd uint32
+	if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &durationSeconds, &periodEnd); err != nil {
 		return activation, ErrAvatarItemTypeInvalid
 	}
 	ref, known := RefItems[refID]
 	if !known || !ref.IsDevilSpirit() {
 		return activation, ErrAvatarItemTypeInvalid
 	}
-	if durationMS == 0 {
+	if durationSeconds == 0 {
 		return activation, ErrDevilSpiritDurationEmpty
 	}
 	now := time.Now()
 	activation.ExpiresAt = time.Unix(int64(periodEnd), 0)
 	if periodEnd <= uint32(now.Unix()) {
-		activation.ExpiresAt = now.Add(time.Duration(durationMS) * time.Millisecond)
+		// Stock RefObjItem Param1 stores NASRUN lifetime in seconds (the vSRO
+		// 1.188 entries use 2,419,200 for 28 days). ITEM.DATA preserves that
+		// value for an unawakened Devil Spirit; treating it as milliseconds
+		// expires a 28-day Spirit after only 40m19s.
+		activation.ExpiresAt = devilSpiritExpiration(now, durationSeconds)
 		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `RENT_PERIOD_BEGIN_TIME`=?,`RENT_PERIOD_END_TIME`=? WHERE `ID`=?", uint32(now.Unix()), uint32(activation.ExpiresAt.Unix()), itemID); err != nil {
 			return DevilSpiritActivation{}, err
 		}
@@ -176,6 +180,10 @@ func (r *SQLAvatarInventoryRepository) ActivateDevilSpirit(ctx context.Context, 
 		return DevilSpiritActivation{}, fmt.Errorf("%w: %v", ErrAlchemyOutcomeUnknown, err)
 	}
 	return activation, nil
+}
+
+func devilSpiritExpiration(now time.Time, durationSeconds uint32) time.Time {
+	return now.Add(time.Duration(durationSeconds) * time.Second)
 }
 
 func (r *SQLAvatarInventoryRepository) ExpireDevilSpirit(ctx context.Context, characterID int64, itemID int, now time.Time) (expiration DevilSpiritExpiration, err error) {

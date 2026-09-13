@@ -37,7 +37,11 @@ type GameReadyHandler struct {
 		RehydratePlayer(context.Context, *model.Player) error
 	}
 	social interface {
+		PreparePlayer(context.Context, *model.Player) error
 		Bootstrap(context.Context, *server.Session) error
+	}
+	countdowns interface {
+		Rehydrate(context.Context, *server.Session, *model.Player) error
 	}
 }
 
@@ -48,9 +52,16 @@ func (h *GameReadyHandler) ConfigureCOS(runtime interface {
 }
 
 func (h *GameReadyHandler) ConfigureSocial(runtime interface {
+	PreparePlayer(context.Context, *model.Player) error
 	Bootstrap(context.Context, *server.Session) error
 }) {
 	h.social = runtime
+}
+
+func (h *GameReadyHandler) ConfigureQuestCountdowns(runtime interface {
+	Rehydrate(context.Context, *server.Session, *model.Player) error
+}) {
+	h.countdowns = runtime
 }
 
 func NewGameReadyHandler(players gameReadyPlayerLookup, mall ...model.ItemMallRepository) *GameReadyHandler {
@@ -109,6 +120,14 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 			return fmt.Errorf("load item mall balances: %w", err)
 		}
 	}
+	// Durable state that participates in the player's spawn encoding must be
+	// loaded before visibility activation. Otherwise observers can receive an
+	// entering job character as no-job until the later social bootstrap.
+	if h.social != nil {
+		if err := h.social.PreparePlayer(ctx, player); err != nil {
+			return fmt.Errorf("prepare social state before GameReady: %w", err)
+		}
+	}
 	if !session.CompleteCharacterLoading() {
 		return fmt.Errorf("GameReady could not complete character loading")
 	}
@@ -164,6 +183,11 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 	if h.social != nil {
 		if err := h.social.Bootstrap(ctx, session); err != nil {
 			return fmt.Errorf("bootstrap social systems after GameReady: %w", err)
+		}
+	}
+	if h.countdowns != nil {
+		if err := h.countdowns.Rehydrate(ctx, session, player); err != nil {
+			return fmt.Errorf("rehydrate quest countdowns after GameReady: %w", err)
 		}
 	}
 	publishRestoredItemServices(player)

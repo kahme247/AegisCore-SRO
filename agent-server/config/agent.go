@@ -17,6 +17,8 @@ const (
 	AgentTrafficWindowMS           = "agent.traffic_filter.window_ms"
 	AgentTimedBuffDuration         = "agent.client.timed_buff_duration"
 	AgentGiantMonsterSpawnRatio    = "agent.monsters.giant_spawn_ratio"
+	AgentTradeSafetyOption         = "agent.trade.safety_option"
+	AgentTradeSafetyNum            = "agent.trade.safety_num"
 	AgentDiagnosticsEnabled        = "agent.diagnostics.enabled"
 	AgentDiagnosticsPort           = "agent.diagnostics.port"
 	AgentManagementEnabled         = "agent.management.enabled"
@@ -59,6 +61,8 @@ func bindEnvAliases() {
 	viper.BindEnv(AgentTrafficWindowMS, "AGENT_TRAFFIC_FILTER_WINDOW_MS")
 	viper.BindEnv(AgentTimedBuffDuration, "AGENT_TIMED_BUFF_DURATION")
 	viper.BindEnv(AgentGiantMonsterSpawnRatio, "AGENT_GIANT_MONSTER_SPAWN_RATIO")
+	viper.BindEnv(AgentTradeSafetyOption, "AGENT_TRADE_SAFETY_OPTION")
+	viper.BindEnv(AgentTradeSafetyNum, "AGENT_TRADE_SAFETY_NUM")
 	viper.BindEnv(AgentDiagnosticsEnabled, "AGENT_DIAGNOSTICS_ENABLED")
 	viper.BindEnv(AgentDiagnosticsPort, "AGENT_DIAGNOSTICS_PORT")
 	viper.BindEnv(AgentManagementEnabled, "AGENT_MANAGEMENT_ENABLED")
@@ -91,6 +95,9 @@ func setDefaultValues() {
 	viper.SetDefault(AgentTrafficWindowMS, 1000)
 	viper.SetDefault(AgentTimedBuffDuration, false)
 	viper.SetDefault(AgentGiantMonsterSpawnRatio, 1000)
+	// Pinned vSRO 1.188 _RefShardContentConfig values.
+	viper.SetDefault(AgentTradeSafetyOption, 0)
+	viper.SetDefault(AgentTradeSafetyNum, 8)
 	viper.SetDefault(AgentDiagnosticsEnabled, false)
 	viper.SetDefault(AgentDiagnosticsPort, 6060)
 	viper.SetDefault(AgentManagementEnabled, false)

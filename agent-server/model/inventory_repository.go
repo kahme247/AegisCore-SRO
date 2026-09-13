@@ -36,7 +36,7 @@ import (
 */
 
 const (
-	SelectCharacterInventory string = "SELECT inv.SLOT,inv.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,COALESCE(cos.REF_OBJECT_ID,0),COALESCE(cos.KIND,0),COALESCE(cos.STATE,0),COALESCE(cos.NAME,''),COALESCE(cos.LEVEL,0),cos.RENT_ENDS_AT,COALESCE(cos.INVENTORY_SLOT,0),COALESCE(cos.HEALTH,0),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),COALESCE(ap.ASTRAL,0),COALESCE(ap.IMMORTAL,0),COALESCE(ap.STEADY,0) FROM `SRO_SHARD`.`INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` AS it ON inv.FK_ITEM=it.ID LEFT JOIN `SRO_SHARD`.`CHAR_COS` cos ON cos.ID=it.DATA AND cos.OWNER_CHAR_ID=inv.FK_CHAR LEFT JOIN `SRO_SHARD`.`ITEM_ALCHEMY_PROTECTION` ap ON ap.FK_ITEM=it.ID WHERE inv.FK_CHAR=?"
+	SelectCharacterInventory string = "SELECT inv.SLOT,inv.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.CREATOR_NAME,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,COALESCE(cos.REF_OBJECT_ID,0),COALESCE(cos.KIND,0),COALESCE(cos.STATE,0),COALESCE(cos.NAME,''),COALESCE(cos.LEVEL,0),cos.RENT_ENDS_AT,COALESCE(cos.INVENTORY_SLOT,0),COALESCE(cos.HEALTH,0),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),COALESCE(ap.ASTRAL,0),COALESCE(ap.IMMORTAL,0),COALESCE(ap.STEADY,0) FROM `SRO_SHARD`.`INVENTORY` inv INNER JOIN `SRO_SHARD`.`ITEM` AS it ON inv.FK_ITEM=it.ID LEFT JOIN `SRO_SHARD`.`CHAR_COS` cos ON cos.ID=it.DATA AND cos.OWNER_CHAR_ID=inv.FK_CHAR LEFT JOIN `SRO_SHARD`.`ITEM_ALCHEMY_PROTECTION` ap ON ap.FK_ITEM=it.ID WHERE inv.FK_CHAR=?"
 	InsertInventoryItem      string = "INSERT INTO `SRO_SHARD`.`INVENTORY` (FK_CHAR, SLOT, FK_ITEM) VALUES(?, ?, ?);"
 )
 
@@ -186,6 +186,7 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 	var stackCount int
 	var optLevel byte
 	var data uint32
+	var creatorName string
 	var rent RentInfo
 	var cosRefObjectID uint32
 	var cosKind, cosState, cosLevel, cosInventorySlot byte
@@ -194,7 +195,7 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 	var cosHealth int32
 	var magicJSON, socketsJSON, advancedJSON []byte
 	var protection EquipmentProtection
-	if err := scanner.Scan(&slot, &itemID, &variance, &referenceItemID, &stackCount, &optLevel, &data, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime, &cosRefObjectID, &cosKind, &cosState, &cosName, &cosLevel, &cosRentEndsAt, &cosInventorySlot, &cosHealth, &magicJSON, &socketsJSON, &advancedJSON, &protection.Astral, &protection.Immortal, &protection.Steady); err != nil {
+	if err := scanner.Scan(&slot, &itemID, &variance, &referenceItemID, &stackCount, &optLevel, &data, &creatorName, &rent.Type, &rent.CanDelete, &rent.CanRecharge, &rent.PeriodBeginTime, &rent.PeriodEndTime, &rent.MeterRateTime, &rent.PackingTime, &cosRefObjectID, &cosKind, &cosState, &cosName, &cosLevel, &cosRentEndsAt, &cosInventorySlot, &cosHealth, &magicJSON, &socketsJSON, &advancedJSON, &protection.Astral, &protection.Immortal, &protection.Steady); err != nil {
 		return 0, Item{}, err
 	}
 	magicOptions, err := decodeMagicOptions(magicJSON)
@@ -233,6 +234,7 @@ func scanInventoryItem(scanner inventoryScanner) (byte, Item, error) {
 		StackSize:       stackCount,
 		OptLevel:        optLevel,
 		Data:            data,
+		CreatorName:     creatorName,
 		RentInfo:        rent,
 		MagicOptions:    magicOptions,
 		SocketOptions:   sockets,

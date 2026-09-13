@@ -105,7 +105,8 @@ func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session,
 	case Global:
 		return handleGlobalMessage(request, session)
 	case Notice:
-
+		gmh := GetGmMessageHandlerInstance()
+		return gmh.HandleAdminMessage(request, session)
 	case Stall:
 		return handleStallMessage(request, session)
 	case Union:

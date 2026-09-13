@@ -1,6 +1,7 @@
 package character
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -13,10 +14,11 @@ import (
 )
 
 type fakeGameReadyPlayers struct {
-	player      *model.Player
-	err         error
-	lookups     int
-	activations int
+	player          *model.Player
+	err             error
+	lookups         int
+	activations     int
+	jobAtActivation model.PlayerJob
 }
 
 func (f *fakeGameReadyPlayers) GetPlayerByUniqueId(_ uint32) (*model.Player, error) {
@@ -29,12 +31,54 @@ func (f *fakeGameReadyPlayers) GetPlayerByUniqueId(_ uint32) (*model.Player, err
 
 func (f *fakeGameReadyPlayers) ActivatePlayer(player *model.Player) []service.VisibilityDelta {
 	f.activations++
+	f.jobAtActivation = player.GetJob()
 	if player.CurrentHP() == 0 {
 		player.SetLifeState(model.Dead)
 	} else {
 		player.SetLifeState(model.Alive)
 	}
 	return nil
+}
+
+type fakeGameReadySocial struct {
+	prepared     int
+	bootstrapped int
+}
+
+func (f *fakeGameReadySocial) PreparePlayer(_ context.Context, player *model.Player) error {
+	f.prepared++
+	player.SetJob(model.PlayerJob{Type: model.PlayerJobTrader, Level: 4, Alias: "Aegis"})
+	return nil
+}
+
+func (f *fakeGameReadySocial) Bootstrap(context.Context, *server.Session) error {
+	f.bootstrapped++
+	return nil
+}
+
+func TestGameReadyPreparesSpawnStateBeforeVisibilityActivation(t *testing.T) {
+	session := newGameReadyTestSession(t)
+	if !session.BeginCharacterLoading() {
+		t.Fatal("test session could not enter character loading")
+	}
+	player := &model.Player{
+		ID: session.UserContext.CharacterID, Session: session,
+		CharName: session.UserContext.CharName, LifeState: model.Spawning,
+		BaseStats: model.BaseStats{HP: 100, MP: 100},
+	}
+	players := &fakeGameReadyPlayers{player: player}
+	social := &fakeGameReadySocial{}
+	handler := NewGameReadyHandler(players)
+	handler.ConfigureSocial(social)
+	if err := handler.handleSessionPacket(context.Background(), session, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("GameReady rejected: %v", err)
+	}
+	if social.prepared != 1 || social.bootstrapped != 1 {
+		t.Fatalf("social calls = prepare %d, bootstrap %d", social.prepared, social.bootstrapped)
+	}
+	if got := players.jobAtActivation; got.Type != model.PlayerJobTrader || got.Level != 4 || got.Alias != "Aegis" {
+		t.Fatalf("job at visibility activation = %+v", got)
+	}
 }
 
 func TestGameReadyRejectsOutOfOrderTrailingAndDuplicateRequests(t *testing.T) {

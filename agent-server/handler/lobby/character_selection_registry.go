@@ -159,12 +159,27 @@ type CharacterSelectionHandler struct {
 	itemBuffs         model.ItemBuffRepository
 	hwan              model.HwanRepository
 	movement          model.MovementSettingsRepository
+	playerPreparer     interface {
+		PreparePlayer(context.Context, *model.Player) error
+	}
 	referenceData     *model.ReferenceDataCatalog
 	creationPolicy    model.CharacterCreationPolicyRepository
 	timedBuffDuration bool
 	creator           model.CharacterCreator
 	loadPlayer        func(model.Char, *server.Session) (*model.Player, error)
 	world             characterJoinWorld
+}
+
+// ConfigurePlayerPreparer loads durable state that is encoded in 0x3013.
+// It must run during character selection, before the bootstrap body is sent.
+func (h *CharacterSelectionHandler) ConfigurePlayerPreparer(preparer interface {
+	PreparePlayer(context.Context, *model.Player) error
+}) error {
+	if h == nil || preparer == nil {
+		return model.ErrSocialInvalidRequest
+	}
+	h.playerPreparer = preparer
+	return nil
 }
 
 func (h *CharacterSelectionHandler) ConfigureHwanRepository(repository model.HwanRepository) error {

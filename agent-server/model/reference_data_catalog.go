@@ -76,3 +76,15 @@ func (c *ReferenceDataCatalog) Character(id uint32) (RefChar, bool) {
 	character, ok := c.characters[id]
 	return character, ok
 }
+
+func (c *ReferenceDataCatalog) CharacterByCodeName(codeName string) (RefChar, bool) {
+	if c == nil || codeName == "" {
+		return RefChar{}, false
+	}
+	for _, character := range c.characters {
+		if character.CodeName == codeName {
+			return character, true
+		}
+	}
+	return RefChar{}, false
+}

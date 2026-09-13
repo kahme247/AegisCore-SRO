@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // InventoryRelocationAction describes the already-supported single-item
@@ -192,11 +193,50 @@ func canEquipAtSlot(inventory *Inventory, item Item, targetSlot byte, player *Pl
 		return inventory.canEquipNecklace(item, player)
 	case SlotLeftRing, SlotRightRing:
 		return inventory.canEquipRing(item, player)
+	case SlotExtra:
+		return canEquipJobSuit(item, player)
 	default:
-		// SlotExtra is within the legacy equipment range but has no verified
-		// rule. Refuse it instead of guessing an equip policy.
 		return false
 	}
+}
+
+func canEquipJobSuit(item Item, player *Player) bool {
+	if player == nil {
+		return false
+	}
+	ref, ok := RefItems[item.GetRefObjectID()]
+	if !ok {
+		return false
+	}
+	code := strings.ToUpper(strings.TrimSpace(ref.CodeName))
+	if !strings.Contains(code, "_TRADE_") {
+		return false
+	}
+	switch player.GetJob().Type {
+	case PlayerJobTrader:
+		return strings.Contains(code, "_TRADE_TRADER_")
+	case PlayerJobThief:
+		return strings.Contains(code, "_TRADE_THIEF_")
+	case PlayerJobHunter:
+		return strings.Contains(code, "_TRADE_HUNTER_")
+	default:
+		return false
+	}
+}
+
+// HasActiveJobSuit reports whether slot 8 contains job clothes matching the
+// player's active trader or thief role. Trade transports are not available to
+// hunters or to characters whose job clothes are only present in the bag.
+func HasActiveJobSuit(player *Player) bool {
+	if player == nil {
+		return false
+	}
+	jobType := player.GetJob().Type
+	if jobType != PlayerJobTrader && jobType != PlayerJobThief {
+		return false
+	}
+	item, equipped := player.Inventory.Items[SlotExtra]
+	return equipped && canEquipJobSuit(item, player)
 }
 
 // ApplyInventoryRelocation applies one previously-built plan to items. It

@@ -10,6 +10,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/server"
 )
 
 type questTimerDispatchCall struct {
@@ -64,12 +65,29 @@ func TestQuestTimerPublisherSchedulesPositiveCountdownAndDispatchesExpiry(t *tes
 	if len(dispatcher.calls) != 1 || dispatcher.calls[0] != (questTimerDispatchCall{characterID: 77, questID: 100, event: model.QuestAuthoredCountdown}) {
 		t.Fatalf("dispatch calls = %#v", dispatcher.calls)
 	}
-	if len(sent) != 2 || len(callbacks) != 1 {
+	if len(sent) != 1 || len(callbacks) != 1 {
 		t.Fatalf("expiry sent=%d callbacks=%d", len(sent), len(callbacks))
 	}
-	wantExpiry := []byte{2, 100, 0, 0, 0, 0x12, 0x34, 0x04, 0, 0, 0, 0}
-	if !reflect.DeepEqual(sent[1].Payload(), wantExpiry) {
-		t.Fatalf("expiry packet = % X, want % X", sent[1].Payload(), wantExpiry)
+}
+
+func TestQuestTimerPublisherCheckpointsTenSecondBoundary(t *testing.T) {
+	player := &model.Player{ID: 77}
+	var callbacks []func()
+	var remaining []uint32
+	publisher := questTimerPublisher{
+		dispatcher: &questTimerDispatcherStub{}, send: func(network.Packet) error { return nil }, tickCadence: time.Second,
+		schedule: func(_ time.Duration, callback func()) { callbacks = append(callbacks, callback) },
+		checkpoint: func(_ context.Context, timer model.QuestTimer) error {
+			remaining = append(remaining, timer.Remaining)
+			return nil
+		},
+	}
+	if _, _, err := publisher.start(context.Background(), player, 100, 11, 0, questTimerWireMetadata{}); err != nil {
+		t.Fatal(err)
+	}
+	callbacks[0]()
+	if !reflect.DeepEqual(remaining, []uint32{10}) {
+		t.Fatalf("checkpoint remaining = %v", remaining)
 	}
 }
 
@@ -139,5 +157,96 @@ func TestQuestTimerPublisherRollsBackFailedInitialDisplay(t *testing.T) {
 	}
 	if _, exists := player.QuestTimerSnapshot(103); exists {
 		t.Fatal("failed initial display left timer registered")
+	}
+}
+
+func TestQuestCountdownServiceExpiresWithRetireThenAuthoredNotice(t *testing.T) {
+	repository := &questRepositoryStub{}
+	service := NewQuestCountdownService(repository)
+	var callbacks []func()
+	service.schedule = func(delay time.Duration, callback func()) {
+		if delay != time.Second {
+			t.Fatalf("schedule delay = %v", delay)
+		}
+		callbacks = append(callbacks, callback)
+	}
+	var sent []network.Packet
+	service.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	player := &model.Player{ID: 77, Quests: []model.CharacterQuest{{
+		QuestID: 501, QuestCodeName: "QNO_KT_ACCESSORY_1", Status: model.QuestActive,
+		AchievementCount: 2, ObjectiveKey: "OBJECTIVE", TimerDuration: 1,
+	}}}
+	quest := player.QuestSnapshot()[0]
+	if err := service.Start(context.Background(), &server.Session{}, player, quest); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || len(callbacks) != 1 || sent[0].MessageID != opcode.QuestUpdate {
+		t.Fatalf("start sent=%d callbacks=%d", len(sent), len(callbacks))
+	}
+	callbacks[0]()
+	if repository.characterID != 77 || repository.questID != 501 {
+		t.Fatalf("abandon identity = (%d,%d)", repository.characterID, repository.questID)
+	}
+	current, exists := playerQuest(player, 501)
+	if !exists || current.Status != model.QuestAborted {
+		t.Fatalf("expired quest = (%+v,%v)", current, exists)
+	}
+	if len(sent) != 3 || sent[1].MessageID != opcode.QuestUpdate || sent[2].MessageID != opcode.QuestNotification {
+		ids := make([]uint16, len(sent))
+		for index := range sent {
+			ids[index] = sent[index].MessageID
+		}
+		t.Fatalf("expiry packet IDs = %04X", ids)
+	}
+	if got := sent[1].Payload(); !reflect.DeepEqual(got, []byte{3, 0xF5, 1, 0, 0}) {
+		t.Fatalf("retire payload = % X", got)
+	}
+	wantNotice := append([]byte{0x1D, 0}, []byte("SN_TALK_QNO_KT_ACCESSORY_1_09")...)
+	if got := sent[2].Payload(); !reflect.DeepEqual(got, wantNotice) {
+		t.Fatalf("notice payload = % X, want % X", got, wantNotice)
+	}
+}
+
+func TestQuestCountdownServiceResumesPersistedRemainingTime(t *testing.T) {
+	repository := &questRepositoryStub{}
+	service := NewQuestCountdownService(repository)
+	service.schedule = func(time.Duration, func()) {}
+	service.send = func(_ *server.Session, _ network.Packet) error { return nil }
+	player := &model.Player{ID: 77}
+	quest := model.CharacterQuest{
+		QuestID: 501, QuestCodeName: "QNO_KT_ACCESSORY_1", Status: model.QuestActive,
+		TimerDuration: 120, TimerRemaining: 30,
+	}
+	if err := service.Start(context.Background(), &server.Session{}, player, quest); err != nil {
+		t.Fatal(err)
+	}
+	timer, exists := player.QuestTimerSnapshot(501)
+	if !exists || timer.Remaining != 30 {
+		t.Fatalf("rehydrated timer = (%+v,%v)", timer, exists)
+	}
+}
+
+func TestQuestTimerPublisherCancelsWhenQuestIsNoLongerActive(t *testing.T) {
+	player := &model.Player{ID: 1, Quests: []model.CharacterQuest{{QuestID: 7, Status: model.QuestActive}}}
+	var callbacks []func()
+	dispatcher := &questTimerDispatcherStub{}
+	publisher := questTimerPublisher{
+		dispatcher: dispatcher, send: func(network.Packet) error { return nil }, tickCadence: time.Second,
+		schedule: func(_ time.Duration, callback func()) { callbacks = append(callbacks, callback) },
+		isActive: func(candidate *model.Player, questID int) bool {
+			quest, exists := playerQuest(candidate, questID)
+			return exists && quest.Status.ClientActive()
+		},
+	}
+	if _, _, err := publisher.start(context.Background(), player, 7, 2, 0, questTimerWireMetadata{}); err != nil {
+		t.Fatal(err)
+	}
+	player.MarkQuestAborted(7)
+	callbacks[0]()
+	if _, exists := player.QuestTimerSnapshot(7); exists || len(dispatcher.calls) != 0 || len(callbacks) != 1 {
+		t.Fatalf("inactive timer exists=%v dispatches=%d callbacks=%d", exists, len(dispatcher.calls), len(callbacks))
 	}
 }

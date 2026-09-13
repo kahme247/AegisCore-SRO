@@ -42,34 +42,59 @@ func NPCSelectionTalkData(codeName string) []byte {
 	case strings.Contains(upper, "SMITH"):
 		data = []byte{0, 4, 1, 2, 4, 0x20, 0}
 	case strings.Contains(upper, "ARMOR"):
-		data = []byte{0, 2, 1, 4, 0}
+		data = []byte{0, 3, 1, 2, 4, 0}
 	case strings.Contains(upper, "POTION"):
-		data = []byte{0, 1, 1, 0}
+		data = []byte{0, 2, 1, 2, 0}
 	case strings.Contains(upper, "ACCESSORY"):
-		data = []byte{0, 1, 1, 0}
+		data = []byte{0, 2, 1, 2, 0}
 	case strings.Contains(upper, "WAREHOUSE"):
-		data = []byte{0, 2, 1, 3, 0}
+		data = []byte{0, 3, 1, 2, 3, 0}
 	case isTeleportServiceCodeName(upper):
-		data = []byte{0, 1, 8, 0}
+		data = []byte{0, 2, 2, 8, 0}
 	case strings.Contains(upper, "HORSE"):
-		data = []byte{0, 2, 1, 0x0B, 0}
+		data = []byte{0, 3, 1, 2, 0x0B, 0}
 	case strings.Contains(upper, "GUILD"):
 		// 0x0D opens guild storage; 0x0F is the existing guild service.
-		data = []byte{0, 3, 1, 0x0D, 0x0F, 0}
+		data = []byte{0, 4, 1, 2, 0x0D, 0x0F, 0}
 	case strings.Contains(upper, "DOCTOR"):
-		data = []byte{0, 2, 1, 0x14, 0}
+		data = []byte{0, 3, 1, 2, 0x14, 0}
 	case strings.Contains(upper, "DESIGNER"):
-		data = []byte{0, 2, 1, 0, 0}
+		data = []byte{0, 3, 1, 2, 0, 0}
+	case isJobNPCCodeName(upper):
+		// B045 advertises a job service group, not the final enrollment action.
+		// sro_client.exe 0x00700440 maps groups 0x14/0x15/0x16 to job types
+		// 1/2/3 and calls 0x006FDEB0, which builds the state-dependent menu and
+		// creates action 0x1E for enrollment when the character has no job.
+		// Store (1) is advertised separately from the job service group so the
+		// association NPC can open its Media-defined equipment catalog.
+		data = []byte{0, 2, 1, jobNPCServiceGroup(upper), 0}
 	case isShopNPCCodeName(upper):
-		data = []byte{0, 1, 1, 0}
+		data = []byte{0, 2, 1, 2, 0}
 	default:
-		data = []byte{0, 0, 0}
+		data = []byte{0, 1, 2, 0}
 	}
 
 	if info, ok := npcSelectionInfoWord(upper); ok {
 		data = append(data, byte(info), byte(info>>8))
 	}
 	return data
+}
+
+func jobNPCServiceGroup(codeName string) byte {
+	switch {
+	case strings.Contains(codeName, "THIEF"):
+		return 0x15
+	case strings.Contains(codeName, "HUNTER"):
+		return 0x16
+	default:
+		return 0x14 // merchant/trader
+	}
+}
+
+func isJobNPCCodeName(codeName string) bool {
+	upper := strings.ToUpper(codeName)
+	return strings.Contains(upper, "THIEF") || strings.Contains(upper, "HUNTER") ||
+		strings.Contains(upper, "MERCHANT") || strings.Contains(upper, "TRADER")
 }
 
 func isTeleportServiceCodeName(codeName string) bool {

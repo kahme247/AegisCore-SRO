@@ -101,7 +101,7 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 	return h.sendPacket(transition.Target.GetSession(), full)
 }
 
-func (h *PartyHandler) handleLeave(_ context.Context, session *server.Session, packet network.Packet) error {
+func (h *PartyHandler) handleLeave(ctx context.Context, session *server.Session, packet network.Packet) error {
 	if session == nil || packet.Remaining() != 0 {
 		return fmt.Errorf("invalid party-leave request")
 	}
@@ -109,10 +109,24 @@ func (h *PartyHandler) handleLeave(_ context.Context, session *server.Session, p
 	if err != nil {
 		return err
 	}
-	return publishRemoval(h, transition)
+	return publishRemoval(ctx, h, transition)
 }
 
-func publishRemoval(h *PartyHandler, transition service.PartyTransition) error {
+func publishRemoval(ctx context.Context, h *PartyHandler, transition service.PartyTransition) error {
+	if h != nil && h.instanceExit != nil {
+		affected := []*model.Player{transition.Target}
+		if transition.Dismissed {
+			affected = transition.AllBefore
+		}
+		for _, player := range affected {
+			if player == nil {
+				continue
+			}
+			if err := h.instanceExit.SubmitPartyQuestInstanceExit(ctx, player); err != nil {
+				return err
+			}
+		}
+	}
 	if err := sendPartyPacket(h, transition.AllBefore, buildPartyLeave(transition.RemovedUID, transition.RemovalReason)); err != nil {
 		return err
 	}
@@ -146,5 +160,5 @@ func HandleDisconnect(playerUID uint32) {
 	if err != nil {
 		return
 	}
-	_ = publishRemoval(&PartyHandler{service: service.GetPartyServiceInstance()}, transition)
+	_ = publishRemoval(context.Background(), &PartyHandler{service: service.GetPartyServiceInstance()}, transition)
 }

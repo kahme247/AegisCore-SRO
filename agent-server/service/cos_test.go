@@ -19,6 +19,8 @@ type cosRepositoryFake struct {
 	saveErr  error
 	stored   []int
 	services []model.COSTimedService
+	cargo    []model.Item
+	released bool
 }
 
 type cosGroundItemLifecycleFake struct{ canceled *model.Item }
@@ -49,6 +51,80 @@ func (f *cosRepositoryFake) LoadCOSTimedServices(context.Context, int, uint64, t
 func (f *cosRepositoryFake) StoreItem(_ context.Context, _ int, _ uint64, _ byte, itemID int) error {
 	f.stored = append(f.stored, itemID)
 	return nil
+}
+func (f *cosRepositoryFake) DestroyJobTransport(context.Context, int, uint64) ([]model.Item, error) {
+	f.released = true
+	return append([]model.Item(nil), f.cargo...), nil
+}
+
+type cosCargoGroundFake struct{ items []*model.Item }
+
+func (f *cosCargoGroundFake) Spawn(item *model.Item, _ uint32) error {
+	f.items = append(f.items, item)
+	return nil
+}
+
+func TestCOSJobTransportDeathReleasesEveryCargoSlotWithoutSpecialtyOwner(t *testing.T) {
+	repository := &cosRepositoryFake{cargo: []model.Item{
+		{ID: 41, CreatorName: "", SRObject: model.SRObject{RefObjectID: 900}},
+		{CreatorName: "TraderAlias", TransientGroundItem: true, OwnerUniqueID: 77, SRObject: model.SRObject{RefObjectID: 901}},
+	}}
+	ground := &cosCargoGroundFake{}
+	runtime := NewCOSService(repository, &cosWorldFake{})
+	runtime.ConfigureCargoGroundItems(ground)
+	pet := &model.COS{PersistentID: 12, OwnerCharID: 7, Kind: model.COSJobTransport, Inventory: model.NewInventory(map[byte]model.Item{0: repository.cargo[0], 3: repository.cargo[1]})}
+	pet.SetNavmeshPosition(navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(10, 0, 20)})
+	if destroyed, err := runtime.releaseJobTransportCargo(context.Background(), pet); err != nil || !destroyed {
+		t.Fatal(err)
+	}
+	if !repository.released || len(ground.items) != 2 || ground.items[1].OwnerUniqueID != 0 || !ground.items[1].TransientGroundItem || len(pet.Snapshot().Inventory.Items) != 0 {
+		t.Fatalf("released=%t items=%+v inventory=%+v", repository.released, ground.items, pet.Snapshot().Inventory.Items)
+	}
+}
+
+func TestCOSJobTransportDeathIsTerminalAndClearsInstrumentIdentity(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9002: {
+		RefObject: model.RefObject{ID: 9002, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(model.COSJobTransport)}},
+		Level:     1, MaxHP: 100, InventorySize: 5,
+	}}
+	repository := &cosRepositoryFake{record: model.COSRecord{
+		ID: 78, OwnerCharID: 6, RefObjectID: 9002, Kind: model.COSJobTransport,
+		State: model.COSItemActive, Level: 1, Health: 100, MaxHealth: 100, InventorySlot: 16,
+	}}
+	owner := &model.Player{
+		ID: 6, CharName: "Trader", LifeState: model.Alive,
+		Inventory: model.NewInventory(map[byte]model.Item{16: {
+			Data: 78, COS: model.COSItemInfo{Present: true, Kind: model.COSJobTransport, State: model.COSItemActive},
+			SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}},
+		}}),
+		SRObject: model.SRObject{UniqueID: 10},
+	}
+	world := &cosWorldFake{next: 200}
+	runtime := NewCOSService(repository, world)
+	runtime.ConfigureCargoGroundItems(&cosCargoGroundFake{})
+	pet, err := runtime.Summon(context.Background(), owner, 78)
+	if err != nil {
+		t.Fatalf("Summon: %v", err)
+	}
+	savesBeforeDeath := len(repository.saved)
+	if err := runtime.MarkDead(context.Background(), owner, pet.GetUniqueID()); err != nil {
+		t.Fatalf("MarkDead: %v", err)
+	}
+	if !repository.released || len(repository.saved) != savesBeforeDeath {
+		t.Fatalf("released=%t saves=%d, want terminal destroy without dead checkpoint", repository.released, len(repository.saved))
+	}
+	if _, err := runtime.Owned(owner, pet.GetUniqueID()); !errors.Is(err, model.ErrCOSNotOwned) {
+		t.Fatalf("destroyed cart remains owned: %v", err)
+	}
+	item := owner.GetInventory().Items[16]
+	if item.Data != 0 || item.COS.Present {
+		t.Fatalf("transport instrument after destroy = data %d COS %+v", item.Data, item.COS)
+	}
+	if revived, err := runtime.RevivePersisted(owner, 78, 50); err != nil || revived != nil {
+		t.Fatalf("destroyed cart revived = %+v, %v", revived, err)
+	}
 }
 
 type cosWorldFake struct {

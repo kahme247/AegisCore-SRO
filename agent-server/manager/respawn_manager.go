@@ -8,6 +8,7 @@ import (
 	"github.com/g3n/engine/math32"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -183,6 +184,54 @@ func (s *RespawnManager) spawnNpc(spawnArea *model.SpawnArea) error {
 	npc.BindSpawnArea(spawnArea)
 	spawnArea.AddNPC(npc)
 	return nil
+}
+
+// SpawnQuestNPC creates a transient quest-owned monster near the player. It
+// deliberately does not bind the NPC to a SpawnArea: death/despawn must not
+// enqueue an ordinary world respawn for a periodic quest pursuer.
+func (s *RespawnManager) SpawnQuestNPC(codeName string, center navmeshv2.RtNavmeshPosition, radius float32) (*model.NPC, error) {
+	catalog := s.configuredReferenceData()
+	if catalog == nil {
+		return nil, ErrRespawnReferenceCatalogUnavailable
+	}
+	refChar, exists := catalog.CharacterByCodeName(codeName)
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", ErrRespawnReferenceCharacterUnavailable, codeName)
+	}
+	area := &model.SpawnArea{Spawn: model.Spawn{
+		Position: center, RefObjID: uint64(refChar.ID), NpcCodeName: codeName,
+		ChampionGenPercentage: 0, AggressType: byte(model.Aggressive), SightRange: 100,
+	}}
+	npc, err := s.newNPCForSpawn(area)
+	if err != nil {
+		return nil, err
+	}
+	world := service.GetWorldServiceInstance()
+	npc.RtNavmeshPosition = center
+	if radius > 0 {
+		origin := center.GetGlobalCoordinates()
+		for attempt := 0; attempt < maxRespawnPositionAttempts; attempt++ {
+			x, z := questSpawnOffset(radius, rand.Float64(), rand.Float64())
+			candidate, resolveErr := world.NewPosFromGlobalCoordinates(math32.NewVector3(origin.X+x, origin.Y, origin.Z+z))
+			if resolveErr != nil || candidate.Region.ID != center.Region.ID || !world.CanMoveDirectly(center, candidate) {
+				continue
+			}
+			candidate.Offset.Y = center.Offset.Y
+			npc.RtNavmeshPosition = candidate
+			break
+		}
+	}
+	world.AddVisibleObject(npc)
+	return npc, nil
+}
+
+func questSpawnOffset(radius float32, angleUnit, distanceUnit float64) (float32, float32) {
+	if radius <= 0 {
+		return 0, 0
+	}
+	angle := angleUnit * 2 * math.Pi
+	distance := float64(radius) * distanceUnit
+	return float32(math.Cos(angle) * distance), float32(math.Sin(angle) * distance)
 }
 
 // newNPCForSpawn resolves the NPC through the configured immutable catalog

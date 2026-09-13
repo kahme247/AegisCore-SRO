@@ -14,6 +14,7 @@ type GameTimeManager struct {
 	referenceTime time.Time
 	cos           interface{ UpdateFollowers(time.Time) }
 	alchemy       interface{ TickAlchemy() }
+	nativeQuests  interface{ Tick(time.Time) }
 	watchdogStop  chan struct{}
 }
 
@@ -23,6 +24,10 @@ func (gtm *GameTimeManager) ConfigureCOS(runtime interface{ UpdateFollowers(time
 
 func (gtm *GameTimeManager) ConfigureAlchemy(runtime interface{ TickAlchemy() }) {
 	gtm.alchemy = runtime
+}
+
+func (gtm *GameTimeManager) ConfigureNativeQuests(runtime interface{ Tick(time.Time) }) {
+	gtm.nativeQuests = runtime
 }
 
 var gameTimeManagerInstance *GameTimeManager
@@ -64,6 +69,9 @@ func (gtm *GameTimeManager) moveObjects() {
 			}
 			if gtm.cos != nil {
 				gtm.cos.UpdateFollowers(now)
+			}
+			if gtm.nativeQuests != nil {
+				gtm.nativeQuests.Tick(now)
 			}
 			moving := 0
 			world.ForEachMovingObject(func(obj model.ICharacter) {
@@ -109,4 +117,19 @@ func (gtm *GameTimeManager) StopWatchdog() {
 
 func (gtm *GameTimeManager) GetCurrentTick() int64 {
 	return int64(time.Now().Sub(gtm.referenceTime) / gtm.rate)
+}
+
+// CurrentWorldTime projects the configured simulated clock. At speed 1 the
+// clock follows local wall time; other multipliers accelerate or slow the
+// cycle from the local midnight reference.
+func (gtm *GameTimeManager) CurrentWorldTime() time.Time {
+	if gtm == nil {
+		return time.Now()
+	}
+	speed := viper.GetFloat64(config.GameTimeDaySpeed)
+	if speed <= 0 {
+		speed = 1
+	}
+	elapsed := time.Since(gtm.referenceTime)
+	return gtm.referenceTime.Add(time.Duration(float64(elapsed) * speed))
 }

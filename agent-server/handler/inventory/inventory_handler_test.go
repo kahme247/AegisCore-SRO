@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -70,6 +71,100 @@ type groundPickupRepositoryFake struct {
 	result      model.GroundItemPickupResult
 	err         error
 	calls       int
+}
+
+type oldWomanGroundActionFake struct {
+	characterID int
+	calls       int
+	result      model.OldWomanSearchStartResult
+	advance     model.OldWomanSearchActionResult
+	advances    int
+	advanceRoll byte
+	err         error
+}
+
+type nativeCatchActionFake struct {
+	characterID int
+	questID     int
+	roll        byte
+	starts      int
+	advances    int
+	start       model.NativeCatchStartResult
+	advance     model.NativeCatchActionResult
+	err         error
+}
+
+func (f *nativeCatchActionFake) StartNativeCatchAction(_ context.Context, characterID, questID int) (model.NativeCatchStartResult, error) {
+	f.characterID, f.questID = characterID, questID
+	f.starts++
+	return f.start, f.err
+}
+
+func (f *nativeCatchActionFake) AdvanceNativeCatchAction(_ context.Context, characterID, questID int, roll byte) (model.NativeCatchActionResult, error) {
+	f.characterID, f.questID, f.roll = characterID, questID, roll
+	f.advances++
+	return f.advance, f.err
+}
+
+func (f *oldWomanGroundActionFake) AdvanceOldWomanSearchAction(_ context.Context, characterID int, roll byte) (model.OldWomanSearchActionResult, error) {
+	f.characterID = characterID
+	f.advances++
+	f.advanceRoll = roll
+	return f.advance, f.err
+}
+
+func (f *oldWomanGroundActionFake) StartOldWomanSearchAction(_ context.Context, characterID int) (model.OldWomanSearchStartResult, error) {
+	f.calls++
+	f.characterID = characterID
+	return f.result, f.err
+}
+
+type transientJobCOSPickupRepositoryFake struct {
+	groundPickupRepositoryFake
+	cosID    uint64
+	item     *model.Item
+	result   model.GroundItemCOSPickupResult
+	err      error
+	cosCalls int
+}
+
+func (f *transientJobCOSPickupRepositoryFake) PickupTransient(_ context.Context, characterID int64, item *model.Item, slot byte) (model.GroundItemPickupResult, error) {
+	f.calls++
+	f.characterID, f.item, f.slot = characterID, item, slot
+	return f.groundPickupRepositoryFake.result, f.groundPickupRepositoryFake.err
+}
+
+func (f *transientJobCOSPickupRepositoryFake) PickupTransientToJobCOS(_ context.Context, characterID int64, cosID uint64, item *model.Item, slot, _ byte) (model.GroundItemCOSPickupResult, error) {
+	f.cosCalls++
+	f.characterID, f.cosID, f.item, f.slot = characterID, cosID, item, slot
+	return f.result, f.err
+}
+
+type specialtyPickupCOSResolverFake struct{ transport *model.COS }
+
+func (f specialtyPickupCOSResolverFake) ResolveActiveOwned(*model.Player, model.COSKind) (*model.COS, bool) {
+	return f.transport, f.transport != nil
+}
+
+type specialtyPickupDistanceFake struct{ distance float32 }
+
+func (f specialtyPickupDistanceFake) DistanceTo(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) float32 {
+	return f.distance
+}
+
+type packageItemCatalogFake struct {
+	npcRefID uint32
+	tab      byte
+	slot     byte
+	result   model.PackageItemGood
+	err      error
+	calls    int
+}
+
+func (f *packageItemCatalogFake) ResolvePackageItem(_ context.Context, npcRefID uint32, tab, slot byte) (model.PackageItemGood, error) {
+	f.calls++
+	f.npcRefID, f.tab, f.slot = npcRefID, tab, slot
+	return f.result, f.err
 }
 
 type groundGoldPickupRepositoryFake struct {
@@ -178,6 +273,105 @@ func (f *inventoryHandlerRelocatorFake) Relocate(_ context.Context, characterID 
 	return f.err
 }
 
+func TestJobSuitEquipWaitsForStockWearingPeriod(t *testing.T) {
+	previous := model.RefItems
+	t.Cleanup(func() { model.RefItems = previous })
+	model.RefItems = map[uint32]model.RefItem{
+		2001: {RefObject: model.RefObject{ID: 2001, CodeName: "ITEM_CH_M_TRADE_THIEF_02"}},
+	}
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}}}, ID: 44, Session: session,
+		Inventory: model.NewInventory(map[byte]model.Item{40: {ID: 91, SRObject: model.SRObject{RefObjectID: 2001}}}),
+	}
+	player.SetJob(model.PlayerJob{Type: model.PlayerJobThief, Level: 1})
+	relocator := &inventoryHandlerRelocatorFake{}
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, relocator)
+	handler.send = func(_ *server.Session, _ network.Packet) error { return nil }
+	var delay time.Duration
+	var complete func()
+	handler.jobSuitSchedule = func(got time.Duration, callback func()) {
+		delay, complete = got, callback
+	}
+
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(MoveItemOperation))
+	request.WriteByte(40)
+	request.WriteByte(model.SlotExtra)
+	request.WriteUInt16(0)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("begin job-suit equip: %v", err)
+	}
+	if delay != 30*time.Second || complete == nil {
+		t.Fatalf("scheduled delay/callback = %v/%v, want 30s/non-nil", delay, complete != nil)
+	}
+	if relocator.calls != 0 {
+		t.Fatalf("relocator called %d times before wearing period", relocator.calls)
+	}
+	if _, equipped := player.Inventory.Items[model.SlotExtra]; equipped {
+		t.Fatal("job suit equipped before wearing period completed")
+	}
+
+	complete()
+	if relocator.calls != 1 {
+		t.Fatalf("relocator calls after wearing period = %d, want 1", relocator.calls)
+	}
+	if _, equipped := player.Inventory.Items[model.SlotExtra]; !equipped {
+		t.Fatal("job suit was not equipped after wearing period completed")
+	}
+}
+
+func TestUnconfiguredTokenAndInvalidOperationRemainFailClosed(t *testing.T) {
+	for _, operation := range []ItemInventoryOperation{BuyTokenPackageItemOperation, RejectedItemOperation2C} {
+		t.Run(fmt.Sprintf("0x%02X", operation), func(t *testing.T) {
+			handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{}, nil)
+			var packets []network.Packet
+			handler.send = func(_ *server.Session, packet network.Packet) error {
+				packets = append(packets, packet)
+				return nil
+			}
+			request := network.EmptyClientPacket()
+			request.WriteByte(byte(operation))
+			request.WriteBytes(make([]byte, 16))
+
+			if err := handler.handlePacket(context.Background(), &server.Session{}, request); err != nil {
+				t.Fatalf("operation 0x%02X: %v", operation, err)
+			}
+			if len(packets) != 1 || packets[0].MessageID != opcode.ItemOperationResponse {
+				t.Fatalf("operation 0x%02X packets = %#v", operation, packets)
+			}
+			if got, want := packets[0].Payload(), []byte{2, 0, 0}; !bytes.Equal(got, want) {
+				t.Fatalf("operation 0x%02X failure payload = %X, want %X", operation, got, want)
+			}
+		})
+	}
+}
+
+func TestPackageItemsResolveSelectedNPCAuthorityBeforeMutation(t *testing.T) {
+	for _, operation := range []byte{vsro188.ItemOperationPackageItem, vsro188.ItemOperationPackageItemExtended} {
+		catalog := &packageItemCatalogFake{result: model.PackageItemGood{ID: 74222, CodeName: "PACKAGE_ITEM_TEST", PaymentDevice: 1, Cost: 383, Members: []model.PackageItemMember{{Index: 1, RefItemID: 2147, Data: 20, MaxStack: 40}}}}
+		handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{}, nil)
+		handler.ConfigurePackageItems(catalog)
+		var response network.Packet
+		handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+		session := &server.Session{UserContext: server.UserContext{SelectedNPCRefObjID: 1234}}
+		request := network.EmptyClientPacket()
+		request.WriteByte(operation)
+		request.WriteByte(2)
+		request.WriteByte(7)
+		request.WriteUInt16(3)
+		if err := handler.handlePacket(context.Background(), session, request); err != nil {
+			t.Fatalf("package 0x%02X: %v", operation, err)
+		}
+		if catalog.calls != 1 || catalog.npcRefID != 1234 || catalog.tab != 2 || catalog.slot != 7 {
+			t.Fatalf("catalog call = %+v", catalog)
+		}
+		if response.MessageID != opcode.ItemOperationResponse || len(response.Payload()) == 0 || response.Payload()[0] != 2 {
+			t.Fatalf("fail-closed response = %#v", response)
+		}
+	}
+}
+
 func TestInventoryMoveWithTrailingPayloadIsRejectedBeforeLookupOrDatabase(t *testing.T) {
 	lookup := &inventoryHandlerPlayerLookupFake{}
 	relocator := &inventoryHandlerRelocatorFake{}
@@ -210,6 +404,7 @@ func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 	repository := &groundPickupRepositoryFake{result: model.GroundItemPickupResult{Slot: 13, Inventory: model.NewInventory(map[byte]model.Item{13: *item})}}
 	lifecycle := &groundPickupLifecycleFake{}
 	handler := NewInventoryHandler(world, nil)
+	handler.oldWomanSchedule = func(time.Duration, func()) {}
 	handler.ConfigureGroundItemPickupRepository(repository)
 	handler.ConfigureGroundItemLifecycle(lifecycle)
 	var packets []network.Packet
@@ -244,6 +439,215 @@ func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 	}
 	if got := packets[0].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
 		t.Fatalf("pickup animation payload = % X, want collector UID 77 and one heading byte", got)
+	}
+}
+
+func TestOldWomanSearchGroundTriggerStartsActionWithoutNormalPickup(t *testing.T) {
+	stage := model.OldWomanSearchStages[0]
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(stage.Region), Offset: math32.NewVector3(stage.X, stage.Y, stage.Z)}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: position}, ID: 44, Session: session}
+	item := &model.Item{SRObject: model.SRObject{UniqueID: 900, RefObjectID: model.OldWomanSearchTriggerItemRefID, RtNavmeshPosition: position}, ID: 91}
+	world := &groundPickupWorldFake{player: player, item: item}
+	pickup := &groundPickupRepositoryFake{}
+	quest := model.CharacterQuest{QuestID: model.OldWomanSearchQuestID, Status: model.QuestProgressed, Data1: 1 | uint64(stage.Countdown)<<32}
+	action := &oldWomanGroundActionFake{result: model.OldWomanSearchStartResult{Quest: quest, Countdown: stage.Countdown}}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemPickupRepository(pickup)
+	handler.ConfigureOldWomanSearch(action)
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if action.calls != 1 || action.characterID != 44 || pickup.calls != 0 || world.removed != nil {
+		t.Fatalf("action=%+v pickupCalls=%d removed=%v", action, pickup.calls, world.removed)
+	}
+	if len(packets) != 1 || packets[0].MessageID != opcode.QuestCatchResult {
+		t.Fatalf("packets = %+v", packets)
+	}
+	questID, _ := packets[0].ReadUInt32()
+	countdown, _ := packets[0].ReadByte()
+	if questID != model.OldWomanSearchQuestID || countdown != stage.Countdown {
+		t.Fatalf("capture = quest %d countdown %d", questID, countdown)
+	}
+	if got := player.QuestSnapshot(); len(got) != 1 || got[0].Data1 != quest.Data1 {
+		t.Fatalf("live quests = %+v", got)
+	}
+}
+
+func TestNativeCatchGroundTriggerStartsPeriodicActionWithoutNormalPickup(t *testing.T) {
+	definition, _ := model.NativeCatchDefinitionForQuest(163)
+	sphere := definition.Spheres[0]
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(sphere.Region), Offset: math32.NewVector3(sphere.X, sphere.Y, sphere.Z)}
+	quest := model.CharacterQuest{QuestID: definition.QuestID, QuestCodeName: definition.CodeName, Status: model.QuestProgressed, Data1: uint64(definition.Countdown) << 32}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: position}, ID: 44, Session: session, Quests: []model.CharacterQuest{quest}}
+	item := &model.Item{SRObject: model.SRObject{UniqueID: 901, RefObjectID: definition.TriggerRefID, RtNavmeshPosition: position}, ID: 92}
+	world := &groundPickupWorldFake{player: player, item: item}
+	pickup := &groundPickupRepositoryFake{}
+	action := &nativeCatchActionFake{start: model.NativeCatchStartResult{Quest: quest, Definition: definition, Countdown: definition.Countdown}}
+	handler := NewInventoryHandler(world, nil)
+	handler.ConfigureGroundItemPickupRepository(pickup)
+	handler.ConfigureNativeCatchActions(action)
+	var scheduled func()
+	handler.nativeCatchSchedule = func(delay time.Duration, callback func()) {
+		if delay != time.Second {
+			t.Fatalf("schedule delay = %s", delay)
+		}
+		scheduled = callback
+	}
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(PickupItemOperation))
+	request.WriteUInt32(item.GetUniqueID())
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if action.starts != 1 || action.characterID != 44 || action.questID != definition.QuestID || pickup.calls != 0 || world.removed != nil {
+		t.Fatalf("action=%+v pickupCalls=%d removed=%v", action, pickup.calls, world.removed)
+	}
+	if scheduled == nil || len(packets) != 1 || packets[0].MessageID != opcode.QuestCatchResult {
+		t.Fatalf("scheduled=%t packets=%+v", scheduled != nil, packets)
+	}
+}
+
+func TestNativeCatchPeriodicEventPublishesRecoveredFailureTalk(t *testing.T) {
+	definition, _ := model.NativeCatchDefinitionForQuest(163)
+	quest := model.CharacterQuest{QuestID: definition.QuestID, Status: model.QuestProgressed}
+	action := &nativeCatchActionFake{advance: model.NativeCatchActionResult{
+		Quest: quest, Definition: definition, Resolved: true,
+		FailureTalkKey: definition.FailureTalkKey,
+	}}
+	player := &model.Player{ID: 44, Quests: []model.CharacterQuest{quest}}
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 44}}
+	handler := NewInventoryHandler(nil, nil)
+	handler.ConfigureNativeCatchActions(action)
+	handler.nativeCatchRoll = func() byte { return 51 }
+	var callback func()
+	handler.nativeCatchSchedule = func(delay time.Duration, next func()) {
+		if delay != time.Second {
+			t.Fatalf("delay = %s", delay)
+		}
+		callback = next
+	}
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	handler.beginNativeCatchEvents(session, player, definition.QuestID)
+	callback()
+	if action.advances != 1 || action.roll != 51 || len(packets) != 1 || packets[0].MessageID != opcode.QuestNotification {
+		t.Fatalf("action=%+v packets=%+v", action, packets)
+	}
+}
+
+func TestNativeCatchPeriodicReplacementRejectsStaleGeneration(t *testing.T) {
+	definition, _ := model.NativeCatchDefinitionForQuest(163)
+	quest := model.CharacterQuest{QuestID: definition.QuestID, Status: model.QuestProgressed}
+	action := &nativeCatchActionFake{advance: model.NativeCatchActionResult{Quest: quest, Definition: definition, Resolved: true}}
+	player := &model.Player{ID: 44, Quests: []model.CharacterQuest{quest}}
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 44}}
+	handler := NewInventoryHandler(nil, nil)
+	handler.ConfigureNativeCatchActions(action)
+	var callbacks []func()
+	handler.nativeCatchSchedule = func(_ time.Duration, callback func()) { callbacks = append(callbacks, callback) }
+	handler.beginNativeCatchEvents(session, player, definition.QuestID)
+	handler.beginNativeCatchEvents(session, player, definition.QuestID)
+	if len(callbacks) != 2 {
+		t.Fatalf("callbacks = %d", len(callbacks))
+	}
+	callbacks[0]()
+	if action.advances != 0 {
+		t.Fatalf("stale callback advanced %d times", action.advances)
+	}
+	callbacks[1]()
+	if action.advances != 1 {
+		t.Fatalf("current callback advanced %d times", action.advances)
+	}
+}
+
+func TestOldWomanSearchPeriodicEventConsumesNativeEvent18(t *testing.T) {
+	quest := model.CharacterQuest{QuestID: model.OldWomanSearchQuestID, Status: model.QuestProgressed, Data1: 1}
+	action := &oldWomanGroundActionFake{advance: model.OldWomanSearchActionResult{
+		Quest: quest, Resolved: true, FailureTalkKey: model.OldWomanSearchFailureTalkKey,
+	}}
+	player := &model.Player{ID: 44, Quests: []model.CharacterQuest{quest}}
+	session := &server.Session{UserContext: server.UserContext{CharacterID: 44}}
+	handler := NewInventoryHandler(nil, nil)
+	handler.ConfigureOldWomanSearch(action)
+	handler.oldWomanRoll = func() byte { return 26 }
+	var callback func()
+	handler.oldWomanSchedule = func(delay time.Duration, next func()) {
+		if delay != time.Second {
+			t.Fatalf("delay = %s", delay)
+		}
+		callback = next
+	}
+	var packets []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+	handler.beginOldWomanSearchEvents(session, player)
+	if callback == nil {
+		t.Fatal("periodic event was not scheduled")
+	}
+	callback()
+	if action.advances != 1 || action.advanceRoll != 26 || len(packets) != 1 || packets[0].MessageID != opcode.QuestNotification {
+		t.Fatalf("action=%+v packets=%+v", action, packets)
+	}
+}
+
+func TestSpecialtyGroundPickupJobAdmissionMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		jobType byte
+		alias   string
+		creator string
+		allowed bool
+	}{
+		{name: "trader recovers own cargo", jobType: model.PlayerJobTrader, alias: "TraderAlias", creator: "traderalias", allowed: true},
+		{name: "trader cannot take foreign cargo", jobType: model.PlayerJobTrader, alias: "TraderAlias", creator: "OtherTrader"},
+		{name: "thief takes foreign cargo", jobType: model.PlayerJobThief, alias: "ThiefAlias", creator: "TraderAlias", allowed: true},
+		{name: "thief cannot take own cargo", jobType: model.PlayerJobThief, alias: "ThiefAlias", creator: "thiefalias"},
+		{name: "hunter rejected", jobType: model.PlayerJobHunter, alias: "HunterAlias", creator: "TraderAlias"},
+		{name: "no job rejected", jobType: model.PlayerJobNone, creator: "TraderAlias"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+			position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}
+			player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: position}, ID: 44, Session: session}
+			player.SetJob(model.PlayerJob{Type: test.jobType, Alias: test.alias, Level: 1})
+			item := &model.Item{SRObject: model.SRObject{UniqueID: 900, RefObjectID: 700, RtNavmeshPosition: position}, StackSize: 2, CreatorName: test.creator, TransientGroundItem: true}
+			transport := &model.COS{NPC: model.NPC{SRObject: model.SRObject{UniqueID: 88, RtNavmeshPosition: position}}, PersistentID: 99, OwnerCharID: 44, OwnerUniqueID: 77, Kind: model.COSJobTransport, InventorySize: 40, Inventory: model.NewInventory(nil)}
+			world := &groundPickupWorldFake{player: player, item: item}
+			repository := &transientJobCOSPickupRepositoryFake{result: model.GroundItemCOSPickupResult{Item: model.Item{ID: 123, SRObject: model.SRObject{RefObjectID: 700}, StackSize: 2, CreatorName: test.creator}, Slot: 0, Scale: 2, SafeTradeReset: true}}
+			handler := NewInventoryHandler(world, nil)
+			handler.ConfigureGroundItemPickupRepository(repository)
+			handler.ConfigureSafeTrade(nil, specialtyPickupCOSResolverFake{transport: transport}, specialtyPickupDistanceFake{distance: 10})
+			var packets []network.Packet
+			handler.send = func(_ *server.Session, packet network.Packet) error { packets = append(packets, packet); return nil }
+			request := network.EmptyClientPacket()
+			request.WriteByte(byte(PickupItemOperation))
+			request.WriteUInt32(item.GetUniqueID())
+			if err := handler.handlePacket(context.Background(), session, request); err != nil {
+				t.Fatalf("pickup: %v", err)
+			}
+			if test.allowed {
+				if repository.cosCalls != 1 || repository.characterID != 44 || repository.cosID != 99 || repository.item != item || repository.slot != 0 {
+					t.Fatalf("COS repository call = %+v", repository)
+				}
+				if world.removed != item || transport.Inventory.Items[0].ID != 123 {
+					t.Fatalf("committed world/runtime state removed=%v inventory=%+v", world.removed, transport.Inventory.Items)
+				}
+				if len(packets) != 4 || packets[1].MessageID != opcode.ItemOperationResponse || !bytes.Equal(packets[1].Payload(), []byte{1, 0x17, 88, 0, 0, 0, 0}) || packets[2].MessageID != opcode.JobUpdateTradeScale || packets[3].MessageID != opcode.JobUpdateSafeTrade || !bytes.Equal(packets[3].Payload(), []byte{0, 0x40}) {
+					t.Fatalf("success packets = %#v", packets)
+				}
+			} else if repository.cosCalls != 0 || world.removed != nil {
+				t.Fatalf("rejected pickup mutated state: calls=%d removed=%v", repository.cosCalls, world.removed)
+			}
+		})
 	}
 }
 
@@ -465,7 +869,7 @@ func TestPlayerItemMovesIntoAbilityPetInventory(t *testing.T) {
 	if len(player.GetInventory().Items) != 0 || pet.Snapshot().Inventory.Items[3].ID != 100 {
 		t.Fatalf("runtime inventories player=%+v pet=%+v", player.GetInventory().Items, pet.Snapshot().Inventory.Items)
 	}
-	want := []byte{1, vsro188.ItemOperationCOSTransfer, 88, 0, 0, 0, 3}
+	want := []byte{1, byte(PutItemIntoPetInventoryOperation), 88, 0, 0, 0, 14, 3}
 	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
 		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
 	}
@@ -496,7 +900,7 @@ func TestPlayerItemMovesFromAbilityPetInventory(t *testing.T) {
 	if player.GetInventory().Items[14].ID != 100 || len(pet.Snapshot().Inventory.Items) != 0 {
 		t.Fatalf("runtime inventories player=%+v pet=%+v", player.GetInventory().Items, pet.Snapshot().Inventory.Items)
 	}
-	want := []byte{1, vsro188.ItemOperationCOSTransfer, 88, 0, 0, 0, 14}
+	want := []byte{1, byte(TakeItemFromPetInventoryOperation), 88, 0, 0, 0, 3, 14}
 	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
 		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
 	}

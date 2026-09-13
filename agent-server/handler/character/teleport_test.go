@@ -2,15 +2,50 @@ package character
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/g3n/engine/math32"
 )
+
+type partyExitInstanceRepository struct {
+	state model.QuestInstanceMemberState
+}
+
+func (r *partyExitInstanceRepository) SaveQuestInstanceMember(_ context.Context, state model.QuestInstanceMemberState) error {
+	r.state = state
+	return nil
+}
+func (r *partyExitInstanceRepository) LoadQuestInstanceMember(context.Context, int, uint32) (model.QuestInstanceMemberState, error) {
+	return r.state, nil
+}
+func (r *partyExitInstanceRepository) LoadQuestInstanceMemberByWorld(context.Context, int, uint16) (model.QuestInstanceMemberState, error) {
+	return r.state, nil
+}
+func (*partyExitInstanceRepository) DeleteQuestInstanceMember(context.Context, int, uint16) error {
+	return nil
+}
+
+type partyExitInstanceAllocator struct {
+	scope    model.GameWorldScope
+	released int
+}
+
+func (a *partyExitInstanceAllocator) AllocateQuestInstanceScope(context.Context, int, uint32) (model.GameWorldScope, error) {
+	return a.scope, nil
+}
+
+func (a *partyExitInstanceAllocator) ReleaseQuestInstanceScope(context.Context, model.GameWorldScope) error {
+	a.released++
+	return nil
+}
 
 type teleportWorldFake struct {
 	*selectEntityWorldFake
@@ -19,6 +54,19 @@ type teleportWorldFake struct {
 	flushes      int
 	resets       int
 	lastPosition navmeshv2.RtNavmeshPosition
+}
+
+type instanceTeleportWorldFake struct {
+	*teleportWorldFake
+	players map[uint32]*model.Player
+}
+
+func (f *instanceTeleportWorldFake) GetPlayerByUniqueId(uid uint32) (*model.Player, error) {
+	player := f.players[uid]
+	if player == nil {
+		return nil, model.ErrQuestInstanceNotMember
+	}
+	return player, nil
 }
 
 func (f *teleportWorldFake) GetRegion(id int16) (navmeshv2.RtNavmeshTerrain, error) {
@@ -38,6 +86,131 @@ func (f *teleportWorldFake) FlushPlayerPosition(_ uint32) error {
 
 func (f *teleportWorldFake) ResetPlayerVisibilityForTeleport(_ *model.Player) {
 	f.resets++
+}
+
+func TestNativeQuestInstanceTeleportCoordinatesMembersAndCommitsAfterSubmission(t *testing.T) {
+	firstSession, first, _ := selectEntityFixture(t)
+	secondSession, second, _ := selectEntityFixture(t)
+	second.SetUniqueID(200)
+	second.ID = 43
+	secondSession.UserContext.UniqueID = 200
+	secondSession.UserContext.CharacterID = 43
+	for _, session := range []*server.Session{firstSession, secondSession} {
+		session.MarkAuthenticated()
+		if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+			t.Fatal("could not prepare instance member session")
+		}
+	}
+	scope, _ := model.NewGameWorldScope(41, 2)
+	registry := model.NewQuestInstanceRegistry()
+	if _, err := registry.Create(scope, 141, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Join(scope, second); err != nil {
+		t.Fatal(err)
+	}
+	plan, matched, err := registry.PrepareNativeQuestInstanceDeath(scope, 141, "MOB_QT_01_TAHOMET", 500)
+	if err != nil || !matched {
+		t.Fatalf("prepare matched=%t error=%v", matched, err)
+	}
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(30000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	baseWorld := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{}, region: region}
+	world := &instanceTeleportWorldFake{teleportWorldFake: baseWorld, players: map[uint32]*model.Player{100: first, 200: second}}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	handler.roll = func() int { return 0 }
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	if err = handler.SubmitNativeQuestInstanceTeleport(registry, plan, first); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 3 || sent[0].MessageID != opcode.QuestNotification || sent[1].MessageID != opcode.TeleportReadyRequest || sent[2].MessageID != opcode.TeleportReadyRequest {
+		t.Fatalf("packets = %#v", sent)
+	}
+	if baseWorld.stops != 2 || baseWorld.resets != 2 || first.GetLifeState() != model.Spawning || second.GetLifeState() != model.Spawning {
+		t.Fatalf("stops=%d resets=%d life=%d/%d", baseWorld.stops, baseWorld.resets, first.GetLifeState(), second.GetLifeState())
+	}
+	if firstSession.LifecyclePhase() != server.SessionCharacterLoading || secondSession.LifecyclePhase() != server.SessionCharacterLoading {
+		t.Fatal("instance members did not enter loading lifecycle")
+	}
+	variables, _ := registry.Variables(scope)
+	if variables["QNO_RM_OLDWOMAN_6_Step"] != 3 || variables["QNO_RM_OLDWOMAN_6_EVENT_TIMER"] != 60500 {
+		t.Fatalf("variables = %#v", variables)
+	}
+	if baseWorld.lastPosition.Offset.X != 30 || baseWorld.lastPosition.Offset.Y != 0 || baseWorld.lastPosition.Offset.Z != 30 {
+		t.Fatalf("destination = %+v", baseWorld.lastPosition)
+	}
+}
+
+func TestQuestInstanceEntryResetsEveryPersistedMemberAtCurrentPosition(t *testing.T) {
+	firstSession, first, _ := selectEntityFixture(t)
+	secondSession, second, _ := selectEntityFixture(t)
+	second.UniqueID = 200
+	secondSession.UserContext.UniqueID = 200
+	for _, session := range []*server.Session{firstSession, secondSession} {
+		session.MarkAuthenticated()
+		if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+			t.Fatal("prepare session")
+		}
+	}
+	scope, _ := model.NewGameWorldScope(13, 1)
+	first.SetGameWorldID(uint32(scope))
+	second.SetGameWorldID(uint32(scope))
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(30000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	base := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{}, region: region}
+	world := &instanceTeleportWorldFake{teleportWorldFake: base, players: map[uint32]*model.Player{100: first, 200: second}}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	instance := model.QuestInstance{Scope: scope, QuestID: 251, OwnerUID: 100, Members: []uint32{100, 200}}
+	if err := handler.SubmitQuestInstanceEntry(instance, []*model.Player{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0].MessageID != opcode.TeleportReadyRequest || sent[1].MessageID != opcode.TeleportReadyRequest || base.stops != 2 || base.resets != 2 {
+		t.Fatalf("packets=%#v stops=%d resets=%d", sent, base.stops, base.resets)
+	}
+}
+
+func TestPartyQuestInstanceExitUsesPersistedOriginAndNativeNotice(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	player.ID = 77
+	session.UserContext.CharacterID = 77
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("prepare session")
+	}
+	scope, _ := model.NewGameWorldScope(41, 2)
+	player.SetNavmeshPosition(navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(25000), Offset: math32.NewVector3(10, 20, 30)})
+	repository := &partyExitInstanceRepository{}
+	registry := model.NewQuestInstanceRegistry()
+	allocator := &partyExitInstanceAllocator{scope: scope}
+	lifecycle, _ := model.NewQuestInstanceLifecycle(registry, repository, allocator)
+	if _, err := lifecycle.Create(context.Background(), 141, 9001, player, time.Unix(1000, 0), true); err != nil {
+		t.Fatal(err)
+	}
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(25000))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{}, region: region}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	handler.ConfigureQuestInstanceExit(lifecycle)
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil }
+	if err := handler.SubmitPartyQuestInstanceExit(context.Background(), player); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0].MessageID != opcode.QuestNotification || sent[1].MessageID != opcode.TeleportReadyRequest {
+		t.Fatalf("packets=%#v", sent)
+	}
+	if player.GetGameWorldID() != 0 || world.stops != 1 || world.lastPosition.Region.ID != 25000 || world.lastPosition.Offset.X != 10 || world.lastPosition.Offset.Y != 20 || world.lastPosition.Offset.Z != 30 {
+		t.Fatalf("scope=%X stops=%d destination=%+v", player.GetGameWorldID(), world.stops, world.lastPosition)
+	}
+	if allocator.released != 1 {
+		t.Fatalf("released scopes=%d", allocator.released)
+	}
+	if _, err := registry.Instance(scope); !errors.Is(err, model.ErrQuestInstanceMissing) {
+		t.Fatalf("registry instance error=%v", err)
+	}
 }
 
 type teleportRepositoryFake struct {

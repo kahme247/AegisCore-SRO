@@ -36,6 +36,7 @@ const (
 	QuestTransitionRewardReady
 	QuestTransitionClose
 	QuestTransitionAbort
+	QuestTransitionAchieve
 )
 
 func (status QuestStatus) Valid() bool {
@@ -71,6 +72,10 @@ func TransitionQuest(status QuestStatus, transition QuestTransition) (QuestStatu
 		if status.ClientActive() {
 			return QuestAborted, nil
 		}
+	case QuestTransitionAchieve:
+		if status == QuestRewardReady {
+			return QuestInactive, nil
+		}
 	default:
 		return 0, fmt.Errorf("unknown quest transition %d", transition)
 	}
@@ -87,6 +92,8 @@ func QuestTransitionSources(transition QuestTransition) []QuestStatus {
 		return []QuestStatus{QuestRewardReady}
 	case QuestTransitionAbort:
 		return []QuestStatus{QuestActive, QuestProgressed, QuestRewardReady}
+	case QuestTransitionAchieve:
+		return []QuestStatus{QuestRewardReady}
 	default:
 		return nil
 	}

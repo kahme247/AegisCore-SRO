@@ -3,19 +3,48 @@ package character
 import (
 	"sync"
 	"time"
+
+	"github.com/Harvi8/AegisCore/agent-server/model"
 )
 
 // NPCInteraction is the server-validated context shared by NPC-backed
 // services. It prevents a later shop, repair, teleport, or quest packet from
 // naming an arbitrary NPC that the player did not just interact with.
 type NPCInteraction struct {
-	PlayerUniqueID  uint32
-	NPCUniqueID     uint32
-	NPCRefObjectID  uint32
-	Action          byte
-	PendingQuestID  int
-	OfferedQuestIDs []int
-	OpenedAt        time.Time
+	PlayerUniqueID         uint32
+	NPCUniqueID            uint32
+	NPCRefObjectID         uint32
+	Action                 byte
+	PendingQuestID         int
+	OfferedQuestIDs        []int
+	PendingDialogQuestID   int
+	DialogQuestIDs         []int
+	DialogKeys             []string
+	PendingDeliveryQuestID int
+	DeliveryQuestIDs       []int
+	DeliveryKeys           []string
+	PendingInstanceQuestID int
+	OpenedAt               time.Time
+}
+
+func (r *NPCInteractionRegistry) SetInstanceEntry(playerUID uint32, questID int) bool {
+	if r == nil || playerUID == 0 || questID <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingInstanceQuestID = questID
+	interaction.PendingQuestID = 0
+	interaction.OfferedQuestIDs = nil
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = nil
+	interaction.DialogKeys = nil
+	r.entries[playerUID] = interaction
+	return true
 }
 
 // NPCInteractionRegistry deliberately keeps only the most-recent interaction
@@ -89,6 +118,104 @@ func (r *NPCInteractionRegistry) SetQuestOffers(playerUID uint32, questIDs []int
 	}
 	interaction.OfferedQuestIDs = append([]int(nil), questIDs...)
 	interaction.PendingQuestID = 0
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = nil
+	interaction.DialogKeys = nil
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) SetDialogs(playerUID uint32, prompts []model.QuestDialogPrompt) bool {
+	if r == nil || playerUID == 0 || len(prompts) == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingQuestID = 0
+	interaction.OfferedQuestIDs = nil
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = make([]int, len(prompts))
+	interaction.DialogKeys = make([]string, len(prompts))
+	for index, prompt := range prompts {
+		interaction.DialogQuestIDs[index] = prompt.QuestID
+		interaction.DialogKeys[index] = prompt.DialogueKey
+	}
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) SetDeliveries(playerUID uint32, prompts []model.QuestDeliveryPrompt) bool {
+	if r == nil || playerUID == 0 || len(prompts) == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingQuestID = 0
+	interaction.OfferedQuestIDs = nil
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = nil
+	interaction.DialogKeys = nil
+	interaction.PendingDeliveryQuestID = 0
+	interaction.DeliveryQuestIDs = make([]int, len(prompts))
+	interaction.DeliveryKeys = make([]string, len(prompts))
+	for index, prompt := range prompts {
+		interaction.DeliveryQuestIDs[index] = prompt.QuestID
+		interaction.DeliveryKeys[index] = prompt.DialogueKey
+	}
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) SelectDelivery(playerUID uint32, questID int) bool {
+	if r == nil || playerUID == 0 || questID <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingDeliveryQuestID = questID
+	r.entries[playerUID] = interaction
+	return true
+}
+
+func (r *NPCInteractionRegistry) ClearSelectedDelivery(playerUID uint32) {
+	if r == nil || playerUID == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return
+	}
+	interaction.PendingDeliveryQuestID = 0
+	interaction.DeliveryQuestIDs = nil
+	interaction.DeliveryKeys = nil
+	r.entries[playerUID] = interaction
+}
+
+func (r *NPCInteractionRegistry) SelectDialog(playerUID uint32, questID int) bool {
+	if r == nil || playerUID == 0 || questID <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingDialogQuestID = questID
 	r.entries[playerUID] = interaction
 	return true
 }
@@ -104,6 +231,22 @@ func (r *NPCInteractionRegistry) ClearSelectedQuest(playerUID uint32) {
 		return
 	}
 	interaction.PendingQuestID = 0
+	r.entries[playerUID] = interaction
+}
+
+func (r *NPCInteractionRegistry) ClearSelectedDialog(playerUID uint32) {
+	if r == nil || playerUID == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return
+	}
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = nil
+	interaction.DialogKeys = nil
 	r.entries[playerUID] = interaction
 }
 

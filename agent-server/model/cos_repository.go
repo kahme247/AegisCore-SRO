@@ -48,6 +48,10 @@ type COSInventoryTransferRepository interface {
 	TransferItem(context.Context, int, uint64, byte, byte, bool) (Inventory, Inventory, error)
 }
 
+type COSCargoLossRepository interface {
+	DestroyJobTransport(context.Context, int, uint64) ([]Item, error)
+}
+
 // COSTimedServiceLoader restores active pet services before COS inventory and
 // owner-data publication. Expired rows are deliberately excluded.
 type COSTimedServiceLoader interface {
@@ -174,7 +178,7 @@ func (r *SQLCOSRepository) Rename(ctx context.Context, ownerCharID int, id uint6
 	return nil
 }
 
-const selectCOSInventory = "SELECT ci.SLOT,ci.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,COALESCE(linked.REF_OBJECT_ID,0),COALESCE(linked.KIND,0),COALESCE(linked.STATE,0),COALESCE(linked.NAME,''),COALESCE(linked.LEVEL,0),linked.RENT_ENDS_AT,COALESCE(linked.INVENTORY_SLOT,0),COALESCE(linked.HEALTH,0),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),COALESCE(ap.ASTRAL,0),COALESCE(ap.IMMORTAL,0),COALESCE(ap.STEADY,0) FROM `SRO_SHARD`.`COS_INVENTORY` ci INNER JOIN `SRO_SHARD`.`CHAR_COS` owned ON owned.ID=ci.COS_ID AND owned.OWNER_CHAR_ID=? INNER JOIN `SRO_SHARD`.`ITEM` it ON it.ID=ci.FK_ITEM LEFT JOIN `SRO_SHARD`.`CHAR_COS` linked ON linked.ID=it.DATA AND linked.OWNER_CHAR_ID=? LEFT JOIN `SRO_SHARD`.`ITEM_ALCHEMY_PROTECTION` ap ON ap.FK_ITEM=it.ID WHERE ci.COS_ID=? ORDER BY ci.SLOT"
+const selectCOSInventory = "SELECT ci.SLOT,ci.FK_ITEM,it.VARIANCE,it.FK_REF_ITEM,it.STACK_COUNT,it.OPT_LEVEL,it.DATA,it.CREATOR_NAME,it.RENT_TYPE,it.RENT_CAN_DELETE,it.RENT_CAN_RECHARGE,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME,it.RENT_METER_RATE_TIME,it.RENT_PACKING_TIME,COALESCE(linked.REF_OBJECT_ID,0),COALESCE(linked.KIND,0),COALESCE(linked.STATE,0),COALESCE(linked.NAME,''),COALESCE(linked.LEVEL,0),linked.RENT_ENDS_AT,COALESCE(linked.INVENTORY_SLOT,0),COALESCE(linked.HEALTH,0),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',mo.SLOT,'type',mo.TYPE,'value',mo.VALUE,'paramType',COALESCE(ro.PARAM_TYPE,0))) FROM `SRO_SHARD`.`ITEM_MAGIC_OPTION` mo LEFT JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` ro ON ro.ID=mo.TYPE WHERE mo.FK_ITEM=it.ID),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=1),JSON_ARRAY()),COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('slot',bo.SLOT,'id',bo.OPTION_ID,'value',bo.OPTION_VALUE)) FROM `SRO_SHARD`.`ITEM_BINDING_OPTION` bo WHERE bo.FK_ITEM=it.ID AND bo.OPTION_TYPE=2),JSON_ARRAY()),COALESCE(ap.ASTRAL,0),COALESCE(ap.IMMORTAL,0),COALESCE(ap.STEADY,0) FROM `SRO_SHARD`.`COS_INVENTORY` ci INNER JOIN `SRO_SHARD`.`CHAR_COS` owned ON owned.ID=ci.COS_ID AND owned.OWNER_CHAR_ID=? INNER JOIN `SRO_SHARD`.`ITEM` it ON it.ID=ci.FK_ITEM LEFT JOIN `SRO_SHARD`.`CHAR_COS` linked ON linked.ID=it.DATA AND linked.OWNER_CHAR_ID=? LEFT JOIN `SRO_SHARD`.`ITEM_ALCHEMY_PROTECTION` ap ON ap.FK_ITEM=it.ID WHERE ci.COS_ID=? ORDER BY ci.SLOT"
 
 func (r *SQLCOSRepository) LoadInventory(ctx context.Context, ownerCharID int, id uint64) (Inventory, error) {
 	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 {
@@ -203,6 +207,86 @@ func (r *SQLCOSRepository) LoadInventory(ctx context.Context, ownerCharID int, i
 		return NewInventory(nil), fmt.Errorf("iterate COS inventory: %w", err)
 	}
 	return inventory, nil
+}
+
+func (r *SQLCOSRepository) DestroyJobTransport(ctx context.Context, ownerCharID int, id uint64) ([]Item, error) {
+	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 {
+		return nil, ErrCOSRepositoryUnavailable
+	}
+	beginner, ok := r.shard.(cosTransactionBeginner)
+	if !ok {
+		return nil, ErrCOSRepositoryUnavailable
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var kind byte
+	if err = tx.QueryRowContext(ctx, "SELECT `KIND` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", id, ownerCharID).Scan(&kind); err != nil || kind != byte(COSJobTransport) {
+		return nil, ErrCOSNotFound
+	}
+	rows, err := tx.QueryContext(ctx, selectCOSInventory+" FOR UPDATE", ownerCharID, ownerCharID, id)
+	if err != nil {
+		return nil, err
+	}
+	type cargoRecord struct {
+		slot byte
+		item Item
+	}
+	records := make([]cargoRecord, 0)
+	for rows.Next() {
+		slot, item, scanErr := scanInventoryItem(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, scanErr
+		}
+		records = append(records, cargoRecord{slot: slot, item: item})
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range records {
+		record := &records[index]
+		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", id, record.slot, record.item.ID)
+		if deleteErr != nil || !singleAffectedRow(result) {
+			return nil, ErrInventoryRelocationConflict
+		}
+		for _, query := range []string{"DELETE FROM `ITEM_MAGIC_OPTION` WHERE `FK_ITEM`=?", "DELETE FROM `ITEM_BINDING_OPTION` WHERE `FK_ITEM`=?", "DELETE FROM `ITEM_ALCHEMY_PROTECTION` WHERE `FK_ITEM`=?", "DELETE FROM `ITEM` WHERE `id`=?"} {
+			if _, err = tx.ExecContext(ctx, query, record.item.ID); err != nil {
+				return nil, err
+			}
+		}
+		record.item.ID = 0
+		record.item.TransientGroundItem = true
+		record.item.OwnerUniqueID = 0
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE `ITEM` it JOIN `INVENTORY` inv ON inv.`FK_ITEM`=it.`id` SET it.`DATA`=0 WHERE inv.`FK_CHAR`=? AND it.`DATA`=?", ownerCharID, id)
+	if err != nil || !singleAffectedRow(result) {
+		return nil, ErrCOSNotFound
+	}
+	result, err = tx.ExecContext(ctx, "DELETE FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND `KIND`=?", id, ownerCharID, byte(COSJobTransport))
+	if err != nil || !singleAffectedRow(result) {
+		return nil, ErrCOSNotFound
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, errors.Join(ErrInventoryRelocationOutcomeUnknown, err)
+	}
+	committed = true
+	items := make([]Item, len(records))
+	for index := range records {
+		items[index] = records[index].item
+	}
+	return items, nil
 }
 
 type cosTransactionBeginner interface {

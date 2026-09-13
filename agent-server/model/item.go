@@ -16,12 +16,16 @@ type IItem interface {
 
 type Item struct {
 	SRObject
-	ID       int
-	Name     string
-	Variance uint64
-	OptLevel byte
-	Data     uint32
-	RentInfo RentInfo
+	ID          int
+	Name        string
+	Variance    uint64
+	OptLevel    byte
+	Data        uint32
+	CreatorName string
+	// TransientGroundItem marks COS-death cargo whose old persisted identity
+	// was cleared. Pickup allocates a replacement ITEM identity.
+	TransientGroundItem bool
+	RentInfo            RentInfo
 	// RentCodeName is retained for drop records whose source references a
 	// rent-item definition not yet represented by the maintained shard schema.
 	RentCodeName string

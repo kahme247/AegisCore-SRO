@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/questwire"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
@@ -21,6 +22,15 @@ type ReturnTeleportCoordinator interface {
 	CompleteItemReturn(*server.Session, *model.Player, model.TeleportDestination) error
 }
 
+type QuestInstanceEntryCoordinator interface {
+	SubmitQuestInstanceEntry(model.QuestInstance, []*model.Player) error
+}
+
+type preparedQuestInstanceEntry struct {
+	instance model.QuestInstance
+	members  []*model.Player
+}
+
 type ItemUseHandler struct {
 	players           PlayerLookup
 	useCase           service.ItemUseCase
@@ -30,6 +40,11 @@ type ItemUseHandler struct {
 	timedBuffDuration bool
 	returnTeleport    ReturnTeleportCoordinator
 	devilSpirit       model.AvatarInventoryRepository
+	questInstances    *model.QuestInstanceLifecycle
+	instanceEntries   *service.QuestInstanceEntryService
+	instanceTeleport  QuestInstanceEntryCoordinator
+	party             *service.PartyService
+	nextDungeonKey    func() uint32
 	cos               interface {
 		Summon(context.Context, *model.Player, uint64) (*model.COS, error)
 	}
@@ -52,7 +67,34 @@ func (h *ItemUseHandler) ConfigureCOS(runtime interface {
 }
 
 func NewItemUseHandler(players PlayerLookup, items model.ItemUseRepository) *ItemUseHandler {
-	return &ItemUseHandler{players: players, useCase: service.NewItemUseService(items)}
+	return &ItemUseHandler{players: players, useCase: service.NewItemUseService(items), party: service.GetPartyServiceInstance(), nextDungeonKey: model.NextActionUID}
+}
+
+func (h *ItemUseHandler) ConfigureQuestInstanceEntry(lifecycle *model.QuestInstanceLifecycle, teleport QuestInstanceEntryCoordinator) {
+	if h != nil {
+		h.questInstances = lifecycle
+		h.instanceEntries = service.NewQuestInstanceEntryService(lifecycle, h.party, h.nextDungeonKey)
+		h.instanceTeleport = teleport
+	}
+}
+
+func (h *ItemUseHandler) prepareQuestInstance(ctx context.Context, player *model.Player, questID int) (*preparedQuestInstanceEntry, error) {
+	if h == nil || h.instanceTeleport == nil {
+		return nil, model.ErrQuestInstanceInvalid
+	}
+	entries := h.instanceEntries
+	if entries == nil {
+		entries = service.NewQuestInstanceEntryService(h.questInstances, h.party, h.nextDungeonKey)
+	}
+	prepared, err := entries.Prepare(ctx, player, questID)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedQuestInstanceEntry{instance: prepared.Instance, members: prepared.Members}, nil
+}
+
+func questInstanceEligible(player *model.Player, questID int) bool {
+	return service.QuestInstanceEligible(player, questID)
 }
 
 func RegisterItemUseHandler(target *server.Server, items model.ItemUseRepository, returnTeleport ...ReturnTeleportCoordinator) *ItemUseHandler {
@@ -125,6 +167,9 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		// second ride scroll before consumption while another transport is active.
 		return h.sendFailure(session)
 	}
+	if refExists && model.IsCOSTransportScroll(ref) && !model.HasActiveJobSuit(player) {
+		return h.sendFailure(session)
+	}
 	if refExists && model.IsTeleportScroll(ref) && h.returnTeleport == nil {
 		// The repository mutates position and consumes the item atomically. Do
 		// not allow that commit to happen when the runtime loading handshake is
@@ -143,6 +188,19 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 				preparedReturn = true
 			}
 		}
+	}
+	var preparedInstance *preparedQuestInstanceEntry
+	questInstanceEntryQuestID, isQuestInstanceEntry := model.QuestInstanceEntryQuestID(ref.CodeName)
+	if refExists && isQuestInstanceEntry {
+		if wireRequest.HasCOSTarget || len(wireRequest.ItemData) != 0 {
+			return h.sendFailure(session)
+		}
+		prepared, prepareErr := h.instanceEntries.Prepare(ctx, player, questInstanceEntryQuestID)
+		err = prepareErr
+		if err != nil {
+			return h.sendFailure(session)
+		}
+		preparedInstance = &preparedQuestInstanceEntry{instance: prepared.Instance, members: prepared.Members}
 	}
 	var result model.ItemUseResult
 	usesCOSSlotSelector := refExists && (model.IsCOSExtension(ref) || model.IsCOSPetTimedService(ref) || model.IsCOSRevival(ref))
@@ -224,6 +282,9 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		result, err = h.useCase.UseItem(ctx, player, slot, itemType, reverseOption, reverseMapID)
 	}
 	if err != nil {
+		if preparedInstance != nil {
+			_ = h.questInstances.Destroy(ctx, preparedInstance.instance.Scope, preparedInstance.members)
+		}
 		if preparedReturn {
 			h.returnTeleport.AbortItemReturn(session)
 		}
@@ -388,6 +449,27 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 			h.returnTeleport.AbortItemReturn(session)
 		}
 		return err
+	}
+	if result.QuestInstanceEntryQuestID != 0 {
+		if preparedInstance == nil || result.QuestInstanceEntryQuestID != preparedInstance.instance.QuestID || h.instanceTeleport == nil {
+			return fmt.Errorf("committed quest instance item has no prepared entry")
+		}
+		if err = h.instanceTeleport.SubmitQuestInstanceEntry(preparedInstance.instance, preparedInstance.members); err != nil {
+			return fmt.Errorf("submit quest instance entry: %w", err)
+		}
+	}
+	for _, progress := range result.CollectionQuestProgress {
+		if !progress.Changed {
+			continue
+		}
+		player.CommitQuestMutation(progress.Quest)
+		update, buildErr := questwire.BuildUpdate(progress.Quest, vsro188.QuestUpdateDelta)
+		if buildErr != nil {
+			return buildErr
+		}
+		if err = h.sendPacket(session, update); err != nil {
+			return err
+		}
 	}
 	if result.ReturnDestination != nil {
 		if !preparedReturn || h.returnTeleport == nil {

@@ -156,7 +156,7 @@ func writePartyMember(packet *network.Packet, player *model.Player) {
 	packet.WriteUInt32(player.GetRefObjectID())
 	packet.WriteByte(byte(level))
 	packet.WriteByte(packPartyVitals(hp, mp, utils.BaseHPOrMP(level, strength), utils.BaseHPOrMP(level, intelligence)))
-	writePartyPosition(packet, position)
+	writePartyPosition(packet, position, model.GameWorldScope(player.GetGameWorldID()))
 	packet.WriteString("") // guild name
 	packet.WriteByte(0x04)
 	first, second := highestMasteries(masteries)
@@ -211,7 +211,7 @@ func playerHighestMasteries(player *model.Player) (uint32, uint32) {
 	return highestMasteries(masteries)
 }
 
-func writePartyPosition(packet *network.Packet, position navmeshv2.RtNavmeshPosition) {
+func writePartyPosition(packet *network.Packet, position navmeshv2.RtNavmeshPosition, scope model.GameWorldScope) {
 	region := uint16(position.Region.ID)
 	packet.WriteUInt16(region)
 	if region&navmeshv2.DungeonMask != 0 {
@@ -223,6 +223,6 @@ func writePartyPosition(packet *network.Packet, position navmeshv2.RtNavmeshPosi
 		packet.WriteUInt16(uint16(int16(position.Offset.Z)))
 		packet.WriteUInt16(uint16(int16(position.Offset.Y)))
 	}
-	packet.WriteUInt16(1) // world ID
-	packet.WriteUInt16(1) // layer ID
+	packet.WriteUInt16(scope.WorldID())
+	packet.WriteUInt16(scope.LayerID())
 }

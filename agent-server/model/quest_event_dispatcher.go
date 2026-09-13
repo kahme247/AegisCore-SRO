@@ -13,7 +13,12 @@ var (
 	ErrQuestEventAlreadyRegistered     = errors.New("quest event handler is already registered")
 )
 
-type QuestEventMutation func(context.Context, *sql.Tx, CharacterQuest) error
+type QuestEventMutation func(context.Context, *sql.Tx, int, CharacterQuest) error
+
+type questEventRegistration struct {
+	mutation QuestEventMutation
+	statuses map[QuestStatus]struct{}
+}
 
 type questEventKey struct {
 	questID int
@@ -27,17 +32,35 @@ type questEventKey struct {
 type SQLQuestEventDispatcher struct {
 	shard *sql.DB
 	mu    sync.RWMutex
-	items map[questEventKey]QuestEventMutation
+	items map[questEventKey]questEventRegistration
 }
 
 func NewQuestEventDispatcher(shard *sql.DB) (*SQLQuestEventDispatcher, error) {
 	if shard == nil {
 		return nil, ErrQuestEventDispatcherUnavailable
 	}
-	return &SQLQuestEventDispatcher{shard: shard, items: make(map[questEventKey]QuestEventMutation)}, nil
+	return &SQLQuestEventDispatcher{shard: shard, items: make(map[questEventKey]questEventRegistration)}, nil
 }
 
 func (d *SQLQuestEventDispatcher) Register(questID int, event QuestAuthoredEvent, mutation QuestEventMutation) error {
+	return d.register(questID, event, nil, mutation)
+}
+
+// RegisterForStatuses overrides the generic event status policy for one
+// authored quest handler. This keeps event 0x07 transient-only by default
+// while admitting native handlers that explicitly validate other states.
+func (d *SQLQuestEventDispatcher) RegisterForStatuses(questID int, event QuestAuthoredEvent, statuses []QuestStatus, mutation QuestEventMutation) error {
+	if len(statuses) == 0 {
+		return fmt.Errorf("invalid quest event status policy")
+	}
+	allowed := make(map[QuestStatus]struct{}, len(statuses))
+	for _, status := range statuses {
+		allowed[status] = struct{}{}
+	}
+	return d.register(questID, event, allowed, mutation)
+}
+
+func (d *SQLQuestEventDispatcher) register(questID int, event QuestAuthoredEvent, statuses map[QuestStatus]struct{}, mutation QuestEventMutation) error {
 	if d == nil || d.shard == nil {
 		return ErrQuestEventDispatcherUnavailable
 	}
@@ -50,7 +73,7 @@ func (d *SQLQuestEventDispatcher) Register(questID int, event QuestAuthoredEvent
 	if _, exists := d.items[key]; exists {
 		return fmt.Errorf("quest %d event %d: %w", questID, event, ErrQuestEventAlreadyRegistered)
 	}
-	d.items[key] = mutation
+	d.items[key] = questEventRegistration{mutation: mutation, statuses: statuses}
 	return nil
 }
 
@@ -63,9 +86,9 @@ func (d *SQLQuestEventDispatcher) DispatchQuestEvent(ctx context.Context, charac
 	}
 	key := questEventKey{questID: questID, event: event}
 	d.mu.RLock()
-	mutation := d.items[key]
+	registration, exists := d.items[key]
 	d.mu.RUnlock()
-	if mutation == nil {
+	if !exists || registration.mutation == nil {
 		return ErrQuestEventNotFound
 	}
 
@@ -87,10 +110,10 @@ func (d *SQLQuestEventDispatcher) DispatchQuestEvent(ctx context.Context, charac
 	if err != nil {
 		return err
 	}
-	if !questEventAcceptsStatus(event, quest.Status) {
+	if !registration.accepts(event, quest.Status) {
 		return ErrQuestStateConflict
 	}
-	if err = mutation(ctx, tx, quest); err != nil {
+	if err = registration.mutation(ctx, tx, characterID, quest); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -98,6 +121,14 @@ func (d *SQLQuestEventDispatcher) DispatchQuestEvent(ctx context.Context, charac
 	}
 	committed = true
 	return nil
+}
+
+func (r questEventRegistration) accepts(event QuestAuthoredEvent, status QuestStatus) bool {
+	if r.statuses == nil {
+		return questEventAcceptsStatus(event, status)
+	}
+	_, ok := r.statuses[status]
+	return ok
 }
 
 func supportedQuestEvent(event QuestAuthoredEvent) bool {

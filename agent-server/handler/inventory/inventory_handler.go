@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,8 @@ var (
 
 const playerPickupCollectionRange = float32(160)
 
+const jobSuitEquipDelay = 30 * time.Second
+
 // PlayerLookup is the narrow world-facing dependency needed to resolve a
 // packet's authenticated runtime owner. It deliberately accepts only a
 // UniqueID lookup; character names are mutable display data and must not
@@ -37,8 +40,31 @@ type PlayerLookup interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
 }
 
+type SafeTradeCOSResolver interface {
+	ResolveActiveOwned(*model.Player, model.COSKind) (*model.COS, bool)
+}
+
+type SafeTradeDistance interface {
+	DistanceTo(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) float32
+}
+
 type QuestCollectionProgressRepository interface {
 	RecordCollectedItem(context.Context, int, uint32, uint32) ([]model.QuestProgressResult, error)
+}
+
+type OldWomanSearchGroundActionRepository interface {
+	StartOldWomanSearchAction(context.Context, int) (model.OldWomanSearchStartResult, error)
+	AdvanceOldWomanSearchAction(context.Context, int, byte) (model.OldWomanSearchActionResult, error)
+}
+
+type NativeCatchActionRepository interface {
+	StartNativeCatchAction(context.Context, int, int) (model.NativeCatchStartResult, error)
+	AdvanceNativeCatchAction(context.Context, int, int, byte) (model.NativeCatchActionResult, error)
+}
+
+type nativeCatchScheduleKey struct {
+	characterID int
+	questID     int
 }
 
 type InventoryHandler struct {
@@ -49,26 +75,218 @@ type InventoryHandler struct {
 	objectRemover interface {
 		RemoveVisibleObject(model.ISRObject)
 	}
-	relocator    model.InventoryRelocator
-	economy      model.EconomyRepository
-	mall         model.ItemMallRepository
-	guild        model.GuildStorageRepository
-	avatar       model.AvatarInventoryRepository
-	cosInventory model.COSInventoryTransferRepository
-	groundPickup model.GroundItemPickupRepository
-	groundGold   model.GroundGoldPickupRepository
-	groundDrop   model.GroundItemDropRepository
-	groundItems  interface {
+	relocator         model.InventoryRelocator
+	economy           model.EconomyRepository
+	mall              model.ItemMallRepository
+	guild             model.GuildStorageRepository
+	avatar            model.AvatarInventoryRepository
+	cosInventory      model.COSInventoryTransferRepository
+	safeTrade         model.SafeTradeRepository
+	packageItems      model.PackageItemCatalog
+	safeTradeCOS      SafeTradeCOSResolver
+	safeTradeDistance SafeTradeDistance
+	groundPickup      model.GroundItemPickupRepository
+	groundGold        model.GroundGoldPickupRepository
+	groundDrop        model.GroundItemDropRepository
+	groundItems       interface {
 		Spawn(*model.Item, uint32) error
 	}
-	groundLifecycle interface{ Cancel(*model.Item) }
-	questProgress   QuestCollectionProgressRepository
-	exchange        ExchangeOperations
-	referenceData   *model.ReferenceDataCatalog
-	send            func(*server.Session, network.Packet) error
-	buybackMu       sync.Mutex
-	buyback         map[int]string
-	buybackLog      sync.Once
+	groundLifecycle       interface{ Cancel(*model.Item) }
+	questProgress         QuestCollectionProgressRepository
+	oldWomanSearch        OldWomanSearchGroundActionRepository
+	oldWomanRoll          func() byte
+	oldWomanSchedule      func(time.Duration, func())
+	oldWomanMu            sync.Mutex
+	oldWomanGeneration    map[int]uint64
+	nativeCatch           NativeCatchActionRepository
+	nativeCatchRoll       func() byte
+	nativeCatchSchedule   func(time.Duration, func())
+	nativeCatchMu         sync.Mutex
+	nativeCatchGeneration map[nativeCatchScheduleKey]uint64
+	jobSuitSchedule       func(time.Duration, func())
+	jobSuitMu             sync.Mutex
+	jobSuitPending        map[int]bool
+	jobSuitTeleport       interface{ SubmitSamePositionReload(*model.Player) error }
+	exchange              ExchangeOperations
+	referenceData         *model.ReferenceDataCatalog
+	send                  func(*server.Session, network.Packet) error
+	buybackMu             sync.Mutex
+	buyback               map[int]string
+	buybackLog            sync.Once
+}
+
+func (h *InventoryHandler) advanceOldWomanSearchPeriodicEvent(ctx context.Context, session *server.Session, player *model.Player) (model.OldWomanSearchActionResult, error) {
+	roll := byte(rand.IntN(101))
+	if h.oldWomanRoll != nil {
+		roll = h.oldWomanRoll()
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	result, err := h.oldWomanSearch.AdvanceOldWomanSearchAction(ctx, player.ID, roll)
+	if err != nil {
+		return model.OldWomanSearchActionResult{}, err
+	}
+	if result.Added != nil {
+		player.CommitQuestItemGrant(model.QuestItemGrantResult{Quest: result.Quest, Inventory: result.Inventory, Added: *result.Added})
+		if err = h.sendPacket(session, vsro188.BuildItemOperationTwoByteSuccess(vsro188.ItemOperationServerAdd, result.Added.Slot, 0x3C)); err != nil {
+			return result, err
+		}
+	} else {
+		player.CommitQuestMutation(result.Quest)
+	}
+	if result.Succeeded {
+		update, buildErr := questwire.BuildUpdate(result.Quest, vsro188.QuestUpdateDelta)
+		if buildErr != nil {
+			return result, buildErr
+		}
+		return result, h.sendPacket(session, update)
+	}
+	if result.Resolved {
+		notice, buildErr := vsro188.BuildQuestNotification(result.FailureTalkKey)
+		if buildErr != nil {
+			return result, buildErr
+		}
+		return result, h.sendPacket(session, notice)
+	}
+	return result, nil
+}
+
+func (h *InventoryHandler) beginOldWomanSearchEvents(session *server.Session, player *model.Player) {
+	h.oldWomanMu.Lock()
+	if h.oldWomanGeneration == nil {
+		h.oldWomanGeneration = make(map[int]uint64)
+	}
+	h.oldWomanGeneration[player.ID]++
+	generation := h.oldWomanGeneration[player.ID]
+	h.oldWomanMu.Unlock()
+	h.scheduleOldWomanSearchEvent(session, player, generation)
+}
+
+func (h *InventoryHandler) scheduleOldWomanSearchEvent(session *server.Session, player *model.Player, generation uint64) {
+	if h.oldWomanSchedule == nil || session == nil || player == nil {
+		return
+	}
+	h.oldWomanSchedule(time.Second, func() {
+		h.oldWomanMu.Lock()
+		current := h.oldWomanGeneration[player.ID]
+		h.oldWomanMu.Unlock()
+		if current != generation {
+			return
+		}
+		result, err := h.advanceOldWomanSearchPeriodicEvent(context.Background(), session, player)
+		if err != nil {
+			if !errors.Is(err, model.ErrOldWomanSearchState) {
+				logrus.WithError(err).WithField("character_id", player.ID).Error("QNO_RM_OLDWOMAN_5 periodic event failed")
+			}
+			h.finishOldWomanSearchEvents(player.ID, generation)
+			return
+		}
+		if result.Resolved {
+			h.finishOldWomanSearchEvents(player.ID, generation)
+			return
+		}
+		h.scheduleOldWomanSearchEvent(session, player, generation)
+	})
+}
+
+func (h *InventoryHandler) finishOldWomanSearchEvents(characterID int, generation uint64) {
+	h.oldWomanMu.Lock()
+	defer h.oldWomanMu.Unlock()
+	if h.oldWomanGeneration[characterID] == generation {
+		delete(h.oldWomanGeneration, characterID)
+	}
+}
+
+func (h *InventoryHandler) beginNativeCatchEvents(session *server.Session, player *model.Player, questID int) {
+	key := nativeCatchScheduleKey{characterID: player.ID, questID: questID}
+	h.nativeCatchMu.Lock()
+	if h.nativeCatchGeneration == nil {
+		h.nativeCatchGeneration = make(map[nativeCatchScheduleKey]uint64)
+	}
+	h.nativeCatchGeneration[key]++
+	generation := h.nativeCatchGeneration[key]
+	h.nativeCatchMu.Unlock()
+	h.scheduleNativeCatchEvent(session, player, key, generation)
+}
+
+func (h *InventoryHandler) scheduleNativeCatchEvent(session *server.Session, player *model.Player, key nativeCatchScheduleKey, generation uint64) {
+	if h.nativeCatchSchedule == nil || h.nativeCatch == nil || session == nil || player == nil {
+		return
+	}
+	h.nativeCatchSchedule(time.Second, func() {
+		h.nativeCatchMu.Lock()
+		current := h.nativeCatchGeneration[key]
+		h.nativeCatchMu.Unlock()
+		if current != generation {
+			return
+		}
+		roll := byte(rand.IntN(101))
+		if h.nativeCatchRoll != nil {
+			roll = h.nativeCatchRoll()
+		}
+		player.LockEconomy()
+		result, err := h.nativeCatch.AdvanceNativeCatchAction(context.Background(), player.ID, key.questID, roll)
+		player.UnlockEconomy()
+		if err != nil {
+			if !errors.Is(err, model.ErrNativeCatchActionState) {
+				logrus.WithError(err).WithFields(logrus.Fields{"character_id": player.ID, "quest_id": key.questID}).Error("native catch-action event failed")
+			}
+			h.finishNativeCatchEvents(key, generation)
+			return
+		}
+		if err = h.publishNativeCatchResult(session, player, result); err != nil {
+			logrus.WithError(err).WithFields(logrus.Fields{"character_id": player.ID, "quest_id": key.questID}).Error("native catch-action publish failed")
+			h.finishNativeCatchEvents(key, generation)
+			return
+		}
+		if result.Resolved {
+			h.finishNativeCatchEvents(key, generation)
+			return
+		}
+		h.scheduleNativeCatchEvent(session, player, key, generation)
+	})
+}
+
+func (h *InventoryHandler) finishNativeCatchEvents(key nativeCatchScheduleKey, generation uint64) {
+	h.nativeCatchMu.Lock()
+	defer h.nativeCatchMu.Unlock()
+	if h.nativeCatchGeneration[key] == generation {
+		delete(h.nativeCatchGeneration, key)
+	}
+}
+
+func (h *InventoryHandler) publishNativeCatchResult(session *server.Session, player *model.Player, result model.NativeCatchActionResult) error {
+	if result.Added != nil {
+		player.CommitQuestItemGrant(model.QuestItemGrantResult{Quest: result.Quest, Inventory: result.Inventory, Added: *result.Added})
+		if err := h.sendPacket(session, vsro188.BuildItemOperationTwoByteSuccess(vsro188.ItemOperationServerAdd, result.Added.Slot, 0x3C)); err != nil {
+			return err
+		}
+	} else {
+		player.CommitQuestMutation(result.Quest)
+	}
+	if result.Succeeded {
+		update, err := questwire.BuildUpdate(result.Quest, vsro188.QuestUpdateDelta)
+		if err != nil {
+			return err
+		}
+		if err = h.sendPacket(session, update); err != nil {
+			return err
+		}
+		if result.SuccessTalkKey != "" {
+			notice, buildErr := vsro188.BuildQuestNotification(result.SuccessTalkKey)
+			if buildErr != nil {
+				return buildErr
+			}
+			return h.sendPacket(session, notice)
+		}
+	} else if result.Resolved && result.FailureTalkKey != "" {
+		notice, err := vsro188.BuildQuestNotification(result.FailureTalkKey)
+		if err != nil {
+			return err
+		}
+		return h.sendPacket(session, notice)
+	}
+	return nil
 }
 
 func (h *InventoryHandler) ConfigureReferenceData(catalog *model.ReferenceDataCatalog) {
@@ -80,6 +298,20 @@ func (h *InventoryHandler) ConfigureReferenceData(catalog *model.ReferenceDataCa
 func (h *InventoryHandler) ConfigureCOSRepository(repository model.COSInventoryTransferRepository) {
 	if h != nil {
 		h.cosInventory = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureSafeTrade(repository model.SafeTradeRepository, resolver SafeTradeCOSResolver, distance SafeTradeDistance) {
+	if h != nil {
+		h.safeTrade = repository
+		h.safeTradeCOS = resolver
+		h.safeTradeDistance = distance
+	}
+}
+
+func (h *InventoryHandler) ConfigurePackageItems(repository model.PackageItemCatalog) {
+	if h != nil {
+		h.packageItems = repository
 	}
 }
 
@@ -126,6 +358,26 @@ func (h *InventoryHandler) ConfigureQuestProgressRepository(repository QuestColl
 	}
 }
 
+func (h *InventoryHandler) ConfigureOldWomanSearch(repository OldWomanSearchGroundActionRepository) {
+	if h != nil {
+		h.oldWomanSearch = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureNativeCatchActions(repository NativeCatchActionRepository) {
+	if h != nil {
+		h.nativeCatch = repository
+	}
+}
+
+func (h *InventoryHandler) ConfigureJobSuitTeleport(teleport interface {
+	SubmitSamePositionReload(*model.Player) error
+}) {
+	if h != nil {
+		h.jobSuitTeleport = teleport
+	}
+}
+
 type ExchangeOperations interface {
 	Busy(characterID int) bool
 	HandleInventoryOperation(context.Context, *server.Session, *model.Player, byte, *network.Packet) error
@@ -150,9 +402,13 @@ const (
 	DepositStorageGoldOperation    ItemInventoryOperation = 0x0B
 	WithdrawStorageGoldOperation   ItemInventoryOperation = 0x0C
 	BuyItemFromMallOperation       ItemInventoryOperation = 0x12
+	SellItemFromCOSOperation       ItemInventoryOperation = 0x14
 	BuyItemFromModernMallOperation ItemInventoryOperation = 0x18
-	BuySpecialtyGoodsOperation     ItemInventoryOperation = 0x2B
-	SellSpecialtyGoodsOperation    ItemInventoryOperation = 0x2C
+	BuyTokenPackageItemOperation   ItemInventoryOperation = 0x2B
+	// Stock v188's item-operation structure parser has an inclusive maximum
+	// discriminator of 0x2B. Keep 0x2C named only as an explicit rejection;
+	// it is not evidence of a specialty-goods sell request.
+	RejectedItemOperation2C ItemInventoryOperation = 0x2C
 	// BuyBackItemOperation is retained as stock updater vocabulary only. The
 	// recovered evidence does not prove it as a client 0x7034 discriminator;
 	// NPC buyback is handled through opcode.NPCBuyBackRequest below.
@@ -173,7 +429,13 @@ const (
 // production registration supplies the current world lookup and Agent-owned
 // transaction repository.
 func NewInventoryHandler(players PlayerLookup, relocator model.InventoryRelocator, economy ...model.EconomyRepository) *InventoryHandler {
-	h := &InventoryHandler{players: players, relocator: relocator}
+	h := &InventoryHandler{
+		players: players, relocator: relocator,
+		oldWomanSchedule:    func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) },
+		nativeCatchSchedule: func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) },
+		jobSuitSchedule:     func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) },
+		jobSuitPending:      make(map[int]bool),
+	}
 	h.objects, _ = players.(interface {
 		GetObjectByUniqueId(uint32) (model.ISRObject, error)
 	})
@@ -274,17 +536,24 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 			return h.handleBuy(ctx, session, &packet)
 		case vsro188.PackageItemRequestBodySize:
 			// Stock operation 0x08 also has a package-item insertion form.
-			// Its request lifecycle/catalog transaction is not implemented;
-			// parse it exactly and fail closed rather than treating its fields
-			// as an NPC purchase.
-			return h.handlePackageItemInsertion(session, &packet)
+			// Its selector authority and package transaction are distinct from
+			// the eight-byte ordinary NPC purchase above.
+			return h.handlePackageItemInsertion(ctx, session, operationType, &packet)
 		default:
 			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 		}
 	case BuyItemFromMallOperation, BuyItemFromModernMallOperation:
 		return h.handleMallBuy(ctx, session, ItemInventoryOperation(operationType), &packet)
+	case BuyTokenPackageItemOperation:
+		// Stock v188 maps 0x2B to the generic package-item insertion handler;
+		// it is not a separate COS safe-trade purchase opcode.
+		return h.handlePackageItemInsertion(ctx, session, operationType, &packet)
+	case RejectedItemOperation2C:
+		return h.rejectItemOperation2C(session)
 	case SellItemOperation:
 		return h.handleSell(ctx, session, &packet)
+	case SellItemFromCOSOperation:
+		return h.handleCOSSell(ctx, session, &packet)
 	case DepositStorageGoldOperation, WithdrawStorageGoldOperation:
 		return h.handleStorageGold(ctx, session, ItemInventoryOperation(operationType), &packet)
 	case EquipAvatarItemOperation, UnequipAvatarItemOperation:
@@ -306,6 +575,9 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 	request, err := parseMoveItemRequest(&packet)
 	if err != nil {
 		return err
+	}
+	if request.targetSlot == model.SlotExtra || request.sourceSlot == model.SlotExtra {
+		return h.beginJobSuitChange(session, request)
 	}
 	player, plan, removedBuffs, err := h.relocate(ctx, session, request)
 	if err != nil {
@@ -331,6 +603,88 @@ func (h *InventoryHandler) handlePacket(ctx context.Context, session *server.Ses
 		player.SendToSelfAndKnown(&removed)
 	}
 	return sendMoveItemSuccess(session, request, plan)
+}
+
+// beginJobSuitChange preserves the stock two-phase job-clothes lifecycle. The
+// client starts its yellow pending-action gauge when it sends 0x7034 and ends
+// it when B034 arrives, so neither the relocation nor its completion may be
+// emitted until the 30-second wearing period expires. Both putting on and
+// taking off job clothes require the player to remain in a town region.
+func (h *InventoryHandler) beginJobSuitChange(session *server.Session, request moveItemRequest) error {
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	if !model.IsTownRegionV188(player.GetNavmeshPosition().Region.ID) {
+		return nil
+	}
+	player.LockEconomy()
+	_, err = model.PlanInventoryRelocation(player.Inventory.Items, request.sourceSlot, request.targetSlot, player)
+	player.UnlockEconomy()
+	if err != nil {
+		logrus.WithError(err).Debug("rejected delayed job-suit equip")
+		return nil
+	}
+
+	h.jobSuitMu.Lock()
+	if h.jobSuitPending[player.ID] {
+		h.jobSuitMu.Unlock()
+		return nil
+	}
+	h.jobSuitPending[player.ID] = true
+	h.jobSuitMu.Unlock()
+	direction := vsro188.JobSuitCountdownEquip
+	if request.sourceSlot == model.SlotExtra {
+		direction = vsro188.JobSuitCountdownUnequip
+	}
+	start := vsro188.BuildJobSuitCountdownStart(player.GetUniqueID(), direction, byte(jobSuitEquipDelay/time.Second))
+	if err := h.sendPacket(session, start); err != nil {
+		h.jobSuitMu.Lock()
+		delete(h.jobSuitPending, player.ID)
+		h.jobSuitMu.Unlock()
+		return err
+	}
+	player.Broadcast(&start)
+
+	h.jobSuitSchedule(jobSuitEquipDelay, func() {
+		h.jobSuitMu.Lock()
+		delete(h.jobSuitPending, player.ID)
+		h.jobSuitMu.Unlock()
+
+		currentPlayer, resolveErr := h.resolvePlayer(session)
+		if resolveErr != nil || !model.IsTownRegionV188(currentPlayer.GetNavmeshPosition().Region.ID) {
+			stop := vsro188.BuildJobSuitCountdownStop(player.GetUniqueID(), vsro188.JobSuitCountdownCancel)
+			player.SendToSelfAndKnown(&stop)
+			return
+		}
+		completedPlayer, plan, removedBuffs, relocateErr := h.relocate(context.Background(), session, request)
+		if relocateErr != nil {
+			stop := vsro188.BuildJobSuitCountdownStop(player.GetUniqueID(), vsro188.JobSuitCountdownCancel)
+			player.SendToSelfAndKnown(&stop)
+			logrus.WithError(relocateErr).WithField("character_id", player.ID).Debug("delayed job-suit equip canceled")
+			return
+		}
+		stop := vsro188.BuildJobSuitCountdownStop(completedPlayer.GetUniqueID(), vsro188.JobSuitCountdownFinish)
+		completedPlayer.SendToSelfAndKnown(&stop)
+		if sendErr := sendRelocationStateUpdates(session, completedPlayer, plan); sendErr != nil {
+			logrus.WithError(sendErr).WithField("character_id", player.ID).Debug("send delayed job-suit state")
+			return
+		}
+		for _, token := range removedBuffs {
+			removed := model.BuildBuffRemove(token)
+			completedPlayer.SendToSelfAndKnown(&removed)
+		}
+		if sendErr := sendMoveItemSuccess(session, request, plan); sendErr != nil {
+			logrus.WithError(sendErr).WithField("character_id", player.ID).Debug("send delayed job-suit completion")
+			return
+		}
+		if h.jobSuitTeleport != nil {
+			if teleportErr := h.jobSuitTeleport.SubmitSamePositionReload(completedPlayer); teleportErr != nil {
+				logrus.WithError(teleportErr).WithField("character_id", player.ID).Warn("reload character after job-suit change")
+			}
+		}
+	})
+	return nil
 }
 
 func (h *InventoryHandler) handleGroundItemDrop(ctx context.Context, session *server.Session, packet *network.Packet) error {
@@ -386,7 +740,7 @@ func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *
 	}
 	object, err := h.objects.GetObjectByUniqueId(targetUID)
 	item, valid := groundPickupItem(object)
-	if err != nil || !valid || item == nil || item.ID <= 0 {
+	if err != nil || !valid || item == nil || (item.ID <= 0 && !item.TransientGroundItem) {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
 	if owner := item.GetOwner(); owner != 0 && owner != player.GetUniqueID() {
@@ -398,6 +752,61 @@ func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *
 	}
 	player.LockEconomy()
 	defer player.UnlockEconomy()
+	if definitions := model.NativeCatchDefinitionsForTrigger(item.GetRefObjectID()); len(definitions) != 0 {
+		if h.nativeCatch == nil {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		activeQuestID := 0
+		quests := player.QuestSnapshot()
+		for _, definition := range definitions {
+			for _, quest := range quests {
+				if quest.QuestID == definition.QuestID && quest.Status.ClientActive() {
+					if activeQuestID != 0 {
+						return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+					}
+					activeQuestID = definition.QuestID
+				}
+			}
+		}
+		if activeQuestID == 0 {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		started, startErr := h.nativeCatch.StartNativeCatchAction(ctx, player.ID, activeQuestID)
+		if startErr != nil {
+			logrus.WithError(startErr).WithField("quest_id", activeQuestID).Debug("rejected native ground catch action")
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		player.CommitQuestMutation(started.Quest)
+		capture, buildErr := vsro188.BuildQuestActionResult(opcode.QuestCatchResult, uint32(activeQuestID), started.Countdown)
+		if buildErr != nil {
+			return buildErr
+		}
+		if sendErr := h.sendPacket(session, capture); sendErr != nil {
+			return sendErr
+		}
+		h.beginNativeCatchEvents(session, player, activeQuestID)
+		return nil
+	}
+	if item.GetRefObjectID() == model.OldWomanSearchTriggerItemRefID {
+		if h.oldWomanSearch == nil {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		started, startErr := h.oldWomanSearch.StartOldWomanSearchAction(ctx, player.ID)
+		if startErr != nil {
+			logrus.WithError(startErr).Debug("rejected QNO_RM_OLDWOMAN_5 ground action")
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		player.CommitQuestMutation(started.Quest)
+		capture, buildErr := vsro188.BuildQuestActionResult(opcode.QuestCatchResult, uint32(model.OldWomanSearchQuestID), started.Countdown)
+		if buildErr != nil {
+			return buildErr
+		}
+		if sendErr := h.sendPacket(session, capture); sendErr != nil {
+			return sendErr
+		}
+		h.beginOldWomanSearchEvents(session, player)
+		return nil
+	}
 	if isGeneratedGoldItem(item) {
 		if h.groundGold == nil {
 			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
@@ -421,11 +830,23 @@ func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *
 	if h.groundPickup == nil {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
+	if item.TransientGroundItem && item.CreatorName != "" {
+		return h.handleSpecialtyGroundItemPickup(ctx, session, player, object, item)
+	}
 	slot, available := player.Inventory.FirstFreeNormalSlot(player.GetInventorySize())
 	if !available {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
-	result, err := h.groundPickup.Pickup(ctx, int64(player.ID), int64(item.ID), slot)
+	var result model.GroundItemPickupResult
+	if item.TransientGroundItem {
+		repository, ok := h.groundPickup.(model.GroundTransientPickupRepository)
+		if !ok {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		result, err = repository.PickupTransient(ctx, int64(player.ID), item, slot)
+	} else {
+		result, err = h.groundPickup.Pickup(ctx, int64(player.ID), int64(item.ID), slot)
+	}
 	if err != nil {
 		if errors.Is(err, model.ErrGroundItemPickupOutcomeUnknown) {
 			return err
@@ -470,6 +891,54 @@ func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *
 		}
 	}
 	return nil
+}
+
+func (h *InventoryHandler) handleSpecialtyGroundItemPickup(ctx context.Context, session *server.Session, player *model.Player, object model.ISRObject, item *model.Item) error {
+	repository, ok := h.groundPickup.(model.GroundTransientPickupRepository)
+	if !ok || h.safeTradeCOS == nil || h.safeTradeDistance == nil || !model.SpecialtyPickupAllowed(player.GetJob().Type, player.GetJob().Alias, item.CreatorName) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	transport, ok := h.safeTradeCOS.ResolveActiveOwned(player, model.COSJobTransport)
+	if !ok || transport == nil || transport.PersistentID == 0 || transport.GetLifeState() == model.Dead {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	playerPosition, transportPosition := player.GetNavmeshPosition(), transport.GetNavmeshPosition()
+	if playerPosition.Region.ID != transportPosition.Region.ID || h.safeTradeDistance.DistanceTo(playerPosition, transportPosition) >= 1000 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	slot, available := transport.Inventory.FirstFreeSlot(transport.InventorySize)
+	if !available {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	result, err := repository.PickupTransientToJobCOS(ctx, int64(player.ID), transport.PersistentID, item, slot, transport.GetTradeScale())
+	if err != nil {
+		if errors.Is(err, model.ErrGroundItemPickupOutcomeUnknown) {
+			return err
+		}
+		logrus.WithError(err).Debug("rejected specialty ground-item pickup")
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	inventory := transport.Inventory.Snapshot()
+	if !inventory.Put(result.Slot, transport.InventorySize, result.Item) {
+		return model.ErrGroundItemPickupOutcomeUnknown
+	}
+	transport.ReplaceInventory(inventory)
+	transport.SetTradeScale(result.Scale)
+	h.cancelGroundItemLifecycle(object)
+	h.objectRemover.RemoveVisibleObject(object)
+	packets := []network.Packet{
+		buildGroundPickupAnimation(player, item),
+		model.BuildCOSPickupInventoryUpdate(transport.GetUniqueID(), result.Slot, result.Item),
+		mustTradeScalePacket(result.Scale),
+	}
+	if result.SafeTradeReset {
+		reset, encodeErr := (vsro188.JobSafeTradeCodec{}).Encode(vsro188.SafeTradeUpdate{Code: vsro188.JobSafeTradeCodeTransition40})
+		if encodeErr != nil {
+			return encodeErr
+		}
+		packets = append(packets, reset)
+	}
+	return h.sendPackets(session, packets...)
 }
 
 func (h *InventoryHandler) cancelGroundItemLifecycle(object model.ISRObject) {
@@ -569,7 +1038,7 @@ func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, sessi
 	}
 	player.CommitInventory(playerInventory)
 	pet.ReplaceInventory(cosInventory)
-	response := vsro188.BuildItemOperationObjectSlotSuccess(vsro188.ItemOperationCOSTransfer, petUID, destination)
+	response := vsro188.BuildItemOperationObjectSlotPairSuccess(byte(operation), petUID, source, destination)
 	return h.sendPacket(session, response)
 }
 
@@ -945,16 +1414,73 @@ func (h *InventoryHandler) handleBuy(ctx context.Context, session *server.Sessio
 	return h.sendPackets(session, goldUpdate, buildBuySuccess(tab, slot, amount, result.DestinationSlots, result.Item))
 }
 
-func (h *InventoryHandler) handlePackageItemInsertion(session *server.Session, packet *network.Packet) error {
+func (h *InventoryHandler) handlePackageItemInsertion(ctx context.Context, session *server.Session, operation byte, packet *network.Packet) error {
 	request, err := vsro188.DecodePackageItemRequestBody(packet)
 	if err != nil {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
-	logrus.WithFields(logrus.Fields{
+	fields := logrus.Fields{
+		"operation": fmt.Sprintf("0x%02X", operation),
 		"selectorA": fmt.Sprintf("0x%02X", request.SelectorA),
 		"selectorB": fmt.Sprintf("0x%02X", request.SelectorB),
 		"quantity":  request.Quantity,
-	}).Debug("package-item operation 0x08 is not enabled")
+	}
+	if (operation == vsro188.ItemOperationPackageItem || operation == vsro188.ItemOperationPackageItemExtended) && h.packageItems != nil && session != nil && session.UserContext.SelectedNPCRefObjID != 0 {
+		good, resolveErr := h.packageItems.ResolvePackageItem(ctx, session.UserContext.SelectedNPCRefObjID, request.SelectorA, request.SelectorB)
+		if resolveErr != nil {
+			logrus.WithError(resolveErr).WithFields(fields).Debug("rejected package-item selector authority")
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		fields["package"] = good.CodeName
+		fields["members"] = len(good.Members)
+		if purchaser, ok := h.packageItems.(model.PackageItemPurchaser); ok {
+			player, playerErr := h.resolvePlayer(session)
+			if playerErr != nil {
+				return playerErr
+			}
+			if session.UserContext.SelectedNPCUniqueID == 0 {
+				return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+			}
+			if _, interactionErr := h.validateInteractionNPC(player, session.UserContext.SelectedNPCUniqueID, false); interactionErr != nil {
+				return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+			}
+			npc, objectErr := h.objects.GetObjectByUniqueId(session.UserContext.SelectedNPCUniqueID)
+			if objectErr != nil || npc == nil || npc.GetRefObjectID() != session.UserContext.SelectedNPCRefObjID {
+				return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+			}
+			player.LockEconomy()
+			defer player.UnlockEconomy()
+			if h.exchange != nil && h.exchange.Busy(player.ID) {
+				return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+			}
+			var result model.PackageItemPurchaseResult
+			var purchaseErr error
+			if operation == vsro188.ItemOperationPackageItemExtended {
+				result, purchaseErr = purchaser.PurchaseTokenPackageItem(ctx, int64(player.ID), npc.GetRefObjectID(), request.SelectorA, request.SelectorB, request.Quantity)
+			} else {
+				result, purchaseErr = purchaser.PurchasePackageItem(ctx, int64(player.ID), npc.GetRefObjectID(), request.SelectorA, request.SelectorB, request.Quantity)
+			}
+			if purchaseErr != nil {
+				if errors.Is(purchaseErr, model.ErrPackageItemOutcomeUnknown) {
+					return purchaseErr
+				}
+				logrus.WithError(purchaseErr).WithFields(fields).Debug("rejected package-item purchase")
+				return h.handleEconomyError(session, purchaseErr)
+			}
+			continuations := make([]vsro188.PackageItemContinuation, len(result.Continuations))
+			for index, continuation := range result.Continuations {
+				continuations[index] = vsro188.PackageItemContinuation{Selector: continuation.Slot, Quantity: continuation.Remaining}
+			}
+			success := vsro188.BuildPackageItemSuccess(vsro188.PackageItemSuccess{Operation: operation, SelectorA: request.SelectorA, SelectorB: request.SelectorB, ResultBytes: result.DestinationSlots, Quantity: request.Quantity, Continuations: continuations})
+			if operation == vsro188.ItemOperationPackageItemExtended {
+				player.CommitInventory(result.Inventory)
+				return h.sendPacket(session, success)
+			}
+			player.CommitEconomy(result.Gold, result.Inventory)
+			return h.sendPackets(session, vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: result.Gold}), success)
+		}
+	}
+	logrus.WithFields(fields).Debug("package-item operation is not enabled")
 	return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 }
 
@@ -980,18 +1506,136 @@ func (h *InventoryHandler) handleSell(ctx context.Context, session *server.Sessi
 	if _, err = h.validateInteractionNPC(player, npcUID, false); err != nil {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
+	npcObject, err := h.objects.GetObjectByUniqueId(npcUID)
+	if err != nil || npcObject == nil || npcObject.GetRefObjectID() == 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
 	sessionID := buybackSessionID(session)
 	resetBuyback := h.buybackSession(player.ID) != sessionID
-	result, err := h.economy.Sell(ctx, int64(player.ID), session.UserContext.UserID, source, amount, resetBuyback)
+	result, err := h.economy.Sell(ctx, int64(player.ID), session.UserContext.UserID, npcObject.GetRefObjectID(), source, amount, resetBuyback)
 	if err != nil {
-		return h.handleEconomyError(session, err)
+		return h.handleSpecialtyEconomyError(session, err)
 	}
 	h.setBuybackSession(player.ID, sessionID)
 	player.CommitEconomy(result.Gold, result.Inventory)
+	h.postTriJobReward(ctx, result)
 	if err = h.sendPacket(session, buildSellSuccess(source, amount, npcUID, result.BuybackSlot)); err != nil {
 		return err
 	}
 	return h.sendPacket(session, buildGoldUpdate(result.Gold))
+}
+
+func (h *InventoryHandler) handleCOSSell(ctx context.Context, session *server.Session, packet *network.Packet) error {
+	repository, ok := h.economy.(model.COSEconomyRepository)
+	if !ok || h.objects == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	request, err := vsro188.DecodeCOSSellRequest(packet)
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	player, err := h.resolvePlayer(session)
+	if err != nil {
+		return err
+	}
+	object, err := h.objects.GetObjectByUniqueId(request.ObjectUniqueID)
+	transport, valid := object.(*model.COS)
+	if err != nil || !valid || transport == nil || transport.PersistentID == 0 || transport.Kind != model.COSJobTransport || transport.OwnerCharID != player.ID || transport.OwnerUniqueID != player.GetUniqueID() {
+		return h.handleSpecialtyEconomyError(session, model.ErrSpecialtyNoCart)
+	}
+	if request.Source >= transport.InventorySize {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	playerPosition, transportPosition := player.GetNavmeshPosition(), transport.GetNavmeshPosition()
+	if playerPosition.Region.ID != transportPosition.Region.ID || navmeshv2.HorizontalDistance(playerPosition, transportPosition) > 1000 {
+		return h.handleSpecialtyEconomyError(session, model.ErrSpecialtyCartTooFar)
+	}
+	if _, err = h.validateInteractionNPC(player, request.NPCUniqueID, false); err != nil {
+		return h.handleSpecialtyEconomyError(session, model.ErrSpecialtyNotBuyer)
+	}
+	npcObject, err := h.objects.GetObjectByUniqueId(request.NPCUniqueID)
+	if err != nil || npcObject == nil || npcObject.GetRefObjectID() == 0 {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	playerPosition, npcPosition := player.GetNavmeshPosition(), npcObject.GetNavmeshPosition()
+	if playerPosition.Region.ID != npcPosition.Region.ID || navmeshv2.HorizontalDistance(playerPosition, npcPosition) > 1000 {
+		return h.handleSpecialtyEconomyError(session, model.ErrSpecialtyCartTooFar)
+	}
+	player.LockEconomy()
+	defer player.UnlockEconomy()
+	if h.exchange != nil && h.exchange.Busy(player.ID) {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	sessionID := buybackSessionID(session)
+	result, err := repository.SellCOS(ctx, int64(player.ID), session.UserContext.UserID, npcObject.GetRefObjectID(), transport.PersistentID, request.Source, request.Amount, h.buybackSession(player.ID) != sessionID)
+	if err != nil {
+		return h.handleSpecialtyEconomyError(session, err)
+	}
+	h.setBuybackSession(player.ID, sessionID)
+	transport.ReplaceInventory(result.COSInventory)
+	transport.SetTradeScale(result.TradeScale)
+	player.Mutex.Lock()
+	player.Gold = result.Gold
+	player.Mutex.Unlock()
+	if result.JobAdvanced {
+		player.SetJob(model.PlayerJob{Type: result.Job.Type, Alias: result.Job.Alias, Level: result.Job.Level, Experience: result.Job.Experience})
+	}
+	h.postTriJobReward(ctx, result)
+	return h.sendPackets(session, buildCOSSellResultPackets(request, result)...)
+}
+
+func buildCOSSellResultPackets(request vsro188.COSSellRequest, result model.EconomyResult) []network.Packet {
+	packets := []network.Packet{vsro188.BuildCOSSellSuccess(request, result.BuybackSlot), buildGoldUpdate(result.Gold)}
+	if result.Specialty {
+		packets = append(packets, mustTradeScalePacket(result.TradeScale))
+	}
+	if result.SafeTradeReset {
+		packet, err := (vsro188.JobSafeTradeCodec{}).Encode(vsro188.SafeTradeUpdate{Code: vsro188.JobSafeTradeCodeTransition40})
+		if err != nil {
+			panic(err)
+		}
+		packets = append(packets, packet)
+	}
+	if result.JobAdvanced {
+		packet, err := (vsro188.JobUpdateCodec{}).Encode(vsro188.JobState{Type: result.Job.Type, Level: result.Job.Level, Experience: uint32(min(result.Job.Experience, math.MaxUint32))})
+		if err != nil {
+			panic(err)
+		}
+		packets = append(packets, packet)
+	}
+	return packets
+}
+
+func (h *InventoryHandler) postTriJobReward(ctx context.Context, result model.EconomyResult) {
+	if !result.Specialty || result.TriJobReward == 0 {
+		return
+	}
+	if rewards, ok := h.economy.(interface {
+		AddTriJobReward(context.Context, byte, uint64) error
+	}); ok {
+		if err := rewards.AddTriJobReward(ctx, result.TriJobType, result.TriJobReward); err != nil {
+			logrus.WithError(err).Warn("failed to post independent tri-job reward update")
+		}
+	}
+}
+
+func (h *InventoryHandler) handleSpecialtyEconomyError(session *server.Session, err error) error {
+	var code uint16
+	switch {
+	case errors.Is(err, model.ErrSpecialtyTraderOnly):
+		code = vsro188.SpecialtyErrorTraderOnly
+	case errors.Is(err, model.ErrSpecialtyNoCart):
+		code = vsro188.SpecialtyErrorNoCart
+	case errors.Is(err, model.ErrSpecialtyNotBuyer):
+		code = vsro188.SpecialtyErrorNotBuyer
+	case errors.Is(err, model.ErrSpecialtyCartTooFar):
+		code = vsro188.SpecialtyErrorCartTooFar
+	case errors.Is(err, model.ErrSpecialtyStolen):
+		code = vsro188.SpecialtyErrorStolen
+	default:
+		return h.handleEconomyError(session, err)
+	}
+	return h.sendPacket(session, vsro188.BuildItemOperationFailure(code))
 }
 
 func buybackSessionID(session *server.Session) string {
@@ -1381,6 +2025,21 @@ func (h *InventoryHandler) relocate(ctx context.Context, session *server.Session
 		removedBuffs = player.RemoveInvalidFireShieldBuffs(h.referenceData)
 	}
 	return player, plan, removedBuffs, nil
+}
+
+func (h *InventoryHandler) rejectItemOperation2C(session *server.Session) error {
+	// SR_GameServer 0x004D8BF0 and 0x004F76E0 reject discriminators above
+	// 0x2B. Preserve an explicit response for 0x2C without assigning it an
+	// invented sell lifecycle.
+	return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+}
+
+func mustTradeScalePacket(scale byte) network.Packet {
+	packet, err := (vsro188.JobTradeScaleCodec{}).Encode(scale)
+	if err != nil {
+		return network.Packet{}
+	}
+	return packet
 }
 
 func (h *InventoryHandler) resolvePlayer(session *server.Session) (*model.Player, error) {
