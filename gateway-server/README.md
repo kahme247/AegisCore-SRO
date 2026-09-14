@@ -5,6 +5,17 @@ negotiation, notices, shard listing, login policy and one-time handoff to Agent.
 Runtime compatibility values come from explicit configuration; Gateway does not
 load or transmit the client profile JSON.
 
+Use this guide for client version negotiation, login, shard listing, or the
+private handoff to Agent. For a normal first installation, follow the
+[root setup guide](../README.md#first-time-setup) instead.
+
+Quick check from `go-sro/`:
+
+```text
+docker compose ps gateway-server
+docker compose logs --tail=200 gateway-server
+```
+
 ## Protocol surface
 
 After the Silkroad core handshake and module identification, Gateway admits:

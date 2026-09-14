@@ -81,7 +81,7 @@ rollback analysis.
 | S -> C | `0x3047` / `0x3048` / `0x3049` | Inventory/storage multipart transfer; begin and end widths, data framing, and client item parser are binary-confirmed |
 | S -> C | `0xB03E` | Maintained repair response: success `u8 1`, failure `u8 2 + u16 code`; code semantics remain open |
 | S -> C | `0x3052` | Maintained server contract: `u8 slot, u32 value`; stock client handler body still open |
-| S -> C | `0x3092` | Binary-confirmed two-byte update: `u8 first`, `u8 second`; domain names and trigger path remain open |
+| S -> C | `0x3092` | Capacity update: `u8 target` (`1` inventory, `2` storage), `u8 resultingCapacity` |
 | S -> C | `0x305C` | Item-used/entity notification; server writes two `u32` values and the stock client reads two `u32` values |
 | S -> C | `0x3153` | Three `u32` balance-state values; server state writer can emit them, client stores them at `+0x4AC/+0x4B0/+0x4B4` |
 | S -> C | `0x3154` | `u8 reason, u8 cashType, u32 value`; validated server-side for reason `0..5` and cash type `0..2` |
@@ -109,13 +109,11 @@ wire proof. Direction and phase must remain part of the opcode key.
 
 The client registration and server disassembly independently establish a
 server-to-client `0x3092` body containing exactly two consecutive bytes. The
-server writes the first byte from its runtime record and a second byte whose
-observed value is initialized to `1` or `2`; the client registration resolves
-the packet to its handler. The safe compatibility type is therefore
-`u8 first, u8 second`. Neither byte is named as inventory capacity or mode in
-the maintained codec, and AegisCore currently has no domain event that emits
-this packet. Adding the codec preserves the confirmed wire contract without
-inventing the unresolved trigger semantics.
+first is a target (`1` player inventory, `2` storage) and the second is the
+resulting capacity. GameServer builder `0x004E8B61` writes them in that order;
+its inventory branch loads target `1` and the committed capacity. The stock
+client `On3092` path dispatches target `1` to player inventory capacity and
+target `2` to storage capacity.
 
 ## Inventory and equipment structure facts
 
@@ -669,11 +667,13 @@ eight-byte body for its existing transaction:
 ```
 
 The two forms are safely demultiplexed by exact remaining body length. The
-four-byte package form is decoded and rejected with the standard fail-closed
-item-operation response until a maintained package catalog, authorization
-rule, item-construction transaction, and result-vector mapping exist. The
-stock procedure names below are evidence of the binary's persistence family;
-they are not an instruction to recreate those stored procedures in AegisCore.
+four-byte gold/package form now resolves against the authenticated selected
+NPC and maintained shop/tab/package chain, applies the recovered package
+quantity and slot rules in one transaction, and returns the primary generated
+slot vector. Token operation `0x2B` resolves the selected expanded price-policy
+entry, atomically debits the matching token stacks in ascending inventory-slot
+order, and emits the confirmed continuation vector for every deleted or
+partially reduced stack.
 
 The stock client has a direct sender for operation `0x08` in
 `0x007950B0`'s `param_1 == 0x0F, param_3 == 0x46` branch. It prepares the
@@ -738,8 +738,23 @@ u16 record +0x06
 Operation `0x13` adds `u32 record +0x30` immediately after the operation
 byte. The child bytes are observed result-vector entries; their item/stock
 semantics and the failure result mapping remain unresolved. Operation `0x2B`
-has an additional trailing child vector in the emitter and is not collapsed
-into the `0x08` grammar.
+then appends the exact additional vector:
+
+```text
+u8 continuationCount
+repeat continuationCount:
+    u8 child record +0x03
+    u16 child record +0x06
+```
+
+The stock client `CNetProcessIn::OnB034` (`0x0087F370`) delegates to decoder
+`0x0087EB50`, which reads each pair and constructs a child operation record
+through `0x00878AB0`; the handler subsequently applies every constructed
+record through the same `0x00871940`/`0x0087BA20` update path used for the
+primary result. This proves widths, ordering, and child-continuation behavior,
+but not a universal public name for the two fields. AegisCore's codec now
+preserves this distinct `0x2B` envelope rather than collapsing it into the
+`0x08` grammar.
 
 Raw evidence: [`007950B0_FUN_007950b0.c`](../../analysis/decompiled/client-pickup-refs/007950B0_FUN_007950b0.c),
 [`007923A0_FUN_007923a0.c`](../../analysis/decompiled/client-pickup-refs/007923A0_FUN_007923a0.c),
@@ -2300,12 +2315,35 @@ Raw exchange SQL evidence: [`0043FB20_FUN_0043fb20.c`](../../analysis/decompiled
 ### Stock TestIn SQL
 
 The GameServer contains two distinct cash-related procedure families. The
-client-confirmed operation-`0x18` edge is the package-item family:
+client-confirmed operation-`0x18` edge selects the package-item updater; the
+same updater class is also reached by the generic package insertion dispatch
+used by item-operation `0x2B` (and the overloaded four-byte `0x08` form):
 
 ```sql
 {CALL _STRG_ADD_PACKAGEITEM (%d,%d,%d,%d,%d,%I64d,%d,%d,%d,%d,'...')}
 {CALL _STRG_ADD_PACKAGEITEM_WITH_STOCKQUANTITY (%d,%d,%d,%d,%d,%d,%I64d,%d,%d,%d,%d,'...')}
 ```
+
+The decompiled package initializer (`0x0045E080`) proves the two formatter
+arities (11 versus 12 values, with the latter carrying a stock-quantity
+field), but does not preserve stable names for all context/derived arguments.
+The pinned shard procedure bodies close these names. `_STRG_ADD_PACKAGEITEM`
+passes `Operation`, `CharID`, `PaymentDevice`, `RefPackageItemID`, `Count`, the
+remaining currency balances, and `CreaterName` to
+`_STRG_ADD_PACKAGEITEM_CORE`. That core explicitly names operation `43`
+(`0x2B`) `SP_BUY_ITEM_WITH_TOKEN`; it consumes token devices `64`, `128`,
+`256`, `512`, and `1024` and returns their inventory changes as the trailing
+continuation records. Payment device `1` updates remaining gold and is used by
+the ordinary four-byte operation-`0x08` package path. Both operations insert
+into character inventory; operation `0x13` is the COS form.
+
+`_GetNeededSlotCountByBuyPackageItem` also closes quantity expansion. A
+single non-bionic `TypeID1/2 == 3/3` member with package `Data == 0` consumes
+one slot and receives the request count as its stack quantity. Every other
+package clamps the requested count to `[1,5]`, creates that many instances of
+each scrap member, and therefore requires `memberCount * clampedCount` slots.
+The package core passes the current job creator name to the specialty-item
+constructor and debits `Cost * Count` through the selected payment device.
 
 The exact cash-item procedures are also present through the base
 `AQ_StorageUpdater` vtable slot `+0x30` (`0x00AE5688 + 0x30 -> 0x0045A5D0`):
@@ -2941,11 +2979,11 @@ ownership in the Agent handlers and repositories. Current adapter coverage is:
 | --- | --- | --- |
 | `0x7034` operation `0x18` request and `0xB034` package success/failure | `item_mall_codec.go` | `inventory_handler.go` validates and commits through the mall repository, then publishes the confirmed `0xB034`; the binary-confirmed state-only balance continuation does not directly emit `0x3153` |
 | `0xB034` legacy item-mall operation `0x12` completion | `item_mall_codec.go` | legacy mall handler uses the centralized selector/destination/quantity envelope |
-| `0x7034/0xB034` specialty operation `0x2B` framing | `item_specialty_codec.go` | exact request and success envelope codecs; specialty catalog/transaction integration remains fail-closed because no maintained domain source is available |
+| `0x7034/0xB034` token package operation `0x2B` | `item_specialty_codec.go`, `package_item_repository.go` | exact request/success envelope, selected price-policy authority, atomic package insertion and slot-ordered token debit continuation |
 | `0xB034` operation `0x06` pickup completion | `item_operation_codec.go` | ground-item pickup publishes `result=1, operation=0x06, destinationSlot` |
 | `0xB034` operation `0x00` relocation completion | `item_operation_codec.go` | inventory relocation publishes source slot, destination slot, quantity, and an empty child vector |
 | `0x7034/0xB034` operation `0x07` ground drop | `item_operation_codec.go` | handler locks and removes only the `INVENTORY` link, preserves the `ITEM` row, admits the item through `GroundItemService`, compensates with a restore link if admission fails, then publishes the exact slot-only completion |
-| `0xB034` operations `0x08`/`0x09` ordinary economy completion | `item_economy_codec.go` | the maintained NPC buy path accepts the exact eight-byte `0x08` context form; the four-byte stock package-item form is length-demultiplexed and fail-closed until its domain transaction exists |
+| `0xB034` operations `0x08`/`0x09` ordinary economy completion | `item_economy_codec.go` | the maintained NPC buy path accepts the exact eight-byte `0x08` context form; the four-byte stock package-item form is length-demultiplexed into its selected-shop package transaction |
 | `0xB034` operation `0x08` package-item success | `item_operation_codec.go` | exact selector/result-vector/quantity envelope is available for replay and future domain integration; result-vector entries remain opaque |
 | `0x7168/0xB168` plus maintained `0xB034` buyback completion | `item_economy_codec.go` | dedicated NPC buyback handler commits through `EconomyRepository`, acknowledges on `0xB168`, then publishes the maintained destination/source/quantity envelope; stock updater operation `0x22` is not accepted as a `0x7034` request |
 | `0xB034` avatar transfer completion | `item_operation_codec.go` | avatar equip/unequip publishes operation, source/destination, zero quantity, and reserved byte through the protocol codec |
@@ -3002,8 +3040,9 @@ only, or deliberately fail-closed. The ledger is an implementation contract,
 not a claim that every stock callback has been reproduced. In particular,
 modern mall operation `0x18` remains partial until result-vector/status and
 cash-notification semantics are capture-correlated; specialty operation
-`0x2B` remains framing-only; operation `0x2C`, magic-cube lifecycle, and the
-unresolved TypeID3=`3` callbacks remain fail-closed. This prevents a future
+`0x2B` is implemented as the recovered token package purchase; operation
+`0x2C`, magic-cube lifecycle, and the unresolved TypeID3=`3` callbacks remain
+fail-closed. This prevents a future
 codec addition from silently becoming an unsafe item mutation.
 
 The item-use notification is likewise isolated from the use transaction: the
@@ -3372,8 +3411,8 @@ and [`004883E0_FUN_004883e0.c`](../../analysis/decompiled/alchemy-shardmanager/i
     The multipart framing, rent block, slot order, and client TypeID parser are
     confirmed; the remaining class-specific server serializer edges and
     capture-backed field semantics are still open.
-11. Recover the specialty/job-item catalog and transaction inputs behind the
-    operation-`0x2B` selectors and `_STRG_ADD_SPECIALTY`; the request and
-    fixed completion envelopes are now codec-covered, but the maintained
-    domain currently has no evidence-backed source catalog, price rules, or
-    atomic mutation contract for this branch.
+11. Complete the atomic gold/package operation-`0x08` transaction using the
+    now-maintained NPC/shop/tab/package authority chain and the recovered
+    `_STRG_ADD_PACKAGEITEM_CORE` slot/count/creator rules. Operation `0x2B` is
+    the separate token-payment variant and must debit token stacks rather than
+    being labeled as specialty purchase.

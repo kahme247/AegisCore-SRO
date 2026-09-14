@@ -6,6 +6,11 @@ responsibilities. It records only metadata and evidence locators; the legacy
 binaries, extracted strings, captures and proprietary data remain outside the
 maintained Go source tree.
 
+Use this guide when auditing implementation coverage against local legacy
+evidence. It is a development audit, not a server installation step.
+
+## Run the audit
+
 From the `go-sro` worktree, audit the embedded manifest against the local
 read-only evidence catalogs with:
 

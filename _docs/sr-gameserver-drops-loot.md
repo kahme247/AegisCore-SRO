@@ -58,7 +58,9 @@ unrecovered. The normal pickup path subsequently claims the existing `ITEM` row 
 The maintained selector implementation is
 `agent-server/service/monster_drops.go`. It now reproduces the recovered
 direct and random-group boundaries: inclusive byte count ranges,
-million-point chance checks with the item factor, bounded group retries,
+two-`rand()` 30-bit-to-million-point chance checks with the item factor,
+including the inclusive `roll <= DropRatio * factor * 1,000,000` boundary,
+bounded group retries,
 `Overlap == 1` candidate removal, binary gold `%101` chance with 15-bit
 interpolation and drop-class multipliers, and the
 `<1000 / <10000 / >=10000` gold reference split. A hydrated
@@ -79,11 +81,119 @@ maintained schema has no recovered rent-reference or magic-option-group
 catalog, so it does not invent `RentInfo` or option values from those tokens;
 resolving those metadata catalogs is a separate follow-up boundary.
 
-The profile-driven generator (`0x00725FD0`) and named exception generator
-(`0x00726020`) remain explicit unresolved extension points. They are not
-silently approximated by ordinary direct/group rows; until their profile
-records are recovered, the maintained selector executes only the confirmed
-gold, direct, and random-group branches.
+The retained SQL reference contains no `_SupportGoldConfig`, so the
+profile-driven generator (`0x00725FD0`) has no rows and its predicate is false
+for this deployment. The named exception generator (`0x00726020`) is implemented
+for the resulting class-`3/8` path. The profile data itself is no longer an
+unknown: the pinned server
+registers `_REFDROPITEMASSIGN`, `_REFDROPOPTLVLSEL`, and these ten concrete
+class-selection tables:
+
+- `_REFDROPCLASSSEL_EQUIP` and `_REFDROPCLASSSEL_RAREEQUIP`;
+- `_REFDROPCLASSSEL_RECOVER`, `_CURE`, `_AMMO`, and `_SCROLL`;
+- `_REFDROPCLASSSEL_REINFORCE`;
+- `_REFDROPCLASSSEL_ALCHEMY_TABLET`, `_ALCHEMY_MAGICSTONE`, and
+  `_ALCHEMY_ATTRSTONE`.
+
+Their retained CSV exports are present under
+`framework/docs/db/table_data/` with explicit headers. Class-selection rows
+are keyed by monster level and contain `ProbGroupN` columns;
+`_RefDropItemAssign` contains `Service`, `RefItemID`, relative and absolute
+probabilities, assigned group, and drop count; `_RefDropOptLvlSel` contains
+option level, probability, and required online time. These are the missing
+normalized runtime inputs, not speculative profile records.
+
+At image base `0x00401000`, coordinator `0x007245C0` calls
+`0x00725FD0` only when the monster reference has a matching profile. That
+function walks category indices `0..15`, stopping at the already-derived
+inventory cap. Helper `0x00725990` first resolves the category from the
+monster reference's vector rooted at `+0x2A8`; each entry is 32 bytes, with
+the category discriminator at `+0x00` and the selected count range at
+`+0x0C/+0x10`. Only configured categories reach its switch. Recovered
+concrete bodies are category `0` (equipment plus per-entry magic-option
+rolls), `6` (one of four reinforcement-recipe codenames), `10` (assigned
+item selection), and `14` (the separate special producer at `0x00725820`);
+categories `1`, `11`, `12`, and `13` explicitly return without output.
+After this profile pass, `0x007245C0` still runs random-group and direct
+assignments, then cycles the eight generic class selectors through
+`0x00726900` and `0x00726A70`. Implementing this branch therefore requires
+the twelve retained tables plus the reference-item classification/option
+builders; treating it as one extra drop-ratio row would change both output
+families and PRNG consumption.
+
+Migration `000100` and `import-drop-catalog` now provide that lossless
+normalized input. `REF_DROP_CLASS_SELECTION` stores every level/group cell;
+`REF_DROP_ITEM_ASSIGN` preserves source-row identity because the retained file
+contains legitimate duplicate item/group tuples and signed
+`AssignedGroup = -1` sentinels; `REF_DROP_OPT_LEVEL_SELECTION` retains all
+thirteen option rows. Agent startup hydrates these tables into an immutable
+`DropProfileCatalog`, classifying selectable assignments by the retained item
+TypeIDs and rarity. Its assignment primitive mirrors `0x00724120`: source
+rows contribute their `Prob_Relative` weight, one candidate is selected from
+that weighted population, and a second `rand()%100 <= Prob_Absolute` roll is
+inclusive and is consumed even when the absolute value is 100. Class-group
+selection now mirrors `0x006AA6D0`/`0x007244F0`: positive probabilities above
+`0.000001` are accumulated, multiplied by one million and truncated; the
+two-15-bit random value is reduced by `1,000,000 / classMultiplier`, receives
+the native item-factor transform, and lower-bounds that cumulative map to a
+zero-based group. Assignment sentinel `-1` resolves as `ItemClass-1`, while
+an explicit positive group is decremented once, matching `0x006AA810`.
+
+The maintained coordinator now runs random-group assignments, direct
+assignments, and then the recovered repeated generic selector cycle. Gold,
+recovery, cure, reinforcement recipes, alchemy tablets, ammunition/scroll,
+and magic/attribute-stone pairs use the native cap, pass count, class
+multiplier, family choice, country filter, weighted assignment, absolute
+gate, and source drop count before ordinary world materialization. Gold is
+inside that repeated cycle: low drop-class nibble `4`, for example, performs
+five gold/class passes. Equipment and rare-equipment now additionally build
+option level, variance, durability, and magic options through
+`0x00724400`/`0x007276A0` before ordinary world materialization. The retained
+class-`3/8` named exceptions run before random/direct rolls and the generic
+cycle, matching coordinator `0x007245C0`.
+
+The first two equipment builders are now closed. `_RefDropOptLvlSel` stores
+cumulative probabilities: `0x006AA620` converts each probability to a
+million-point integer and stores source `OptLevel+1`; `0x00724400` consumes
+two 15-bit draws, selects the first cumulative threshold, clamps the stored
+level to `1..8`, and returns `0..7`. Base variance dispatch
+`0x00727590` selects six 5-bit fields for armor and eligible shields, seven
+for weapons, and two for accessories. Each field is
+`floor(min(rand()/32767, rand()/32767, rand()/32767) * 31)` through
+`0x00729280`. Non-accessory durability uses field zero to interpolate the
+reference `Dur_L..Dur_U` range; accessories store data value `1`. Agent now
+hydrates the required TypeIDs/durability bounds and emits these base states
+together with the option catalog described below.
+
+`0x007276A0` consumes
+the item-family candidate lists assembled from `magicoptionassign.txt`, magic
+definitions from `magicoption.txt`, including its trailing family/minimum-class
+pairs. Migration `000102_drop_magic_option_catalog` normalizes 537 retained
+assignment entries and 765 applicability entries while extending
+`REF_MAGIC_OPTION` with the native drop weight. `refmagicoptgroup.txt` remains
+the separate named/set-option group catalog, and
+`refmagicoptbyitemoptleveldata.txt` remains the preauthored item-option value
+catalog; neither drives this ordinary equipment-drop branch. Normal equipment has a 30-percent admission
+branch before option-count selection, while rarity-2 equipment bypasses that
+gate. Four independent `rand()%6+1` draws choose the minimum requested option
+count, bounded by the item's `MaxMagicOptCount` and finally by the twelve-slot
+wire limit. Candidate selection (`0x0072F410`) concatenates two 15-bit
+`rand()` results, reduces them modulo one million, and lower-bounds a
+cumulative-weight vector. Candidate eligibility (`0x0072F2D0` / `0x0072FF60`)
+then accepts either an exact item reference or an encoded equipment-family
+record with country and minimum-item-class constraints. The builder rejects
+duplicates against its temporary option list. `MATTR_NOT_REPARABLE` consumes
+the attempted slot without adding a normal magic parameter, which is why the
+attempt count and emitted count can differ. The maintained generator now
+performs these transitions and persists the resulting options with the ground
+item.
+
+The coordinator at `0x007245C0` fixes the generic eight-slot order as gold,
+equipment, recovery, cure, reinforcement, tablet, ammo/scroll, and
+magic/attribute stone. The equipment slot calls `0x00726A70` once: in its
+default path `rand()%1000 == 1` switches that single selection from the normal
+assignment vector to the rarity-2 vector. Normal and rare equipment are not
+independent drop attempts; Agent mirrors this branch before its class roll.
 
 ## Lifecycle
 
@@ -992,6 +1102,45 @@ therefore version-specific generation behavior that precedes the common
 `0x004B7680` materialization path, rather than separate world-object or SQL
 lifecycles.
 
+The four count phases, including defaults consumed before an override, are:
+
+| phase | default | `MOB_RM_ROC` | `MOB_TQ_WHITESNAKE` | `MOB_TK_BONELORD` | monster TypeID4 `8` |
+|---|---:|---:|---:|---:|---:|
+| enhanced generated equipment | `rand()%4+5` | `rand()%31+50` | default | default | `rand()%2+1` |
+| ordinary generated equipment | `rand()%3` | `rand()%11+10` | `rand()%3+1` | `rand()%2` | `0` |
+| one-count random reinforcement recipe | `rand()%3` | `rand()%51+50` | `rand()%3+1` | default | `rand()%2+1` |
+| `ITEM_ETC_SCROLL_RETURN_02` | `rand()%11+10` | `rand()%51+100` | default | default | `0` |
+
+The enhanced pass conditionally attaches `MATTR_NOT_REPARABLE` while below
+the item's `MaxMagicOptCount`, then increases durability by the option's
+percentage. Accessory candidates that fail generation do not consume the
+enhanced attempt (`--i` before the loop increment). The recipe phase chooses
+uniformly among weapon, shield, armor, and accessory `_B` recipes. Agent's
+`NativeDropExceptionPlan` now preserves the exact count and random-draw
+contract. The kill path supplies monster code/TypeID4 from `RefChars`, resolves
+the recipes and return scroll from loaded `RefItems`, reuses the generic
+equipment builder for both equipment phases, applies the retained
+`MATTR_NOT_REPARABLE` option/durability mutation subject to the item's authored
+magic-option cap, and sends every description through the common ground-item
+materializer.
+
+The specialized predicate is a sixteen-vector scan on the monster reference,
+not a global switch: `0x0072DF90` addresses vector `monster+0x2A8+16*index`,
+whose records have stride `0x20`, and matches record byte zero against the
+packed drop-class low nibble. `0x0072DF10` returns that matching record.
+`0x00725FD0` visits all sixteen vector indices while capacity remains. In
+`0x00725990`, selector indices `0`, `6`, `10`, and `14` respectively drive
+generated equipment, fixed reinforcement recipes, a class-selected catalog,
+and return scrolls; indices `1`, `11`, `12`, and `13` are explicit no-ops in
+this binary. The remaining record fields at `+0x0C/+0x10` are inclusive count
+bounds. The executable registers the source as `_SupportGoldConfig`. A
+read-only audit of the retained `SRO_VT_SHARD`, `SRO_VT_ACCOUNT`, and their
+stored-procedure definitions found no such table or procedure. This retained
+vSRO deployment therefore has no authoritative specialized rows:
+`0x0072DEE0` is false and drop classes `3/8` use the named exception generator.
+Agent does not fabricate specialized rows, but now implements that proven
+exception path.
+
 ## 4. Gold
 
 ### Generation, range, and gold-item selection
@@ -1190,6 +1339,7 @@ its SQL execution before the pickup response.
 
   The packet is then dispatched through `0x00484D90`. The same five-byte writer and broadcast sequence appears independently at `0x0052643C` through `0x005264AA`, confirming a reusable pickup-animation layout rather than a one-off COS response artifact. The `0x004D51DE` function later produces `0xB0C5` command responses, so that particular invocation includes COS handling; the binary evidence does not justify calling every invocation a player-only pickup.
 - `0x3015` and `0x304D` occur in the same executable and are the repository's current entity single-spawn and ownership-removal labels. The labels are protocol-corpus names, not proofs of the drop object layout.
+- The final direct-entry update tail is exact. After item virtual `+0x498`, GameServer writer `0x00533F70` emits one byte from its entry-state argument and emits the associated `u32` only when that byte is `5` or `6`. Client wrapper `0x008A6CA0` selects mode `1`, so `0x008A6BD0` calls both `CIItem` initial parser `0x009E1D00` and update parser `0x009E1A30`; the latter consumes that same one-byte/conditional-`u32` grammar. Ordinary ground entry is state `0` and therefore has no following `u32`. Two captured assertion dumps (`2026-07-24 04:16:18` and `04:27:48`) faulted at client assertion `0x00830DDA` with current opcode `0x3015` because the former Agent writer appended an unconditional zero `u32`, leaving four bytes unread. Agent now emits the exact one-byte ordinary tail and retains direct `0x3015` visibility for a single ground item.
 - The generic visibility writer constructs `0x3015` at `0x00533FA6` and passes the target object to virtual `+0x498` in serialization mode `2`. For vtable `0x00AEB2B4`, that slot is `0x0048FB60`. In its mode-`2`/no-context branch, it calls the item-data object's virtual `+0x28` with the output stream and mode `2`, then calls item virtual `+0x494` with the same stream/mode; in its context-bound branch it delegates to the item-data serializer without that item-level follow-up. This proves that the item portion of `0x3015` is data-object polymorphic, with a conditional item-state extension, rather than a fixed packet literal in `0x00533F70`. The recovered mob factory writes a non-null `CGObjMob` source context to item `+0x14C`, so an item serialized before a later `+0x504(0)` clear takes this context-bound branch. The direct factory-to-transition-to-observer edge is now recovered for the seven ground-item families; the exact serializer mode used by a particular branch still follows the context predicate. The `CGItemExpendable +0x494` implementation is `0x0048FC10`: after the data serializer it writes `u32 itemUID` from item `+0x08`, then a helper-produced 14-byte base record derived from the object's placement fields. In this mode-`2`/no-context use it additionally writes `u8 hasOwnershipMarker = (item + 0x150 != 0)`, conditionally writes the raw `u32` marker at `+0x150`, and writes one reference/state byte returned by `0x004909C0`. These fields follow variable item-data content, so this does not establish their absolute offsets in every `0x3015` body or a complete spawn wire layout. Its concrete observer writer owner is the `CMsgBlock` RTTI family: `0x00AF7F90` (`CMsgBlock`), `0x00AF7FB8` (`CMsgBlockObject`), and `0x00AF7FD8` (`CMsgBlockTerrain`) all expose `+0x08 = 0x00534340` and `+0x0C = 0x005344B0`. That method iterates its recipient/object tracking vectors, calls `0x00533E70` in mode `1`, then calls the `0x00533F70` `0x3015` writer for each selected recipient before recording the tracked object. The separate `CWorldLayerObjContainer` RTTI fragment is not the concrete writer owner in this image. This proves the observer-layer entry, polymorphic single-entity serialization, and downstream socket handoff; the selected service identity and complete body grammar remain unresolved.
 - The stock-client object factory and CIItem class link provide a second, independent boundary around the `0x3015` body. `0x008A6BD0` reads the initial `u32` discriminator; ordinary values go through `0x009C1FA0`, whose `0x0093F670` type-word lookup selects `DAT_00EF1C28` when `(typeWord & 0x1c) == 0x0c`. `0x009C1CE0` allocates through the global object manager/class-link allocator and initializes the object with `0x009C1840`, which stores the item reference ID at `+0x21c` and resolves its reference data at `+0x220`/`+0x224`. The CIItem constructor `0x009E1AB0` installs primary vtable `0x00DE317C` and secondary vtable `0x00DE318C`. The `0x3015` dispatcher calls slot `+0x64` on the pointer returned by that class-link path and, for an existing-object update, slot `+0x68`. The vtable layout supplies an important multiple-inheritance alias: secondary vtable `0x00DE318C + 0x64 = 0x00DE31F0`, and `0x00DE31F0` points to `0x009E1D00`; secondary `+0x68 = 0x00DE31F4` points to `0x009E1A30`; primary `0x00DE317C + 0x74` points to the same `0x009E1D00`. The RTTI complete-object locators confirm that the primary table has subobject offset `0`, while the secondary table has subobject offset `0x54` (`0x00E2D0C4` versus `0x00E2D124`), and the class-link template is explicitly `CClassLink<CIGIDObject>`. Thus the `0x3015` `+0x64/+0x68` calls are binary-confirmed as the CIGIDObject-subobject routes into CIItem's initial and update parsers when the class-link result is used in its declared interface form; only the allocator's raw pointer-adjustment instruction is not recovered in the decompilation. `0x009E1A30` reads an additional state byte at item `+0xf4`, and values `5`/`6` read a `u32` at `+0x28c` and call `0x008AF620` modes `6`/`7`. The initial parser reads conditional item-type data, an optional quantity at item `+0x97`, a marker-present-like byte at `+0x95`, a conditional `u32` at `+0x96`, a state byte at `+0x98`, then copies placement fields and invokes world/layer update helpers. It also formats the recovered gold quantity or item name and marker text. The exact conditional predicates and the semantics of `+0x95`, `+0x96`, `+0x98` remain unrecovered; this still does not establish a complete `0x3015` wire grammar. Evidence: `analysis/decompiled/client-3015-handler.asm`, `analysis/decompiled/client-object-factory/009C1FA0_FUN_009c1fa0.c`, `analysis/decompiled/client-item-classlink-impl/009E1D00_FUN_009e1d00.c`, `analysis/decompiled/client-item-parser/009E1A30_FUN_009e1a30.c`, `analysis/decompiled/client-item-classlink-impl/009E1AB0_FUN_009e1ab0.c`, and `analysis/decompiled/client-item-parser/CIItem_vtable_slots.txt`.
 - The `CGItemExpendable` vtable mapping is independently recoverable at `0x00AEB2B4`: `+0x3AC -> 0x00482520` stores the current layer at item `+0x128`; `+0x3B0 -> 0x00485BB0` replaces the dynamic attachment at `+0x12C`; `+0x364 -> 0x0048FB30` is the successful-transfer leave/attachment callback; `+0x494 -> 0x0048FC10` writes the conditional item-state tail; `+0x498 -> 0x0048FB60` is the polymorphic `0x3015` serializer; `+0x4D8 -> 0x0048FC70` is the pickup transfer operation; `+0x4DC -> 0x0048FDF0` is its context path; `+0x4F0 -> 0x0049A9B0` mutates stack count; and `+0x504 -> 0x0048F990` binds or clears source context. The `0x00485BB0` attachment setter first calls the old attachment's virtual `+0x0C(item, newAttachment)` when non-null (the argument is zero on the pickup/removal call), then calls the new attachment's virtual `+0x08(item, oldAttachment, flags)` when non-null, and finally stores the new pointer through item virtual `+0x4AC` (`0x00484040`, item `+0x12C`). The generic transition producer is now identified: destination `CRgnObject +0x18 = 0x00538A00` returns a selected entry whose constructor writes `CMsgBlockObject` vtable `0x00AF7FB8`; therefore the transition setter's new `+0x08` is the concrete CMsgBlockObject enter writer. On the successful pickup transfer, `+0x364 = 0x0048FB30` calls `0x00485150`, which conditionally invokes the old CMsgBlockObject `+0x0C = 0x005344B0 -> 0x00534050 -> 0x3016` and clears the attachment. Reference-threshold expiry reaches `+0x368 = 0x00484CF0`, writes state `3` through `+0x1F0`, and is later removed by the central `0x00417090` path; it does not directly call the `+0x364` leave edge. See `analysis/decompiled/item-vtable/00AEB2B4_CGItemExpendable_slots.txt`, `analysis/decompiled/item-vtable/00485BB0_attachment_setter.asm`, `analysis/decompiled/msgblock-attachment/CMsgBlockObject_region_attachment.txt`, `analysis/decompiled/removal-callback-refs/pickup-expiry-3016-edge.txt`, and `analysis/decompiled/pickup-transfer/expiry-vs-3016-boundary.txt`.

@@ -4,6 +4,20 @@
 target-bound catalog and exits. It is deliberately separate from runtime server
 startup.
 
+Use this command only during an explicit database maintenance window. Back up
+the selected schema first, run one target, and confirm a successful exit before
+running the other target.
+
+From `go-sro/`, the normal Compose commands are:
+
+```text
+docker compose --profile maintenance up --build migrate-account
+docker compose --profile maintenance up --build migrate-shard
+```
+
+Use the native commands below only when the database environment variables are
+already configured in the current shell.
+
 ```powershell
 go run ./cmd/migrate --target=account
 go run ./cmd/migrate --target shard
@@ -25,13 +39,6 @@ Relevant configuration is:
 - shard: `DATABASE_SHARD_DRIVER`, `DB_SHARD_HOST`, `DB_SHARD_PORT`,
   `DB_SHARD_USER`, `DB_SHARD_PW`, `DB_SHARD_DATABASE`, `DB_SHARD_PARAMS`.
 
-For Compose, run one profile-gated job at a time:
-
-```powershell
-docker compose --profile maintenance up --build migrate-account
-docker compose --profile maintenance up --build migrate-shard
-```
-
 The jobs wait for database health but do not start during ordinary
 `docker compose up`. The image tests migration/framework packages while building
 and runs the final binary as UID/GID 65532.
@@ -45,18 +52,16 @@ docker compose --profile maintenance up --build --abort-on-container-exit --exit
 ```
 
 Run the corresponding command with `migrate-shard` for the shard target. The
-current fresh-install snapshot is account `000004` and shard `000053`; existing
+current fresh-install snapshot is account `000004` and shard `000066`; existing
 deployments should apply only the pending embedded files.
 
 ## Operator checklist
 
-1. Stop writes that can touch the selected schema.
-2. Take and verify a backup.
-3. Confirm `SELECT DATABASE()` and inspect the existing ledger.
-4. Review every pending preflight, up and down file.
-5. Run one target and inspect its exit status.
-6. Verify the actual schema, data and migration ledger.
-7. Restore writes only after all three agree.
+1. Stop writes to the selected schema, then take and verify a backup.
+2. Confirm `SELECT DATABASE()` and inspect the existing ledger.
+3. Review every pending preflight, up, and down file.
+4. Run one target and verify its exit status, schema, data, and ledger.
+5. Restore writes only after all checks agree.
 
 ```sql
 SELECT DATABASE();

@@ -137,6 +137,8 @@ After selection, the world bootstrap is the clearest client-confirmed ordering:
 
 The client receives movement and combat updates, mutates client-side world objects/UI, and sends action requests through the same `CMsgStreamBuffer` path. Focused stock-confirmed handlers include movement (`0xB021`, `0xB023`), action/combat (`0xB070`, `0xB071`), item result (`0xB034`, `0xB04C`), quest/dialogue (`0x30D4`, `0x30D5`, `0x3CA2`), chat (`0x3026`), and game-time/control paths. Logout/reset messages include `0xB005`, `0xB006`, and `0x3055`; the exact process-transition effect of every error branch remains to be traced.
 
+Player/object selection is the `0x7045/0xB045` family. The client sender at `0x0078F5F0` writes exactly one `u32 targetUID`; `CNetProcessIn::OnB045` at `0x0088B200` resolves that UID and consumes a runtime-class-specific response tail. The end-to-end right-click/player branch is documented in [player-right-click-target-selection.md](player-right-click-target-selection.md). The similarly named `0x7445/0xB445` pair in preserved eSRO sources is not this binary profile.
+
 The binary-confirmed prerequisite edges are:
 
 ```text

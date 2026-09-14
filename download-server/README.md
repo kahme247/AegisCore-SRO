@@ -6,6 +6,16 @@ database/catalog decisions belong to Gateway and `cmd/patch-admin`; the
 existing launcher owns PK2 import after it downloads and decompresses each
 prepared payload.
 
+This service is optional. Use it only when clients must download an incremental
+patch. A normal Gateway + Agent installation does not require it.
+
+Quick check from `go-sro/` after enabling the `patching` profile:
+
+```text
+docker compose ps download-server
+docker compose logs --tail=200 download-server
+```
+
 Implemented wire flow:
 
 1. Complete the normal Silkroad security and `0x2001` module-identification exchange.

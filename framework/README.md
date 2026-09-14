@@ -3,6 +3,15 @@
 `framework` is the shared runtime used by Gateway, Agent and maintenance tools.
 It remains part of this monorepo rather than a separately versioned dependency.
 
+Use this guide when changing shared Go packages. Server operators normally need
+the [root setup guide](../README.md#first-time-setup), not this reference.
+
+Quick verification from `go-sro/`:
+
+```text
+go test ./framework/...
+```
+
 ## Packages
 
 | Package | Current responsibility |

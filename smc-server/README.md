@@ -6,6 +6,16 @@ management APIs, dashboard aggregation, and security auditing. Its embedded web
 application talks only to SMC Server; browsers never connect directly to MySQL,
 Gateway, Agent, or the private admission endpoint.
 
+SMC Server is optional. Use this guide when enabling the management dashboard;
+it is not required for a normal Gateway + Agent installation.
+
+Quick check from `go-sro/` after enabling the `smc` profile:
+
+```text
+docker compose ps smc-server
+docker compose logs --tail=200 smc-server
+```
+
 The current implementation keeps database views read-only and exposes one
 explicitly audited live control: disconnecting a player through Agent's private
 mTLS management API. It provides:

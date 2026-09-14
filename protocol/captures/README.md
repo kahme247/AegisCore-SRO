@@ -3,6 +3,13 @@
 No stock-client captures are checked in. The `vsro188` profile remains
 `evidence-pending`; inferred packet fields are provisional.
 
+Use this guide only when turning a local packet capture into a sanitized test
+fixture. Never commit raw captures, credentials, account data, chat, character
+names, IP addresses, or proprietary client files.
+
+The shortest safe path is: record provenance, choose the representation,
+sanitize, replay locally, then pass the acceptance gate below.
+
 Sanitized wire evidence becomes the project's highest protocol authority only
 when it is traceable to a client executable whose name, SHA-256, file version,
 locale and Content ID are recorded alongside the matching Data.pk2 identity.

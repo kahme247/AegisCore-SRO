@@ -2,6 +2,12 @@
 
 This is a separate x86 DLL for the pinned vSRO 1.188 client. It is not a replacement for the reference DevKit and it is not copied into the client directory automatically.
 
+Use this tool only when diagnosing a stock-client crash. It is not part of the
+server build or first-time installation, and its output may contain sensitive
+packet data.
+
+## Build and test
+
 The current milestone provides the bounded trace ring and `.actrace` sidecar writer. It has no live hook installed yet, so it cannot affect normal game traffic. The next milestone will connect the ring only to client-verified plaintext packet boundaries.
 
 Build from `go-sro` in an x86 Visual Studio developer shell:

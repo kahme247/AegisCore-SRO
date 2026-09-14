@@ -5,6 +5,11 @@ identity, and SMC client identity. It refuses to overwrite any existing file.
 Generated files belong under ignored `.local/` directories and must never be
 committed or reused as production credentials.
 
+Use this command only to enable the optional SMC management channel in local
+development. A normal Gateway + Agent installation does not need it.
+
+## Generate local certificates
+
 From `go-sro/`:
 
 ```powershell
@@ -21,3 +26,6 @@ Set `AGENT_MANAGEMENT_TLS_SERVER_NAME=agent-server`, enable both management
 flags (`AGENT_MANAGEMENT_ENABLED=1` and `SMC_AGENT_MANAGEMENT_ENABLED=1`), and
 recreate Agent and SMC Server during a maintenance window. The command is for
 local development only; it does not rotate or inspect existing credentials.
+
+For production, issue these identities from an operator-controlled CA and keep
+the SMC and Gateway admission trust chains separate.

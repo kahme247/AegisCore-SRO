@@ -149,7 +149,7 @@ Confirmed anchors useful to implementation are:
 
 | Opcode | Slot | Handler | Confirmed behavior |
 | --- | --- | --- | --- |
-| `0x7045` | `0x00CD3F30` | `0x0050FE50` | teleport request family; exact parsing is covered by the teleport recovery artifacts |
+| `0x7045` | `0x00CD3F30` | `0x0050FE50` | object/player target selection; reads one `u32 targetUID`, resolves the live object, then invokes its selection virtual; see [player-right-click-target-selection.md](player-right-click-target-selection.md) |
 | `0x7046` | `0x00CD3F38` | `0x00510250` | adjacent teleport/dialogue request family |
 | `0x704C` | `0x00CD3F68` | `0x00510980` | combat/action request path used by the recovered combat work |
 | `0x7202` | `0x00CD4D18` | `0x005169D0` | dedicated potion/skill-restoration request; reads `u32,u32,u8` |
@@ -261,7 +261,7 @@ formatted SQL argument.
 | Open market | `_OpenMarket`, `_OpenMarket_Insert`, `_OpenMarket_Update` | `0x004535A0..0x004548E0` |
 | Item exchange completion | `_STRG_MOVEITEM_NEW`, plus conditional `_Char.RemainGold` update | `0x0043FB20` |
 | Fortress/siege | `_SiegeFortress*`, `_AddSiegeFortressObject`, `_UpdateSiegeFortressTaxRatio`, `_SiegeFortressTaxCollect`, `_SiegeFortressHireNPC`, `_SiegeFortressEntryDungeon` | `0x00456EC0`, `0x004CD3F0`, `0x0061E330`, `0x00627DE0..0x00628890` |
-| Trade job | `_AddTrijobReward`, `_DeleteOldTrijobData`, `_InsertCharTrijobSafeTradeData`, `_DeleteCharTrijobSafeTradeData` | `0x00465220..0x00465F20` |
+| Trade job | `_AddTrijobReward`, `_DeleteOldTrijobData`, `_InsertCharTrijobSafeTradeData`, `_DeleteCharTrijobSafeTradeData` | `0x00465220..0x00465F20`; lifecycle/opcodes/structures are documented in [vsro188-job-system.md](vsro188-job-system.md) |
 | Timed jobs | `_TimedJob`, `_TimedJobForPet` deletes | `0x00650AF0`, `0x006514A0`, `0x0065FDC0` |
 | Guild history/memo | `_GPHistory`, `_DeleteGPHistory`, `_Memo_Delete` | `0x005D05E0`, `0x005D70A0` |
 

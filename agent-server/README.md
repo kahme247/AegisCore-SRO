@@ -5,6 +5,17 @@ movement, combat, economy, COS/pet and social handlers. The checked-in
 `vsro188` profile is still `evidence-pending`; implemented behavior has
 automated coverage but is not a claim of complete stock-client compatibility.
 
+Use this guide when Agent fails to start, world data does not load, or gameplay
+configuration must change. For a normal first installation, follow the
+[root setup guide](../README.md#first-time-setup) instead.
+
+Quick check from `go-sro/`:
+
+```text
+docker compose ps agent-server
+docker compose logs --tail=200 agent-server
+```
+
 ## Startup
 
 Agent startup performs these operations in order:
@@ -57,6 +68,8 @@ prepared-cache validation does.
 | `AGENT_TRAFFIC_FILTER_PACKET_LIMIT` | `200` | Physical frames per window |
 | `AGENT_TRAFFIC_FILTER_WINDOW_MS` | `1000` | Traffic-filter window |
 | `AGENT_GIANT_MONSTER_SPAWN_RATIO` | `1000` | One-in-N giant generation ratio; `0` disables runtime giants |
+| `AGENT_TRADE_SAFETY_OPTION` | `0` | Stock safe-trade policy: `0` counted, `1` denied, `2` unlimited |
+| `AGENT_TRADE_SAFETY_NUM` | `8` | Attempt limit used by counted safe trade and `0x34D5` |
 | `AGENT_TIMED_BUFF_DURATION` | `0` | Optional duration override for development timed-buff tests |
 | `AGENT_FEATURE_<NAME>_ENABLED` | `0` | Evidence-mapped optional legacy feature; unavailable features fail startup if enabled |
 | `AGENT_DIAGNOSTICS_ENABLED` | `false` | Enable loopback-only pprof and runtime metrics |
@@ -150,8 +163,9 @@ admission-port fallback.
   COS summon/unsummon, transport and pet state, follower movement, basic COS
   combat and GameReady rehydration.
 - Party lifecycle and matching; persistent guild membership, permissions,
-  notices, SP donation and invitations; academy membership and matching; job
-  enrollment, aliases, ranking and rewards; five-second logout/restart
+  notices, SP donation and invitations; academy membership and matching;
+  binary-backed tri-job enrollment/withdrawal, aliases, online spawn/select
+  state, EXP/level progression, ranking and rewards; five-second logout/restart
   countdown; local, global, party, guild, union, academy and whisper chat;
   character rename; stall acknowledgement and GM commands.
 - In-memory stall host create/update/leave/destroy handling. Customer entry,
@@ -162,6 +176,15 @@ messages are filtered through the enabled rows in `CHAT_ABUSE_FILTER`; the
 Agent loads the database snapshot at startup and refreshes it every minute.
 Global chat does not consume its inventory item, and notice/NPC chat is not
 implemented.
+
+GM chat supports transient monster spawning with
+`.spawn MOB_CODE_NAME [count]`. The count defaults to one and is limited to
+20. Spawned monsters are placed near the GM and do not join a persistent
+respawn area, making the command suitable for combat and drop testing. The
+account must have `SRO_ACCOUNT.USER.IS_GM = 1`, and the player must reconnect
+after that flag changes. The stock client's Shift+`~` cheat console sends chat
+type `7`; Agent routes that channel through the same GM-only authorization and
+accepts its bare `spawn MOB_CODE_NAME [count]` form.
 
 ## World invariants
 
@@ -209,20 +232,10 @@ when the expanded item count is supplied.
 
 ## Persistence and resources
 
-Apply account migrations and shard migrations through `000053` before runtime.
-Shard `000007` is intentionally unresolved. Current paths also depend on
-movement settings (`000021`), rental metadata (`000022`), return city (`000023`),
-progression and mob rates (`000024`-`000025`), quick slots and durable speed
-effects (`000026`-`000027`), MySQL 8.4 compatibility (`000028`-`000029`), Item
-Mall and timed services (`000030`-`000031`), creation policy and regions
-(`000032`-`000036`), Premium activation and character buy-back (`000037`-`000038`),
-experience services and active buffs (`000039`-`000041`), COS/pets (`000042`),
-equipment and avatar systems (`000043`), alchemy references (`000044`), Hwan
-state (`000045`), three-page inventory (`000046`), social systems (`000047`)
-aggregate version/idempotency/outbox foundations (`000048`) and durable outbox
-dispatch leases (`000049`), persistent schedule definitions and run history
-(`000050`), forced guild-rename state (`000051`) and the permanent character
-deletion lifecycle (`000052`) and recovered PK administration state (`000053`).
+Apply the current account catalog and shard migrations through `000102` before
+runtime. Shard `000007` is intentionally absent. See the
+[migration catalog](../db/migrations/README.md#current-catalog) for version
+groups instead of treating this runtime guide as migration history.
 
 The world loader eagerly retains full navmesh maps. Compose documents more than
 5 GiB after world load and applies an 8 GiB Agent memory limit. Prepared navdata

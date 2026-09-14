@@ -90,7 +90,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "15882:15882"
+      - "${AGENT_PUBLIC_PORT:-15882}:15882"
     # This is reachable only by services on the aegiscore network; do not publish
     # the Gateway-to-Agent ticket installation port to the host.
     expose:
@@ -113,6 +113,8 @@ services:
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
       AGENT_GIANT_MONSTER_SPAWN_RATIO: ${AGENT_GIANT_MONSTER_SPAWN_RATIO:-1000}
+      AGENT_TRADE_SAFETY_OPTION: ${AGENT_TRADE_SAFETY_OPTION:-0}
+      AGENT_TRADE_SAFETY_NUM: ${AGENT_TRADE_SAFETY_NUM:-8}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
       AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
       SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
@@ -172,6 +174,7 @@ services:
       # loopback/private Agent endpoint in production. Supply the values from
       # an approved capture and the externally reachable Agent address.
       AGENT_PUBLIC_IP: "${AGENT_PUBLIC_IP:?Set AGENT_PUBLIC_IP to the externally reachable Agent IPv4 address}"
+      AGENT_PORT: "${AGENT_PUBLIC_PORT:-15882}"
       GATEWAY_HOST: gateway-server
       GATEWAY_ENVIRONMENT: "${GATEWAY_ENVIRONMENT:-production}"
       GATEWAY_PROTOCOL_PROFILES: "${GATEWAY_PROTOCOL_PROFILES:-}"

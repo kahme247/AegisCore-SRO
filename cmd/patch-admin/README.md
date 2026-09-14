@@ -5,6 +5,12 @@ DownloadServer path. It never scans
 or watches a directory for publication. An administrator supplies a reviewed
 JSON build specification listing every changed file.
 
+Use this guide only when publishing launcher patches. It is not required to run
+Gateway or Agent. The safe workflow is: scan, review the generated JSON, build,
+stage, test, publish, then verify.
+
+Do not publish an unreviewed directory or build directly on a production host.
+
 Before first use, back up `SRO_ACCOUNT`, stop Gateway writes, and apply account
 migration `000004_patch_release_catalog`. Normal service startup does not run
 migrations.

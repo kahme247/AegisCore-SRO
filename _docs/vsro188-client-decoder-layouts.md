@@ -481,6 +481,17 @@ non-null secondary context, `+0x68`. Therefore `0x3015` is not a
 four-byte-only spawn packet: the object record after that ID remains
 TypeID-dependent.
 
+For `CIItem`, the ordinary single-entry tail is now exact. Initial parser
+`0x009E1D00` consumes the TypeID-dependent item-data prefix, calls base
+placement parser `0x009C3A70` for
+`u32 UID + u16 region + 3*f32 position + u16 heading`, then reads
+`u8 hasMarker`, an optional marker `u32`, and one item-state byte. Because
+`0x008A6CA0` passes mode `1`, dispatcher `0x008A6BD0` immediately invokes
+update parser `0x009E1A30`, which reads exactly one more state byte; only
+values `5` and `6` consume a following `u32`. Ordinary ground entry uses
+state `0`. Leaving an unconditional `u32` after that byte produces four
+unread bytes and reaches the client's deliberate packet assertion.
+
 The group packet sequence is consequently `3017(action,count)`, one or more
 `3019` record chunks, then `3018`; removal uses `3017(action=2,count)` with
 `3019` containing only the `u32` IDs, then `3018`. AegisCore's group writer
