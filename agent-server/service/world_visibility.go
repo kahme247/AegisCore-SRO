@@ -1,6 +1,7 @@
 package service
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -18,6 +19,11 @@ const (
 	VisibilityAdded VisibilityDeltaKind = iota + 1
 	VisibilityRemoved
 )
+
+type visibilityCellKey struct {
+	x int
+	z int
+}
 
 // VisibilityDelta is a caller-owned, UID-only snapshot of one directed
 // visibility change. ObserverUID is the player whose known list changed and
@@ -179,6 +185,7 @@ func (w *WorldService) reconcileObjectVisibilityLocked(object model.ISRObject) {
 		w.mutex.Unlock()
 		return
 	}
+	w.updateVisibilityCellLocked(object, position)
 	for _, regionID := range w.visibilityNeighbourRegionIDsLocked(position.Region.ID) {
 		for _, candidate := range w.visibleObjectsByRegion[regionID] {
 			if player, ok := candidate.(*model.Player); ok && player != nil {
@@ -233,10 +240,10 @@ func (w *WorldService) reconcilePlayerVisibilityLocked(player *model.Player) []V
 	}
 
 	candidates := w.visibilityCandidates(player)
-	deltas := make([]VisibilityDelta, 0, len(candidates)*2)
+	var deltas []VisibilityDelta
 	for _, candidate := range candidates {
 		if other, isPlayer := candidate.(*model.Player); isPlayer {
-			deltas = append(deltas, w.reconcilePlayerPair(player, other)...)
+			deltas = w.reconcilePlayerPairInto(deltas, player, other)
 			continue
 		}
 		w.reconcilePlayerObject(player, candidate)
@@ -255,23 +262,48 @@ func (w *WorldService) visibilityCandidates(player *model.Player) []model.ISRObj
 
 	playerUID := player.GetUniqueID()
 	playerPosition := player.GetNavmeshPosition()
-	candidatesByUID := make(map[uint32]model.ISRObject)
+	if w.visibilityCandidatesByUID == nil {
+		w.visibilityCandidatesByUID = make(map[uint32]model.ISRObject)
+	}
+	candidatesByUID := w.visibilityCandidatesByUID
+	for uid := range candidatesByUID {
+		delete(candidatesByUID, uid)
+	}
 
 	w.mutex.Lock()
 	if w.playersByUniqueId[playerUID] != player || w.visibleObjects[playerUID] != player {
 		w.mutex.Unlock()
 		return nil
 	}
-	for _, regionID := range w.visibilityNeighbourRegionIDsLocked(playerPosition.Region.ID) {
-		for _, object := range w.visibleObjectsByRegion[regionID] {
-			if object == nil {
-				continue
+	w.updateVisibilityCellLocked(player, playerPosition)
+	cell, validCell := visibilityCellForPosition(playerPosition)
+	if validCell {
+		for x := cell.x - 1; x <= cell.x+1; x++ {
+			for z := cell.z - 1; z <= cell.z+1; z++ {
+				for _, object := range w.visibilityObjectsByCell[visibilityCellKey{x: x, z: z}] {
+					if object == nil {
+						continue
+					}
+					otherUID := object.GetUniqueID()
+					if otherUID == 0 || otherUID == playerUID {
+						continue
+					}
+					candidatesByUID[otherUID] = object
+				}
 			}
-			otherUID := object.GetUniqueID()
-			if otherUID == 0 || otherUID == playerUID {
-				continue
+		}
+	} else {
+		for _, regionID := range w.visibilityNeighbourRegionIDsLocked(playerPosition.Region.ID) {
+			for _, object := range w.visibleObjectsByRegion[regionID] {
+				if object == nil {
+					continue
+				}
+				otherUID := object.GetUniqueID()
+				if otherUID == 0 || otherUID == playerUID {
+					continue
+				}
+				candidatesByUID[otherUID] = object
 			}
-			candidatesByUID[otherUID] = object
 		}
 	}
 	w.mutex.Unlock()
@@ -280,7 +312,17 @@ func (w *WorldService) visibilityCandidates(player *model.Player) []model.ISRObj
 	// it is still in the current known list. Include that bounded per-player
 	// set so one movement event produces the corresponding reciprocal removal.
 	if knownList := player.GetKnownObjectList(); knownList != nil {
-		for _, object := range knownList.GetKnownObjects() {
+		w.visibilityKnownObjects = w.visibilityKnownObjects[:0]
+		if appender, ok := knownList.(interface {
+			AppendKnownObjects([]model.ISRObject) []model.ISRObject
+		}); ok {
+			w.visibilityKnownObjects = appender.AppendKnownObjects(w.visibilityKnownObjects)
+		} else {
+			for _, object := range knownList.GetKnownObjects() {
+				w.visibilityKnownObjects = append(w.visibilityKnownObjects, object)
+			}
+		}
+		for _, object := range w.visibilityKnownObjects {
 			if object == nil {
 				continue
 			}
@@ -292,16 +334,99 @@ func (w *WorldService) visibilityCandidates(player *model.Player) []model.ISRObj
 		}
 	}
 
-	ids := make([]uint32, 0, len(candidatesByUID))
+	w.visibilityCandidateIDs = w.visibilityCandidateIDs[:0]
+	ids := w.visibilityCandidateIDs
 	for uid := range candidatesByUID {
 		ids = append(ids, uid)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	candidates := make([]model.ISRObject, 0, len(ids))
+	w.visibilityCandidateIDs = ids
+	w.visibilityCandidateObjects = w.visibilityCandidateObjects[:0]
+	candidates := w.visibilityCandidateObjects
 	for _, uid := range ids {
 		candidates = append(candidates, candidatesByUID[uid])
 	}
+	w.visibilityCandidateObjects = candidates
 	return candidates
+}
+
+func visibilityCellForPosition(position navmeshv2.RtNavmeshPosition) (visibilityCellKey, bool) {
+	if position.Offset == nil {
+		return visibilityCellKey{}, false
+	}
+	x := float64(float32(position.Region.X)*navmeshv2.RegionWidth + position.Offset.X)
+	z := float64(float32(position.Region.Y)*navmeshv2.RegionHeight + position.Offset.Z)
+	return visibilityCellKey{
+		x: int(math.Floor(x / float64(visibilityExitRange))),
+		z: int(math.Floor(z / float64(visibilityExitRange))),
+	}, true
+}
+
+// updateVisibilityCellLocked keeps the coarse normal-world spatial index in
+// sync. The cell width equals the visibility exit range, so only the 3x3 cell
+// neighbourhood can contain a player that should remain visible.
+// The caller holds w.mutex.
+func (w *WorldService) updateVisibilityCellLocked(object model.ISRObject, position navmeshv2.RtNavmeshPosition) {
+	if w == nil || object == nil {
+		return
+	}
+	if w.visibilityObjectsByCell == nil {
+		w.visibilityObjectsByCell = make(map[visibilityCellKey][]model.ISRObject)
+		w.visibilityCellByUID = make(map[uint32]visibilityCellKey)
+		for uid, visible := range w.visibleObjects {
+			if visible == nil {
+				continue
+			}
+			cell, ok := visibilityCellForPosition(visible.GetNavmeshPosition())
+			if !ok {
+				continue
+			}
+			w.visibilityObjectsByCell[cell] = append(w.visibilityObjectsByCell[cell], visible)
+			w.visibilityCellByUID[uid] = cell
+		}
+	}
+	uid := object.GetUniqueID()
+	cell, ok := visibilityCellForPosition(position)
+	if !ok || uid == 0 {
+		return
+	}
+	if previous, exists := w.visibilityCellByUID[uid]; exists {
+		if previous == cell {
+			return
+		}
+		objects := w.visibilityObjectsByCell[previous]
+		for index, candidate := range objects {
+			if candidate == object {
+				objects[index] = objects[len(objects)-1]
+				w.visibilityObjectsByCell[previous] = objects[:len(objects)-1]
+				break
+			}
+		}
+	}
+	w.visibilityObjectsByCell[cell] = append(w.visibilityObjectsByCell[cell], object)
+	w.visibilityCellByUID[uid] = cell
+}
+
+// removeVisibilityCellLocked removes terminal membership from the coarse
+// spatial index. The caller holds w.mutex.
+func (w *WorldService) removeVisibilityCellLocked(uid uint32) {
+	if w == nil || w.visibilityCellByUID == nil {
+		return
+	}
+	cell, exists := w.visibilityCellByUID[uid]
+	if !exists {
+		return
+	}
+	target := w.visibleObjects[uid]
+	objects := w.visibilityObjectsByCell[cell]
+	for index, object := range objects {
+		if object == target {
+			objects[index] = objects[len(objects)-1]
+			w.visibilityObjectsByCell[cell] = objects[:len(objects)-1]
+			break
+		}
+	}
+	delete(w.visibilityCellByUID, uid)
 }
 
 // reconcileVisibleObject queues a newly registered NPC/item for every active
@@ -393,8 +518,12 @@ func (w *WorldService) visibilityNeighbourRegionIDsLocked(regionID int16) []int1
 }
 
 func (w *WorldService) reconcilePlayerPair(player, other *model.Player) []VisibilityDelta {
+	return w.reconcilePlayerPairInto(nil, player, other)
+}
+
+func (w *WorldService) reconcilePlayerPairInto(deltas []VisibilityDelta, player, other *model.Player) []VisibilityDelta {
 	if player == nil || other == nil || player == other {
-		return nil
+		return deltas
 	}
 
 	playerList := player.GetKnownObjectList()
@@ -408,7 +537,6 @@ func (w *WorldService) reconcilePlayerPair(player, other *model.Player) []Visibi
 		visibilityObserverEligible(player) && visibilityObserverEligible(other) &&
 		w.playersAreWithinVisibilityRange(player, other, rangeLimit)
 
-	deltas := make([]VisibilityDelta, 0, 2)
 	if inRange {
 		if w.playerCanSee(player, other) && playerList.AddObject(other) {
 			deltas = append(deltas, VisibilityDelta{ObserverUID: player.GetUniqueID(), SubjectUID: other.GetUniqueID(), Kind: VisibilityAdded})
@@ -469,12 +597,14 @@ func (w *WorldService) playerCanSee(observer, subject *model.Player) bool {
 }
 
 func (w *WorldService) playersAreWithinVisibilityRange(first, second *model.Player, rangeLimit float32) bool {
-	firstPosition := first.GetNavmeshPosition()
-	secondPosition := second.GetNavmeshPosition()
-	if firstPosition.Offset == nil || secondPosition.Offset == nil {
+	firstX, firstZ, firstOK := first.NavmeshHorizontalCoordinates()
+	secondX, secondZ, secondOK := second.NavmeshHorizontalCoordinates()
+	if !firstOK || !secondOK {
 		return false
 	}
-	return navmeshv2.HorizontalDistance(firstPosition, secondPosition) <= rangeLimit
+	deltaX := firstX - secondX
+	deltaZ := firstZ - secondZ
+	return deltaX*deltaX+deltaZ*deltaZ <= rangeLimit*rangeLimit
 }
 
 func sortVisibilityDeltas(deltas []VisibilityDelta) {

@@ -691,7 +691,7 @@ func (n *NPC) SendToKnown(packet *network.Packet) {
 		if knownList == nil || !knownList.ClientKnows(n.GetUniqueID()) {
 			continue
 		}
-		_ = player.GetSession().Send(*packet)
+		_ = player.GetSession().TrySend(*packet)
 	}
 }
 

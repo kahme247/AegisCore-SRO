@@ -241,6 +241,54 @@ func TestWorldVisibilityHysteresisPreventsBoundaryFlapping(t *testing.T) {
 	}
 }
 
+func TestWorldVisibilitySpatialCellTracksMovementAndDisconnect(t *testing.T) {
+	regionID := int16(25000)
+	alice := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	bob := newVisibilityTestPlayer(2, "Bob", visibilityTestPosition(regionID, 140, 100))
+	world := newVisibilityTestWorld(t, alice, bob)
+	alice.SetLifeState(model.Alive)
+	bob.SetLifeState(model.Alive)
+	world.ReconcileCharacterVisibility(bob)
+
+	world.mutex.Lock()
+	oldCell, indexed := world.visibilityCellByUID[bob.GetUniqueID()]
+	world.mutex.Unlock()
+	if !indexed {
+		t.Fatal("player was not entered into visibility cell index")
+	}
+
+	bob.SetNavmeshPosition(visibilityTestPosition(regionID, 900, 100))
+	world.ReconcileCharacterVisibility(bob)
+	world.mutex.Lock()
+	newCell := world.visibilityCellByUID[bob.GetUniqueID()]
+	oldObjects := append([]model.ISRObject(nil), world.visibilityObjectsByCell[oldCell]...)
+	newObjects := append([]model.ISRObject(nil), world.visibilityObjectsByCell[newCell]...)
+	world.mutex.Unlock()
+	if newCell == oldCell {
+		t.Fatalf("movement retained old visibility cell %+v", oldCell)
+	}
+	for _, object := range oldObjects {
+		if object == bob {
+			t.Fatal("moving player remained in old visibility cell")
+		}
+	}
+	found := false
+	for _, object := range newObjects {
+		found = found || object == bob
+	}
+	if !found {
+		t.Fatal("moving player was not added to new visibility cell")
+	}
+
+	world.PlayerDisconnectedAfterSave(bob.GetUniqueID(), bob.CharName)
+	world.mutex.Lock()
+	_, indexed = world.visibilityCellByUID[bob.GetUniqueID()]
+	world.mutex.Unlock()
+	if indexed {
+		t.Fatal("disconnected player remained in visibility cell index")
+	}
+}
+
 func TestWorldVisibilityReconcileEmitsNoDuplicateDeltas(t *testing.T) {
 	regionID := int16(25000)
 	alice := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))

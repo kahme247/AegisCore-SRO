@@ -12,6 +12,10 @@ import (
 )
 
 const (
+	// DefaultPositionPersistenceWorkers bounds concurrent checkpoint writes.
+	// Forced player and shutdown flushes retain their synchronous semantics.
+	DefaultPositionPersistenceWorkers = 4
+
 	// DefaultPositionPersistenceMaxPending bounds the number of distinct players
 	// whose most recent position is waiting to be saved. A player may update an
 	// existing pending entry without consuming another slot.
@@ -93,6 +97,7 @@ func (databaseCharacterPositionRepository) UpdateCharacterPosition(characterID i
 // tighter limits.
 type PositionPersistenceOptions struct {
 	MaxPending          int
+	Workers             int
 	RetryInitialBackoff time.Duration
 	RetryMaxBackoff     time.Duration
 
@@ -142,6 +147,7 @@ type PositionPersistenceService struct {
 	lastCheckpoint     time.Time
 
 	maxPending          int
+	workers             int
 	retryInitialBackoff time.Duration
 	retryMaxBackoff     time.Duration
 	now                 func() time.Time
@@ -171,6 +177,12 @@ func NewPositionPersistenceServiceWithOptions(repository CharacterPositionReposi
 	if options.MaxPending <= 0 {
 		options.MaxPending = DefaultPositionPersistenceMaxPending
 	}
+	if options.Workers <= 0 {
+		options.Workers = DefaultPositionPersistenceWorkers
+	}
+	if options.Workers > options.MaxPending {
+		options.Workers = options.MaxPending
+	}
 	if options.RetryInitialBackoff <= 0 {
 		options.RetryInitialBackoff = DefaultPositionPersistenceRetryInitialBackoff
 	}
@@ -190,6 +202,7 @@ func NewPositionPersistenceServiceWithOptions(repository CharacterPositionReposi
 		checkpointInterval:  checkpointInterval,
 		lastCheckpoint:      options.Now(),
 		maxPending:          options.MaxPending,
+		workers:             options.Workers,
 		retryInitialBackoff: options.RetryInitialBackoff,
 		retryMaxBackoff:     options.RetryMaxBackoff,
 		now:                 options.Now,
@@ -246,8 +259,10 @@ func (p *PositionPersistenceService) TryMarkDirty(player *model.Player) error {
 	return nil
 }
 
-// FlushDue checkpoints snapshots whose retry deadline has elapsed. It does
-// not block the simulation waiting for another caller's in-flight write.
+// FlushDue claims snapshots whose retry deadline has elapsed and dispatches
+// them to a bounded set of background workers. Database latency therefore
+// does not block the world tick. A snapshot remains marked in-flight until its
+// write completes, preserving per-player ordering with forced flushes.
 func (p *PositionPersistenceService) FlushDue(now time.Time) {
 	p.mutex.Lock()
 	if now.Sub(p.lastCheckpoint) < p.checkpointInterval {
@@ -258,8 +273,58 @@ func (p *PositionPersistenceService) FlushDue(now time.Time) {
 	snapshots := p.claimDueLocked(now)
 	p.mutex.Unlock()
 
+	if len(snapshots) == 0 {
+		return
+	}
+	go p.flushDueBatch(snapshots)
+}
+
+func (p *PositionPersistenceService) flushDueBatch(snapshots []dirtyPosition) {
+	workerCount := min(p.workers, len(snapshots))
+	work := make(chan dirtyPosition)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for snapshot := range work {
+				_ = p.flushClaimedSnapshot(context.Background(), snapshot)
+			}
+		}()
+	}
 	for _, snapshot := range snapshots {
-		_ = p.flushClaimedSnapshot(context.Background(), snapshot)
+		work <- snapshot
+	}
+	close(work)
+	workers.Wait()
+}
+
+// WaitForIdle waits for background checkpoint writes that have already been
+// claimed. It does not flush queued or retry-delayed snapshots. Tests,
+// diagnostics, and benchmarks can use it when they need a settled view;
+// production shutdown should continue to use Drain.
+func (p *PositionPersistenceService) WaitForIdle(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		p.mutex.Lock()
+		var waitFor <-chan struct{}
+		for _, snapshot := range p.dirty {
+			if snapshot.flushing {
+				waitFor = snapshot.flushDone
+				break
+			}
+		}
+		p.mutex.Unlock()
+		if waitFor == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-waitFor:
+		}
 	}
 }
 

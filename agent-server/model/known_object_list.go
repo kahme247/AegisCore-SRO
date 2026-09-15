@@ -58,6 +58,21 @@ func (k *KnownObjectList) GetKnownObjects() map[uint32]ISRObject {
 	return objects
 }
 
+// AppendKnownObjects appends a locked snapshot to caller-owned storage. Hot
+// visibility paths use it to reuse buffers without exposing the authoritative
+// map; GetKnownObjects remains available when a detached map is required.
+func (k *KnownObjectList) AppendKnownObjects(destination []ISRObject) []ISRObject {
+	if k == nil {
+		return destination
+	}
+	k.mutex.Lock()
+	defer k.mutex.Unlock()
+	for _, object := range k.KnownObjects {
+		destination = append(destination, object)
+	}
+	return destination
+}
+
 func (k *KnownObjectList) Knows(object ISRObject) bool {
 	k.mutex.Lock()
 	defer k.mutex.Unlock()

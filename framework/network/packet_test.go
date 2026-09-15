@@ -955,6 +955,22 @@ func TestPacketWriterGrowthKeepsHeaderAndPayloadInOneBuffer(t *testing.T) {
 	}
 }
 
+func TestNewServerPacketUsesCompactBufferAndGrowsOnDemand(t *testing.T) {
+	p := NewServerPacket(0xB021)
+	if got := cap(p.Buffer); got != initialPacketBufferSize {
+		t.Fatalf("initial packet capacity = %d, want %d", got, initialPacketBufferSize)
+	}
+	if err := p.WriteBytes(make([]byte, initialPacketBufferSize)); err != nil {
+		t.Fatalf("WriteBytes() error = %v", err)
+	}
+	if cap(p.Buffer) <= initialPacketBufferSize {
+		t.Fatalf("packet capacity did not grow: %d", cap(p.Buffer))
+	}
+	if got := len(p.Payload()); got != initialPacketBufferSize {
+		t.Fatalf("payload length = %d, want %d", got, initialPacketBufferSize)
+	}
+}
+
 func TestPacketMarshalBinaryRejectsPayloadOver15BitLimit(t *testing.T) {
 	p := NewServerPacket(0xA100)
 	if err := p.WriteBytes(make([]byte, DefaultMaxFramePayload+1)); err != nil {

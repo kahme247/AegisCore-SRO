@@ -96,6 +96,38 @@ type contextBlockingPositionRepository struct {
 	started chan struct{}
 }
 
+type boundedWorkerPositionRepository struct {
+	started chan struct{}
+	release chan struct{}
+
+	mutex       sync.Mutex
+	inFlight    int
+	maxInFlight int
+	completed   int
+}
+
+func (r *boundedWorkerPositionRepository) UpdateCharacterPosition(int, int16, float32, float32, float32) error {
+	r.mutex.Lock()
+	r.inFlight++
+	if r.inFlight > r.maxInFlight {
+		r.maxInFlight = r.inFlight
+	}
+	r.mutex.Unlock()
+	r.started <- struct{}{}
+	<-r.release
+	r.mutex.Lock()
+	r.inFlight--
+	r.completed++
+	r.mutex.Unlock()
+	return nil
+}
+
+func (r *boundedWorkerPositionRepository) results() (maxInFlight, completed int) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.maxInFlight, r.completed
+}
+
 func (r *contextBlockingPositionRepository) UpdateCharacterPosition(int, int16, float32, float32, float32) error {
 	return errors.New("legacy write path must not be used")
 }
@@ -144,6 +176,15 @@ func persistenceTestPlayer(uid uint32, characterID int, x float32) *model.Player
 				Offset: math32.NewVector3(x, 5, 7),
 			},
 		},
+	}
+}
+
+func waitForPositionPersistenceIdle(t *testing.T, service *PositionPersistenceService) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := service.WaitForIdle(ctx); err != nil {
+		t.Fatalf("wait for position persistence: %v", err)
 	}
 }
 
@@ -213,12 +254,52 @@ func TestPositionPersistenceCheckpointInterval(t *testing.T) {
 	service.lastCheckpoint = time.Unix(100, 0)
 	service.MarkDirty(persistenceTestPlayer(9, 101, 40))
 	service.FlushDue(time.Unix(129, 0))
+	waitForPositionPersistenceIdle(t, service)
 	if repository.calls != 0 {
 		t.Fatalf("checkpoint flushed early: %d writes", repository.calls)
 	}
 	service.FlushDue(time.Unix(130, 0))
+	waitForPositionPersistenceIdle(t, service)
 	if repository.calls != 1 || len(service.dirty) != 0 {
 		t.Fatalf("checkpoint did not flush once: writes=%d dirty=%d", repository.calls, len(service.dirty))
+	}
+}
+
+func TestPositionPersistenceFlushDueUsesBoundedBackgroundWorkers(t *testing.T) {
+	repository := &boundedWorkerPositionRepository{
+		started: make(chan struct{}, 5),
+		release: make(chan struct{}),
+	}
+	service := NewPositionPersistenceServiceWithOptions(repository, time.Nanosecond, PositionPersistenceOptions{
+		MaxPending: 5,
+		Workers:    2,
+	})
+	for player := 1; player <= 5; player++ {
+		service.MarkDirty(persistenceTestPlayer(uint32(player), player, float32(player)))
+	}
+
+	service.FlushDue(time.Now().Add(time.Second))
+	for worker := 0; worker < 2; worker++ {
+		select {
+		case <-repository.started:
+		case <-time.After(time.Second):
+			t.Fatal("background checkpoint worker did not start")
+		}
+	}
+	select {
+	case <-repository.started:
+		t.Fatal("checkpoint batch exceeded configured worker limit")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(repository.release)
+	waitForPositionPersistenceIdle(t, service)
+	maxInFlight, completed := repository.results()
+	if maxInFlight != 2 || completed != 5 {
+		t.Fatalf("background flush max concurrency=%d completed=%d, want 2 and 5", maxInFlight, completed)
+	}
+	if stats := service.Stats(); stats.Pending != 0 || stats.InFlight != 0 || stats.FlushSucceeded != 5 {
+		t.Fatalf("background flush did not settle: %+v", stats)
 	}
 }
 
@@ -240,6 +321,7 @@ func TestPositionPersistenceRetriesWithBoundedBackoff(t *testing.T) {
 	service.MarkDirty(persistenceTestPlayer(11, 111, 10))
 
 	service.FlushDue(now)
+	waitForPositionPersistenceIdle(t, service)
 	if got := repository.callCount(); got != 1 {
 		t.Fatalf("first checkpoint calls=%d, want 1", got)
 	}
@@ -256,12 +338,14 @@ func TestPositionPersistenceRetriesWithBoundedBackoff(t *testing.T) {
 
 	now = start.Add(500 * time.Millisecond)
 	service.FlushDue(now)
+	waitForPositionPersistenceIdle(t, service)
 	if got := repository.callCount(); got != 1 {
 		t.Fatalf("retry ran before initial backoff: calls=%d", got)
 	}
 
 	now = start.Add(time.Second)
 	service.FlushDue(now)
+	waitForPositionPersistenceIdle(t, service)
 	if got := repository.callCount(); got != 2 {
 		t.Fatalf("first retry calls=%d, want 2", got)
 	}
@@ -274,12 +358,14 @@ func TestPositionPersistenceRetriesWithBoundedBackoff(t *testing.T) {
 
 	now = start.Add(2 * time.Second)
 	service.FlushDue(now)
+	waitForPositionPersistenceIdle(t, service)
 	if got := repository.callCount(); got != 2 {
 		t.Fatalf("exponential retry ran early: calls=%d", got)
 	}
 
 	now = start.Add(3 * time.Second)
 	service.FlushDue(now)
+	waitForPositionPersistenceIdle(t, service)
 	stats = service.Stats()
 	if got := repository.callCount(); got != 3 {
 		t.Fatalf("second retry calls=%d, want 3", got)

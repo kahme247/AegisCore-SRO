@@ -80,5 +80,6 @@ func (i worldIndex) addPlayer(player *model.Player) error {
 	i.world.playersByUniqueId[uid] = player
 	i.world.playersByCharName[player.CharName] = player
 	i.world.playersByCharacterID[player.ID] = player
+	i.world.updateVisibilityCellLocked(player, player.GetNavmeshPosition())
 	return nil
 }

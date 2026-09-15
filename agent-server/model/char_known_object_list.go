@@ -26,8 +26,8 @@ type CharKnownObjectList struct {
 func (k *CharKnownObjectList) AddObject(object ISRObject) bool {
 	k.mutex.Lock()
 	defer k.mutex.Unlock()
-	logrus.Debugf("adding object %d to CharKnownObjectList with type %s", object.GetUniqueID(), object.GetType())
 	if k.KnownObjectList.AddObject(object) {
+		logrus.Debugf("adding object %d to CharKnownObjectList with type %s", object.GetUniqueID(), object.GetType())
 		uid := object.GetUniqueID()
 		if _, exists := k.ObjectsToDespawn[uid]; exists {
 			// The removal was not delivered yet, so the client still knows this
@@ -49,8 +49,8 @@ func (k *CharKnownObjectList) AddObject(object ISRObject) bool {
 func (k *CharKnownObjectList) RemoveObject(object ISRObject) bool {
 	k.mutex.Lock()
 	defer k.mutex.Unlock()
-	logrus.Debugf("removing object %d from CharKnownObjectList with type %s", object.GetUniqueID(), object.GetType())
 	if k.KnownObjectList.RemoveObject(object) {
+		logrus.Debugf("removing object %d from CharKnownObjectList with type %s", object.GetUniqueID(), object.GetType())
 		uid := object.GetUniqueID()
 		if _, exists := k.ObjectsToSpawn[uid]; exists {
 			// The spawn was never delivered, so the client must not receive a

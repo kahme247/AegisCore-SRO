@@ -73,17 +73,23 @@ type WorldService struct {
 	// world membership mutex: known-list operations can acquire their own
 	// locks, so they must run after the membership snapshot is taken without
 	// blocking movement, admission, or shutdown from acquiring w.mutex.
-	visibilityMutex          sync.Mutex
-	loader2                  *navmeshv2.Loader
-	navmeshGobPath           string
-	positionPersistence      *PositionPersistenceService
-	positionCheckpoint       time.Duration
-	regionCatalog            model.GameServerRegionRepository
-	spawnCatalog             model.ContinentSpawnRepository
-	teleportGateCatalog      model.TeleportGateRepository
-	gameplayRates            interface{ Current() model.GameplayRates }
-	referenceData            *model.ReferenceDataCatalog
-	mountedTransportResolver func(*model.Player) (*model.COS, bool)
+	visibilityMutex            sync.Mutex
+	visibilityCandidatesByUID  map[uint32]model.ISRObject
+	visibilityCandidateIDs     []uint32
+	visibilityCandidateObjects []model.ISRObject
+	visibilityKnownObjects     []model.ISRObject
+	visibilityObjectsByCell    map[visibilityCellKey][]model.ISRObject
+	visibilityCellByUID        map[uint32]visibilityCellKey
+	loader2                    *navmeshv2.Loader
+	navmeshGobPath             string
+	positionPersistence        *PositionPersistenceService
+	positionCheckpoint         time.Duration
+	regionCatalog              model.GameServerRegionRepository
+	spawnCatalog               model.ContinentSpawnRepository
+	teleportGateCatalog        model.TeleportGateRepository
+	gameplayRates              interface{ Current() model.GameplayRates }
+	referenceData              *model.ReferenceDataCatalog
+	mountedTransportResolver   func(*model.Player) (*model.COS, bool)
 }
 
 // ConfigureMountedTransportResolver connects world movement to the COS
@@ -173,17 +179,19 @@ func GetWorldServiceInstance() *WorldService {
 	worldServiceOnce.Do(func() {
 		checkpointSeconds := viper.GetInt(config.PositionCheckpointSeconds)
 		worldServiceInstance = &WorldService{
-			visibleObjects:         make(map[uint32]model.ISRObject),
-			playersByUniqueId:      make(map[uint32]*model.Player),
-			playersByCharName:      make(map[string]*model.Player),
-			playersByCharacterID:   make(map[int]*model.Player),
-			npcsByUniqueId:         make(map[uint32]*model.NPC),
-			pets:                   make(map[uint32]model.ISRObject),
-			regions:                make(map[int16]*navmeshv2.RtNavmeshTerrain),
-			regionOwners:           make(map[int16]string),
-			movingObjects:          make(map[uint32]model.ICharacter),
-			visibleObjectsByRegion: make(map[int16][]model.ISRObject),
-			spawns:                 make(map[int16][]*model.SpawnArea),
+			visibleObjects:          make(map[uint32]model.ISRObject),
+			playersByUniqueId:       make(map[uint32]*model.Player),
+			playersByCharName:       make(map[string]*model.Player),
+			playersByCharacterID:    make(map[int]*model.Player),
+			npcsByUniqueId:          make(map[uint32]*model.NPC),
+			pets:                    make(map[uint32]model.ISRObject),
+			regions:                 make(map[int16]*navmeshv2.RtNavmeshTerrain),
+			regionOwners:            make(map[int16]string),
+			movingObjects:           make(map[uint32]model.ICharacter),
+			visibleObjectsByRegion:  make(map[int16][]model.ISRObject),
+			visibilityObjectsByCell: make(map[visibilityCellKey][]model.ISRObject),
+			visibilityCellByUID:     make(map[uint32]visibilityCellKey),
+			spawns:                  make(map[int16][]*model.SpawnArea),
 			// UniqueID 0 is reserved as the unauthenticated/no-player sentinel in
 			// session cleanup and protocol packets. Never allocate it to a world
 			// player.
@@ -297,7 +305,9 @@ func (w *WorldService) AddVisibleObject(o model.ISRObject) {
 	}
 	w.visibleObjects[uid] = o
 	o.SetUniqueID(uid)
-	w.visibleObjectsByRegion[o.GetNavmeshPosition().Region.ID] = append(w.visibleObjectsByRegion[o.GetNavmeshPosition().Region.ID], o)
+	position := o.GetNavmeshPosition()
+	w.visibleObjectsByRegion[position.Region.ID] = append(w.visibleObjectsByRegion[position.Region.ID], o)
+	w.updateVisibilityCellLocked(o, position)
 	if npc, ok := o.(*model.NPC); ok {
 		w.npcsByUniqueId[uid] = npc
 	}
@@ -332,6 +342,7 @@ func (w *WorldService) RemoveVisibleObject(object model.ISRObject) {
 		}
 		w.visibleObjectsByRegion[regionID] = filtered
 	}
+	w.removeVisibilityCellLocked(uid)
 	delete(w.visibleObjects, uid)
 	delete(w.npcsByUniqueId, uid)
 	delete(w.movingObjects, uid)
@@ -388,6 +399,7 @@ func (w *WorldService) playerDisconnected(uid uint32, _ string, checkpointPositi
 			w.visibleObjectsByRegion[regionID] = filtered
 		}
 	}
+	w.removeVisibilityCellLocked(uid)
 	delete(w.visibleObjects, uid)
 	delete(w.playersByUniqueId, uid)
 	if player != nil {
@@ -1414,15 +1426,14 @@ func (w *WorldService) Broadcast(packet network.Packet) {
 	}
 	w.mutex.Unlock()
 
-	// Sender.Send can wait for a slow socket. The world mutex protects only the
-	// membership index, never network I/O; a disconnect or movement update may
-	// therefore progress while this broadcast is still draining.
+	// Broadcast traffic is non-critical and uses each session's bounded queue so
+	// one slow socket cannot stall the world caller.
 	for _, player := range players {
 		if player == nil {
 			continue
 		}
 		if session := player.GetSession(); session != nil {
-			_ = session.Send(packet)
+			_ = session.TrySend(packet)
 		}
 	}
 }

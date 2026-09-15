@@ -30,10 +30,12 @@ func (pos RtNavmeshPosition) GetGlobalCoordinates() *math32.Vector3 {
 // melee reach are calculated from region X/Z plus local X/Z; terrain height
 // must not make two visually adjacent entities appear out of range.
 func HorizontalDistance(from, to RtNavmeshPosition) float32 {
-	fromGlobal := from.GetGlobalCoordinates()
-	toGlobal := to.GetGlobalCoordinates()
-	dx := fromGlobal.X - toGlobal.X
-	dz := fromGlobal.Z - toGlobal.Z
+	fromX := float32(from.Region.X)*RegionWidth + from.Offset.X
+	fromZ := float32(from.Region.Y)*RegionHeight + from.Offset.Z
+	toX := float32(to.Region.X)*RegionWidth + to.Offset.X
+	toZ := float32(to.Region.Y)*RegionHeight + to.Offset.Z
+	dx := fromX - toX
+	dz := fromZ - toZ
 	return math32.Sqrt(dx*dx + dz*dz)
 }
 

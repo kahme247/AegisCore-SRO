@@ -42,6 +42,25 @@ func TestMovementGenerationRejectsStaleCommit(t *testing.T) {
 	}
 }
 
+func TestNavmeshHorizontalCoordinatesReturnsDetachedWorldPlaneSnapshot(t *testing.T) {
+	object := &SRObject{RtNavmeshPosition: testPosition(0x1234, 20, 7, 30)}
+	x, z, ok := object.NavmeshHorizontalCoordinates()
+	if !ok {
+		t.Fatal("NavmeshHorizontalCoordinates() rejected valid position")
+	}
+	position := object.GetNavmeshPosition()
+	wantX := float32(position.Region.X)*navmeshv2.RegionWidth + position.Offset.X
+	wantZ := float32(position.Region.Y)*navmeshv2.RegionHeight + position.Offset.Z
+	if x != wantX || z != wantZ {
+		t.Fatalf("coordinates = (%v,%v), want (%v,%v)", x, z, wantX, wantZ)
+	}
+	position.Offset.X++
+	nextX, _, _ := object.NavmeshHorizontalCoordinates()
+	if nextX != x {
+		t.Fatal("mutating returned position clone changed coordinate snapshot")
+	}
+}
+
 func TestHeadingConversions(t *testing.T) {
 	heading := RadiansToHeading(math.Pi)
 	if math.Abs(float64(heading-32768)) > 1 {

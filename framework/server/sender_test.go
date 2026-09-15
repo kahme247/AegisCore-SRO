@@ -108,6 +108,49 @@ func TestSenderReturnsClosedError(t *testing.T) {
 	}
 }
 
+func TestSenderTrySendRejectsFullQueueAndReportsStats(t *testing.T) {
+	writer := &blockingDeadlineWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	sender := NewSender(writer, marshalPacket)
+	defer func() {
+		sender.Close()
+		sender.Wait()
+	}()
+	packet := network.NewServerPacket(0xB021)
+
+	if err := sender.TrySend(*packet); err != nil {
+		t.Fatalf("initial TrySend() error = %v", err)
+	}
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("sender worker did not start blocked write")
+	}
+	for index := 0; index < cap(sender.queue); index++ {
+		if err := sender.TrySend(*packet); err != nil {
+			t.Fatalf("TrySend() filling slot %d error = %v", index, err)
+		}
+	}
+	if err := sender.TrySend(*packet); !errors.Is(err, ErrSenderQueueFull) {
+		t.Fatalf("TrySend() full queue error = %v, want %v", err, ErrSenderQueueFull)
+	}
+	stats := sender.Stats()
+	if stats.Queued != stats.QueueCapacity || stats.Enqueued != uint64(stats.QueueCapacity+1) || stats.Rejected != 1 {
+		t.Fatalf("full queue stats = %+v", stats)
+	}
+
+	close(writer.release)
+	if err := sender.Send(*packet); err != nil {
+		t.Fatalf("barrier Send() error = %v", err)
+	}
+	stats = sender.Stats()
+	if stats.Queued != 0 || stats.Completed != stats.Enqueued || stats.Failed != 0 {
+		t.Fatalf("drained queue stats = %+v", stats)
+	}
+}
+
 func marshalPacket(packet network.Packet) ([]byte, error) {
 	return packet.MarshalBinary()
 }
@@ -118,6 +161,20 @@ type shortDeadlineWriter struct {
 	buffer        bytes.Buffer
 	deadlineCalls int
 }
+
+type blockingDeadlineWriter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingDeadlineWriter) Write(bytes []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(bytes), nil
+}
+
+func (*blockingDeadlineWriter) SetWriteDeadline(time.Time) error { return nil }
 
 func (w *shortDeadlineWriter) Write(bytes []byte) (int, error) {
 	w.mu.Lock()

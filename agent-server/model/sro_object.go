@@ -99,7 +99,9 @@ func (o *SRObject) SetNavmeshPosition(newPosition navmeshv2.RtNavmeshPosition) {
 	mutex := o.mutexForObject()
 	mutex.Lock()
 	defer mutex.Unlock()
-	logrus.Debugf("Setting position to %s", newPosition.String())
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.Debugf("Setting position to %s", newPosition.String())
+	}
 	o.RtNavmeshPosition = cloneNavmeshPosition(newPosition)
 }
 
@@ -109,6 +111,25 @@ func (o *SRObject) GetNavmeshPosition() (position navmeshv2.RtNavmeshPosition) {
 	defer mutex.RUnlock()
 	position = cloneNavmeshPosition(o.RtNavmeshPosition)
 	return
+}
+
+// NavmeshHorizontalCoordinates returns an allocation-free world-plane
+// snapshot for high-volume range checks. It does not expose the mutable Offset
+// pointer owned by the object.
+func (o *SRObject) NavmeshHorizontalCoordinates() (x, z float32, ok bool) {
+	if o == nil {
+		return 0, 0, false
+	}
+	mutex := o.mutexForObject()
+	mutex.RLock()
+	defer mutex.RUnlock()
+	if o.RtNavmeshPosition.Offset == nil {
+		return 0, 0, false
+	}
+	position := o.RtNavmeshPosition
+	return float32(position.Region.X)*navmeshv2.RegionWidth + position.Offset.X,
+		float32(position.Region.Y)*navmeshv2.RegionHeight + position.Offset.Z,
+		true
 }
 
 func (o *SRObject) SetPosition(newPosition Position) {

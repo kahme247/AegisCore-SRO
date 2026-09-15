@@ -16,6 +16,8 @@ const (
 	HeaderSize uint16 = 6
 	DataSize   uint16 = BufferSize - HeaderSize
 
+	initialPacketBufferSize = 64
+
 	HeaderOffset   uint16 = 0
 	SizeOffset            = HeaderOffset + 0
 	IDOffset              = HeaderOffset + 2
@@ -136,7 +138,7 @@ func NewClientPacket(messageID uint16) *Packet {
 }
 
 func newEmptyPacket(serverPacket bool) Packet {
-	buffer := make([]byte, int(BufferSize))
+	buffer := make([]byte, initialPacketBufferSize)
 	return Packet{
 		MessageID:     0,
 		Encrypted:     false,
@@ -497,8 +499,8 @@ func (p *Packet) ensurePayloadCapacity(requiredPayload int) error {
 	required := int(HeaderSize) + requiredPayload
 	if cap(p.Buffer) < required {
 		capacity := cap(p.Buffer)
-		if capacity < int(BufferSize) {
-			capacity = int(BufferSize)
+		if capacity < initialPacketBufferSize {
+			capacity = initialPacketBufferSize
 		}
 		for capacity < required {
 			if capacity > int(^uint(0)>>1)/2 {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -12,8 +13,9 @@ import (
 const DefaultWriteTimeout = 5 * time.Second
 
 var (
-	ErrSenderClosed  = errors.New("session sender is closed")
-	ErrNilSenderConn = errors.New("session sender has no connection")
+	ErrSenderClosed    = errors.New("session sender is closed")
+	ErrNilSenderConn   = errors.New("session sender has no connection")
+	ErrSenderQueueFull = errors.New("session sender queue is full")
 )
 
 // deadlineWriter is intentionally smaller than net.Conn so Sender can be
@@ -39,6 +41,20 @@ type Sender struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	workerWG  sync.WaitGroup
+
+	enqueued  atomic.Uint64
+	completed atomic.Uint64
+	failed    atomic.Uint64
+	rejected  atomic.Uint64
+}
+
+type SenderStats struct {
+	Queued        int
+	QueueCapacity int
+	Enqueued      uint64
+	Completed     uint64
+	Failed        uint64
+	Rejected      uint64
 }
 
 type outboundJob struct {
@@ -85,6 +101,17 @@ func (s *Sender) Send(packet network.Packet) error {
 		return err
 	}
 	return s.enqueue([]outboundFrame{{packet: &clone}})
+}
+
+// TrySend queues one packet without waiting for socket I/O. It preserves the
+// same per-session writer ordering as Send and returns ErrSenderQueueFull when
+// the bounded queue cannot accept work immediately.
+func (s *Sender) TrySend(packet network.Packet) error {
+	clone, err := cloneOutboundPacket(packet)
+	if err != nil {
+		return err
+	}
+	return s.tryEnqueue([]outboundFrame{{packet: &clone}})
 }
 
 // SendBatch queues ordinary packets as one indivisible writer job. It is used
@@ -154,6 +181,7 @@ func (s *Sender) enqueue(frames []outboundFrame) error {
 	case <-s.done:
 		return ErrSenderClosed
 	case s.queue <- job:
+		s.enqueued.Add(1)
 	}
 
 	select {
@@ -164,6 +192,27 @@ func (s *Sender) enqueue(frames []outboundFrame) error {
 	}
 }
 
+func (s *Sender) tryEnqueue(frames []outboundFrame) error {
+	if s.conn == nil {
+		return ErrNilSenderConn
+	}
+	select {
+	case <-s.done:
+		return ErrSenderClosed
+	default:
+	}
+	select {
+	case <-s.done:
+		return ErrSenderClosed
+	case s.queue <- outboundJob{frames: frames}:
+		s.enqueued.Add(1)
+		return nil
+	default:
+		s.rejected.Add(1)
+		return ErrSenderQueueFull
+	}
+}
+
 func (s *Sender) run() {
 	for {
 		select {
@@ -171,11 +220,32 @@ func (s *Sender) run() {
 			return
 		case job := <-s.queue:
 			err := s.writeJob(job.frames)
-			select {
-			case job.result <- err:
-			case <-s.done:
+			if err != nil {
+				s.failed.Add(1)
+			} else {
+				s.completed.Add(1)
+			}
+			if job.result != nil {
+				select {
+				case job.result <- err:
+				case <-s.done:
+				}
 			}
 		}
+	}
+}
+
+func (s *Sender) Stats() SenderStats {
+	if s == nil {
+		return SenderStats{}
+	}
+	return SenderStats{
+		Queued:        len(s.queue),
+		QueueCapacity: cap(s.queue),
+		Enqueued:      s.enqueued.Load(),
+		Completed:     s.completed.Load(),
+		Failed:        s.failed.Load(),
+		Rejected:      s.rejected.Load(),
 	}
 }
 
