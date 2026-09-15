@@ -145,21 +145,21 @@ func (modelInventoryStore) GetCharacterInventory(_ context.Context, characterID 
 // requests. The shared lock preserves their original process-wide ordering
 // while the registry preserves ordering for each individual session.
 type CharacterSelectionHandler struct {
-	mu                sync.Mutex
-	characters        CharacterStore
-	inventory         CharacterInventoryStore
-	avatarInventory   model.AvatarInventoryRepository
-	quests            model.CharacterQuestRepository
-	masteries         model.MasteryRepository
-	skills            model.CharacterSkillRepository
-	quickSlots        model.CharacterQuickSlotRepository
-	autoPotion        model.AutoPotionSettingsRepository
-	speedEffects      model.SpeedEffectRepository
-	itemServices      model.ItemServiceRepository
-	itemBuffs         model.ItemBuffRepository
-	hwan              model.HwanRepository
-	movement          model.MovementSettingsRepository
-	playerPreparer     interface {
+	mu              sync.Mutex
+	characters      CharacterStore
+	inventory       CharacterInventoryStore
+	avatarInventory model.AvatarInventoryRepository
+	quests          model.CharacterQuestRepository
+	masteries       model.MasteryRepository
+	skills          model.CharacterSkillRepository
+	quickSlots      model.CharacterQuickSlotRepository
+	autoPotion      model.AutoPotionSettingsRepository
+	speedEffects    model.SpeedEffectRepository
+	itemServices    model.ItemServiceRepository
+	itemBuffs       model.ItemBuffRepository
+	hwan            model.HwanRepository
+	movement        model.MovementSettingsRepository
+	playerPreparer  interface {
 		PreparePlayer(context.Context, *model.Player) error
 	}
 	referenceData     *model.ReferenceDataCatalog
