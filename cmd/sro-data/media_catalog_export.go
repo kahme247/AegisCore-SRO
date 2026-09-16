@@ -167,7 +167,7 @@ func loadEventMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatal
 		{"refeventrewarditems.txt", `SELECT SERVICE,EVENT_ID,EVENT_CODE_NAME,ITEM_CODE_NAME,PAY_COUNT,ACHIEVE_RATIO,RENT_ITEM_CODE_NAME,PARAM_1,PARAM_1_DESCRIPTION,PARAM_2,PARAM_2_DESCRIPTION FROM SRO_SHARD.REF_EVENT_REWARD_ITEM WHERE SERVICE=1 ORDER BY EVENT_ID,ID`},
 		{"refservereventreward.txt", `SELECT REWARD_ID,REF_SKILL_ID,REWARD_CLASS,FLAGS,APPLY_TIME,REF_VALUE_1,REF_VALUE_2,REF_VALUE_3,EXP_RATIO,SKILL_EXP_RATIO FROM SRO_SHARD.REF_SERVER_EVENT_REWARD ORDER BY REWARD_ID`},
 		{"refservereventreward_expupforplayers.txt", `SELECT REWARD_ID,EXP_RATIO,SKILL_EXP_RATIO FROM SRO_SHARD.REF_SERVER_EVENT_REWARD_EXP_UP_FOR_PLAYERS ORDER BY REWARD_ID`},
-		{"refservereventreward_spawnmonster.txt", `SELECT REWARD_ID,REF_OBJ_ID,MONSTER_COUNT,LEVEL,PARAM_1,PARAM_2 FROM SRO_SHARD.REF_SERVER_EVENT_REWARD_SPAWN_MONSTER ORDER BY REWARD_ID`},
+		{"refservereventreward_spawnmonster.txt", `SELECT REWARD_ID,REF_OBJ_ID,REGION_ID,POS_X,POS_Y,POS_Z FROM SRO_SHARD.REF_SERVER_EVENT_REWARD_SPAWN_MONSTER ORDER BY REWARD_ID`},
 		{"refservereventreward_event.txt", `SELECT SERVER_EVENT_ID,REWARD_ID,AQ_TYPE FROM SRO_SHARD.REF_SERVER_EVENT_REWARD_EVENT ORDER BY SERVER_EVENT_ID,REWARD_ID`},
 	}
 	result := make([]mediaExportCatalog, 0, len(specs))
@@ -181,11 +181,13 @@ func loadEventMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatal
 	return result, nil
 }
 
-func loadItemMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalog, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT common.ID,common.SERVICE,common.CODE_NAME,common.TYPE_ID_1,
+const selectItemMediaCatalog = `SELECT common.ID,common.SERVICE,common.CODE_NAME,common.TYPE_ID_1,
         common.TYPE_ID_2,common.TYPE_ID_3,common.TYPE_ID_4,common.RAW_DATA,item.SET_ID,item.ITEM_CLASS,item.RAW_DATA
-        FROM SRO_SHARD.REF_OBJ_COMMON_VSRO common JOIN SRO_SHARD.REF_OBJ_ITEM_VSRO item ON item.ID=common.ID
-        WHERE common.SERVICE=1 AND common.TYPE_ID_1=3 ORDER BY common.ID`)
+		FROM SRO_SHARD.REF_OBJ_COMMON_VSRO common JOIN SRO_SHARD.REF_OBJ_ITEM_VSRO item ON item.ID=common.LINK
+		WHERE common.SERVICE=1 AND common.TYPE_ID_1=3 ORDER BY common.ID`
+
+func loadItemMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalog, error) {
+	rows, err := tx.QueryContext(ctx, selectItemMediaCatalog)
 	if err != nil {
 		return nil, fmt.Errorf("query item Media data: %w", err)
 	}

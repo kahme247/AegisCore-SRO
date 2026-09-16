@@ -429,12 +429,108 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 102 {
-		t.Fatalf("shard migration count = %d, want 102", len(shardMigrations))
+	if len(shardMigrations) != 130 {
+		t.Fatalf("shard migration count = %d, want 130", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
 		shardMigrationByVersion[migration.Version] = migration
+	}
+	magicCubeMigration := shardMigrationByVersion[121]
+	if magicCubeMigration.Version != 121 || magicCubeMigration.Name != "magic_cube_storage" ||
+		!strings.Contains(magicCubeMigration.UpSQL, "MAGIC_CUBE_INVENTORY") ||
+		!strings.Contains(magicCubeMigration.UpSQL, "UQ_MAGIC_CUBE_INVENTORY_ITEM") ||
+		!strings.Contains(magicCubeMigration.UpSQL, "ON DELETE RESTRICT") ||
+		!strings.Contains(magicCubeMigration.DownSQL, "DROP TABLE IF EXISTS `SRO_SHARD`.`MAGIC_CUBE_INVENTORY`") {
+		t.Fatalf("magic cube migration = %#v, want reversible version 121 linked storage", magicCubeMigration)
+	}
+	itemLinkMigration := shardMigrationByVersion[123]
+	if itemLinkMigration.Version != 123 || itemLinkMigration.Name != "vsro_item_common_link" ||
+		!strings.Contains(itemLinkMigration.PreflightSQL, "JSON_EXTRACT(common.`RAW_DATA`, '$.Link')") ||
+		!strings.Contains(itemLinkMigration.PreflightSQL, "REF_OBJ_STRUCT_VSRO") ||
+		!strings.Contains(itemLinkMigration.PreflightSQL, "common.`TYPE_ID_1` = 4") ||
+		!strings.Contains(itemLinkMigration.PreflightSQL, "HAVING COUNT(*) > 1") ||
+		strings.Contains(itemLinkMigration.PreflightSQL, "WHERE common.`ID` IS NULL\nWHERE") ||
+		!strings.Contains(itemLinkMigration.UpSQL, "ADD COLUMN `LINK` INT") ||
+		!strings.Contains(itemLinkMigration.UpSQL, "DROP FOREIGN KEY `fk_ref_obj_item_vsro_common`") ||
+		!strings.Contains(itemLinkMigration.DownSQL, "DROP COLUMN `LINK`") {
+		t.Fatalf("item-link migration = %#v, want reversible version 123 authoritative common Link", itemLinkMigration)
+	}
+	dimensionHoleWorldMigration := shardMigrationByVersion[128]
+	if dimensionHoleWorldMigration.Version != 128 || dimensionHoleWorldMigration.Name != "dimension_hole_world_lifecycle" ||
+		!strings.Contains(dimensionHoleWorldMigration.UpSQL, "WORLD_ENTRY_TYPE") ||
+		!strings.Contains(dimensionHoleWorldMigration.UpSQL, "WORLD_DURATION_MS") ||
+		!strings.Contains(dimensionHoleWorldMigration.UpSQL, "7200000") ||
+		!strings.Contains(dimensionHoleWorldMigration.UpSQL, "600000") ||
+		!strings.Contains(dimensionHoleWorldMigration.DownSQL, "DROP COLUMN `WORLD_ENTRY_TYPE`") {
+		t.Fatalf("Dimension Hole world migration = %#v, want reversible version 128 lifecycle authority", dimensionHoleWorldMigration)
+	}
+	dimensionHoleWorldRegionMigration := shardMigrationByVersion[130]
+	if dimensionHoleWorldRegionMigration.Version != 130 || dimensionHoleWorldRegionMigration.Name != "dimension_hole_world_regions" ||
+		!strings.Contains(dimensionHoleWorldRegionMigration.UpSQL, "REF_GAME_WORLD_REGION") ||
+		!strings.Contains(dimensionHoleWorldRegionMigration.UpSQL, "PRIMARY KEY (`WORLD_ID`, `REGION_ID`)") ||
+		!strings.Contains(dimensionHoleWorldRegionMigration.UpSQL, "FOREIGN KEY (`WORLD_ID`)") ||
+		!strings.Contains(dimensionHoleWorldRegionMigration.DownSQL, "DROP TABLE `SRO_SHARD`.`REF_GAME_WORLD_REGION`") {
+		t.Fatalf("Dimension Hole world-region migration = %#v, want reversible version 130 region authority", dimensionHoleWorldRegionMigration)
+	}
+	dimensionHoleStartMigration := shardMigrationByVersion[131]
+	if dimensionHoleStartMigration.Version != 131 || dimensionHoleStartMigration.Name != "dimension_hole_start_positions" ||
+		!strings.Contains(dimensionHoleStartMigration.UpSQL, "REF_INSTANCE_WORLD_START_POSITION") ||
+		!strings.Contains(dimensionHoleStartMigration.UpSQL, "PRIMARY KEY (`WORLD_ID`, `START_INDEX`)") ||
+		!strings.Contains(dimensionHoleStartMigration.UpSQL, "`REGION_ID` SMALLINT NOT NULL") ||
+		!strings.Contains(dimensionHoleStartMigration.UpSQL, "`POS_X` INT NOT NULL") ||
+		!strings.Contains(dimensionHoleStartMigration.DownSQL, "DROP TABLE `SRO_SHARD`.`REF_INSTANCE_WORLD_START_POSITION`") {
+		t.Fatalf("Dimension Hole start-position migration = %#v, want reversible version 131 stock starts", dimensionHoleStartMigration)
+	}
+	guildWarMigration := shardMigrationByVersion[111]
+	if guildWarMigration.Version != 111 || guildWarMigration.Name != "guild_war_runtime" ||
+		!strings.Contains(guildWarMigration.UpSQL, "GUILD_WAR_RUNTIME") ||
+		!strings.Contains(guildWarMigration.UpSQL, "CHALLENGER_MASTER") ||
+		!strings.Contains(guildWarMigration.UpSQL, "SURRENDERED_GUILD") ||
+		!strings.Contains(guildWarMigration.UpSQL, "DUE_AT") ||
+		!strings.Contains(guildWarMigration.UpSQL, "CHALLENGER_SCORE") ||
+		!strings.Contains(guildWarMigration.UpSQL, "REWARD_CLAIMED_AT") ||
+		!strings.Contains(guildWarMigration.DownSQL, "DROP TABLE `SRO_SHARD`.`GUILD_WAR_RUNTIME`") {
+		t.Fatalf("guild war migration = %#v, want reversible version 111 guild_war_runtime", guildWarMigration)
+	}
+	guildElectionMigration := shardMigrationByVersion[112]
+	if guildElectionMigration.Version != 112 || guildElectionMigration.Name != "guild_election_runtime" ||
+		!strings.Contains(guildElectionMigration.UpSQL, "GUILD_ELECTION_CANDIDATE") ||
+		!strings.Contains(guildElectionMigration.UpSQL, "GUILD_ELECTION_VOTE") ||
+		!strings.Contains(guildElectionMigration.UpSQL, "PREVIOUS_MASTER") ||
+		!strings.Contains(guildElectionMigration.DownSQL, "DROP TABLE IF EXISTS `GUILD_ELECTION`") {
+		t.Fatalf("guild election migration = %#v, want reversible version 112 guild_election_runtime", guildElectionMigration)
+	}
+	fortressMigration := shardMigrationByVersion[113]
+	if fortressMigration.Version != 113 || fortressMigration.Name != "fortress_expenditure_runtime" ||
+		!strings.Contains(fortressMigration.UpSQL, "FORTRESS_EXPENDITURE") ||
+		!strings.Contains(fortressMigration.UpSQL, "TREASURY_GOLD") ||
+		!strings.Contains(fortressMigration.UpSQL, "FORTRESS_BIJEOKDAN") ||
+		!strings.Contains(fortressMigration.UpSQL, "CK_FORTRESS_EXPENDITURE_REASON") ||
+		!strings.Contains(fortressMigration.DownSQL, "DROP TABLE IF EXISTS `FORTRESS`") {
+		t.Fatalf("fortress migration = %#v, want reversible version 113 fortress_expenditure_runtime", fortressMigration)
+	}
+	communityFriendMigration := shardMigrationByVersion[114]
+	if communityFriendMigration.Version != 114 || communityFriendMigration.Name != "community_friend_runtime" ||
+		!strings.Contains(communityFriendMigration.UpSQL, "COMMUNITY_FRIEND_REQUEST") ||
+		!strings.Contains(communityFriendMigration.UpSQL, "COMMUNITY_FRIEND") ||
+		!strings.Contains(communityFriendMigration.UpSQL, "CK_COMMUNITY_FRIEND_REQUEST_DIRECTION") ||
+		!strings.Contains(communityFriendMigration.DownSQL, "DROP TABLE IF EXISTS `COMMUNITY_FRIEND_REQUEST`") {
+		t.Fatalf("community friend migration = %#v, want reversible version 114 community_friend_runtime", communityFriendMigration)
+	}
+	communityBlockMigration := shardMigrationByVersion[115]
+	if communityBlockMigration.Version != 115 || communityBlockMigration.Name != "community_block_runtime" ||
+		!strings.Contains(communityBlockMigration.UpSQL, "COMMUNITY_BLOCK") ||
+		!strings.Contains(communityBlockMigration.UpSQL, "CK_COMMUNITY_BLOCK_DISTINCT") ||
+		!strings.Contains(communityBlockMigration.DownSQL, "DROP TABLE IF EXISTS `COMMUNITY_BLOCK`") {
+		t.Fatalf("community block migration = %#v, want reversible version 115 community_block_runtime", communityBlockMigration)
+	}
+	communityMemoMigration := shardMigrationByVersion[116]
+	if communityMemoMigration.Version != 116 || communityMemoMigration.Name != "community_memo_runtime" ||
+		!strings.Contains(communityMemoMigration.UpSQL, "COMMUNITY_MEMO") ||
+		!strings.Contains(communityMemoMigration.UpSQL, "IX_COMMUNITY_MEMO_INBOX") ||
+		!strings.Contains(communityMemoMigration.DownSQL, "DROP TABLE IF EXISTS `COMMUNITY_MEMO`") {
+		t.Fatalf("community memo migration = %#v, want reversible version 116 community_memo_runtime", communityMemoMigration)
 	}
 	mediaCatalogMigration := shardMigrationByVersion[81]
 	if mediaCatalogMigration.Version != 81 || mediaCatalogMigration.Name != "media_text_catalog" ||

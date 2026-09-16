@@ -30,8 +30,9 @@ type serverEventRewardExpRow struct {
 	ExpRatio, SkillExpRatio float64
 }
 type serverEventRewardSpawnRow struct {
-	RewardID, RefObjID, MonsterCount, Level int64
-	Param1, Param2                          int64
+	RewardID, RefObjID int64
+	RegionID           int16
+	X, Y, Z            float32
 }
 type serverEventRewardEventRow struct{ ServerEventID, RewardID, AQType int64 }
 
@@ -138,15 +139,27 @@ func parseServerEventRewardExpRows(path string) ([]serverEventRewardExpRow, erro
 }
 func parseServerEventRewardSpawnRows(path string) ([]serverEventRewardSpawnRow, error) {
 	return parseRows(path, 6, func(f []string, _ string) (serverEventRewardSpawnRow, error) {
-		v := make([]int64, 6)
-		for i := range v {
-			n, e := strconv.ParseInt(f[i], 10, 64)
-			if e != nil {
-				return serverEventRewardSpawnRow{}, e
-			}
-			v[i] = n
+		rewardID, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil {
+			return serverEventRewardSpawnRow{}, err
 		}
-		return serverEventRewardSpawnRow{v[0], v[1], v[2], v[3], v[4], v[5]}, nil
+		refObjID, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			return serverEventRewardSpawnRow{}, err
+		}
+		regionID, err := strconv.ParseInt(f[2], 10, 16)
+		if err != nil {
+			return serverEventRewardSpawnRow{}, err
+		}
+		coordinates := [3]float32{}
+		for index := range coordinates {
+			value, parseErr := strconv.ParseFloat(f[index+3], 32)
+			if parseErr != nil {
+				return serverEventRewardSpawnRow{}, parseErr
+			}
+			coordinates[index] = float32(value)
+		}
+		return serverEventRewardSpawnRow{RewardID: rewardID, RefObjID: refObjID, RegionID: int16(regionID), X: coordinates[0], Y: coordinates[1], Z: coordinates[2]}, nil
 	})
 }
 func parseServerEventRewardEventRows(path string) ([]serverEventRewardEventRow, error) {
@@ -210,7 +223,7 @@ func importServerEventRewardRows(ctx context.Context, db *sql.DB, rewards []serv
 		}
 	}
 	for _, r := range spawn {
-		_, e = tx.ExecContext(ctx, "INSERT INTO REF_SERVER_EVENT_REWARD_SPAWN_MONSTER VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE REF_OBJ_ID=VALUES(REF_OBJ_ID),MONSTER_COUNT=VALUES(MONSTER_COUNT),LEVEL=VALUES(LEVEL),PARAM_1=VALUES(PARAM_1),PARAM_2=VALUES(PARAM_2)", r.RewardID, r.RefObjID, r.MonsterCount, r.Level, r.Param1, r.Param2)
+		_, e = tx.ExecContext(ctx, "INSERT INTO REF_SERVER_EVENT_REWARD_SPAWN_MONSTER (REWARD_ID,REF_OBJ_ID,REGION_ID,POS_X,POS_Y,POS_Z) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE REF_OBJ_ID=VALUES(REF_OBJ_ID),REGION_ID=VALUES(REGION_ID),POS_X=VALUES(POS_X),POS_Y=VALUES(POS_Y),POS_Z=VALUES(POS_Z)", r.RewardID, r.RefObjID, r.RegionID, r.X, r.Y, r.Z)
 		if e != nil {
 			return e
 		}

@@ -3,12 +3,16 @@
 `sro-data` provides offline archive verification and explicit reference-data
 maintenance. None of its commands run during Agent or Gateway startup.
 
-Use `verify` for a read-only archive check. Every `import-*` command writes to
-`SRO_SHARD` and must be treated as database maintenance.
+Use `verify` for a read-only archive check. `audit-item-coverage`,
+`verify-drop-catalog`, and `verify-dimension-hole` are read-only shard audits.
+Every `import-*` command writes to `SRO_SHARD` and must be treated as database
+maintenance.
 
 | Need | Start here |
 | --- | --- |
 | Check `Data.pk2` without changing the database | [Verify Data.pk2](#verify-datapk2) |
+| Audit usable items, linked skills, and loot sources | [Audit item and drop coverage](#audit-item-and-drop-coverage) |
+| Prove Dimension Hole startup data is complete | [Verify Dimension Hole readiness](#verify-dimension-hole-readiness) |
 | Export database-backed Media files | [Export Media files](#export-database-backed-media-files) |
 | Load Media reference catalogs | [Import Media references](#import-media-references) |
 | Load drops, Item Mall, skills, items, or quests | Open the matching import section below |
@@ -98,7 +102,7 @@ go run ./cmd/sro-data import-reference --media Media/Media
 ```
 
 The importer expects `server_dep/silkroad/textdata/leveldata.txt`,
-`levelgold.txt`, and `skilldata.txt`, follows the filenames listed by
+`levelgold.txt`, `gameworlddata.txt`, and `skilldata.txt`, follows the filenames listed by
 `skilldata.txt`, and upserts levels plus enabled skills in one transaction.
 `levelgold.txt` must contain the complete 140-row level/GoldMin/GoldMax catalog;
 its values populate the restoration-price columns added by shard migration
@@ -109,6 +113,79 @@ deleted, so this is not strict synchronization.
 
 Shard migration `000015` provides `REF_LEVEL_DATA` and `REF_SKILL_DATA`;
 `000072` extends the level catalog with `DROP_GOLD_MIN` and `DROP_GOLD_MAX`.
+Shard migration `000128` extends `REF_GAME_WORLD` with the stock lifecycle
+contract. Because the six-field Media export omits those server-only columns,
+the importer supplies the reference-database values only for the pinned
+Dimension Hole worlds: entry/entrance/leave type `0`, duration `7200000 ms`,
+and empty-remain time `600000 ms`. Other worlds retain zero until an
+authoritative server-side source is imported.
+
+Shard migrations `000130` and `000131` add the normalized allowed-region and
+instance-start tables. `import-reference` replaces only worlds `63–84` in those
+catalogs and imports the exact vSRO 1.188 start positions recovered from
+`_RefInstance_World_Start_Pos`.
+
+## Verify Dimension Hole readiness
+
+After the shard migrations and reference import, run the read-only gate:
+
+```powershell
+go run ./cmd/sro-data verify-dimension-hole
+```
+
+Success requires all 22 pinned worlds, all 2,088 world-region mappings, and at
+least one validated stock start position for every world. Missing tables, rows,
+altered lifecycle metadata, invalid regions, duplicate starts, or unsupported
+nonzero `Param` values return a non-zero status. Agent performs the same
+preflight before enabling Dimension Hole item use.
+
+## Audit item and drop coverage
+
+Create deterministic item and loot reports from one repeatable-read,
+read-only shard snapshot:
+
+```powershell
+go run ./cmd/sro-data audit-item-coverage `
+  --output-dir ./.local/reports/item-coverage
+```
+
+The command writes `items.csv`, `drop_sources.csv`, and `summary.md`. The item
+report includes TypeIDs, parameters, the resolved active `REF_SKILL` link,
+decoded effect family, implementation status, reason, and loot-source count.
+The normalized drop report follows direct monster assignments, random groups,
+and level-profile item assignments while retaining missing references as
+broken rows. References absent from the active runtime catalogs but present as
+`SERVICE=0` in `REF_OBJ_COMMON_VSRO` are reported as disabled and are excluded
+from effective loot-source counts; they are not data corruption. `CanDrop`
+remains the player's permission to drop an inventory item; it is not treated as
+proof that a monster produces that item.
+
+Use a gate only after reviewing the baseline report. Reports are still written
+before the command returns a failing status:
+
+```powershell
+go run ./cmd/sro-data audit-item-coverage `
+  --output-dir ./.local/reports/item-coverage `
+  --fail-on broken
+
+go run ./cmd/sro-data audit-item-coverage `
+  --output-dir ./.local/reports/item-coverage `
+  --fail-on unsupported
+```
+
+Validate the normalized drop catalogs without writing reports or changing the
+database:
+
+```powershell
+go run ./cmd/sro-data verify-drop-catalog
+```
+
+The verifier checks item, monster, group, magic-option, probability, range,
+classification, duplicate, and orphan boundaries. It reports normalized edges
+skipped because their authoritative item or monster has `SERVICE=0`; only
+genuinely missing, wrong-type, or enabled-but-unloaded references fail. Empty
+optional profile catalogs are reported as warnings; broken edges or invalid
+values return a non-zero exit status.
 
 ## Import event rewards
 
@@ -289,7 +366,18 @@ Required files and targets:
 | `ref_magic_opt_item_opt_level.json` | `REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO` |
 | `ref_set_item_group.json` | `REF_SET_ITEM_GROUP_VSRO` |
 
-Shard migrations `000020`, `000091`, and `000092` provide these tables. The package
+Shard migrations `000020`, `000091`, `000092`, and `000123` provide these tables.
+The common export must include `_RefObjCommon.Link`. The importer validates
+one-to-one `_RefObjCommon.Link` mappings for both TypeID1=3 items and
+TypeID1=4 structures before opening the replacement transaction. For example,
+the stock `INS_QUEST_TELEPORT` common row has public `ID=19556` and private
+`Link=7`, so its structure row is `ref_obj_struct.json` `ID=7`, not `ID=19556`.
+`_RefObjCommon.ID` remains the public object reference and must not be used as
+the detail-row join. The structure row's source fields are preserved in
+`RAW_DATA`; the importer does not synthesize teleport interaction/task bytes
+from `teleportbuilding.txt`.
+
+The package
 import retains every `_RefScrapOfPackageItem` member and its stock `Index`, so
 multi-member vectors are not flattened to one item. It also retains shop-tab
 placement, the NPC-to-shop-to-tab authority chain, and the actual price-policy

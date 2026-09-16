@@ -8,7 +8,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
+	"strconv"
 
 	"github.com/Harvi8/AegisCore/framework/config"
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
@@ -22,7 +24,7 @@ type vsroItemTable struct {
 }
 
 var vsroItemTables = []vsroItemTable{
-	{"ref_obj_common.json", "REF_OBJ_COMMON_VSRO", []string{"ID", "Service", "CodeName128", "TypeID1", "TypeID2", "TypeID3", "TypeID4"}},
+	{"ref_obj_common.json", "REF_OBJ_COMMON_VSRO", []string{"ID", "Service", "CodeName128", "TypeID1", "TypeID2", "TypeID3", "TypeID4", "Link"}},
 	{"ref_obj_item.json", "REF_OBJ_ITEM_VSRO", []string{"ID", "SetID", "ItemClass"}},
 	{"ref_obj_struct.json", "REF_OBJ_STRUCT_VSRO", []string{"ID"}},
 	{"ref_package_item.json", "REF_PACKAGE_ITEM_VSRO", []string{"Country", "Service", "ID", "CodeName128"}},
@@ -53,6 +55,9 @@ func importVSROItemReference(ctx context.Context, arguments []string, output io.
 		}
 		data[i] = rows
 	}
+	if err := validateVSROItemLinks(data); err != nil {
+		return fmt.Errorf("validate vSRO item links: %w", err)
+	}
 	config.Initialize()
 	pool, err := frameworkdb.OpenPool(ctx, frameworkdb.ShardPool, frameworkdb.ShardPoolConfig())
 	if err != nil {
@@ -67,6 +72,9 @@ func importVSROItemReference(ctx context.Context, arguments []string, output io.
 }
 
 func importVSROItemRows(ctx context.Context, pool *sql.DB, data [][]map[string]any) error {
+	if err := validateVSROItemLinks(data); err != nil {
+		return fmt.Errorf("validate vSRO item links: %w", err)
+	}
 	tx, err := pool.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -83,6 +91,98 @@ func importVSROItemRows(ctx context.Context, pool *sql.DB, data [][]map[string]a
 		}
 	}
 	return tx.Commit()
+}
+
+// validateVSROItemLinks enforces the stock _RefObjCommon.Link -> detail-row ID
+// relationships before the replacement transaction starts. Common.ID is the
+// public object reference; both item.ID and struct.ID are private detail-row
+// identities and are not interchangeable once the source sequences diverge.
+func validateVSROItemLinks(data [][]map[string]any) error {
+	if len(data) != len(vsroItemTables) {
+		return fmt.Errorf("got %d table payloads, want %d", len(data), len(vsroItemTables))
+	}
+	if err := validateVSRODetailLinks(data[0], data[1], 3, "_RefObjItem"); err != nil {
+		return err
+	}
+	return validateVSRODetailLinks(data[0], data[2], 4, "_RefObjStruct")
+}
+
+func validateVSRODetailLinks(commonRows, detailRows []map[string]any, typeID1 int64, detailName string) error {
+	detailIDs := make(map[int64]struct{}, len(detailRows))
+	for rowNumber, row := range detailRows {
+		id, err := vsroItemInteger(row, "ID")
+		if err != nil || id <= 0 {
+			return fmt.Errorf("%s row %d ID: %w", detailName, rowNumber+1, errInvalidVSROItemInteger(err, id))
+		}
+		if _, duplicate := detailIDs[id]; duplicate {
+			return fmt.Errorf("%s row %d duplicates ID %d", detailName, rowNumber+1, id)
+		}
+		detailIDs[id] = struct{}{}
+	}
+
+	linked := make(map[int64]int64, len(detailIDs))
+	for rowNumber, row := range commonRows {
+		commonType, err := vsroItemInteger(row, "TypeID1")
+		if err != nil {
+			return fmt.Errorf("_RefObjCommon row %d TypeID1: %w", rowNumber+1, err)
+		}
+		if commonType != typeID1 {
+			continue
+		}
+		commonID, err := vsroItemInteger(row, "ID")
+		if err != nil || commonID <= 0 {
+			return fmt.Errorf("_RefObjCommon row %d ID: %w", rowNumber+1, errInvalidVSROItemInteger(err, commonID))
+		}
+		link, err := vsroItemInteger(row, "Link")
+		if err != nil || link <= 0 {
+			return fmt.Errorf("_RefObjCommon row %d Link: %w", rowNumber+1, errInvalidVSROItemInteger(err, link))
+		}
+		if _, exists := detailIDs[link]; !exists {
+			return fmt.Errorf("_RefObjCommon ID %d links to missing %s ID %d", commonID, detailName, link)
+		}
+		if previous, duplicate := linked[link]; duplicate {
+			return fmt.Errorf("_RefObjCommon IDs %d and %d both link to %s ID %d", previous, commonID, detailName, link)
+		}
+		linked[link] = commonID
+	}
+	if len(linked) != len(detailIDs) {
+		for id := range detailIDs {
+			if _, exists := linked[id]; !exists {
+				return fmt.Errorf("%s ID %d has no TypeID1=%d _RefObjCommon Link", detailName, id, typeID1)
+			}
+		}
+	}
+	return nil
+}
+
+func vsroItemInteger(row map[string]any, column string) (int64, error) {
+	value := vsroJSONValue(row, normalizeVSROColumn(column))
+	switch typed := value.(type) {
+	case json.Number:
+		return typed.Int64()
+	case string:
+		return strconv.ParseInt(typed, 10, 64)
+	case int:
+		return int64(typed), nil
+	case int64:
+		return typed, nil
+	case float64:
+		if math.Trunc(typed) != typed || typed < float64(-1<<63) || typed >= float64(1<<63) {
+			return 0, fmt.Errorf("%v is not an integer", typed)
+		}
+		return int64(typed), nil
+	case nil:
+		return 0, errors.New("is missing")
+	default:
+		return 0, fmt.Errorf("has unsupported value %T", value)
+	}
+}
+
+func errInvalidVSROItemInteger(err error, value int64) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("must be positive, got %d", value)
 }
 
 func insertVSROItemRows(ctx context.Context, tx *sql.Tx, spec vsroItemTable, rows []map[string]any) error {

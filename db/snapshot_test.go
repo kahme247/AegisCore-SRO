@@ -39,7 +39,7 @@ func TestFreshInstallSnapshotsContainCompleteMigrationHistory(t *testing.T) {
 			for _, migration := range catalog.Migrations() {
 				ledgerEntry := fmt.Sprintf("(%d,'%s','%s','applied'", migration.Version, migration.Name, migration.Checksum)
 				if !strings.Contains(contents, ledgerEntry) {
-					t.Errorf("snapshot lacks applied ledger entry for migration %06d_%s", migration.Version, migration.Name)
+					t.Errorf("snapshot lacks applied ledger entry for migration %06d_%s with checksum %s", migration.Version, migration.Name, migration.Checksum)
 				}
 			}
 		})
@@ -181,6 +181,45 @@ func TestFreshShardSnapshotContainsAggregateRuntimeFoundations(t *testing.T) {
 	} {
 		if !strings.Contains(contents, required) {
 			t.Fatalf("shard snapshot lacks aggregate runtime contract %q", required)
+		}
+	}
+}
+
+func TestFreshShardSnapshotContainsDimensionHoleWorldRegions(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"CREATE TABLE `REF_GAME_WORLD_REGION`",
+		"PRIMARY KEY (`WORLD_ID`,`REGION_ID`)",
+		"KEY `idx_ref_game_world_region_region` (`REGION_ID`)",
+		"CONSTRAINT `fk_ref_game_world_region_world`",
+		"FOREIGN KEY (`WORLD_ID`) REFERENCES `REF_GAME_WORLD` (`WORLD_ID`) ON DELETE CASCADE",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks Dimension Hole world-region contract %q", required)
+		}
+	}
+}
+
+func TestFreshShardSnapshotContainsDimensionHoleStartPositions(t *testing.T) {
+	shard, err := os.ReadFile("create_sro_shard.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(shard)
+	for _, required := range []string{
+		"CREATE TABLE `REF_INSTANCE_WORLD_START_POSITION`",
+		"PRIMARY KEY (`WORLD_ID`,`START_INDEX`)",
+		"CONSTRAINT `fk_ref_instance_world_start_position_world`",
+		"(63,0,32484,1063,693,1125,0)",
+		"(69,0,-32750,10897,165,-6110,0)",
+		"(84,0,28644,1257,-247,1771,0)",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Fatalf("shard snapshot lacks Dimension Hole start-position contract %q", required)
 		}
 	}
 }

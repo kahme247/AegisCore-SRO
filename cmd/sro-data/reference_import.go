@@ -12,9 +12,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/config"
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	_ "github.com/go-sql-driver/mysql"
@@ -68,7 +70,20 @@ type dropMagicOptionAssignmentRow struct {
 
 type gameWorldReferenceRow struct {
 	WorldID, WorldType, MaxInstanceCount, MaxUserCount uint64
+	WorldEntryType, WorldEntranceType, WorldLeaveType  uint64
+	WorldDurationMS, WorldEmptyRemainMS                uint64
 	CodeName, ConfigGroupCodeName                      string
+}
+
+type gameWorldRegionReferenceRow struct {
+	WorldID  uint16
+	RegionID int16
+}
+
+type instanceWorldStartPositionReferenceRow struct {
+	WorldID, StartIndex uint16
+	RegionID            int16
+	X, Y, Z, Param      int32
 }
 
 func importReferenceData(ctx context.Context, arguments []string, output io.Writer) (runErr error) {
@@ -107,6 +122,11 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err != nil {
 		return err
 	}
+	gameWorldRegions, err := loadDimensionHoleWorldRegionReferenceData(filepath.Join(textDataDirectory, "refregion.txt"))
+	if err != nil {
+		return err
+	}
+	startPositions := dimensionHoleStockStartPositions()
 	eventRewards, eventRewardItems, err := loadEventRewardReferenceData(textDataDirectory)
 	if err != nil {
 		return err
@@ -118,14 +138,36 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 		return fmt.Errorf("open shard database: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, pool.Close()) }()
-	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions, dropMagicAssignments, gameWorlds); err != nil {
+	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions, dropMagicAssignments, gameWorlds, gameWorldRegions, startPositions); err != nil {
 		return err
 	}
 	if err := importEventRewardRows(ctx, pool, eventRewards, eventRewardItems); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, %d magic-option rows, %d drop magic-option assignments, %d game-world rows, %d event rewards, and %d event reward items\n", len(levels), len(skills), len(magicOptions), len(dropMagicAssignments), len(gameWorlds), len(eventRewards), len(eventRewardItems))
+	_, err = fmt.Fprintf(output, "imported %d level rows, %d enabled skill rows, %d magic-option rows, %d drop magic-option assignments, %d game-world rows, %d Dimension Hole world-region rows, %d Dimension Hole start positions, %d event rewards, and %d event reward items\n", len(levels), len(skills), len(magicOptions), len(dropMagicAssignments), len(gameWorlds), len(gameWorldRegions), len(startPositions), len(eventRewards), len(eventRewardItems))
 	return err
+}
+
+// dimensionHoleStockStartPositions is the exact vSRO 1.188
+// _RefInstance_World_Start_Pos subset for worlds 63-84. The stock server
+// selects uniformly from all rows for a world; this profile contains one each.
+func dimensionHoleStockStartPositions() []instanceWorldStartPositionReferenceRow {
+	rows := make([]instanceWorldStartPositionReferenceRow, 0, len(model.DimensionHoleCatalog()))
+	for _, definition := range model.DimensionHoleCatalog() {
+		row := instanceWorldStartPositionReferenceRow{WorldID: definition.WorldID}
+		switch definition.WorldID {
+		case 63, 64, 65, 66, 67, 68:
+			row.RegionID, row.X, row.Y, row.Z = 32484, 1063, 693, 1125
+		case 69, 70, 71, 72, 73, 74, 75, 76:
+			row.RegionID, row.X, row.Y, row.Z = -32750, 10897, 165, -6110
+		case 77, 78, 81, 82:
+			row.RegionID, row.X, row.Y, row.Z = 29427, 264, -770, 1745
+		case 79, 80, 83, 84:
+			row.RegionID, row.X, row.Y, row.Z = 28644, 1257, -247, 1771
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func loadGameWorldReferenceData(path string) ([]gameWorldReferenceRow, error) {
@@ -153,7 +195,17 @@ func loadGameWorldReferenceData(path string) ([]gameWorldReferenceRow, error) {
 			return nil, fmt.Errorf("game-world line %d has invalid or duplicate identity: %w", lineNumber, err)
 		}
 		seenIDs[worldID], seenCodes[fields[1]] = true, true
-		rows = append(rows, gameWorldReferenceRow{WorldID: worldID, CodeName: fields[1], WorldType: worldType, MaxInstanceCount: maxInstances, MaxUserCount: maxUsers, ConfigGroupCodeName: fields[5]})
+		row := gameWorldReferenceRow{WorldID: worldID, CodeName: fields[1], WorldType: worldType, MaxInstanceCount: maxInstances, MaxUserCount: maxUsers, ConfigGroupCodeName: fields[5]}
+		if worldID <= uint64(^uint16(0)) {
+			if _, dimensionHole := model.DimensionHoleDefinitionForWorld(uint16(worldID)); dimensionHole {
+				row.WorldEntryType = uint64(model.DimensionHoleWorldEntryType)
+				row.WorldEntranceType = uint64(model.DimensionHoleWorldEntranceType)
+				row.WorldLeaveType = uint64(model.DimensionHoleWorldLeaveType)
+				row.WorldDurationMS = uint64(model.DimensionHoleWorldDurationMS)
+				row.WorldEmptyRemainMS = uint64(model.DimensionHoleWorldEmptyRemainMS)
+			}
+		}
+		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read game-world data %q: %w", path, err)
@@ -162,6 +214,93 @@ func loadGameWorldReferenceData(path string) ([]gameWorldReferenceRow, error) {
 		return nil, errors.New("game-world data contains no rows")
 	}
 	return rows, nil
+}
+
+func loadDimensionHoleWorldRegionReferenceData(path string) ([]gameWorldRegionReferenceRow, error) {
+	contents, err := readClientTextFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open region data %q: %w", path, err)
+	}
+	const (
+		toguiRegions = 48
+		flameRegions = 1
+		wreckRegions = 224
+	)
+	wantedCounts := map[string]int{
+		"GOD_TOGUI":     toguiRegions,
+		"GOD_FLAME":     flameRegions,
+		"GOD_WRECK_IN":  wreckRegions,
+		"GOD_WRECK_OUT": wreckRegions,
+	}
+	regions := make(map[string][]int16, len(wantedCounts))
+	seen := make(map[string]map[int16]bool, len(wantedCounts))
+	scanner := bufio.NewScanner(strings.NewReader(contents))
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		fields := strings.Split(scanner.Text(), "\t")
+		if len(fields) < 6 {
+			continue
+		}
+		for index := range fields {
+			fields[index] = strings.TrimSpace(fields[index])
+		}
+		family := strings.ToUpper(fields[3])
+		if _, wanted := wantedCounts[family]; !wanted {
+			continue
+		}
+		service, serviceErr := positiveUint(fields[5])
+		region, regionErr := strconv.ParseInt(fields[0], 10, 16)
+		if serviceErr != nil || regionErr != nil || service != 1 || region == 0 {
+			return nil, fmt.Errorf("region line %d has invalid Dimension Hole row: %w", lineNumber, errors.Join(serviceErr, regionErr))
+		}
+		regionID := int16(region)
+		if seen[family] == nil {
+			seen[family] = make(map[int16]bool)
+		}
+		if seen[family][regionID] {
+			return nil, fmt.Errorf("region line %d duplicates Dimension Hole family %s region %d", lineNumber, family, regionID)
+		}
+		seen[family][regionID] = true
+		regions[family] = append(regions[family], regionID)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read region data %q: %w", path, err)
+	}
+	for family, want := range wantedCounts {
+		if got := len(regions[family]); got != want {
+			return nil, fmt.Errorf("region data family %s has %d rows, want %d", family, got, want)
+		}
+		sort.Slice(regions[family], func(i, j int) bool { return regions[family][i] < regions[family][j] })
+	}
+
+	definitions := model.DimensionHoleCatalog()
+	capacity := 0
+	for _, definition := range definitions {
+		family, ok := dimensionHoleRegionFamily(definition.WorldCodeName)
+		if !ok {
+			return nil, fmt.Errorf("Dimension Hole world %d has unsupported region family %q", definition.WorldID, definition.WorldCodeName)
+		}
+		capacity += len(regions[family])
+	}
+	rows := make([]gameWorldRegionReferenceRow, 0, capacity)
+	for _, definition := range definitions {
+		family, ok := dimensionHoleRegionFamily(definition.WorldCodeName)
+		if !ok {
+			return nil, fmt.Errorf("Dimension Hole world %d has unsupported region family %q", definition.WorldID, definition.WorldCodeName)
+		}
+		for _, regionID := range regions[family] {
+			rows = append(rows, gameWorldRegionReferenceRow{WorldID: definition.WorldID, RegionID: regionID})
+		}
+	}
+	return rows, nil
+}
+
+func dimensionHoleRegionFamily(worldCodeName string) (string, bool) {
+	for _, family := range []string{"GOD_TOGUI", "GOD_FLAME", "GOD_WRECK_IN", "GOD_WRECK_OUT"} {
+		if strings.HasPrefix(worldCodeName, "INS_"+family+"_") {
+			return family, true
+		}
+	}
+	return "", false
 }
 
 func loadMagicOptionReferenceData(path string) ([]magicOptionReferenceRow, error) {
@@ -477,7 +616,7 @@ func positiveUint(value string) (uint64, error) {
 	return parsed, nil
 }
 
-func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow, magicOptions []magicOptionReferenceRow, dropMagicAssignments []dropMagicOptionAssignmentRow, gameWorlds []gameWorldReferenceRow) error {
+func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelReferenceRow, skills []skillReferenceRow, magicOptions []magicOptionReferenceRow, dropMagicAssignments []dropMagicOptionAssignmentRow, gameWorlds []gameWorldReferenceRow, gameWorldRegions []gameWorldRegionReferenceRow, startPositions []instanceWorldStartPositionReferenceRow) error {
 	tx, err := pool.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin reference import: %w", err)
@@ -542,14 +681,40 @@ func importReferenceRows(ctx context.Context, pool *sql.DB, levels []levelRefere
 			return fmt.Errorf("import drop magic-option assignment %d/%d/%d/%d: %w", assignment.Country, assignment.TypeID3, assignment.TypeID4, assignment.Slot, err)
 		}
 	}
-	gameWorldStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_GAME_WORLD` (`WORLD_ID`,`CODE_NAME`,`WORLD_TYPE`,`MAX_INSTANCE_COUNT`,`MAX_USER_COUNT`,`CONFIG_GROUP_CODE_NAME`) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`WORLD_TYPE`=VALUES(`WORLD_TYPE`),`MAX_INSTANCE_COUNT`=VALUES(`MAX_INSTANCE_COUNT`),`MAX_USER_COUNT`=VALUES(`MAX_USER_COUNT`),`CONFIG_GROUP_CODE_NAME`=VALUES(`CONFIG_GROUP_CODE_NAME`)")
+	gameWorldStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_GAME_WORLD` (`WORLD_ID`,`CODE_NAME`,`WORLD_TYPE`,`MAX_INSTANCE_COUNT`,`MAX_USER_COUNT`,`WORLD_ENTRY_TYPE`,`WORLD_ENTRANCE_TYPE`,`WORLD_LEAVE_TYPE`,`WORLD_DURATION_MS`,`WORLD_EMPTY_REMAIN_MS`,`CONFIG_GROUP_CODE_NAME`) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `CODE_NAME`=VALUES(`CODE_NAME`),`WORLD_TYPE`=VALUES(`WORLD_TYPE`),`MAX_INSTANCE_COUNT`=VALUES(`MAX_INSTANCE_COUNT`),`MAX_USER_COUNT`=VALUES(`MAX_USER_COUNT`),`WORLD_ENTRY_TYPE`=VALUES(`WORLD_ENTRY_TYPE`),`WORLD_ENTRANCE_TYPE`=VALUES(`WORLD_ENTRANCE_TYPE`),`WORLD_LEAVE_TYPE`=VALUES(`WORLD_LEAVE_TYPE`),`WORLD_DURATION_MS`=VALUES(`WORLD_DURATION_MS`),`WORLD_EMPTY_REMAIN_MS`=VALUES(`WORLD_EMPTY_REMAIN_MS`),`CONFIG_GROUP_CODE_NAME`=VALUES(`CONFIG_GROUP_CODE_NAME`)")
 	if err != nil {
 		return fmt.Errorf("prepare game-world import: %w", err)
 	}
 	defer gameWorldStatement.Close()
 	for _, world := range gameWorlds {
-		if _, err := gameWorldStatement.ExecContext(ctx, world.WorldID, world.CodeName, world.WorldType, world.MaxInstanceCount, world.MaxUserCount, world.ConfigGroupCodeName); err != nil {
+		if _, err := gameWorldStatement.ExecContext(ctx, world.WorldID, world.CodeName, world.WorldType, world.MaxInstanceCount, world.MaxUserCount, world.WorldEntryType, world.WorldEntranceType, world.WorldLeaveType, world.WorldDurationMS, world.WorldEmptyRemainMS, world.ConfigGroupCodeName); err != nil {
 			return fmt.Errorf("import game world %d: %w", world.WorldID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM `REF_GAME_WORLD_REGION` WHERE `WORLD_ID` BETWEEN ? AND ?", model.DimensionHoleFirstWorldID, model.DimensionHoleLastWorldID); err != nil {
+		return fmt.Errorf("clear Dimension Hole world regions: %w", err)
+	}
+	gameWorldRegionStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_GAME_WORLD_REGION` (`WORLD_ID`,`REGION_ID`) VALUES (?,?)")
+	if err != nil {
+		return fmt.Errorf("prepare Dimension Hole world-region import: %w", err)
+	}
+	defer gameWorldRegionStatement.Close()
+	for _, row := range gameWorldRegions {
+		if _, err := gameWorldRegionStatement.ExecContext(ctx, row.WorldID, row.RegionID); err != nil {
+			return fmt.Errorf("import Dimension Hole world %d region %d: %w", row.WorldID, row.RegionID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM `REF_INSTANCE_WORLD_START_POSITION` WHERE `WORLD_ID` BETWEEN ? AND ?", model.DimensionHoleFirstWorldID, model.DimensionHoleLastWorldID); err != nil {
+		return fmt.Errorf("clear Dimension Hole start positions: %w", err)
+	}
+	startPositionStatement, err := tx.PrepareContext(ctx, "INSERT INTO `REF_INSTANCE_WORLD_START_POSITION` (`WORLD_ID`,`START_INDEX`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`PARAM_VALUE`) VALUES (?,?,?,?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("prepare Dimension Hole start-position import: %w", err)
+	}
+	defer startPositionStatement.Close()
+	for _, row := range startPositions {
+		if _, err := startPositionStatement.ExecContext(ctx, row.WorldID, row.StartIndex, row.RegionID, row.X, row.Y, row.Z, row.Param); err != nil {
+			return fmt.Errorf("import Dimension Hole world %d start %d: %w", row.WorldID, row.StartIndex, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
