@@ -130,6 +130,7 @@ type ItemMallModernPurchaseSuccess struct {
 	SlotIndex    byte
 	ResultBytes  []byte
 	PackageCount uint16
+	ItemPayload  []byte
 }
 
 // ItemMallLegacyPurchaseSuccess is the fixed selector/slot/count envelope
@@ -179,6 +180,7 @@ func BuildItemMallModernPurchaseSuccess(success ItemMallModernPurchaseSuccess) n
 		packet.WriteByte(value)
 	}
 	packet.WriteUInt16(success.PackageCount)
+	_ = packet.WriteBytes(success.ItemPayload)
 	return packet
 }
 
@@ -231,7 +233,10 @@ func DecodeItemMallModernPurchaseSuccess(packet *network.Packet) (ItemMallModern
 		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("read 0x18 trailing package count: %w", err)
 	}
 	if packet.Remaining() != 0 {
-		return ItemMallModernPurchaseSuccess{}, fmt.Errorf("0x18 response has %d trailing bytes", packet.Remaining())
+		success.ItemPayload, err = packet.ReadBytes(packet.Remaining())
+		if err != nil {
+			return ItemMallModernPurchaseSuccess{}, fmt.Errorf("read 0x18 item payload: %w", err)
+		}
 	}
 	return success, nil
 }

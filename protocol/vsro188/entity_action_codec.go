@@ -11,6 +11,7 @@ import (
 // descriptive; the binary confirms the widths/order and branch values, not
 // every gameplay meaning.
 const (
+	EntityActionKindInteraction    = 2
 	EntityActionKindTarget         = 4
 	EntityActionKindRemove         = 5
 	EntityActionTargetModeEntity   = 1
@@ -18,6 +19,7 @@ const (
 )
 
 type EntityActionStopRequest struct{}
+type EntityActionInteractionRequest struct{ TargetUID uint32 }
 type EntityActionTargetRequest struct{ TargetUID uint32 }
 type EntityActionSkillTargetRequest struct {
 	SkillID   uint32
@@ -33,6 +35,7 @@ type EntityActionPositionSkillRequest struct {
 type EntityActionRemoveBuffRequest struct{ SkillID uint32 }
 
 type EntityActionStopRequestCodec struct{}
+type EntityActionInteractionRequestCodec struct{}
 type EntityActionTargetRequestCodec struct{}
 type EntityActionSkillTargetRequestCodec struct{}
 type EntityActionPositionSkillRequestCodec struct{}
@@ -50,6 +53,35 @@ func (EntityActionStopRequestCodec) Encode(EntityActionStopRequest) (network.Pac
 		return network.Packet{}, err
 	}
 	return packet, nil
+}
+
+// Decode accepts the exact runtime-structure activation emitted by the pinned
+// client. The action kind is shared protocol framing; gameplay code must still
+// prove that TargetUID resolves to the expected live structure before acting.
+func (EntityActionInteractionRequestCodec) Decode(packet network.Packet) (EntityActionInteractionRequest, error) {
+	if packet.Remaining() != 7 {
+		return EntityActionInteractionRequest{}, fmt.Errorf("entity interaction payload length %d, want 7", packet.Remaining())
+	}
+	phase, err := packet.ReadByte()
+	if err != nil {
+		return EntityActionInteractionRequest{}, fmt.Errorf("read entity interaction phase: %w", err)
+	}
+	kind, err := packet.ReadByte()
+	if err != nil {
+		return EntityActionInteractionRequest{}, fmt.Errorf("read entity interaction kind: %w", err)
+	}
+	targetMode, err := packet.ReadByte()
+	if err != nil {
+		return EntityActionInteractionRequest{}, fmt.Errorf("read entity interaction target mode: %w", err)
+	}
+	targetUID, err := packet.ReadUInt32()
+	if err != nil {
+		return EntityActionInteractionRequest{}, fmt.Errorf("read entity interaction target UID: %w", err)
+	}
+	if phase != CombatActionPhaseStart || kind != EntityActionKindInteraction || targetMode != EntityActionTargetModeEntity || targetUID == 0 {
+		return EntityActionInteractionRequest{}, fmt.Errorf("invalid entity interaction phase=%d kind=%d target-mode=%d uid=%d", phase, kind, targetMode, targetUID)
+	}
+	return EntityActionInteractionRequest{TargetUID: targetUID}, nil
 }
 
 func (EntityActionTargetRequestCodec) Encode(request EntityActionTargetRequest) (network.Packet, error) {

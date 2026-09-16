@@ -73,7 +73,7 @@ func TestItemCompatibilityCoveragePinsHighRiskBoundaries(t *testing.T) {
 	if got := find("invalid specialty operation"); got.Status != CompatibilityFailClosed || got.Operation != "0x2C" {
 		t.Fatalf("invalid specialty operation coverage = %+v", got)
 	}
-	if got := find("magic-cube lifecycle"); got.Status != CompatibilityFailClosed {
+	if got := find("magic-cube lifecycle"); got.Status != CompatibilityPartial || got.RequestOpcode != 0x7034 || got.ResponseOpcode != 0xB034 || got.Operation != "request 0x27/0x28; response 0x27/0x28/0x29" {
 		t.Fatalf("magic-cube coverage = %+v", got)
 	}
 	if got := find("unresolved item-use callbacks"); got.Status != CompatibilityFailClosed {
@@ -84,5 +84,14 @@ func TestItemCompatibilityCoveragePinsHighRiskBoundaries(t *testing.T) {
 	}
 	if got := find("mastery withdrawal"); got.Status != CompatibilityImplemented || got.RequestOpcode != 0x7203 || got.ResponseOpcode != 0xB203 {
 		t.Fatalf("mastery withdrawal coverage = %+v", got)
+	}
+	if got := find("storage open"); got.Status != CompatibilityImplemented || got.RequestOpcode != 0x703C || got.ResponseOpcode != 0xB03C {
+		t.Fatalf("storage-open coverage = %+v", got)
+	}
+	if got := find("ranged ammunition update"); got.Status != CompatibilityImplemented || got.ResponseOpcode != 0x3057 {
+		t.Fatalf("ranged-ammunition coverage = %+v", got)
+	}
+	if got := find("ground-item alternate pickup rejection"); got.Status != CompatibilityImplemented || got.RequestOpcode != 0x703F || got.ResponseOpcode != 0xB03F {
+		t.Fatalf("unknown inventory selector coverage = %+v", got)
 	}
 }

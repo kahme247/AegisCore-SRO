@@ -12,13 +12,16 @@ import (
 )
 
 var (
-	ErrDefinitionExists = errors.New("scheduler definition already exists")
-	ErrRunLeaseLost     = errors.New("scheduler run lease is no longer owned")
+	ErrDefinitionExists   = errors.New("scheduler definition already exists")
+	ErrDefinitionNotFound = errors.New("scheduler definition was not found")
+	ErrDefinitionChanged  = errors.New("scheduler definition changed")
+	ErrRunLeaseLost       = errors.New("scheduler run lease is no longer owned")
 )
 
 type database interface {
 	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 type SQLStore struct {
@@ -63,6 +66,156 @@ func (store *SQLStore) Create(ctx context.Context, definition Definition) (Defin
 		return Definition{}, fmt.Errorf("create scheduler definition %q: %w", definition.ID, err)
 	}
 	return cloneDefinition(definition), nil
+}
+
+func (store *SQLStore) Get(ctx context.Context, id string) (Definition, error) {
+	if store == nil || store.database == nil {
+		return Definition{}, errors.New("scheduler store is not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || len(id) > 128 {
+		return Definition{}, errors.New("scheduler definition ID must contain 1-128 characters")
+	}
+	rows, err := store.database.QueryContext(normalizeContext(ctx), definitionSelect+" WHERE `SCHEDULE_ID`=?", id)
+	if err != nil {
+		return Definition{}, fmt.Errorf("query scheduler definition %q: %w", id, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return Definition{}, fmt.Errorf("query scheduler definition %q: %w", id, err)
+		}
+		return Definition{}, ErrDefinitionNotFound
+	}
+	definition, err := scanDefinition(rows)
+	if err != nil {
+		return Definition{}, err
+	}
+	if rows.Next() {
+		return Definition{}, fmt.Errorf("scheduler definition %q is duplicated", id)
+	}
+	return cloneDefinition(definition), nil
+}
+
+func (store *SQLStore) List(ctx context.Context, limit int) ([]Definition, error) {
+	if store == nil || store.database == nil {
+		return nil, errors.New("scheduler store is not configured")
+	}
+	if limit < 1 || limit > 500 {
+		return nil, errors.New("scheduler definition list limit must be between 1 and 500")
+	}
+	rows, err := store.database.QueryContext(normalizeContext(ctx), definitionSelect+" ORDER BY `SCHEDULE_ID` LIMIT ?", limit)
+	if err != nil {
+		return nil, fmt.Errorf("list scheduler definitions: %w", err)
+	}
+	defer rows.Close()
+	definitions := make([]Definition, 0)
+	for rows.Next() {
+		definition, err := scanDefinition(rows)
+		if err != nil {
+			return nil, err
+		}
+		definitions = append(definitions, cloneDefinition(definition))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list scheduler definitions: %w", err)
+	}
+	return definitions, nil
+}
+
+func (store *SQLStore) SetEnabled(ctx context.Context, id string, expectedVersion uint64, enabled bool) (Definition, error) {
+	if expectedVersion == 0 {
+		return Definition{}, errors.New("scheduler expected version is required")
+	}
+	definition, err := store.Get(ctx, id)
+	if err != nil {
+		return Definition{}, err
+	}
+	if definition.Version != expectedVersion {
+		return Definition{}, ErrDefinitionChanged
+	}
+	if definition.Enabled == enabled {
+		return definition, nil
+	}
+	nextRunAt := definition.NextRunAt
+	if enabled {
+		var available bool
+		nextRunAt, available, err = definition.NextAfter(store.now().UTC().Add(-time.Nanosecond))
+		if err != nil {
+			return Definition{}, err
+		}
+		if !available {
+			return Definition{}, errors.New("scheduler definition has no future occurrence")
+		}
+	}
+	result, err := store.database.ExecContext(normalizeContext(ctx),
+		"UPDATE `AEGIS_SCHEDULE_DEFINITION` SET `ENABLED`=?,`NEXT_RUN_AT`=?,`VERSION`=`VERSION`+1 WHERE `SCHEDULE_ID`=? AND `VERSION`=?",
+		enabled, nullableTime(nextRunAt), definition.ID, expectedVersion,
+	)
+	if err != nil {
+		return Definition{}, fmt.Errorf("set scheduler definition %q enabled=%t: %w", definition.ID, enabled, err)
+	}
+	if err := requireOneRow(result, "scheduler definition changed"); err != nil {
+		return Definition{}, ErrDefinitionChanged
+	}
+	definition.Enabled = enabled
+	definition.NextRunAt = nextRunAt
+	definition.Version++
+	return cloneDefinition(definition), nil
+}
+
+type RunRecord struct {
+	ID              uint64          `json:"id"`
+	ScheduleID      string          `json:"scheduleId"`
+	ScheduleVersion uint64          `json:"scheduleVersion"`
+	ScheduledFor    time.Time       `json:"scheduledFor"`
+	Handler         string          `json:"handler"`
+	Payload         json.RawMessage `json:"payload"`
+	Phase           Phase           `json:"phase"`
+	Scope           Scope           `json:"scope"`
+	ShardID         uint16          `json:"shardId,omitempty"`
+	Status          string          `json:"status"`
+	AttemptCount    uint32          `json:"attemptCount"`
+	StartedAt       *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
+	LastError       string          `json:"lastError,omitempty"`
+}
+
+func (store *SQLStore) ListRuns(ctx context.Context, scheduleID string, limit int) ([]RunRecord, error) {
+	if store == nil || store.database == nil {
+		return nil, errors.New("scheduler store is not configured")
+	}
+	scheduleID = strings.TrimSpace(scheduleID)
+	if scheduleID == "" || len(scheduleID) > 128 || limit < 1 || limit > 500 {
+		return nil, errors.New("scheduler run-history parameters are invalid")
+	}
+	rows, err := store.database.QueryContext(normalizeContext(ctx),
+		"SELECT `RUN_ID`,`FK_SCHEDULE`,`SCHEDULE_VERSION`,`SCHEDULED_FOR`,`HANDLER`,`PAYLOAD`,`PHASE`,`SCOPE`,COALESCE(`SHARD_ID`,0),`STATUS`,`ATTEMPT_COUNT`,`STARTED_AT`,`FINISHED_AT`,COALESCE(`LAST_ERROR`,'') FROM `AEGIS_SCHEDULE_RUN` WHERE `FK_SCHEDULE`=? ORDER BY `SCHEDULED_FOR` DESC,`RUN_ID` DESC LIMIT ?",
+		scheduleID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list scheduler runs for %q: %w", scheduleID, err)
+	}
+	defer rows.Close()
+	records := make([]RunRecord, 0)
+	for rows.Next() {
+		var record RunRecord
+		var payload []byte
+		var attempt uint64
+		if err := rows.Scan(&record.ID, &record.ScheduleID, &record.ScheduleVersion, &record.ScheduledFor, &record.Handler, &payload, &record.Phase, &record.Scope, &record.ShardID, &record.Status, &attempt, &record.StartedAt, &record.FinishedAt, &record.LastError); err != nil {
+			return nil, fmt.Errorf("scan scheduler run history: %w", err)
+		}
+		if attempt > uint64(^uint32(0)) || !json.Valid(payload) {
+			return nil, fmt.Errorf("scheduler run %d contains invalid durable state", record.ID)
+		}
+		record.AttemptCount = uint32(attempt)
+		record.Payload = append(json.RawMessage(nil), payload...)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list scheduler run history: %w", err)
+	}
+	return records, nil
 }
 
 type MaterializeResult struct {

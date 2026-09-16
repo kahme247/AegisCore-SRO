@@ -15,6 +15,7 @@ func TestItemUseRequestMatchesStock704CForms(t *testing.T) {
 		want ItemUseRequest
 	}{
 		{"ordinary", "0eec08", ItemUseRequest{InventorySlot: 0x0E, ItemType: 0x08EC}},
+		{"dimension-hole", "0d6c3e", ItemUseRequest{InventorySlot: 0x0D, ItemType: 0x3E6C}},
 		{"reverse-map", "0ded290707000000", ItemUseRequest{InventorySlot: 0x0D, ItemType: 0x29ED, HasOption: true, Option: 7, MapID: 7}},
 	}
 	for _, test := range tests {
@@ -88,5 +89,9 @@ func TestItemUseResponsesMatchStockB04CLayouts(t *testing.T) {
 	failure := BuildItemUseFailure(0x183E)
 	if got, want := hex.EncodeToString(failure.Payload()), "023e18"; got != want {
 		t.Fatalf("failure payload = %s, want %s", got, want)
+	}
+	dimensionHole := BuildItemUseSuccess(ItemUseSuccess{SourceSlot: 13, NewAmount: 0, ItemType: 0x3E6C})
+	if got, want := hex.EncodeToString(dimensionHole.Payload()), "010d00006c3e"; got != want {
+		t.Fatalf("Dimension Hole success payload = %s, want %s", got, want)
 	}
 }

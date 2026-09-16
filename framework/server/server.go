@@ -12,21 +12,22 @@ import (
 )
 
 type Server struct {
-	host              string
-	port              int
-	Sessions          map[string]*Session
-	options           network.EncodingOptions
-	ModuleID          string
-	PacketChannel     chan PacketChannelData
-	SessionClosed     chan *Session
-	sessionsMu        sync.RWMutex
-	handlers          *HandlerRegistry
-	admissionMu       sync.RWMutex
-	admissionPolicy   PacketAdmissionPolicy
-	trafficFilterMu   sync.RWMutex
-	trafficFilter     TrafficFilterOptions
-	closeHandlerMu    sync.RWMutex
-	sessionClosedHook func(*Session)
+	host               string
+	port               int
+	Sessions           map[string]*Session
+	options            network.EncodingOptions
+	ModuleID           string
+	PacketChannel      chan PacketChannelData
+	SessionClosed      chan *Session
+	sessionsMu         sync.RWMutex
+	handlers           *HandlerRegistry
+	admissionMu        sync.RWMutex
+	admissionPolicy    PacketAdmissionPolicy
+	trafficFilterMu    sync.RWMutex
+	trafficFilter      TrafficFilterOptions
+	closeHandlerMu     sync.RWMutex
+	sessionClosingHook func(*Session)
+	sessionClosedHook  func(*Session)
 
 	moduleIdentifiedMu   sync.RWMutex
 	moduleIdentifiedHook func(context.Context, *Session) error
@@ -135,6 +136,17 @@ func (e *Server) SetSessionClosedHandler(handler func(*Session)) {
 	e.closeHandlerMu.Unlock()
 }
 
+// SetSessionClosingHandler installs an immediate, non-blocking transport-close
+// hook. It runs after registry removal and before session workers drain.
+func (e *Server) SetSessionClosingHandler(handler func(*Session)) {
+	if e == nil {
+		return
+	}
+	e.closeHandlerMu.Lock()
+	e.sessionClosingHook = handler
+	e.closeHandlerMu.Unlock()
+}
+
 // SetModuleIdentifiedHandler installs a listener-specific hook that runs after
 // the normal 0x2001 module-identification response has been written. Services
 // such as DownloadServer use it for protocol messages that are valid only once
@@ -156,6 +168,12 @@ func (e *Server) sessionModuleIdentifiedHandler() func(context.Context, *Session
 
 func (e *Server) closeSession(session *Session) {
 	e.RemoveSession(session)
+	e.closeHandlerMu.RLock()
+	hook := e.sessionClosingHook
+	e.closeHandlerMu.RUnlock()
+	if hook != nil {
+		hook(session)
+	}
 }
 
 func (e *Server) sessionDrained(session *Session) {

@@ -44,9 +44,20 @@ func TestGuildStorageControlResponsesMatchMaintainedLayouts(t *testing.T) {
 	if got, want := closeSuccess.Payload(), []byte{1}; !bytes.Equal(got, want) {
 		t.Fatalf("guild close success = % X, want % X", got, want)
 	}
+	closeFailure := BuildGuildStorageCloseFailure(0x4C49)
+	if got, want := closeFailure.Payload(), []byte{2, 0x49, 0x4C}; !bytes.Equal(got, want) {
+		t.Fatalf("guild close failure = % X, want % X", got, want)
+	}
+	listFailure := BuildGuildStorageListFailure(0x4C4A)
+	if got, want := listFailure.Payload(), []byte{2, 0x4A, 0x4C}; !bytes.Equal(got, want) {
+		t.Fatalf("guild list failure = % X, want % X", got, want)
+	}
 }
 
 func TestChunkStorageDataUsesStockFourKiBBoundaryForBothProfiles(t *testing.T) {
+	if StorageDataChunkSize != 4064 {
+		t.Fatalf("storage chunk size = %d, want stock 4096-0x20", StorageDataChunkSize)
+	}
 	input := make([]byte, StorageDataChunkSize*2+1)
 	for index := range input {
 		input[index] = byte(index)

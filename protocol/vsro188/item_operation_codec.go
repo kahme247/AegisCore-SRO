@@ -22,8 +22,7 @@ const ItemOperationServerAdd byte = 0x0E
 
 // ItemOperationServerDelete is the maintained server-side item-removal
 // discriminator used by quest and alchemy material-consumption paths. Its
-// stock semantic label is not promoted beyond the existing AegisCore
-// contract.
+// success body contains the source slot followed by one opaque byte.
 const ItemOperationServerDelete byte = 0x0F
 
 const ItemOperationRelocation byte = 0x00
@@ -43,6 +42,118 @@ const ItemOperationPackageItem byte = 0x08
 // debit continuation vector. It enters the same package insertion engine as
 // the gold/package operation 0x08.
 const ItemOperationPackageItemExtended byte = 0x2B
+
+const (
+	ItemOperationMagicCubePush   byte = 0x27
+	ItemOperationMagicCubePop    byte = 0x28
+	ItemOperationMagicCubeDelete byte = 0x29
+)
+
+// MagicCubeMoveRequest preserves the exact 0x7034 parser fields. Context is
+// present only for operation 0x28; the binary does not establish a safer
+// public name for that u32 value.
+type MagicCubeMoveRequest struct {
+	Context     uint32
+	Source      byte
+	Destination byte
+	Amount      uint16
+}
+
+func BuildMagicCubeMoveRequest(operation byte, request MagicCubeMoveRequest) (network.Packet, error) {
+	if operation != ItemOperationMagicCubePush && operation != ItemOperationMagicCubePop {
+		return network.Packet{}, fmt.Errorf("magic-cube move operation is 0x%02X", operation)
+	}
+	packet := network.EmptyClientPacket()
+	packet.MessageID = opcode.ItemOperationRequest
+	packet.WriteByte(operation)
+	if operation == ItemOperationMagicCubePop {
+		packet.WriteUInt32(request.Context)
+	}
+	packet.WriteByte(request.Source)
+	packet.WriteByte(request.Destination)
+	packet.WriteUInt16(request.Amount)
+	return packet, nil
+}
+
+func DecodeMagicCubeMoveRequest(packet *network.Packet) (byte, MagicCubeMoveRequest, error) {
+	if packet == nil {
+		return 0, MagicCubeMoveRequest{}, fmt.Errorf("magic-cube move request is nil")
+	}
+	operation, err := packet.ReadByte()
+	if err != nil || (operation != ItemOperationMagicCubePush && operation != ItemOperationMagicCubePop) {
+		return 0, MagicCubeMoveRequest{}, fmt.Errorf("read magic-cube move operation: %w", err)
+	}
+	request, err := DecodeMagicCubeMoveRequestBody(operation, packet)
+	return operation, request, err
+}
+
+// DecodeMagicCubeMoveRequestBody decodes a request after a shared 0x7034
+// dispatcher has already consumed the operation discriminator.
+func DecodeMagicCubeMoveRequestBody(operation byte, packet *network.Packet) (MagicCubeMoveRequest, error) {
+	if packet == nil || (operation != ItemOperationMagicCubePush && operation != ItemOperationMagicCubePop) {
+		return MagicCubeMoveRequest{}, fmt.Errorf("invalid magic-cube move body operation 0x%02X", operation)
+	}
+	want := 4
+	if operation == ItemOperationMagicCubePop {
+		want = 8
+	}
+	if packet.Remaining() != want {
+		return MagicCubeMoveRequest{}, fmt.Errorf("magic-cube operation 0x%02X has %d body bytes, want %d", operation, packet.Remaining(), want)
+	}
+	request := MagicCubeMoveRequest{}
+	var err error
+	if operation == ItemOperationMagicCubePop {
+		request.Context, err = packet.ReadUInt32()
+	}
+	if err == nil {
+		request.Source, err = packet.ReadByte()
+	}
+	if err == nil {
+		request.Destination, err = packet.ReadByte()
+	}
+	if err == nil {
+		request.Amount, err = packet.ReadUInt16()
+	}
+	if err != nil {
+		return MagicCubeMoveRequest{}, fmt.Errorf("decode magic-cube operation 0x%02X: %w", operation, err)
+	}
+	return request, nil
+}
+
+// MagicCubeSuccess is the semantic-neutral stock 0xB034 record shared by
+// operations 0x27-0x29. Operation 0x29 is response-only: the GameServer's
+// 0x0050CE80 startup table installs request handlers for 0x27 and 0x28 but
+// leaves the 0x29 entry null. DeleteScalar and Context are emitted only by
+// 0x29; Context is also emitted first by 0x28.
+type MagicCubeSuccess struct {
+	Operation    byte
+	DeleteScalar byte
+	Context      uint32
+	Source       byte
+	Destination  byte
+	Amount       uint16
+}
+
+func BuildMagicCubeSuccess(success MagicCubeSuccess) (network.Packet, error) {
+	if success.Operation < ItemOperationMagicCubePush || success.Operation > ItemOperationMagicCubeDelete {
+		return network.Packet{}, fmt.Errorf("magic-cube success operation is 0x%02X", success.Operation)
+	}
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ItemOperationResponse
+	packet.WriteByte(1)
+	packet.WriteByte(success.Operation)
+	switch success.Operation {
+	case ItemOperationMagicCubePop:
+		packet.WriteUInt32(success.Context)
+	case ItemOperationMagicCubeDelete:
+		packet.WriteByte(success.DeleteScalar)
+		packet.WriteUInt32(success.Context)
+	}
+	packet.WriteByte(success.Source)
+	packet.WriteByte(success.Destination)
+	packet.WriteUInt16(success.Amount)
+	return packet, nil
+}
 
 // PackageItemRequestBodySize is the exact number of bytes after operation
 // 0x08 in the recovered package-item sender.
@@ -279,6 +390,13 @@ func BuildItemOperationTwoByteSuccess(operation, first, second byte) network.Pac
 	packet.WriteByte(first)
 	packet.WriteByte(second)
 	return packet
+}
+
+// BuildItemOperationServerDeleteSuccess writes the complete stock client
+// decoder contract for operation 0x0F. The trailing scalar's business meaning
+// is unresolved; ordinary server-side removals use its zero/default value.
+func BuildItemOperationServerDeleteSuccess(slot byte) network.Packet {
+	return BuildItemOperationTwoByteSuccess(ItemOperationServerDelete, slot, 0)
 }
 
 // BuildItemOperationObjectSlotSuccess writes the mode-1 completion form used

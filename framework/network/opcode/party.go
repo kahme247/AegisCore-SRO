@@ -6,7 +6,7 @@ const (
 	PartyInviteRequest          uint16 = 0x7062
 	PartyKickRequest            uint16 = 0x7063
 	PartyInvitation             uint16 = 0x3080
-	PartyCreate                 uint16 = 0x3865
+	PartyCreate                 uint16 = 0x3065
 	PartyUpdateResponse         uint16 = 0x3864
 	PartyCreateResponse         uint16 = 0xB060
 	PartyInviteResponse         uint16 = 0xB062

@@ -56,11 +56,17 @@ func TestImplementedRegistryEntriesDoNotClaimCaptureVerification(t *testing.T) {
 func TestProtocolRegistryContainsTypedInWorldSurface(t *testing.T) {
 	wantRequests := []uint16{
 		opcode.QuestTalk,
+		opcode.CommunityFriendResponse,
+		opcode.AcademyMatchingResponse,
+		opcode.PremiumPause,
+		opcode.OperatorRequest,
 		opcode.EntityMovementRequest,
 		opcode.EntityMovementForwardRequest,
 		opcode.EntityMovementTurnRequest,
+		opcode.RecallSolveRequest,
 		opcode.ItemOperationRequest,
 		opcode.StorageOpenRequest,
+		opcode.InventoryUnknownRequest,
 		opcode.EntitySelectRequest,
 		opcode.EntityDeselectRequest,
 		opcode.InventoryItemUseRequest,
@@ -68,29 +74,74 @@ func TestProtocolRegistryContainsTypedInWorldSurface(t *testing.T) {
 		opcode.CharacterIncreaseIntellectRequest,
 		opcode.TeleportDesignateRequest,
 		opcode.TeleportUseRequest,
+		opcode.SiegeActionRequest,
 		opcode.EntityActionRequest,
 		opcode.COSCommandRequest,
 		opcode.COSTerminationRequest,
+		opcode.COSUnknownRequest,
 		opcode.COSUpdateMountStateRequest,
 		opcode.QuestAbandonRequest,
+		opcode.GuildUpdateSiegeAuthorityRequest,
+		opcode.GuildElectionRequest,
+		opcode.GuildElectionParticipateRequest,
+		opcode.GuildElectionVoteRequest,
+		opcode.GuildWarRequest,
+		opcode.GuildWarEndRequest,
+		opcode.GuildWarCompensationClaimRequest,
+		opcode.GuildWarRewardRequest,
 		opcode.COSUnsummonRequest,
 		opcode.COSNameRequest,
+		opcode.SilkHistoryRequest,
+		opcode.SilkUnknownRequest,
 		opcode.AlchemyElixirRequest,
 		opcode.AlchemyStoneRequest,
 		opcode.AlchemyMaterialRequest,
 		opcode.AlchemyDismantleRequest,
+		opcode.PremiumDecoUseRequest,
 		opcode.AlchemySocketRequest,
 		opcode.SkillWithdrawRequest,
 		opcode.MasteryWithdrawRequest,
+		opcode.GuildMercenaryAttrRequest,
+		opcode.GuildMercenaryTerminateRequest,
+		opcode.CommunityFriendAddRequest,
+		opcode.CommunityFriendDeleteRequest,
+		opcode.CommunityMemoOpenRequest,
+		opcode.CommunityMemoSendRequest,
+		opcode.CommunityMemoDeleteRequest,
+		opcode.CommunityMemoListRequest,
+		opcode.CommunityMemoGroupSendRequest,
+		opcode.CommunityBlockUpdateRequest,
 		opcode.COSSettingsRequest,
+		opcode.AcademyInviteRequest,
+		opcode.AcademyMemberActionRequest,
+		opcode.AcademyUnknownOperationRequest,
+		opcode.FlagWarRegisterRequest,
+		opcode.BattleArenaRequest,
+		opcode.GuildGPHistoryRequest,
+		opcode.OpenMarketDetailRequest,
+		opcode.OpenMarketCloseRequest,
+		opcode.OpenMarketRegisterRequest,
+		opcode.OpenMarketUnregisterRequest,
+		opcode.OpenMarketBuyRequest,
+		opcode.OpenMarketSettleRequest,
+		opcode.OpenMarketSearchRequest,
+		opcode.OpenMarketListRequest,
 		opcode.QuestRewardSelectionRequest,
+		opcode.FGWRecallListRequest,
+		opcode.FGWRecallRequest,
+		opcode.FGWRecallResponse,
+		opcode.FGWExitRequest,
 		opcode.AgentPingRequest,
 	}
 	gotRequests := ProtocolRegistry().Opcodes(protocolregistry.ServiceAgent, protocolregistry.ClientToServer, protocolregistry.AgentInWorld)
 	if !reflect.DeepEqual(gotRequests, wantRequests) {
 		t.Fatalf("in-world request opcodes = %#v, want %#v", gotRequests, wantRequests)
 	}
-	for _, packetOpcode := range []uint16{opcode.MovementPositionUpdate, opcode.EntityMovementTurnResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.ItemMallBalanceUpdate, opcode.ItemMallCashNotification, opcode.EntityItemUsed, opcode.ItemDurabilityUpdate, opcode.ItemRepairResponse, opcode.EntityUpdatePoints, opcode.InventoryItemUpdate, opcode.InventorySizeUpdate, opcode.StorageDataBegin, opcode.StorageData, opcode.StorageDataEnd, opcode.GuildStorageDataBegin, opcode.GuildStorageData, opcode.GuildStorageDataEnd} {
+	legacyKey := protocolregistry.Key{Service: protocolregistry.ServiceAgent, Direction: protocolregistry.ClientToServer, Phase: protocolregistry.AgentInWorld, Opcode: opcode.COSUnknownRequest30C4}
+	if entry, exists := ProtocolRegistry().Lookup(legacyKey); exists {
+		t.Fatalf("unsupported legacy COS request 0x30C4 is registered: %+v", entry)
+	}
+	for _, packetOpcode := range []uint16{opcode.MovementPositionUpdate, opcode.EntityMovementTurnResponse, opcode.EntitySkillCastBegin, opcode.EntitySkillCastEnd, opcode.ItemMallBalanceUpdate, opcode.ItemMallCashNotification, opcode.EntityItemUsed, opcode.ItemDurabilityUpdate, opcode.ItemRepairResponse, opcode.EntityUpdatePoints, opcode.InventoryItemUpdate, opcode.InventorySizeUpdate, opcode.StorageDataBegin, opcode.StorageData, opcode.StorageDataEnd, opcode.GuildStorageDataBegin, opcode.GuildStorageData, opcode.GuildStorageDataEnd, opcode.FGWUpdate, opcode.GuildWarInfo, opcode.OpenMarketUpdate, opcode.SiegeUpdate} {
 		key := protocolregistry.Key{Service: protocolregistry.ServiceAgent, Direction: protocolregistry.ServerToClient, Phase: protocolregistry.AgentInWorld, Opcode: packetOpcode}
 		entry, exists := ProtocolRegistry().Lookup(key)
 		if !exists || entry.Pair != nil {

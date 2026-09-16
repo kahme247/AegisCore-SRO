@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
@@ -68,6 +69,32 @@ func TestEntityActionRequestCodecsMatchRecovered7074Forms(t *testing.T) {
 			}
 			if !bytes.Equal(got, test.want) {
 				t.Fatalf("payload = %x, want %x", got, test.want)
+			}
+		})
+	}
+}
+
+func TestEntityActionInteractionRequestCodecRequiresExactRuntimeStructureForm(t *testing.T) {
+	valid := network.EmptyClientPacket()
+	valid.WriteBytes([]byte{1, 2, 1, 0x78, 0x56, 0x34, 0x12})
+	request, err := (EntityActionInteractionRequestCodec{}).Decode(valid)
+	if err != nil || request.TargetUID != 0x12345678 {
+		t.Fatalf("Decode() = %+v, %v", request, err)
+	}
+
+	for name, payload := range map[string][]byte{
+		"short":       {1, 2, 1, 0x78, 0x56, 0x34},
+		"trailing":    {1, 2, 1, 0x78, 0x56, 0x34, 0x12, 0},
+		"wrong phase": {2, 2, 1, 0x78, 0x56, 0x34, 0x12},
+		"wrong kind":  {1, 4, 1, 0x78, 0x56, 0x34, 0x12},
+		"wrong mode":  {1, 2, 2, 0x78, 0x56, 0x34, 0x12},
+		"zero UID":    {1, 2, 1, 0, 0, 0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			packet := network.EmptyClientPacket()
+			packet.WriteBytes(payload)
+			if _, decodeErr := (EntityActionInteractionRequestCodec{}).Decode(packet); decodeErr == nil {
+				t.Fatal("Decode() accepted invalid runtime-structure interaction")
 			}
 		})
 	}

@@ -5,10 +5,10 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
-// StorageDataChunkSize is the maximum payload used by the recovered vSRO
-// storage transfer path. Chunking copies bytes without interpreting the
-// variable TypeID-driven item records inside the stream.
-const StorageDataChunkSize = 4096
+// StorageDataChunkSize matches GameServer 0x430A20: each storage stream
+// fragment is capped at the stock 4096-byte message capacity minus 0x20 bytes
+// reserved by the message writer.
+const StorageDataChunkSize = int(network.BufferSize) - 0x20
 
 // StorageItemRecord keeps the fixed storage envelope separate from the
 // TypeID-driven rent/item bodies owned by the domain serializer.
@@ -54,6 +54,22 @@ func BuildGuildStorageCloseSuccess() network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.GuildStorageCloseResponse
 	packet.WriteByte(1)
+	return packet
+}
+
+func BuildGuildStorageCloseFailure(errorCode uint16) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.GuildStorageCloseResponse
+	packet.WriteByte(2)
+	packet.WriteUInt16(errorCode)
+	return packet
+}
+
+func BuildGuildStorageListFailure(errorCode uint16) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.GuildStorageListResponse
+	packet.WriteByte(2)
+	packet.WriteUInt16(errorCode)
 	return packet
 }
 

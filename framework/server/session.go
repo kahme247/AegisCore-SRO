@@ -17,7 +17,10 @@ import (
 	"time"
 )
 
-const DefaultSessionIdleTimeout = 30 * time.Second
+const (
+	DefaultSessionIdleTimeout   = 30 * time.Second
+	DefaultSendQueueRejectLimit = 8
+)
 
 // HandshakePhase is the single authoritative progression for the vSRO
 // challenge exchange. The old boolean fields remain in SecurityContext for
@@ -38,33 +41,45 @@ type Session struct {
 	Context     SecurityContext
 	UserContext UserContext
 	network.EncodingOptions
-	Sequence            network.MessageSequence
-	Crc                 network.MessageCRC
-	Cipher              *blowfish.Cipher
-	ServerPacketChannel chan PacketChannelData
-	ConnectionClosed    chan *Session
-	mutex               *sync.Mutex
-	securityMu          sync.RWMutex
-	ServerModuleID      string
-	packetChannel       chan network.Packet
-	massive             *inboundMassive
-	Sender              *Sender
-	lifetime            *sessionLifetime
-	onClose             func(*Session)
-	onDrained           func(*Session)
-	onModuleIdentified  func(context.Context, *Session) error
-	handlers            *HandlerRegistry
-	admissionPolicy     PacketAdmissionPolicy
-	trafficFilter       *sessionTrafficFilter
-	flightRecorder      *sessionFlightRecorder
-	traceCorrelationMu  sync.RWMutex
-	traceCorrelationID  string
-	handshakePhase      atomic.Uint32
-	moduleIdentified    atomic.Bool
-	authenticated       atomic.Bool
-	lifecyclePhase      atomic.Uint32
-	idleTimeoutNanos    atomic.Int64
-	lastSeenUnixNano    atomic.Int64
+	Sequence              network.MessageSequence
+	Crc                   network.MessageCRC
+	Cipher                *blowfish.Cipher
+	ServerPacketChannel   chan PacketChannelData
+	ConnectionClosed      chan *Session
+	mutex                 *sync.Mutex
+	securityMu            sync.RWMutex
+	ServerModuleID        string
+	packetChannel         chan network.Packet
+	massive               *inboundMassive
+	Sender                *Sender
+	lifetime              *sessionLifetime
+	onClose               func(*Session)
+	onDrained             func(*Session)
+	onModuleIdentified    func(context.Context, *Session) error
+	handlers              *HandlerRegistry
+	admissionPolicy       PacketAdmissionPolicy
+	trafficFilter         *sessionTrafficFilter
+	flightRecorder        *sessionFlightRecorder
+	traceCorrelationMu    sync.RWMutex
+	traceCorrelationID    string
+	handshakePhase        atomic.Uint32
+	moduleIdentified      atomic.Bool
+	authenticated         atomic.Bool
+	lifecyclePhase        atomic.Uint32
+	admissionAccountID    atomic.Uint32
+	idleTimeoutNanos      atomic.Int64
+	lastSeenUnixNano      atomic.Int64
+	sendQueueRejectLimit  atomic.Uint32
+	sendQueueFullStreak   atomic.Uint32
+	saturationClosing     atomic.Bool
+	saturationDisconnects atomic.Uint64
+}
+
+type SessionOutboundStats struct {
+	Sender                SenderStats
+	ConsecutiveQueueFull  uint32
+	QueueRejectLimit      uint32
+	SaturationDisconnects uint64
 }
 
 // HandshakePhase returns the ordered protocol state for this session.
@@ -159,6 +174,7 @@ func NewSession(
 		return session.encodeOutboundPacket(packet)
 	})
 	session.idleTimeoutNanos.Store(int64(DefaultSessionIdleTimeout))
+	session.sendQueueRejectLimit.Store(DefaultSendQueueRejectLimit)
 	session.markSeen()
 
 	return session
@@ -421,6 +437,29 @@ func (s *Session) Done() <-chan struct{} {
 	return s.lifetime.done
 }
 
+// BindAdmissionAccount publishes the authenticated account for immediate
+// transport-close cleanup. False means the session is already closing or an
+// identity was already bound; callers must release a redeemed reservation.
+func (s *Session) BindAdmissionAccount(accountID uint32) bool {
+	if s == nil || accountID == 0 || !s.admissionAccountID.CompareAndSwap(0, accountID) {
+		return false
+	}
+	select {
+	case <-s.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+// AdmissionAccountID is safe to read from transport-close hooks.
+func (s *Session) AdmissionAccountID() uint32 {
+	if s == nil {
+		return 0
+	}
+	return s.admissionAccountID.Load()
+}
+
 // Drained closes after every session-owned inbound worker and the ordered
 // sender have exited, and after the terminal domain callback has run. Done
 // remains the immediate shutdown signal for cancellation-sensitive callers.
@@ -588,6 +627,70 @@ func (s *Session) Send(packet network.Packet) error {
 		log.Errorf("failed to send packet 0x%04X for session %s: %v", packet.MessageID, s.ID, err)
 	}
 	return err
+}
+
+// TrySend queues a non-critical outbound packet without waiting for socket
+// I/O. Callers must tolerate ErrSenderQueueFull and reserve Send/SendBatch for
+// protocol sequences whose completion must be observed synchronously.
+func (s *Session) TrySend(packet network.Packet) error {
+	if s.Sender == nil {
+		return ErrSenderClosed
+	}
+	packet.ServerPacket = true
+	err := s.Sender.TrySend(packet)
+	outcome := "queued"
+	if err == nil {
+		s.sendQueueFullStreak.Store(0)
+	} else {
+		outcome = "rejected"
+		if errors.Is(err, ErrSenderQueueFull) {
+			streak := s.sendQueueFullStreak.Add(1)
+			limit := s.SendQueueRejectLimit()
+			if streak >= limit && s.saturationClosing.CompareAndSwap(false, true) {
+				s.saturationDisconnects.Add(1)
+				log.Warnf("disconnecting slow session %s after %d consecutive full outbound queues", s.ID, streak)
+				go s.Close()
+			}
+		}
+	}
+	s.flightRecorder.recordPacket("outbound", "try_send", packet, "", outcome, err, s.HandshakePhase(), s.IsAuthenticated())
+	return err
+}
+
+func (s *Session) SetSendQueueRejectLimit(limit uint32) {
+	if s == nil {
+		return
+	}
+	if limit == 0 {
+		limit = DefaultSendQueueRejectLimit
+	}
+	s.sendQueueRejectLimit.Store(limit)
+}
+
+func (s *Session) SendQueueRejectLimit() uint32 {
+	if s == nil {
+		return DefaultSendQueueRejectLimit
+	}
+	limit := s.sendQueueRejectLimit.Load()
+	if limit == 0 {
+		return DefaultSendQueueRejectLimit
+	}
+	return limit
+}
+
+func (s *Session) OutboundStats() SessionOutboundStats {
+	if s == nil {
+		return SessionOutboundStats{QueueRejectLimit: DefaultSendQueueRejectLimit}
+	}
+	stats := SessionOutboundStats{
+		ConsecutiveQueueFull:  s.sendQueueFullStreak.Load(),
+		QueueRejectLimit:      s.SendQueueRejectLimit(),
+		SaturationDisconnects: s.saturationDisconnects.Load(),
+	}
+	if s.Sender != nil {
+		stats.Sender = s.Sender.Stats()
+	}
+	return stats
 }
 
 // SendBatch writes an ordered protocol sequence as one sender job.

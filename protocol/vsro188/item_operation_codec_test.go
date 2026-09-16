@@ -97,8 +97,8 @@ func TestItemOperationStorageSuccessFormsMatchMaintainedB034Layouts(t *testing.T
 }
 
 func TestItemOperationServerDeleteMatchesMaintainedB034Layout(t *testing.T) {
-	packet := BuildItemOperationSlotSuccess(ItemOperationServerDelete, 0x2A)
-	if got, want := packet.Payload(), []byte{1, 0x0F, 0x2A}; !bytes.Equal(got, want) {
+	packet := BuildItemOperationServerDeleteSuccess(0x2A)
+	if got, want := packet.Payload(), []byte{1, 0x0F, 0x2A, 0}; !bytes.Equal(got, want) {
 		t.Fatalf("server-delete payload = % X, want % X", got, want)
 	}
 }
@@ -157,6 +157,67 @@ func TestPackageItemRequestMatchesRecoveredOverloadedZeroEightLayout(t *testing.
 	}
 	if decoded.SelectorA != 0x12 || decoded.SelectorB != 0x34 || decoded.Quantity != 0x5678 {
 		t.Fatalf("decoded package-item request = %+v", decoded)
+	}
+}
+
+func TestMagicCubeRequestsMatchStock7034Parser(t *testing.T) {
+	push, err := BuildMagicCubeMoveRequest(ItemOperationMagicCubePush, MagicCubeMoveRequest{Source: 0x0D, Destination: 2, Amount: 0x1234})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := push.Payload(), []byte{0x27, 0x0D, 2, 0x34, 0x12}; !bytes.Equal(got, want) {
+		t.Fatalf("cube push = % X, want % X", got, want)
+	}
+	operation, decoded, err := DecodeMagicCubeMoveRequest(&push)
+	if err != nil || operation != 0x27 || decoded.Source != 0x0D || decoded.Destination != 2 || decoded.Amount != 0x1234 {
+		t.Fatalf("decoded cube push = 0x%02X %+v, %v", operation, decoded, err)
+	}
+
+	pop, err := BuildMagicCubeMoveRequest(ItemOperationMagicCubePop, MagicCubeMoveRequest{Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pop.Payload(), []byte{0x28, 0x44, 0x33, 0x22, 0x11, 2, 0x0E, 3, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("cube pop = % X, want % X", got, want)
+	}
+	operation, decoded, err = DecodeMagicCubeMoveRequest(&pop)
+	if err != nil || operation != 0x28 || decoded.Context != 0x11223344 || decoded.Source != 2 || decoded.Destination != 0x0E || decoded.Amount != 3 {
+		t.Fatalf("decoded cube pop = 0x%02X %+v, %v", operation, decoded, err)
+	}
+
+}
+
+func TestMagicCubeRequestDecodersRejectWrongSizes(t *testing.T) {
+	for _, payload := range [][]byte{{0x27, 1, 2, 3}, {0x28, 1, 2, 3, 4, 5, 6, 7}, {0x29}} {
+		packet := network.EmptyClientPacket()
+		packet.WriteBytes(payload)
+		_, _, err := DecodeMagicCubeMoveRequest(&packet)
+		if err == nil {
+			t.Fatalf("magic-cube decoder accepted % X", payload)
+		}
+	}
+}
+
+func TestMagicCubeSuccessBodiesMatchStockB034Decoder(t *testing.T) {
+	tests := []struct {
+		name    string
+		success MagicCubeSuccess
+		want    []byte
+	}{
+		{name: "push", success: MagicCubeSuccess{Operation: 0x27, Source: 0x0D, Destination: 2, Amount: 0x1234}, want: []byte{1, 0x27, 0x0D, 2, 0x34, 0x12}},
+		{name: "pop", success: MagicCubeSuccess{Operation: 0x28, Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3}, want: []byte{1, 0x28, 0x44, 0x33, 0x22, 0x11, 2, 0x0E, 3, 0}},
+		{name: "delete", success: MagicCubeSuccess{Operation: 0x29, DeleteScalar: 7, Context: 0x11223344, Source: 2, Destination: 0x0E, Amount: 3}, want: []byte{1, 0x29, 7, 0x44, 0x33, 0x22, 0x11, 2, 0x0E, 3, 0}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			packet, err := BuildMagicCubeSuccess(test.success)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := packet.Payload(); !bytes.Equal(got, test.want) {
+				t.Fatalf("magic-cube success = % X, want % X", got, test.want)
+			}
+		})
 	}
 }
 

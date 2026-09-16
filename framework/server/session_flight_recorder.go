@@ -319,6 +319,8 @@ func isSensitiveTraceOpcode(messageID uint16) bool {
 		opcode.PatchRequest,
 		opcode.LoginRequest,
 		opcode.LoginResponse,
+		opcode.LauncherTokenRequest,
+		opcode.LauncherTokenResponse,
 		opcode.AuthRequest,
 		opcode.AuthResponse,
 		opcode.AgentLoginTokenRequest,

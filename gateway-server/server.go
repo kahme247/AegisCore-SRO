@@ -16,6 +16,7 @@ import (
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 	"github.com/Harvi8/AegisCore/framework/logging"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/config"
@@ -126,6 +127,7 @@ func NewGatewayServer() (GatewayServer, error) {
 		protocolregistry.ClientToServer,
 		protocolregistry.GatewayPreLogin,
 	)
+	gatewayOpcodes = append(gatewayOpcodes, opcode.LauncherTokenRequest)
 	s.SetAdmissionPolicy(server.AllowListedAdmissionPolicy(gatewayOpcodes...))
 	handler.RegisterPatchRequestHandlerWithCatalog(&s, patches, viper.GetString(config.GatewayPatchChannel))
 	handler.RegisterShardlistRequestHandlerWithReadiness(&s, shards, installer)

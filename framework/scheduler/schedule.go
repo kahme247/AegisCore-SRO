@@ -43,9 +43,9 @@ const (
 )
 
 type Date struct {
-	Year  int
-	Month time.Month
-	Day   int
+	Year  int        `json:"year"`
+	Month time.Month `json:"month"`
+	Day   int        `json:"day"`
 }
 
 func NewDate(year int, month time.Month, day int) (Date, error) {
@@ -93,25 +93,25 @@ func (date Date) addDays(days int) Date {
 }
 
 type Definition struct {
-	ID            string
-	Name          string
-	Handler       string
-	Recurrence    Recurrence
-	Phase         Phase
-	Scope         Scope
-	ShardID       uint16
-	Timezone      string
-	ActiveFrom    *Date
-	ActiveUntil   *Date
-	RunAt         time.Time
-	SecondOfDay   uint32
-	Interval      uint16
-	WeekdayMask   uint8
-	MisfirePolicy MisfirePolicy
-	Enabled       bool
-	Version       uint64
-	NextRunAt     time.Time
-	Payload       json.RawMessage
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Handler       string          `json:"handler"`
+	Recurrence    Recurrence      `json:"recurrence"`
+	Phase         Phase           `json:"phase"`
+	Scope         Scope           `json:"scope"`
+	ShardID       uint16          `json:"shardId,omitempty"`
+	Timezone      string          `json:"timezone"`
+	ActiveFrom    *Date           `json:"activeFrom,omitempty"`
+	ActiveUntil   *Date           `json:"activeUntil,omitempty"`
+	RunAt         time.Time       `json:"runAt,omitempty"`
+	SecondOfDay   uint32          `json:"secondOfDay,omitempty"`
+	Interval      uint16          `json:"interval,omitempty"`
+	WeekdayMask   uint8           `json:"weekdayMask,omitempty"`
+	MisfirePolicy MisfirePolicy   `json:"misfirePolicy"`
+	Enabled       bool            `json:"enabled"`
+	Version       uint64          `json:"version"`
+	NextRunAt     time.Time       `json:"nextRunAt,omitempty"`
+	Payload       json.RawMessage `json:"payload"`
 }
 
 func (definition Definition) Validate() error {

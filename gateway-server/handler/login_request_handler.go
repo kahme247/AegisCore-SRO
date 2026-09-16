@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -30,6 +31,7 @@ const (
 	LoginFailureIPLimit byte = 0x0B
 
 	defaultLoginAttemptLimit uint32 = DefaultLoginAccountAttemptLimit
+	launcherTokenPrefix             = "@A1:"
 )
 
 // CredentialLookup owns only the password check. The password is passed to it
@@ -85,6 +87,7 @@ func DenyLoginAdmission(failure LoginFailure) LoginAdmissionDecision {
 
 type LoginRequestHandler struct {
 	TicketIssuer    *auth.AdmissionTicketStore
+	LaunchTokens    *auth.LaunchTokenStore
 	TicketInstaller auth.AdmissionTicketInstaller
 	AttemptTracker  *LoginAttemptTracker
 	// CredentialRepository is the context-aware Gateway persistence boundary.
@@ -116,6 +119,7 @@ func NewLoginRequestHandler(installer auth.AdmissionTicketInstaller) *LoginReque
 func NewLoginRequestHandlerWithCredentialRepository(installer auth.AdmissionTicketInstaller, credentials db.CredentialRepository) *LoginRequestHandler {
 	return &LoginRequestHandler{
 		TicketIssuer:         auth.NewAdmissionTicketStore(),
+		LaunchTokens:         auth.NewLaunchTokenStore(),
 		TicketInstaller:      installer,
 		AttemptTracker:       NewLoginAttemptTracker(LoginAttemptTrackerOptions{}),
 		CredentialRepository: credentials,
@@ -131,6 +135,7 @@ func RegisterLoginRequestHandler(target *server.Server, installer auth.Admission
 	handler := NewLoginRequestHandler(installer)
 	if target != nil {
 		target.RegisterHandler(opcode.LoginRequest, handler.handleSessionPacket)
+		target.RegisterHandler(opcode.LauncherTokenRequest, handler.handleLauncherTokenSessionPacket)
 	}
 	return handler
 }
@@ -143,6 +148,7 @@ func RegisterLoginRequestHandlerWithCredentialRepository(target *server.Server, 
 	handler := NewLoginRequestHandlerWithCredentialRepository(installer, credentials)
 	if target != nil {
 		target.RegisterHandler(opcode.LoginRequest, handler.handleSessionPacket)
+		target.RegisterHandler(opcode.LauncherTokenRequest, handler.handleLauncherTokenSessionPacket)
 	}
 	return handler
 }
@@ -186,7 +192,12 @@ func (h *LoginRequestHandler) handlePacket(ctx context.Context, packet server.Pa
 
 	// Gateway is the only component that validates the stock password. Do not
 	// log, retain, or forward it after this synchronous lookup.
-	accountID, isValidLogin, credentialErr := h.authenticate(ctx, username, password)
+	accountID, isValidLogin, credentialErr := h.authenticateLogin(ctx, auth.LaunchTokenBinding{
+		Username:  username,
+		ShardID:   shardID,
+		ContentID: contentID,
+		SourceIP:  sourceIP,
+	}, password)
 	password = ""
 	if credentialErr != nil {
 		// Preserve the established A102 counter outcome while keeping database
@@ -257,6 +268,69 @@ func (h *LoginRequestHandler) handlePacket(ctx context.Context, packet server.Pa
 	tracker.ClearAccount(username)
 	log.Infof("SERVER_GATEWAY_LOGIN_RESPONSE success agent=%s:%d", viper.GetString(config.AgentPublicIp), viper.GetInt(config.AgentPort))
 	h.sendLoginResponse(packet.Session, response)
+}
+
+func (h *LoginRequestHandler) handleLauncherTokenSessionPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
+	decoded, err := (vsro188.GatewayLoginRequestCodec{}).Decode(packet)
+	if err != nil {
+		h.sendLauncherTokenFailure(session, LoginFailure{Code: LoginFailureCounter, CounterLimit: defaultLoginAttemptLimit})
+		return nil
+	}
+	sourceIP := sourceIPFromSession(session)
+	if !sourceIP.IsValid() || h == nil || h.LaunchTokens == nil {
+		h.sendLauncherTokenFailure(session, LoginFailure{Code: LoginFailureCounter, CounterLimit: defaultLoginAttemptLimit})
+		return nil
+	}
+	tracker := h.AttemptTracker
+	if tracker == nil {
+		tracker = NewLoginAttemptTracker(LoginAttemptTrackerOptions{})
+		h.AttemptTracker = tracker
+	}
+	if failure, blocked := tracker.Preflight(decoded.Username, sourceIP); blocked {
+		h.sendLauncherTokenFailure(session, failure)
+		return nil
+	}
+	accountID, valid, credentialErr := h.authenticate(ctx, decoded.Username, decoded.Password)
+	decoded.Password = ""
+	if credentialErr != nil || !valid || accountID == 0 {
+		h.sendLauncherTokenFailure(session, tracker.RecordFailure(decoded.Username, sourceIP))
+		return nil
+	}
+	issued, err := h.LaunchTokens.Issue(auth.LaunchTokenBinding{
+		AccountID: accountID,
+		Username:  decoded.Username,
+		ShardID:   decoded.ShardID,
+		ContentID: decoded.ContentID,
+		SourceIP:  sourceIP,
+	})
+	if err != nil {
+		h.sendLauncherTokenFailure(session, LoginFailure{Code: LoginFailureShardUnavailable})
+		return nil
+	}
+	response := network.EmptyPacket()
+	response.MessageID = opcode.LauncherTokenResponse
+	if err := response.WriteByte(1); err != nil {
+		return nil
+	}
+	if err := response.WriteString(issued.Value); err != nil {
+		return nil
+	}
+	tracker.ClearAccount(decoded.Username)
+	h.sendLoginResponse(session, response)
+	return nil
+}
+
+func (h *LoginRequestHandler) sendLauncherTokenFailure(session *server.Session, failure LoginFailure) {
+	failure = normalizeLoginFailure(failure)
+	response := network.EmptyPacket()
+	response.MessageID = opcode.LauncherTokenResponse
+	if err := response.WriteByte(2); err != nil {
+		return
+	}
+	if err := response.WriteByte(failure.Code); err != nil {
+		return
+	}
+	h.sendLoginResponse(session, response)
 }
 
 func (h *LoginRequestHandler) issueAgentTicket(ctx context.Context, request LoginAdmissionRequest, traceID string) (uint32, error) {
@@ -353,6 +427,20 @@ func (h *LoginRequestHandler) authenticate(ctx context.Context, username, passwo
 		return 0, false, db.ErrCredentialRepositoryUnavailable
 	}
 	return h.CredentialRepository.Authenticate(ctx, username, password)
+}
+
+func (h *LoginRequestHandler) authenticateLogin(ctx context.Context, binding auth.LaunchTokenBinding, password string) (uint32, bool, error) {
+	if !strings.HasPrefix(password, launcherTokenPrefix) {
+		return h.authenticate(ctx, binding.Username, password)
+	}
+	if h == nil || h.LaunchTokens == nil {
+		return 0, false, nil
+	}
+	redeemed, err := h.LaunchTokens.Redeem(strings.TrimPrefix(password, launcherTokenPrefix), binding)
+	if err != nil {
+		return 0, false, nil
+	}
+	return redeemed.AccountID, true, nil
 }
 
 func allowAdmission(context.Context, LoginAdmissionRequest) LoginAdmissionDecision {

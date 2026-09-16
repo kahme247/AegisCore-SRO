@@ -86,6 +86,20 @@ func TestMovementResponseCodecsMatchRecoveredClientReaders(t *testing.T) {
 	if err != nil || !bytes.Equal(destination.Payload(), wantDestination) {
 		t.Fatalf("destination Encode() = %x, %v", destination.Payload(), err)
 	}
+	negativeHeight, err := (EntityDestinationMovementResponseCodec{}).Encode(EntityDestinationMovementResponse{
+		EntityUniqueID: 42, TargetRegion: 25000, TargetX: 150, TargetY: -19, TargetZ: 250,
+	})
+	wantNegativeHeight := []byte{42, 0, 0, 0, 1, 0xA8, 0x61, 0x96, 0, 0xED, 0xFF, 0xFA, 0, 0}
+	if err != nil || !bytes.Equal(negativeHeight.Payload(), wantNegativeHeight) {
+		t.Fatalf("negative-height destination Encode() = %x, want %x, err=%v", negativeHeight.Payload(), wantNegativeHeight, err)
+	}
+	dungeon, err := (EntityDestinationMovementResponseCodec{}).Encode(EntityDestinationMovementResponse{
+		EntityUniqueID: 42, TargetRegion: 0x8006, TargetX: -11565, TargetY: -19, TargetZ: 5712,
+	})
+	wantDungeon := []byte{42, 0, 0, 0, 1, 0x06, 0x80, 0xD3, 0xD2, 0xFF, 0xFF, 0xED, 0xFF, 0xFF, 0xFF, 0x50, 0x16, 0, 0, 0}
+	if err != nil || !bytes.Equal(dungeon.Payload(), wantDungeon) {
+		t.Fatalf("dungeon destination Encode() = %x, want %x, err=%v", dungeon.Payload(), wantDungeon, err)
+	}
 	position, err := (EntityPositionUpdateCodec{}).Encode(EntityPositionUpdate{EntityUniqueID: 42, Region: 25000, X: 100, Y: 12.5, Z: 200})
 	wantPosition := []byte{42, 0, 0, 0, 0xA8, 0x61, 0, 0, 0xC8, 0x42, 0, 0, 0x48, 0x41, 0, 0, 0x48, 0x43, 0, 0}
 	if err != nil || !bytes.Equal(position.Payload(), wantPosition) {

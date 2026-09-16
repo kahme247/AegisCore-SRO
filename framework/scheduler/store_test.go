@@ -54,6 +54,79 @@ func TestSQLStoreCreatesDefinitionWithComputedInitialRun(t *testing.T) {
 	state.assert(t, 0, 0)
 }
 
+func TestSQLStoreGetsDefinitionByID(t *testing.T) {
+	runAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	row := []driver.Value{
+		"notice-1", "Notice", "server.notice", []byte(`{"message":"hello"}`), "one_time", "warning", "all_shards", int64(0), "UTC",
+		nil, nil, runAt, int64(0), int64(0), int64(0), "run_once", true, uint64(1), runAt,
+	}
+	state, database := newSchedulerDatabase(t, []schedulerStep{schedulerQuery("WHERE `SCHEDULE_ID`=?", row)})
+	store, _ := NewSQLStore(database)
+	definition, err := store.Get(context.Background(), "notice-1")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if definition.ID != "notice-1" || definition.Handler != "server.notice" || !definition.RunAt.Equal(runAt) {
+		t.Fatalf("definition = %+v", definition)
+	}
+	state.assert(t, 0, 0)
+}
+
+func TestSQLStoreListsDefinitions(t *testing.T) {
+	runAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	row := []driver.Value{
+		"notice-1", "Notice", "server.notice", []byte(`{"message":"hello"}`), "one_time", "warning", "all_shards", int64(0), "UTC",
+		nil, nil, runAt, int64(0), int64(0), int64(0), "run_once", true, uint64(1), runAt,
+	}
+	state, database := newSchedulerDatabase(t, []schedulerStep{schedulerQuery("ORDER BY `SCHEDULE_ID` LIMIT ?", row)})
+	store, _ := NewSQLStore(database)
+	definitions, err := store.List(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(definitions) != 1 || definitions[0].ID != "notice-1" {
+		t.Fatalf("definitions = %+v", definitions)
+	}
+	state.assert(t, 0, 0)
+}
+
+func TestSQLStoreDisablesDefinitionWithExpectedVersion(t *testing.T) {
+	runAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	row := []driver.Value{
+		"notice-1", "Notice", "server.notice", []byte(`{"message":"hello"}`), "one_time", "warning", "all_shards", int64(0), "UTC",
+		nil, nil, runAt, int64(0), int64(0), int64(0), "run_once", true, uint64(1), runAt,
+	}
+	state, database := newSchedulerDatabase(t, []schedulerStep{
+		schedulerQuery("WHERE `SCHEDULE_ID`=?", row),
+		schedulerExec("SET `ENABLED`=?", 1),
+	})
+	store, _ := NewSQLStore(database)
+	updated, err := store.SetEnabled(context.Background(), "notice-1", 1, false)
+	if err != nil {
+		t.Fatalf("SetEnabled() error = %v", err)
+	}
+	if updated.Enabled || updated.Version != 2 {
+		t.Fatalf("updated definition = %+v", updated)
+	}
+	state.assert(t, 0, 0)
+}
+
+func TestSQLStoreListsRunHistory(t *testing.T) {
+	scheduled := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	finished := scheduled.Add(time.Second)
+	row := []driver.Value{uint64(9), "notice-1", uint64(1), scheduled, "server.notice", []byte(`{"message":"hello"}`), "warning", "all_shards", int64(0), "succeeded", uint64(1), scheduled, finished, ""}
+	state, database := newSchedulerDatabase(t, []schedulerStep{schedulerQuery("FROM `AEGIS_SCHEDULE_RUN`", row)})
+	store, _ := NewSQLStore(database)
+	runs, err := store.ListRuns(context.Background(), "notice-1", 100)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != 9 || runs[0].Status != "succeeded" || runs[0].AttemptCount != 1 {
+		t.Fatalf("runs = %+v", runs)
+	}
+	state.assert(t, 0, 0)
+}
+
 func TestSQLStoreMaterializesMissedRunOnceAndAdvancesPastNow(t *testing.T) {
 	now := time.Date(2026, 7, 20, 2, 0, 0, 0, time.UTC)
 	from := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)

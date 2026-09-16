@@ -2,6 +2,7 @@ package vsro188
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
@@ -47,9 +48,9 @@ type EntityDirectionalMovementResponse struct {
 type EntityDestinationMovementResponse struct {
 	EntityUniqueID uint32
 	TargetRegion   uint16
-	TargetX        int16
-	TargetY        int16
-	TargetZ        int16
+	TargetX        int32
+	TargetY        int32
+	TargetZ        int32
 	// Source* are retained for callers that keep server-side movement context.
 	// They are not serialized unless a separate source-bearing response form is
 	// added; the final byte below is therefore always hasSource=false here.
@@ -286,17 +287,35 @@ func (EntityDirectionalMovementResponseCodec) Encode(response EntityDirectionalM
 func (EntityDestinationMovementResponseCodec) Encode(response EntityDestinationMovementResponse) (network.Packet, error) {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityMovementResponse
-	for _, write := range []func() error{
+	writes := []func() error{
 		func() error { return packet.WriteUInt32(response.EntityUniqueID) },
 		func() error { return packet.WriteByte(1) },
 		func() error { return packet.WriteUInt16(response.TargetRegion) },
-		func() error { return packet.WriteUInt16(uint16(response.TargetX)) },
-		func() error { return packet.WriteUInt16(uint16(response.TargetY)) },
-		func() error { return packet.WriteUInt16(uint16(response.TargetZ)) },
+	}
+	if int16(response.TargetRegion) < 0 {
+		writes = append(writes,
+			func() error { return packet.WriteUInt32(uint32(response.TargetX)) },
+			func() error { return packet.WriteUInt32(uint32(response.TargetY)) },
+			func() error { return packet.WriteUInt32(uint32(response.TargetZ)) },
+		)
+	} else {
+		for _, coordinate := range []int32{response.TargetX, response.TargetY, response.TargetZ} {
+			if coordinate < math.MinInt16 || coordinate > math.MaxInt16 {
+				return network.Packet{}, fmt.Errorf("normal movement coordinate %d exceeds int16 wire range", coordinate)
+			}
+		}
+		writes = append(writes,
+			func() error { return packet.WriteUInt16(uint16(int16(response.TargetX))) },
+			func() error { return packet.WriteUInt16(uint16(int16(response.TargetY))) },
+			func() error { return packet.WriteUInt16(uint16(int16(response.TargetZ))) },
+		)
+	}
+	writes = append(writes,
 		// The trailing byte is hasSource. A value of 1 makes the stock client
 		// read the omitted source region/position fields and assert at EOF.
 		func() error { return packet.WriteByte(0) },
-	} {
+	)
+	for _, write := range writes {
 		if err := write(); err != nil {
 			return network.Packet{}, err
 		}

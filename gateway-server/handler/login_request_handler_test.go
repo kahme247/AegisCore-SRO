@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/gateway-server/db"
@@ -20,6 +21,59 @@ import (
 )
 
 var gatewayTestSourceIP = netip.MustParseAddr("203.0.113.17")
+
+func TestLauncherTokenAuthenticatesStockLoginOnce(t *testing.T) {
+	installed := make(chan auth.AdmissionTicket, 1)
+	handler := NewLoginRequestHandler(admissionInstallerFunc(func(_ context.Context, ticket auth.AdmissionTicket) error {
+		installed <- ticket
+		return nil
+	}))
+	credentialCalls := 0
+	handler.CredentialLookup = func(_ context.Context, username, password string) (uint32, bool) {
+		credentialCalls++
+		return 77, username == "Alice" && password == "stock-password"
+	}
+	handler.AdmissionEvaluator = allowAdmission
+	session, clientConn := newGatewayTestSession(t, gatewayTestSourceIP)
+	defer session.Close()
+	defer clientConn.Close()
+
+	go handler.handleLauncherTokenSessionPacket(context.Background(), session, buildGatewayLoginRequest(t, "Alice", "stock-password"))
+	tokenResponse := readGatewayResponseOpcode(t, clientConn, opcode.LauncherTokenResponse)
+	if result, err := tokenResponse.ReadByte(); err != nil || result != 1 {
+		t.Fatalf("launcher token result = %d, err = %v", result, err)
+	}
+	token, err := tokenResponse.ReadString()
+	if err != nil || token == "" {
+		t.Fatalf("launcher token missing: %q, %v", token, err)
+	}
+
+	go handler.handlePacket(context.Background(), server.PacketChannelData{
+		Session: session,
+		Packet:  buildGatewayLoginRequest(t, "Alice", launcherTokenPrefix+token),
+	})
+	loginResponse := readGatewayResponse(t, clientConn)
+	if result, err := loginResponse.ReadByte(); err != nil || result != 1 {
+		t.Fatalf("token login result = %d, err = %v", result, err)
+	}
+	if credentialCalls != 1 {
+		t.Fatalf("credential lookups = %d, want only launcher lookup", credentialCalls)
+	}
+	select {
+	case ticket := <-installed:
+		if ticket.AccountID != 77 || ticket.Username != "Alice" {
+			t.Fatalf("installed ticket = %+v", ticket)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("token login did not install Agent ticket")
+	}
+
+	if _, valid, err := handler.authenticateLogin(context.Background(), auth.LaunchTokenBinding{
+		Username: "Alice", ShardID: 1, ContentID: 56, SourceIP: gatewayTestSourceIP,
+	}, launcherTokenPrefix+token); err != nil || valid {
+		t.Fatalf("replayed token valid = %t, err = %v", valid, err)
+	}
+}
 
 func TestLoginRequestHandlerWaitsForAgentInstallAcknowledgement(t *testing.T) {
 	started := make(chan auth.AdmissionTicket, 1)
@@ -483,6 +537,10 @@ func buildGatewayLoginRequest(t *testing.T, username, password string) network.P
 }
 
 func readGatewayResponse(t *testing.T, clientConn net.Conn) network.Packet {
+	return readGatewayResponseOpcode(t, clientConn, opcode.LoginResponse)
+}
+
+func readGatewayResponseOpcode(t *testing.T, clientConn net.Conn, expectedOpcode uint16) network.Packet {
 	t.Helper()
 	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline() error = %v", err)
@@ -492,7 +550,7 @@ func readGatewayResponse(t *testing.T, clientConn net.Conn) network.Packet {
 	if _, err := io.ReadFull(clientConn, header); err != nil {
 		t.Fatalf("failed to read A102 header: %v", err)
 	}
-	if got, want := binary.LittleEndian.Uint16(header[network.IDOffset:network.IDOffset+2]), uint16(0xA102); got != want {
+	if got, want := binary.LittleEndian.Uint16(header[network.IDOffset:network.IDOffset+2]), expectedOpcode; got != want {
 		t.Fatalf("response opcode = 0x%04X, want 0x%04X", got, want)
 	}
 	payloadSize := int(binary.LittleEndian.Uint16(header[:2]) &^ network.EncryptMask)

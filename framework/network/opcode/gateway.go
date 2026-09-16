@@ -9,6 +9,8 @@ const (
 	LoginResponse                uint16 = 0xA102
 	AuthRequest                  uint16 = 0x6103
 	AuthResponse                 uint16 = 0xA103
+	LauncherTokenRequest         uint16 = 0x6110
+	LauncherTokenResponse        uint16 = 0xA110
 	NoticeRequest                uint16 = 0x6104
 	NoticeResponse               uint16 = 0xA104
 	ShardlistPing                uint16 = 0x6106

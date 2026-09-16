@@ -1,6 +1,7 @@
 package vsro188
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 
@@ -100,8 +101,9 @@ func TestItemMallModernPurchaseSuccessMatchesStockB034Layout(t *testing.T) {
 		SlotIndex:    13,
 		ResultBytes:  []byte{14},
 		PackageCount: 1,
+		ItemPayload:  []byte{0, 0, 0, 0},
 	})
-	if got, want := hex.EncodeToString(packet.Payload()), "01181b0402010d010e0100"; got != want {
+	if got, want := hex.EncodeToString(packet.Payload()), "01181b0402010d010e010000000000"; got != want {
 		t.Fatalf("modern purchase payload = %s, want %s", got, want)
 	}
 	input := network.EmptyClientPacket()
@@ -110,19 +112,22 @@ func TestItemMallModernPurchaseSuccessMatchesStockB034Layout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.ShopGroupID != 1051 || decoded.GroupIndex != 2 || decoded.TabIndex != 1 || decoded.SlotIndex != 13 || len(decoded.ResultBytes) != 1 || decoded.ResultBytes[0] != 14 || decoded.PackageCount != 1 {
+	if decoded.ShopGroupID != 1051 || decoded.GroupIndex != 2 || decoded.TabIndex != 1 || decoded.SlotIndex != 13 || len(decoded.ResultBytes) != 1 || decoded.ResultBytes[0] != 14 || decoded.PackageCount != 1 || !bytes.Equal(decoded.ItemPayload, []byte{0, 0, 0, 0}) {
 		t.Fatalf("decoded modern purchase = %+v", decoded)
 	}
 }
 
-func TestDecodeItemMallModernPurchaseSuccessRejectsTrailingRentBody(t *testing.T) {
+func TestDecodeItemMallModernPurchaseSuccessPreservesItemBody(t *testing.T) {
 	packet := BuildItemMallModernPurchaseSuccess(ItemMallModernPurchaseSuccess{
 		ShopGroupID: 1051, GroupIndex: 2, TabIndex: 1, SlotIndex: 13,
-		ResultBytes: []byte{14}, PackageCount: 1,
+		ResultBytes: []byte{14}, PackageCount: 1, ItemPayload: []byte{0xAA, 0xBB, 0xCC, 0xDD},
 	})
-	packet.WriteBytes([]byte{0, 0, 0, 0})
-	if _, err := DecodeItemMallModernPurchaseSuccess(&packet); err == nil {
-		t.Fatal("operation-0x18 response accepted trailing rent body")
+	decoded, err := DecodeItemMallModernPurchaseSuccess(&packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.ItemPayload, []byte{0xAA, 0xBB, 0xCC, 0xDD}) {
+		t.Fatalf("item payload = %x", decoded.ItemPayload)
 	}
 }
 
