@@ -29,6 +29,7 @@ type Loader struct {
 	MapProjectInfo MapProjectInfo
 	ObjectInfo     ObjectInfo
 	DungeonInfo    DungeonInfo
+	DungeonData    map[int16]DungeonMeshMetadata
 	ObjectData     map[uint32]RtNavmeshObj
 	// RegionData owns one immutable terrain object per region. Keeping pointers
 	// here avoids copying the large fixed-size tile/height arrays whenever a
@@ -76,6 +77,7 @@ func newLoader(reader *pk2.Pk2Reader, dataPk2Path string) *Loader {
 		MapProjectInfo: MapProjectInfo{},
 		ObjectInfo:     ObjectInfo{},
 		DungeonInfo:    DungeonInfo{},
+		DungeonData:    make(map[int16]DungeonMeshMetadata),
 		ObjectData:     make(map[uint32]RtNavmeshObj),
 		RegionData:     make(map[int16]*RtNavmeshTerrain),
 	}
@@ -107,7 +109,11 @@ func (l *Loader) LoadNavMeshInfos() (err error) {
 	}
 	l.MapProjectInfo = mapProjectInfo
 	l.ObjectInfo = objectInfo
-	// dungeonInfo, err := LoadDungeonInfo(l.Pk2Reader)
+	dungeonInfo, err := LoadDungeonInfo(l.Pk2Reader)
+	if err != nil {
+		return err
+	}
+	l.DungeonInfo = dungeonInfo
 	return nil
 }
 

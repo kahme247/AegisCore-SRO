@@ -10,8 +10,8 @@ func BuildMovementUpdatePacket(character ICharacter, movement MovementData, star
 	if movement.HasDestination {
 		packet, _ := (vsro188.EntityDestinationMovementResponseCodec{}).Encode(vsro188.EntityDestinationMovementResponse{
 			EntityUniqueID: character.GetUniqueID(),
-			TargetRegion:   uint16(movement.TargetPosition.Region.ID), TargetX: int16(movement.TargetPosition.Offset.X),
-			TargetY: int16(movement.TargetPosition.Offset.Y), TargetZ: int16(movement.TargetPosition.Offset.Z),
+			TargetRegion:   uint16(movement.TargetPosition.Region.ID), TargetX: int32(movement.TargetPosition.Offset.X),
+			TargetY: int32(movement.TargetPosition.Offset.Y), TargetZ: int32(movement.TargetPosition.Offset.Z),
 		})
 		return packet
 	}

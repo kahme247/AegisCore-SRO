@@ -54,8 +54,8 @@ type COSPolicySnapshot struct {
 func DefaultCOSPolicySnapshot() COSPolicySnapshot {
 	settings := COSGameplaySettings{
 		FollowBaseRadius: 30, FollowRadiusStep: 4, OrbitMinRadius: 38, OrbitRadiusVariance: 2001,
-		PickupIdleMinRadius: 30, PickupIdleVariance: 2001, PickupCollectionRange: 160,
-		CompanionRelocateRange: 80, PickupPetRelocateRange: 190, OrbitMinAngleStep: 45,
+		PickupIdleMinRadius: 30, PickupIdleVariance: 2001, PickupCollectionRange: 300,
+		CompanionRelocateRange: 80, PickupPetRelocateRange: 350, OrbitMinAngleStep: 45,
 		OrbitAngleStepRange: 41, ArrivalRadius: 3, DestinationMatchRange: 2.5, CombatLeashRange: 250,
 		FollowUpdateInterval: 500 * time.Millisecond, RentalRetryInterval: 5 * time.Second,
 		DefaultAttackCooldown: 1500 * time.Millisecond, IdleWaypointMinInterval: 2 * time.Second,

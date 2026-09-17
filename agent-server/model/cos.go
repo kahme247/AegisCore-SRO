@@ -103,7 +103,7 @@ func NewCOS(ref RefChar, owner *Player) (*COS, error) {
 		Inventory: NewInventory(nil), TimedServices: make(map[int]COSTimedService),
 	}
 	if ref.InventorySize > 0 {
-		cos.InventorySize = byte(min(ref.InventorySize, int(^uint8(0))))
+		cos.InventorySize = byte(min(ref.InventorySize, int(MaxInventoryWireSize)))
 		cos.BaseInventorySize = cos.InventorySize
 	}
 	cos.ConfigureMovementSpeeds(float32(ref.Speed1), float32(ref.Speed2))
@@ -191,7 +191,7 @@ func (c *COS) ApplyCommittedTimedService(service COSTimedService) bool {
 	if service.Category == 5 && service.Data1 > 0 {
 		expanded := int(c.BaseInventorySize) + service.Data1
 		if expanded > int(c.InventorySize) {
-			c.InventorySize = byte(min(expanded, int(^uint8(0))))
+			c.InventorySize = byte(min(expanded, int(MaxInventoryWireSize)))
 		}
 	}
 	return true

@@ -182,9 +182,10 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 		_, verifiedCOSLayout := object.(*model.COS)
 		verifiedCOSLayout = verifiedCOSLayout && typeInfo.IsCOS()
 		verifiedTeleportGateLayout := model.IsTeleportGateObject(object)
+		verifiedDimensionHoleLayout := model.IsDimensionHolePortalObject(object)
 		_, verifiedItemLayout := object.(model.IItem)
 		verifiedItemLayout = verifiedItemLayout && typeInfo.IsItem()
-		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedCOSLayout || verifiedTeleportGateLayout || verifiedItemLayout) {
+		if validPosition && (verifiedPlayerLayout || verifiedMobLayout || verifiedNPCLayout || verifiedCOSLayout || verifiedTeleportGateLayout || verifiedDimensionHoleLayout || verifiedItemLayout) {
 			supported[uid] = object
 			continue
 		}

@@ -28,3 +28,28 @@ func TestPurchaseStacks(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveStorageMoveAmount(t *testing.T) {
+	for _, test := range []struct {
+		name                              string
+		source, max, target               int
+		requested                         uint16
+		targetExists, targetSameReference bool
+		want                              int
+		valid                             bool
+	}{
+		{name: "whole move to empty", source: 40, max: 50, want: 40, valid: true},
+		{name: "split to empty", source: 40, max: 50, requested: 10, want: 10, valid: true},
+		{name: "merge", source: 20, max: 50, target: 25, requested: 20, targetExists: true, targetSameReference: true, want: 20, valid: true},
+		{name: "merge overflow", source: 20, max: 50, target: 40, requested: 20, targetExists: true, targetSameReference: true},
+		{name: "different target", source: 20, max: 50, target: 1, requested: 20, targetExists: true},
+		{name: "too much", source: 20, max: 50, requested: 21},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, valid := resolveStorageMoveAmount(test.source, test.max, test.requested, test.targetExists, test.targetSameReference, test.target)
+			if got != test.want || valid != test.valid {
+				t.Fatalf("resolveStorageMoveAmount() = %d/%v, want %d/%v", got, valid, test.want, test.valid)
+			}
+		})
+	}
+}

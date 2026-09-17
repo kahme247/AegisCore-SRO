@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
+	"time"
 
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
@@ -81,12 +83,36 @@ type GuildUnionSnapshot struct {
 }
 
 type AcademyMember struct {
+	CharacterID           int
+	Name                  string
+	Class                 byte
+	Level                 byte
+	RefObjectID           uint32
+	Online                bool
+	MentorID              int
+	MentorName            string
+	AccumulatedExperience uint64
+	JoinedAt              time.Time
+}
+
+type AcademyBuffState struct {
+	AcademyID   int
 	CharacterID int
-	Name        string
-	Class       byte
-	Level       byte
-	RefObjectID uint32
-	Online      bool
+	Type        byte
+	Value       uint64
+	StartsAt    time.Time
+	EndsAt      time.Time
+}
+
+type AcademyGraduation struct {
+	AcademyID                int
+	ApprenticeCharacter      int
+	LeaderCharacter          int
+	AccumulatedExperience    uint64
+	LeaderExperienceAward    uint64
+	AssistantExperienceAward uint64
+	HonorAward               uint32
+	GraduatedAt              time.Time
 }
 
 type AcademySnapshot struct {
@@ -158,7 +184,9 @@ type SocialRepository interface {
 	JoinAcademy(context.Context, int, int) (AcademySnapshot, error)
 	LeaveAcademy(context.Context, int) error
 	KickAcademyMember(context.Context, int, int) error
-	GraduateAcademyMember(context.Context, int, int) error
+	GraduateAcademyMember(context.Context, int, int, string) (AcademyGraduation, error)
+	AccumulateAcademyExperience(context.Context, int, uint64) ([]AcademyBuffState, error)
+	AcademyBuffs(context.Context, int, time.Time) ([]AcademyBuffState, error)
 	UpdateAcademyComment(context.Context, int, string, string) error
 	RegisterAcademyMatch(context.Context, int, string, byte, byte) error
 	DeleteAcademyMatch(context.Context, int) error
@@ -179,6 +207,104 @@ type SocialRepository interface {
 }
 
 type SQLSocialRepository struct{ shard *sql.DB }
+
+type socialCommandContextKey struct{}
+
+type SocialCommandIdentity struct {
+	Key  string
+	Name string
+}
+
+func WithSocialCommand(ctx context.Context, identity SocialCommandIdentity) context.Context {
+	if ctx == nil || !validSocialCommandKey(identity.Key) || strings.TrimSpace(identity.Name) == "" || len(identity.Name) > 128 {
+		return ctx
+	}
+	return context.WithValue(ctx, socialCommandContextKey{}, identity)
+}
+
+type guildCommandState struct {
+	identity  SocialCommandIdentity
+	guildID   int
+	version   uint64
+	topic     string
+	disabled  bool
+	duplicate bool
+}
+
+func replayedGuildCommand(ctx context.Context, tx *sql.Tx) (guildCommandState, bool, error) {
+	identity, ok := ctx.Value(socialCommandContextKey{}).(SocialCommandIdentity)
+	if !ok {
+		return guildCommandState{}, false, nil
+	}
+	var name, aggregateID, status, topic string
+	var version uint64
+	err := tx.QueryRowContext(ctx, "SELECT c.`COMMAND_NAME`,c.`AGGREGATE_ID`,c.`STATUS`,v.`VERSION`,o.`TOPIC` FROM `AEGIS_COMMAND_IDEMPOTENCY` c JOIN `AEGIS_AGGREGATE_VERSION` v ON v.`AGGREGATE_KIND`=c.`AGGREGATE_KIND` AND v.`AGGREGATE_ID`=c.`AGGREGATE_ID` JOIN `AEGIS_OUTBOX_MESSAGE` o ON o.`MESSAGE_ID`=c.`IDEMPOTENCY_KEY` WHERE c.`IDEMPOTENCY_KEY`=? AND c.`AGGREGATE_KIND`='guild' FOR UPDATE", identity.Key).Scan(&name, &aggregateID, &status, &version, &topic)
+	if errors.Is(err, sql.ErrNoRows) {
+		return guildCommandState{}, false, nil
+	}
+	if err != nil {
+		return guildCommandState{}, false, err
+	}
+	if name != identity.Name || status != "completed" {
+		return guildCommandState{}, false, ErrSocialConflict
+	}
+	var guildID int
+	if _, err = fmt.Sscan(aggregateID, &guildID); err != nil || guildID <= 0 {
+		return guildCommandState{}, false, ErrSocialConflict
+	}
+	return guildCommandState{identity: identity, guildID: guildID, version: version, topic: topic, duplicate: true}, true, nil
+}
+
+func beginGuildCommand(ctx context.Context, tx *sql.Tx, guildID int) (guildCommandState, error) {
+	identity, ok := ctx.Value(socialCommandContextKey{}).(SocialCommandIdentity)
+	if !ok {
+		return guildCommandState{disabled: true}, nil
+	}
+	aggregateID := fmt.Sprintf("%d", guildID)
+	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO `AEGIS_AGGREGATE_VERSION` (`AGGREGATE_KIND`,`AGGREGATE_ID`,`VERSION`) VALUES ('guild',?,0)", aggregateID); err != nil {
+		return guildCommandState{}, err
+	}
+	var version uint64
+	if err := tx.QueryRowContext(ctx, "SELECT `VERSION` FROM `AEGIS_AGGREGATE_VERSION` WHERE `AGGREGATE_KIND`='guild' AND `AGGREGATE_ID`=? FOR UPDATE", aggregateID).Scan(&version); err != nil {
+		return guildCommandState{}, err
+	}
+	var name, kind, id, status string
+	err := tx.QueryRowContext(ctx, "SELECT `COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`STATUS` FROM `AEGIS_COMMAND_IDEMPOTENCY` WHERE `IDEMPOTENCY_KEY`=? FOR UPDATE", identity.Key).Scan(&name, &kind, &id, &status)
+	if err == nil {
+		if name != identity.Name || kind != "guild" || id != aggregateID || status != "completed" {
+			return guildCommandState{}, ErrSocialConflict
+		}
+		return guildCommandState{identity: identity, guildID: guildID, version: version, duplicate: true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return guildCommandState{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_COMMAND_IDEMPOTENCY` (`IDEMPOTENCY_KEY`,`COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`EXPECTED_VERSION`,`STATUS`) VALUES (?,?,'guild',?,?,'in_progress')", identity.Key, identity.Name, aggregateID, version); err != nil {
+		return guildCommandState{}, err
+	}
+	return guildCommandState{identity: identity, guildID: guildID, version: version}, nil
+}
+
+func completeGuildCommand(ctx context.Context, tx *sql.Tx, state guildCommandState, topic string) error {
+	if state.disabled || state.duplicate {
+		return nil
+	}
+	aggregateID := fmt.Sprintf("%d", state.guildID)
+	next := state.version + 1
+	result, err := tx.ExecContext(ctx, "UPDATE `AEGIS_AGGREGATE_VERSION` SET `VERSION`=? WHERE `AGGREGATE_KIND`='guild' AND `AGGREGATE_ID`=? AND `VERSION`=?", next, aggregateID, state.version)
+	if err != nil {
+		return err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return ErrSocialConflict
+	}
+	payload := fmt.Sprintf(`{"guild_id":%d,"command":"%s"}`, state.guildID, state.identity.Name)
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_OUTBOX_MESSAGE` (`MESSAGE_ID`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`AGGREGATE_VERSION`,`TOPIC`,`PAYLOAD`,`OCCURRED_AT`) VALUES (?,'guild',?,?,?,?,CURRENT_TIMESTAMP(6))", state.identity.Key, aggregateID, next, topic, []byte(payload)); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE `AEGIS_COMMAND_IDEMPOTENCY` SET `STATUS`='completed',`RESULT_VERSION`=?,`RESULT_PAYLOAD`=?,`COMPLETED_AT`=CURRENT_TIMESTAMP(6) WHERE `IDEMPOTENCY_KEY`=? AND `STATUS`='in_progress'", next, []byte(`{"ok":true}`), state.identity.Key)
+	return err
+}
 
 var _ SocialRepository = (*SQLSocialRepository)(nil)
 
@@ -275,10 +401,20 @@ func (r *SQLSocialRepository) CreateGuild(ctx context.Context, characterID int, 
 	if characterID <= 0 || validateSocialText("guild name", name, 20, false) != nil {
 		return GuildSnapshot{}, 0, ErrSocialInvalidRequest
 	}
-	const cost uint64 = 500000
+	cost := RuntimeGuildCreationCost()
 	var result GuildSnapshot
 	var gold uint64
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if replay, duplicate, err := replayedGuildCommand(ctx, tx); err != nil {
+			return err
+		} else if duplicate {
+			if err = tx.QueryRowContext(ctx, "SELECT GOLD FROM `CHAR` WHERE id=?", characterID).Scan(&gold); err != nil {
+				return err
+			}
+			result, err = scanGuild(ctx, tx, characterID)
+			_ = replay
+			return err
+		}
 		var level int
 		if err := tx.QueryRowContext(ctx, "SELECT CURRENT_LEVEL,GOLD FROM `CHAR` WHERE id=? FOR UPDATE", characterID).Scan(&level, &gold); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -313,20 +449,41 @@ func (r *SQLSocialRepository) CreateGuild(ctx context.Context, characterID int, 
 		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET GOLD=GOLD-? WHERE id=?", cost, characterID); err != nil {
 			return err
 		}
+		command, err := beginGuildCommand(ctx, tx, int(guildID))
+		if err != nil || command.duplicate {
+			return err
+		}
 		gold -= cost
 		result, err = scanGuild(ctx, tx, characterID)
-		return err
+		if err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.created")
 	})
 	return result, gold, err
 }
 
 func (r *SQLSocialRepository) DisbandGuild(ctx context.Context, actor int) error {
 	return r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, "DELETE g FROM GUILD g JOIN GUILD_MEMBER gm ON gm.FK_GUILD=g.ID WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=?", actor, GuildMemberMaster)
+		if _, duplicate, err := replayedGuildCommand(ctx, tx); err != nil || duplicate {
+			return err
+		}
+		var guildID int
+		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD FROM GUILD_MEMBER WHERE FK_CHAR=? AND MEMBER_CLASS=? FOR UPDATE", actor, GuildMemberMaster).Scan(&guildID); err != nil {
+			return ErrSocialAccessDenied
+		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil || command.duplicate {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM GUILD WHERE ID=?", guildID)
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.disbanded")
 	})
 }
 
@@ -344,6 +501,13 @@ func (r *SQLSocialRepository) InviteGuild(ctx context.Context, inviter, invitee 
 		if permissions&GuildPermissionInvite == 0 {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
 		var count int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM GUILD_MEMBER WHERE FK_GUILD=?", guildID).Scan(&count); err != nil {
 			return err
@@ -358,24 +522,42 @@ func (r *SQLSocialRepository) InviteGuild(ctx context.Context, inviter, invitee 
 		if already != 0 {
 			return ErrSocialConflict
 		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO GUILD_INVITATION (FK_GUILD,INVITER_CHAR,INVITEE_CHAR,EXPIRES_AT) VALUES (?,?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 60 SECOND)) ON DUPLICATE KEY UPDATE FK_GUILD=VALUES(FK_GUILD),INVITER_CHAR=VALUES(INVITER_CHAR),EXPIRES_AT=VALUES(EXPIRES_AT)", guildID, inviter, invitee)
-		return err
+		if _, err := tx.ExecContext(ctx, "INSERT INTO GUILD_INVITATION (FK_GUILD,INVITER_CHAR,INVITEE_CHAR,EXPIRES_AT) VALUES (?,?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 60 SECOND)) ON DUPLICATE KEY UPDATE FK_GUILD=VALUES(FK_GUILD),INVITER_CHAR=VALUES(INVITER_CHAR),EXPIRES_AT=VALUES(EXPIRES_AT)", guildID, inviter, invitee); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.invitation.created")
 	})
 }
 
 func (r *SQLSocialRepository) AnswerGuildInvite(ctx context.Context, characterID int, accept bool) (GuildSnapshot, error) {
 	var result GuildSnapshot
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if replay, duplicate, err := replayedGuildCommand(ctx, tx); err != nil {
+			return err
+		} else if duplicate {
+			if strings.HasPrefix(replay.topic, "guild.union.") {
+				return ErrSocialNotFound
+			}
+			if !accept {
+				return nil
+			}
+			result, err = scanGuild(ctx, tx, characterID)
+			return err
+		}
 		var guildID int
 		var level byte
 		if err := tx.QueryRowContext(ctx, "SELECT gi.FK_GUILD,g.LEVEL FROM GUILD_INVITATION gi JOIN GUILD g ON g.ID=gi.FK_GUILD WHERE gi.INVITEE_CHAR=? AND gi.EXPIRES_AT>CURRENT_TIMESTAMP(6) FOR UPDATE", characterID).Scan(&guildID, &level); err != nil {
 			return ErrSocialNotFound
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil || command.duplicate {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM GUILD_INVITATION WHERE INVITEE_CHAR=?", characterID); err != nil {
 			return err
 		}
 		if !accept {
-			return nil
+			return completeGuildCommand(ctx, tx, command, "guild.invitation.rejected")
 		}
 		var count int
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM GUILD_MEMBER WHERE FK_GUILD=?", guildID).Scan(&count); err != nil {
@@ -387,27 +569,43 @@ func (r *SQLSocialRepository) AnswerGuildInvite(ctx context.Context, characterID
 		if _, err := tx.ExecContext(ctx, "INSERT INTO GUILD_MEMBER (FK_GUILD,FK_CHAR) VALUES (?,?)", guildID, characterID); err != nil {
 			return errors.Join(ErrSocialConflict, err)
 		}
-		var err error
 		result, err = scanGuild(ctx, tx, characterID)
-		return err
+		if err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.member.joined")
 	})
 	return result, err
 }
 
 func (r *SQLSocialRepository) LeaveGuild(ctx context.Context, characterID int) error {
 	return r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if _, duplicate, err := replayedGuildCommand(ctx, tx); err != nil || duplicate {
+			return err
+		}
+		var guildID int
 		var class byte
-		if err := tx.QueryRowContext(ctx, "SELECT MEMBER_CLASS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", characterID).Scan(&class); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD,MEMBER_CLASS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", characterID).Scan(&guildID, &class); err != nil {
 			return ErrSocialNotFound
+		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil || command.duplicate {
+			return err
 		}
 		if class == GuildMemberMaster {
 			return ErrSocialAccessDenied
+		}
+		if err = ensureGuildElectionMemberMovable(ctx, tx, guildID, characterID); err != nil {
+			return err
 		}
 		result, err := tx.ExecContext(ctx, "DELETE FROM GUILD_MEMBER WHERE FK_CHAR=?", characterID)
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.member.left")
 	})
 }
 
@@ -421,12 +619,38 @@ func (r *SQLSocialRepository) KickGuildMember(ctx context.Context, actor, target
 		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD,PERMISSIONS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", actor).Scan(&guildID, &permissions); err != nil || permissions&GuildPermissionWithdraw == 0 {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
+		if err = ensureGuildElectionMemberMovable(ctx, tx, guildID, target); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, "DELETE FROM GUILD_MEMBER WHERE FK_GUILD=? AND FK_CHAR=? AND MEMBER_CLASS<>?", guildID, target, GuildMemberMaster)
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.member.kicked")
 	})
+}
+
+func ensureGuildElectionMemberMovable(ctx context.Context, tx *sql.Tx, guildID, characterID int) error {
+	var exists int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM GUILD_ELECTION e JOIN GUILD_ELECTION_CANDIDATE c ON c.FK_ELECTION=e.ID
+WHERE e.FK_GUILD=? AND e.STATUS='active' AND c.FK_CHAR=? LIMIT 1 FOR UPDATE`, guildID, characterID).Scan(&exists)
+	if err == nil {
+		return ErrSocialConflict
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
 }
 
 func (r *SQLSocialRepository) UpdateGuildNotice(ctx context.Context, actor int, title, body string) error {
@@ -436,22 +660,32 @@ func (r *SQLSocialRepository) UpdateGuildNotice(ctx context.Context, actor int, 
 	if err := validateSocialText("guild notice body", body, 1024, true); err != nil {
 		return err
 	}
-	return r.guildAuthorizedWrite(ctx, actor, GuildPermissionNotice, "UPDATE GUILD SET NOTICE_TITLE=?,NOTICE_BODY=? WHERE ID=?", title, body)
+	return r.guildAuthorizedWrite(ctx, actor, GuildPermissionNotice, "guild.notice.updated", "UPDATE GUILD SET NOTICE_TITLE=?,NOTICE_BODY=? WHERE ID=?", title, body)
 }
 
-func (r *SQLSocialRepository) guildAuthorizedWrite(ctx context.Context, actor int, permission uint32, query string, args ...any) error {
+func (r *SQLSocialRepository) guildAuthorizedWrite(ctx context.Context, actor int, permission uint32, topic, query string, args ...any) error {
 	return r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var guildID int
 		var permissions uint32
 		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD,PERMISSIONS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", actor).Scan(&guildID, &permissions); err != nil || permissions&permission == 0 {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
 		args = append(args, guildID)
 		result, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, topic)
 	})
 }
 
@@ -465,6 +699,13 @@ func (r *SQLSocialRepository) UpdateGuildPermissions(ctx context.Context, actor 
 		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD,MEMBER_CLASS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", actor).Scan(&guildID, &class); err != nil || class != GuildMemberMaster {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
 		for memberID, permissions := range updates {
 			if memberID <= 0 || permissions&^uint32(GuildPermissionAll) != 0 {
 				return ErrSocialInvalidRequest
@@ -477,7 +718,7 @@ func (r *SQLSocialRepository) UpdateGuildPermissions(ctx context.Context, actor 
 				return err
 			}
 		}
-		return nil
+		return completeGuildCommand(ctx, tx, command, "guild.permissions.updated")
 	})
 }
 
@@ -492,6 +733,13 @@ func (r *SQLSocialRepository) DonateGuildSP(ctx context.Context, characterID int
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,c.SKILL_POINTS FROM GUILD_MEMBER gm JOIN `CHAR` c ON c.id=gm.FK_CHAR WHERE gm.FK_CHAR=? FOR UPDATE", characterID).Scan(&guildID, &skillPoints); err != nil {
 			return ErrSocialNotFound
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return tx.QueryRowContext(ctx, "SELECT GATHERED_SP FROM GUILD WHERE ID=?", guildID).Scan(&total)
+		}
 		if skillPoints < amount {
 			return ErrSocialConflict
 		}
@@ -504,7 +752,10 @@ func (r *SQLSocialRepository) DonateGuildSP(ctx context.Context, characterID int
 		if _, err := tx.ExecContext(ctx, "UPDATE GUILD_MEMBER SET GP_DONATION=GP_DONATION+? WHERE FK_CHAR=?", amount, characterID); err != nil {
 			return err
 		}
-		return tx.QueryRowContext(ctx, "SELECT GATHERED_SP FROM GUILD WHERE ID=?", guildID).Scan(&total)
+		if err := tx.QueryRowContext(ctx, "SELECT GATHERED_SP FROM GUILD WHERE ID=?", guildID).Scan(&total); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.skill-points.donated")
 	})
 	return total, err
 }
@@ -534,6 +785,14 @@ func (r *SQLSocialRepository) PromoteGuild(ctx context.Context, actor int) (Guil
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,g.LEVEL,g.GATHERED_SP,c.GOLD FROM GUILD_MEMBER gm JOIN GUILD g ON g.ID=gm.FK_GUILD JOIN `CHAR` c ON c.id=gm.FK_CHAR WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=? FOR UPDATE", actor, GuildMemberMaster).Scan(&guildID, &level, &sp, &gold); err != nil {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			snapshot, err = scanGuild(ctx, tx, actor)
+			return err
+		}
 		cost, requiredSP, ok := guildPromotionPolicy(level + 1)
 		if !ok {
 			return ErrSocialCapacity
@@ -555,9 +814,11 @@ func (r *SQLSocialRepository) PromoteGuild(ctx context.Context, actor int) (Guil
 			return err
 		}
 		gold -= cost
-		var err error
 		snapshot, err = scanGuild(ctx, tx, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.promoted")
 	})
 	return snapshot, gold, err
 }
@@ -569,7 +830,19 @@ func (r *SQLSocialRepository) TransferGuild(ctx context.Context, actor, target i
 	var snapshot GuildSnapshot
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var guildID int
-		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD FROM GUILD_MEMBER WHERE FK_CHAR=? AND MEMBER_CLASS=? FOR UPDATE", actor, GuildMemberMaster).Scan(&guildID); err != nil {
+		var memberClass byte
+		if err := tx.QueryRowContext(ctx, "SELECT FK_GUILD,MEMBER_CLASS FROM GUILD_MEMBER WHERE FK_CHAR=? FOR UPDATE", actor).Scan(&guildID, &memberClass); err != nil {
+			return ErrSocialAccessDenied
+		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			snapshot, err = scanGuild(ctx, tx, target)
+			return err
+		}
+		if memberClass != GuildMemberMaster {
 			return ErrSocialAccessDenied
 		}
 		result, err := tx.ExecContext(ctx, "UPDATE GUILD_MEMBER SET MEMBER_CLASS=?,PERMISSIONS=0,STORAGE_RIGHTS=0 WHERE FK_GUILD=? AND FK_CHAR=?", GuildMemberNormal, guildID, actor)
@@ -587,7 +860,10 @@ func (r *SQLSocialRepository) TransferGuild(ctx context.Context, actor, target i
 			return err
 		}
 		snapshot, err = scanGuild(ctx, tx, target)
-		return err
+		if err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.leadership.transferred")
 	})
 	return snapshot, err
 }
@@ -602,11 +878,21 @@ func (r *SQLSocialRepository) UpdateGuildNickname(ctx context.Context, actor, ta
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,g.LEVEL FROM GUILD_MEMBER gm JOIN GUILD g ON g.ID=gm.FK_GUILD WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=? FOR UPDATE", actor, GuildMemberMaster).Scan(&guildID, &level); err != nil || level < 3 {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
 		result, err := tx.ExecContext(ctx, "UPDATE GUILD_MEMBER SET NICKNAME=? WHERE FK_GUILD=? AND FK_CHAR=?", nickname, guildID, target)
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.nickname.updated")
 	})
 }
 
@@ -651,6 +937,13 @@ func (r *SQLSocialRepository) InviteGuildUnion(ctx context.Context, actor, targe
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,g.LEVEL,gm.PERMISSIONS FROM GUILD_MEMBER gm JOIN GUILD g ON g.ID=gm.FK_GUILD WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=0 FOR UPDATE", actor).Scan(&inviterGuild, &inviterLevel, &permissions); err != nil || permissions&GuildPermissionUnion == 0 {
 			return ErrSocialAccessDenied
 		}
+		command, err := beginGuildCommand(ctx, tx, inviterGuild)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
+		}
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,g.LEVEL FROM GUILD_MEMBER gm JOIN GUILD g ON g.ID=gm.FK_GUILD WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=0 FOR UPDATE", target).Scan(&targetGuild, &targetLevel); err != nil {
 			return ErrSocialAccessDenied
 		}
@@ -683,26 +976,44 @@ func (r *SQLSocialRepository) InviteGuildUnion(ctx context.Context, actor, targe
 				return ErrSocialCapacity
 			}
 		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO GUILD_UNION_INVITATION (INVITER_GUILD,INVITEE_GUILD,EXPIRES_AT) VALUES (?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 60 SECOND)) ON DUPLICATE KEY UPDATE INVITER_GUILD=VALUES(INVITER_GUILD),EXPIRES_AT=VALUES(EXPIRES_AT)", inviterGuild, targetGuild)
-		return err
+		if _, err := tx.ExecContext(ctx, "INSERT INTO GUILD_UNION_INVITATION (INVITER_GUILD,INVITEE_GUILD,EXPIRES_AT) VALUES (?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 60 SECOND)) ON DUPLICATE KEY UPDATE INVITER_GUILD=VALUES(INVITER_GUILD),EXPIRES_AT=VALUES(EXPIRES_AT)", inviterGuild, targetGuild); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.union.invitation.created")
 	})
 }
 
 func (r *SQLSocialRepository) AnswerGuildUnionInvite(ctx context.Context, actor int, accept bool) (GuildUnionSnapshot, error) {
 	var snapshot GuildUnionSnapshot
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if replay, duplicate, err := replayedGuildCommand(ctx, tx); err != nil {
+			return err
+		} else if duplicate {
+			if !strings.HasPrefix(replay.topic, "guild.union.") {
+				return ErrSocialNotFound
+			}
+			if !accept {
+				return nil
+			}
+			snapshot, err = scanGuildUnion(ctx, tx, actor)
+			return err
+		}
 		var targetGuild, inviterGuild int
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,i.INVITER_GUILD FROM GUILD_MEMBER gm JOIN GUILD_UNION_INVITATION i ON i.INVITEE_GUILD=gm.FK_GUILD WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=0 AND i.EXPIRES_AT>CURRENT_TIMESTAMP(6) FOR UPDATE", actor).Scan(&targetGuild, &inviterGuild); err != nil {
 			return ErrSocialNotFound
+		}
+		command, err := beginGuildCommand(ctx, tx, targetGuild)
+		if err != nil || command.duplicate {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM GUILD_UNION_INVITATION WHERE INVITEE_GUILD=?", targetGuild); err != nil {
 			return err
 		}
 		if !accept {
-			return nil
+			return completeGuildCommand(ctx, tx, command, "guild.union.invitation.rejected")
 		}
 		var unionID int
-		err := tx.QueryRowContext(ctx, "SELECT FK_UNION FROM GUILD_UNION_MEMBER WHERE FK_GUILD=?", inviterGuild).Scan(&unionID)
+		err = tx.QueryRowContext(ctx, "SELECT FK_UNION FROM GUILD_UNION_MEMBER WHERE FK_GUILD=?", inviterGuild).Scan(&unionID)
 		if errors.Is(err, sql.ErrNoRows) {
 			created, createErr := tx.ExecContext(ctx, "INSERT INTO GUILD_UNION (LEADER_GUILD) VALUES (?)", inviterGuild)
 			if createErr != nil {
@@ -726,16 +1037,31 @@ func (r *SQLSocialRepository) AnswerGuildUnionInvite(ctx context.Context, actor 
 			return err
 		}
 		snapshot, err = scanGuildUnion(ctx, tx, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.union.joined")
 	})
 	return snapshot, err
 }
 
 func (r *SQLSocialRepository) LeaveGuildUnion(ctx context.Context, actor int) error {
 	return r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if replay, duplicate, err := replayedGuildCommand(ctx, tx); err != nil {
+			return err
+		} else if duplicate {
+			if !strings.HasPrefix(replay.topic, "guild.union.") {
+				return ErrSocialConflict
+			}
+			return nil
+		}
 		var guildID, unionID, leader int
 		if err := tx.QueryRowContext(ctx, "SELECT gm.FK_GUILD,um.FK_UNION,u.LEADER_GUILD FROM GUILD_MEMBER gm JOIN GUILD_UNION_MEMBER um ON um.FK_GUILD=gm.FK_GUILD JOIN GUILD_UNION u ON u.ID=um.FK_UNION WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=0 FOR UPDATE", actor).Scan(&guildID, &unionID, &leader); err != nil {
 			return ErrSocialAccessDenied
+		}
+		command, err := beginGuildCommand(ctx, tx, guildID)
+		if err != nil || command.duplicate {
+			return err
 		}
 		if leader == guildID {
 			if _, err := tx.ExecContext(ctx, "UPDATE GUILD g JOIN GUILD_UNION_MEMBER um ON um.FK_GUILD=g.ID SET g.UNION_ID=NULL WHERE um.FK_UNION=?", unionID); err != nil {
@@ -745,7 +1071,10 @@ func (r *SQLSocialRepository) LeaveGuildUnion(ctx context.Context, actor int) er
 			if err != nil {
 				return err
 			}
-			return requireSocialRow(result)
+			if err = requireSocialRow(result); err != nil {
+				return err
+			}
+			return completeGuildCommand(ctx, tx, command, "guild.union.disbanded")
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE GUILD SET UNION_ID=NULL WHERE ID=?", guildID); err != nil {
 			return err
@@ -754,7 +1083,10 @@ func (r *SQLSocialRepository) LeaveGuildUnion(ctx context.Context, actor int) er
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.union.left")
 	})
 }
 
@@ -763,6 +1095,13 @@ func (r *SQLSocialRepository) KickGuildUnion(ctx context.Context, actor, targetG
 		var unionID, leader int
 		if err := tx.QueryRowContext(ctx, "SELECT u.ID,u.LEADER_GUILD FROM GUILD_MEMBER gm JOIN GUILD_UNION u ON u.LEADER_GUILD=gm.FK_GUILD WHERE gm.FK_CHAR=? AND gm.MEMBER_CLASS=0 FOR UPDATE", actor).Scan(&unionID, &leader); err != nil {
 			return ErrSocialAccessDenied
+		}
+		command, err := beginGuildCommand(ctx, tx, leader)
+		if err != nil {
+			return err
+		}
+		if command.duplicate {
+			return nil
 		}
 		if targetGuild == leader {
 			return ErrSocialInvalidRequest
@@ -774,7 +1113,10 @@ func (r *SQLSocialRepository) KickGuildUnion(ctx context.Context, actor, targetG
 		if err != nil {
 			return err
 		}
-		return requireSocialRow(result)
+		if err = requireSocialRow(result); err != nil {
+			return err
+		}
+		return completeGuildCommand(ctx, tx, command, "guild.union.member.kicked")
 	})
 }
 
@@ -801,14 +1143,14 @@ func scanAcademy(ctx context.Context, q interface {
 	if err != nil {
 		return AcademySnapshot{}, err
 	}
-	rows, err := q.QueryContext(ctx, "SELECT c.id,c.CHAR_NAME,am.MEMBER_CLASS,c.CURRENT_LEVEL,c.REF_OBJ_ID,1 FROM ACADEMY_MEMBER am JOIN `CHAR` c ON c.id=am.FK_CHAR WHERE am.FK_ACADEMY=? ORDER BY am.MEMBER_CLASS,c.CHAR_NAME", a.ID)
+	rows, err := q.QueryContext(ctx, "SELECT c.id,c.CHAR_NAME,am.MEMBER_CLASS,c.CURRENT_LEVEL,c.REF_OBJ_ID,1,COALESCE(am.MENTOR_CHAR,0),COALESCE(mentor.CHAR_NAME,''),am.ACCUMULATED_EXP,am.JOINED_AT FROM ACADEMY_MEMBER am JOIN `CHAR` c ON c.id=am.FK_CHAR LEFT JOIN `CHAR` mentor ON mentor.id=am.MENTOR_CHAR WHERE am.FK_ACADEMY=? ORDER BY am.MEMBER_CLASS,c.CHAR_NAME", a.ID)
 	if err != nil {
 		return AcademySnapshot{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m AcademyMember
-		if err = rows.Scan(&m.CharacterID, &m.Name, &m.Class, &m.Level, &m.RefObjectID, &m.Online); err != nil {
+		if err = rows.Scan(&m.CharacterID, &m.Name, &m.Class, &m.Level, &m.RefObjectID, &m.Online, &m.MentorID, &m.MentorName, &m.AccumulatedExperience, &m.JoinedAt); err != nil {
 			return AcademySnapshot{}, err
 		}
 		a.Members = append(a.Members, m)
@@ -824,7 +1166,7 @@ func (r *SQLSocialRepository) Academy(ctx context.Context, characterID int) (Aca
 }
 
 func (r *SQLSocialRepository) CreateAcademy(ctx context.Context, characterID int) (AcademySnapshot, uint64, error) {
-	const cost uint64 = 100000
+	cost := RuntimeAcademyCreationCost()
 	var snapshot AcademySnapshot
 	var gold uint64
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
@@ -832,7 +1174,7 @@ func (r *SQLSocialRepository) CreateAcademy(ctx context.Context, characterID int
 		if err := tx.QueryRowContext(ctx, "SELECT CURRENT_LEVEL,GOLD FROM `CHAR` WHERE id=? FOR UPDATE", characterID).Scan(&level, &gold); err != nil {
 			return ErrSocialNotFound
 		}
-		if level < 60 {
+		if level < RuntimeAcademyMinimumLevel() {
 			return ErrSocialInsufficientLevel
 		}
 		if gold < cost {
@@ -872,17 +1214,24 @@ func (r *SQLSocialRepository) DisbandAcademy(ctx context.Context, actor int) err
 func (r *SQLSocialRepository) JoinAcademy(ctx context.Context, characterID, academyID int) (AcademySnapshot, error) {
 	var snapshot AcademySnapshot
 	err := r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		var count int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM ACADEMY_MEMBER WHERE FK_ACADEMY=? FOR UPDATE", academyID).Scan(&count); err != nil {
-			return err
-		}
-		if count == 0 {
+		var leader int
+		if err := tx.QueryRowContext(ctx, "SELECT LEADER_CHAR FROM ACADEMY WHERE ID=? FOR UPDATE", academyID).Scan(&leader); err != nil {
 			return ErrSocialNotFound
 		}
-		if count >= 5 {
+		var count, level int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM ACADEMY_MEMBER WHERE FK_ACADEMY=?", academyID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= 8 {
 			return ErrSocialCapacity
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ACADEMY_MEMBER (FK_ACADEMY,FK_CHAR) VALUES (?,?)", academyID, characterID); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT CURRENT_LEVEL FROM `CHAR` WHERE id=? FOR UPDATE", characterID).Scan(&level); err != nil {
+			return ErrSocialNotFound
+		}
+		if level >= 40 {
+			return ErrSocialInsufficientLevel
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ACADEMY_MEMBER (FK_ACADEMY,FK_CHAR,MEMBER_CLASS,MENTOR_CHAR) VALUES (?,?,2,?)", academyID, characterID, leader); err != nil {
 			return errors.Join(ErrSocialConflict, err)
 		}
 		var err error
@@ -912,22 +1261,133 @@ func (r *SQLSocialRepository) KickAcademyMember(ctx context.Context, actor, targ
 	})
 }
 
-func (r *SQLSocialRepository) GraduateAcademyMember(ctx context.Context, actor, target int) error {
-	return r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		var academyID int
+func (r *SQLSocialRepository) GraduateAcademyMember(ctx context.Context, actor, target int, commandKey string) (graduation AcademyGraduation, resultErr error) {
+	if actor <= 0 || target <= 0 || actor == target || !validSocialCommandKey(commandKey) {
+		return graduation, ErrSocialInvalidRequest
+	}
+	resultErr = r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if existing, found := academyGraduationByCommand(ctx, tx, commandKey); found {
+			graduation = existing
+			return nil
+		}
 		var level int
-		if err := tx.QueryRowContext(ctx, "SELECT a.ID,c.CURRENT_LEVEL FROM ACADEMY a JOIN ACADEMY_MEMBER am ON am.FK_ACADEMY=a.ID JOIN `CHAR` c ON c.id=am.FK_CHAR WHERE a.LEADER_CHAR=? AND am.FK_CHAR=? AND am.MEMBER_CLASS<>0 FOR UPDATE", actor, target).Scan(&academyID, &level); err != nil {
+		var class byte
+		if err := tx.QueryRowContext(ctx, "SELECT a.ID,a.LEADER_CHAR,c.CURRENT_LEVEL,am.MEMBER_CLASS,am.ACCUMULATED_EXP FROM ACADEMY a JOIN ACADEMY_MEMBER am ON am.FK_ACADEMY=a.ID JOIN `CHAR` c ON c.id=am.FK_CHAR WHERE a.LEADER_CHAR=? AND am.FK_CHAR=? FOR UPDATE", actor, target).Scan(&graduation.AcademyID, &graduation.LeaderCharacter, &level, &class, &graduation.AccumulatedExperience); err != nil {
 			return ErrSocialAccessDenied
 		}
 		if level < 40 {
 			return ErrSocialInsufficientLevel
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM ACADEMY_MEMBER WHERE FK_ACADEMY=? AND FK_CHAR=?", academyID, target); err != nil {
+		if class != 2 {
+			return ErrSocialAccessDenied
+		}
+		graduation.ApprenticeCharacter = target
+		graduation.LeaderExperienceAward = graduation.AccumulatedExperience
+		graduation.AssistantExperienceAward = graduation.AccumulatedExperience / 10
+		graduation.HonorAward = 1
+		graduation.GraduatedAt = time.Now().UTC()
+		if _, err := tx.ExecContext(ctx, "UPDATE ACADEMY_MEMBER SET ACCUMULATED_EXP=ACCUMULATED_EXP+? WHERE FK_ACADEMY=? AND FK_CHAR=? AND MEMBER_CLASS=0", graduation.LeaderExperienceAward, graduation.AcademyID, actor); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE ACADEMY SET GRADUATED_COUNT=GRADUATED_COUNT+1,HONOR_POINTS=HONOR_POINTS+1 WHERE ID=?", academyID)
+		if graduation.AssistantExperienceAward > 0 {
+			if _, err := tx.ExecContext(ctx, "UPDATE ACADEMY_MEMBER SET ACCUMULATED_EXP=ACCUMULATED_EXP+? WHERE FK_ACADEMY=? AND MEMBER_CLASS=1", graduation.AssistantExperienceAward, graduation.AcademyID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM ACADEMY_MENTOR_BUFF WHERE ACADEMY_ID=? AND CHAR_ID=?", graduation.AcademyID, target); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM ACADEMY_MEMBER WHERE FK_ACADEMY=? AND FK_CHAR=?", graduation.AcademyID, target)
+		if err != nil || requireSocialRow(result) != nil {
+			return ErrSocialConflict
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE ACADEMY SET GRADUATED_COUNT=GRADUATED_COUNT+1,HONOR_POINTS=HONOR_POINTS+? WHERE ID=?", graduation.HonorAward, graduation.AcademyID); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "INSERT INTO ACADEMY_GRADUATION (ACADEMY_ID,APPRENTICE_CHAR,LEADER_CHAR,ACCUMULATED_EXP,LEADER_EXP_AWARD,ASSISTANT_EXP_AWARD,HONOR_AWARD,COMMAND_KEY,GRADUATED_AT) VALUES (?,?,?,?,?,?,?,?,?)", graduation.AcademyID, target, actor, graduation.AccumulatedExperience, graduation.LeaderExperienceAward, graduation.AssistantExperienceAward, graduation.HonorAward, commandKey, graduation.GraduatedAt)
 		return err
 	})
+	return graduation, resultErr
+}
+
+func validSocialCommandKey(key string) bool {
+	if key == "" || len(key) > 128 || strings.TrimSpace(key) != key {
+		return false
+	}
+	for _, character := range key {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("-_.:", character)) {
+			return false
+		}
+	}
+	return true
+}
+
+func academyGraduationByCommand(ctx context.Context, tx *sql.Tx, commandKey string) (AcademyGraduation, bool) {
+	var graduation AcademyGraduation
+	err := tx.QueryRowContext(ctx, "SELECT ACADEMY_ID,APPRENTICE_CHAR,LEADER_CHAR,ACCUMULATED_EXP,LEADER_EXP_AWARD,ASSISTANT_EXP_AWARD,HONOR_AWARD,GRADUATED_AT FROM ACADEMY_GRADUATION WHERE COMMAND_KEY=? FOR UPDATE", commandKey).Scan(&graduation.AcademyID, &graduation.ApprenticeCharacter, &graduation.LeaderCharacter, &graduation.AccumulatedExperience, &graduation.LeaderExperienceAward, &graduation.AssistantExperienceAward, &graduation.HonorAward, &graduation.GraduatedAt)
+	return graduation, err == nil
+}
+
+func (r *SQLSocialRepository) AccumulateAcademyExperience(ctx context.Context, characterID int, gained uint64) (states []AcademyBuffState, resultErr error) {
+	if characterID <= 0 || gained == 0 {
+		return nil, ErrSocialInvalidRequest
+	}
+	resultErr = r.tx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var academyID, leader, mentor, level int
+		var class byte
+		var accumulated uint64
+		if err := tx.QueryRowContext(ctx, "SELECT am.FK_ACADEMY,a.LEADER_CHAR,COALESCE(am.MENTOR_CHAR,a.LEADER_CHAR),am.MEMBER_CLASS,c.CURRENT_LEVEL,am.ACCUMULATED_EXP FROM ACADEMY_MEMBER am JOIN ACADEMY a ON a.ID=am.FK_ACADEMY JOIN `CHAR` c ON c.id=am.FK_CHAR WHERE am.FK_CHAR=? FOR UPDATE", characterID).Scan(&academyID, &leader, &mentor, &class, &level, &accumulated); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		if class != 2 || level >= 40 {
+			return nil
+		}
+		award := gained / 10
+		if award == 0 {
+			award = 1
+		}
+		if accumulated > math.MaxUint64-award {
+			return ErrSocialConflict
+		}
+		accumulated += award
+		if _, err := tx.ExecContext(ctx, "UPDATE ACADEMY_MEMBER SET ACCUMULATED_EXP=? WHERE FK_ACADEMY=? AND FK_CHAR=?", accumulated, academyID, characterID); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		ends := now.Add(5 * time.Minute)
+		for _, state := range []AcademyBuffState{{AcademyID: academyID, CharacterID: characterID, Type: 0, Value: accumulated, StartsAt: now, EndsAt: ends}, {AcademyID: academyID, CharacterID: mentor, Type: 1, Value: accumulated, StartsAt: now, EndsAt: ends}} {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO ACADEMY_MENTOR_BUFF (ACADEMY_ID,CHAR_ID,BUFF_TYPE,VALUE,STARTS_AT,ENDS_AT) VALUES (?,?,?,?,?,?) ON DUPLICATE KEY UPDATE VALUE=VALUES(VALUE),STARTS_AT=VALUES(STARTS_AT),ENDS_AT=VALUES(ENDS_AT)", state.AcademyID, state.CharacterID, state.Type, state.Value, state.StartsAt, state.EndsAt); err != nil {
+				return err
+			}
+			states = append(states, state)
+		}
+		_ = leader
+		return nil
+	})
+	return states, resultErr
+}
+
+func (r *SQLSocialRepository) AcademyBuffs(ctx context.Context, characterID int, now time.Time) ([]AcademyBuffState, error) {
+	if r == nil || r.shard == nil || characterID <= 0 || now.IsZero() {
+		return nil, ErrSocialInvalidRequest
+	}
+	rows, err := r.shard.QueryContext(socialContext(ctx), "SELECT ACADEMY_ID,CHAR_ID,BUFF_TYPE,VALUE,STARTS_AT,ENDS_AT FROM ACADEMY_MENTOR_BUFF WHERE CHAR_ID=? AND ENDS_AT>? ORDER BY BUFF_TYPE", characterID, now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var states []AcademyBuffState
+	for rows.Next() {
+		var state AcademyBuffState
+		if err = rows.Scan(&state.AcademyID, &state.CharacterID, &state.Type, &state.Value, &state.StartsAt, &state.EndsAt); err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
 }
 
 func (r *SQLSocialRepository) UpdateAcademyComment(ctx context.Context, actor int, title, body string) error {

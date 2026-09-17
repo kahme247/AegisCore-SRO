@@ -64,17 +64,23 @@ func (h *StorageHandler) handlePacket(ctx context.Context, session *server.Sessi
 	if err != nil {
 		return err
 	}
+	if err = h.sendPacket(session, vsro188.BuildStorageOpenSuccess()); err != nil {
+		return err
+	}
 	for _, response := range buildStorageResponses(snapshot) {
-		if h.send != nil {
-			err = h.send(session, response)
-		} else {
-			err = session.Send(response)
-		}
+		err = h.sendPacket(session, response)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (h *StorageHandler) sendPacket(session *server.Session, packet network.Packet) error {
+	if h.send != nil {
+		return h.send(session, packet)
+	}
+	return session.Send(packet)
 }
 
 func (h *StorageHandler) validate(session *server.Session, npcUID uint32) error {

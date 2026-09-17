@@ -9,6 +9,7 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -50,6 +51,7 @@ func (a *partyExitInstanceAllocator) ReleaseQuestInstanceScope(context.Context, 
 type teleportWorldFake struct {
 	*selectEntityWorldFake
 	region       navmeshv2.RtNavmeshTerrain
+	stopResults  []bool
 	stops        int
 	flushes      int
 	resets       int
@@ -76,6 +78,9 @@ func (f *teleportWorldFake) GetRegion(id int16) (navmeshv2.RtNavmeshTerrain, err
 func (f *teleportWorldFake) StopMovingCharacter(_ model.ICharacter, position navmeshv2.RtNavmeshPosition, _ string, _ bool) bool {
 	f.stops++
 	f.lastPosition = position
+	if f.stops <= len(f.stopResults) {
+		return f.stopResults[f.stops-1]
+	}
 	return true
 }
 
@@ -169,6 +174,103 @@ func TestQuestInstanceEntryResetsEveryPersistedMemberAtCurrentPosition(t *testin
 	}
 	if len(sent) != 2 || sent[0].MessageID != opcode.TeleportReadyRequest || sent[1].MessageID != opcode.TeleportReadyRequest || base.stops != 2 || base.resets != 2 {
 		t.Fatalf("packets=%#v stops=%d resets=%d", sent, base.stops, base.resets)
+	}
+}
+
+func TestDimensionHoleEntryCommitsAuthoredScopeAndLoadingDestination(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("prepare Dimension Hole session")
+	}
+	player.SetGameWorldID(1)
+	player.SetNavmeshPosition(navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(25000),
+		Offset: math32.NewVector3(100, 20, 200),
+	})
+	definition := model.DimensionHoleCatalog()[0]
+	scope, err := model.NewGameWorldScope(definition.WorldID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := service.DimensionHoleAdmission{
+		PortalUID: 501, PlayerUID: player.GetUniqueID(), OwnerUID: 100,
+		Scope: scope, Definition: definition,
+	}
+	destination := service.DimensionHoleEntryDestination{
+		WorldID: definition.WorldID, Region: 31201,
+		X: 30, Y: 4, Z: 40,
+	}
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(destination.Region))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{player: player}, region: region}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+
+	if err = handler.SubmitDimensionHoleEntry(context.Background(), player, admission, destination); err != nil {
+		t.Fatalf("SubmitDimensionHoleEntry() error = %v", err)
+	}
+	if player.GetGameWorldID() != uint32(scope) || player.GetLifeState() != model.Spawning {
+		t.Fatalf("scope=%X life=%d, want %X/spawning", player.GetGameWorldID(), player.GetLifeState(), uint32(scope))
+	}
+	if session.LifecyclePhase() != server.SessionCharacterLoading || world.stops != 1 || world.resets != 1 {
+		t.Fatalf("phase=%s stops=%d resets=%d", session.LifecyclePhase(), world.stops, world.resets)
+	}
+	if world.lastPosition.Region.ID != destination.Region ||
+		world.lastPosition.Offset.X != destination.X || world.lastPosition.Offset.Y != destination.Y || world.lastPosition.Offset.Z != destination.Z {
+		t.Fatalf("destination = %+v", world.lastPosition)
+	}
+	if len(sent) != 1 || sent[0].MessageID != opcode.TeleportReadyRequest ||
+		!reflect.DeepEqual(sent[0].Payload(), []byte{0xE1, 0x79}) {
+		t.Fatalf("Dimension Hole loading packet = %#v", sent)
+	}
+}
+
+func TestDimensionHoleEntryRollsBackScopePositionAndLifecycleWhenReadySendFails(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	session.MarkAuthenticated()
+	if !session.EnterLobby() || !session.BeginCharacterLoading() || !session.CompleteCharacterLoading() {
+		t.Fatal("prepare Dimension Hole session")
+	}
+	player.SetGameWorldID(7)
+	source := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(25000),
+		Offset: math32.NewVector3(100, 20, 200),
+	}
+	player.SetNavmeshPosition(source)
+	definition := model.DimensionHoleCatalog()[0]
+	scope, _ := model.NewGameWorldScope(definition.WorldID, 3)
+	admission := service.DimensionHoleAdmission{
+		PortalUID: 501, PlayerUID: player.GetUniqueID(), OwnerUID: 100,
+		Scope: scope, Definition: definition,
+	}
+	destination := service.DimensionHoleEntryDestination{WorldID: definition.WorldID, Region: 31201, X: 30, Y: 4, Z: 40}
+	region := navmeshv2.NewRtNavmeshTerrain("", navmeshv2.NewRegionFromInt16(destination.Region))
+	region.Cells = []navmeshv2.RtNavmeshCellQuad{{}}
+	world := &teleportWorldFake{selectEntityWorldFake: &selectEntityWorldFake{player: player}, region: region}
+	handler := NewTeleportHandler(world, &teleportRepositoryFake{})
+	sendErr := errors.New("send failed")
+	handler.send = func(*server.Session, network.Packet) error { return sendErr }
+
+	if err := handler.SubmitDimensionHoleEntry(context.Background(), player, admission, destination); !errors.Is(err, sendErr) {
+		t.Fatalf("SubmitDimensionHoleEntry() error = %v", err)
+	}
+	if player.GetGameWorldID() != 7 || session.LifecyclePhase() != server.SessionInWorld {
+		t.Fatalf("rollback scope=%X phase=%s", player.GetGameWorldID(), session.LifecyclePhase())
+	}
+	if world.stops != 2 || world.lastPosition.Region.ID != source.Region.ID ||
+		world.lastPosition.Offset.X != source.Offset.X || world.lastPosition.Offset.Y != source.Offset.Y || world.lastPosition.Offset.Z != source.Offset.Z {
+		t.Fatalf("rollback stops=%d position=%+v", world.stops, world.lastPosition)
+	}
+	handler.mu.Lock()
+	pending := handler.pending[session]
+	handler.mu.Unlock()
+	if pending != nil {
+		t.Fatal("failed Dimension Hole entry retained pending loading state")
 	}
 }
 

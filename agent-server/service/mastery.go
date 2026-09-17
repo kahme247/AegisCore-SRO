@@ -58,10 +58,10 @@ func characterMasteryTotalLimit(player *model.Player) int {
 		return 0
 	}
 	if player.IsChinese() {
-		return 330
+		return min(model.RuntimeCHMasteryMaxTotal(), model.RuntimeCHMasteryPointsPerLevel()*player.Level)
 	}
 	if player.IsEuropean() {
-		return min(europeanMasteryTotalLimit, 2*player.Level)
+		return min(model.RuntimeEUMasteryMaxTotal(), model.RuntimeEUMasteryPointsPerLevel()*player.Level)
 	}
 	return 0
 }

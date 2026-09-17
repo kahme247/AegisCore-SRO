@@ -48,7 +48,8 @@ func ApplyExperience(table *LevelTable, level int, experience, skillExperience, 
 			result.SkillPoints += int(gainedPoints)
 		}
 	}
-	for result.Level < table.MaxLevel() {
+	maximumLevel := min(table.MaxLevel(), RuntimeServerMaxLevel())
+	for result.Level < maximumLevel {
 		row, exists := table.Level(result.Level)
 		if !exists || row.RequiredExperience == 0 || result.Experience < row.RequiredExperience {
 			break

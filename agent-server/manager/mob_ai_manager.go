@@ -58,6 +58,36 @@ type MobAIManager struct {
 	schedule        func(time.Duration, func())
 	ownerTargets    func(*model.NPC, *model.Player, model.RefSkill, int) []*model.Player
 	interruptPlayer func(*model.Player)
+	gameplayRates   interface{ Current() model.GameplayRates }
+}
+
+func (m *MobAIManager) ConfigureGameplayRates(rates interface{ Current() model.GameplayRates }) {
+	if m != nil {
+		m.gameplayRates = rates
+	}
+}
+func (m *MobAIManager) gameplayTimings() (attack, wander, aggroMin, aggroMax, pursuit time.Duration) {
+	attack, wander, aggroMin, aggroMax, pursuit = mobAttackCooldown, mobWanderDelay, mobAggroReactionMin, mobAggroReactionMin+mobAggroReactionJitter, mobPursuitRefresh
+	if m == nil || m.gameplayRates == nil {
+		return
+	}
+	r := m.gameplayRates.Current()
+	if r.MobAttackCooldownMS > 0 {
+		attack = time.Duration(r.MobAttackCooldownMS) * time.Millisecond
+	}
+	if r.MobWanderDelayMS > 0 {
+		wander = time.Duration(r.MobWanderDelayMS) * time.Millisecond
+	}
+	if r.MobAggroReactionMinMS > 0 {
+		aggroMin = time.Duration(r.MobAggroReactionMinMS) * time.Millisecond
+	}
+	if r.MobAggroReactionMaxMS >= r.MobAggroReactionMinMS {
+		aggroMax = time.Duration(r.MobAggroReactionMaxMS) * time.Millisecond
+	}
+	if r.MobPursuitRefreshMS > 0 {
+		pursuit = time.Duration(r.MobPursuitRefreshMS) * time.Millisecond
+	}
+	return
 }
 
 func (m *MobAIManager) ConfigureVitals(repository model.CharacterVitalsRepository) {
@@ -72,6 +102,9 @@ func (m *MobAIManager) ConfigureVitals(repository model.CharacterVitalsRepositor
 type mobAttackProfile struct {
 	reach     float32
 	delay     time.Duration
+	impact    time.Duration
+	lifecycle time.Duration
+	frosted   bool
 	cooldown  time.Duration
 	attackMin int
 	attackMax int
@@ -86,6 +119,9 @@ type mobPendingAttack struct {
 	damage    int
 	magical   bool
 	readyAt   time.Time
+	impact    time.Duration
+	lifecycle time.Duration
+	frosted   bool
 }
 
 type mobLinkedDamage struct {
@@ -309,7 +345,12 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		return
 	}
 	if targetUID == 0 && npc.SpawnArea() != nil && npc.MonsterRarity().UsesOrdinaryAggro() {
-		delay := mobAggroReactionMin + time.Duration(npc.GetUniqueID()%uint32(mobAggroReactionJitter/time.Millisecond))*time.Millisecond
+		_, _, aggroMin, aggroMax, _ := m.gameplayTimings()
+		jitter := aggroMax - aggroMin
+		delay := aggroMin
+		if jitter > 0 {
+			delay += time.Duration(npc.GetUniqueID()%uint32(jitter/time.Millisecond)) * time.Millisecond
+		}
 		if !npc.ReadyToAcquireAggro(target.GetUniqueID(), now, delay) {
 			return
 		}
@@ -317,7 +358,7 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	npc.SetAggroTarget(target.GetUniqueID())
 	distance := navmeshv2.HorizontalDistance(npc.GetNavmeshPosition(), target.GetNavmeshPosition())
 	skillID := npc.AttackSkillID()
-	profile, profileFound := m.attackProfile(npc, target, skillID)
+	profile, profileFound := m.attackProfile(npc, target, skillID, now)
 	attackRange := mobAttackRange
 	if profileFound {
 		attackRange = profile.reach
@@ -340,7 +381,8 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	if distance > attackRange {
 		movement := npc.GetMovementData()
 		routeActive := movement != nil && movement.HasDestination
-		if npc.ReadyToPursue(now, mobPursuitRefresh, routeActive) {
+		_, _, _, _, pursuitRefresh := m.gameplayTimings()
+		if npc.ReadyToPursue(now, pursuitRefresh, routeActive) {
 			if !world.CanMoveDirectly(npc.GetNavmeshPosition(), target.GetNavmeshPosition()) {
 				if npc.GetMotionState() != model.NoMotion {
 					world.StopMovingCharacter(npc, npc.GetNavmeshPosition(), "mob-pursuit-obstructed", true)
@@ -416,6 +458,9 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 			damage:    damage,
 			magical:   profile.magical,
 			readyAt:   now.Add(profile.delay),
+			impact:    profile.impact,
+			lifecycle: profile.lifecycle,
+			frosted:   profile.frosted,
 		})
 		begin := model.BuildDelayedAttackBegin(skillID, npc.GetUniqueID(), target.GetUniqueID(), castUID)
 		npc.SendToKnown(&begin)
@@ -471,7 +516,7 @@ func mobDamageAfterAttackDown(npc *model.NPC, damage int, now time.Time) int {
 	return damage
 }
 
-func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skillID uint32) (mobAttackProfile, bool) {
+func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skillID uint32, now time.Time) (mobAttackProfile, bool) {
 	if m == nil || npc == nil || target == nil || skillID == 0 {
 		return mobAttackProfile{}, false
 	}
@@ -497,9 +542,16 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 		attackRange = mobAttackRange
 	}
 
-	// The client plays the full action duration independently. Damage belongs at
-	// the authored impact point: preparation plus casting time.
-	delay := milliseconds(skill.ActionPreparingTime + skill.ActionCastingTime)
+	// Ordinary damage lands at the authored impact point. Frostbite halves the
+	// client's action speed; keep the delayed hit behind the complete slowed
+	// animation instead of finishing B071 while the model is still attacking.
+	impact := milliseconds(skill.ActionPreparingTime + skill.ActionCastingTime)
+	lifecycle := skill.RuntimeImpactDurationAt(100)
+	delay := impact
+	_, frostbitten := npc.CombatStatus(model.CombatStatusFrostbite, now)
+	if frostbitten {
+		delay = skill.RuntimeImpactDurationAt(200)
+	}
 	if delay < mobClientActionRegistrationDelay {
 		delay = mobClientActionRegistrationDelay
 	}
@@ -511,12 +563,45 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 		cooldown = delay
 	}
 	if cooldown <= 0 {
-		cooldown = mobAttackCooldown
+		cooldown, _, _, _, _ = m.gameplayTimings()
 	}
 	return mobAttackProfile{
-		reach: attackRange, delay: delay, cooldown: cooldown,
+		reach: attackRange, delay: delay, impact: impact, lifecycle: lifecycle, frosted: frostbitten, cooldown: cooldown,
 		attackMin: skill.AttackMin, attackMax: skill.AttackMax, magical: skill.IsMagicalAttack(),
 	}, true
+}
+
+// ReconcileAttackTiming keeps an in-flight NPC swing aligned when Frostbite
+// starts or expires. The pending hit keeps its cast UID and damage; only its
+// authoritative completion time changes.
+func (m *MobAIManager) ReconcileAttackTiming(npc *model.NPC, now time.Time) {
+	if m == nil || npc == nil {
+		return
+	}
+	if now.IsZero() {
+		now = m.combatNow()
+	}
+	_, frosted := npc.CombatStatus(model.CombatStatusFrostbite, now)
+	m.stateMu.Lock()
+	pending, exists := m.pending[npc.GetUniqueID()]
+	if !exists || pending.frosted == frosted {
+		m.stateMu.Unlock()
+		return
+	}
+	remaining := max(time.Duration(0), pending.readyAt.Sub(now))
+	if frosted {
+		// A normal pending hit targets the authored impact point. Once the model
+		// becomes cold, include the animation tail and play all remaining work at
+		// half speed before publishing B071.
+		remaining += max(time.Duration(0), pending.lifecycle-pending.impact)
+		pending.readyAt = now.Add(2 * remaining)
+	} else {
+		// The remaining work was scheduled at half speed; resume it at normal.
+		pending.readyAt = now.Add(remaining / 2)
+	}
+	pending.frosted = frosted
+	m.pending[npc.GetUniqueID()] = pending
+	m.stateMu.Unlock()
 }
 
 func milliseconds(value int) time.Duration {
@@ -1061,6 +1146,12 @@ func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, t
 		}
 		if npcStatusRestrainsMovement(effect.Kind) && world != nil {
 			world.StopMovingCharacter(target, target.GetNavmeshPosition(), "mob-skill-control", true)
+			m.stateMu.Lock()
+			interrupt := m.interruptPlayer
+			m.stateMu.Unlock()
+			if interrupt != nil {
+				interrupt(target)
+			}
 		}
 		bit := model.CombatStatusBadEffectBit(effect.Kind)
 		if bit != 0 {
@@ -1329,7 +1420,8 @@ func (m *MobAIManager) moveTo(world mobAIWorld, npc *model.NPC, target navmeshv2
 }
 
 func (m *MobAIManager) wander(world mobAIWorld, npc *model.NPC, now time.Time) {
-	if npc.GetMotionState() != model.NoMotion || !npc.ReadyToWander(now, mobWanderDelay) {
+	_, wanderDelay, _, _, _ := m.gameplayTimings()
+	if npc.GetMotionState() != model.NoMotion || !npc.ReadyToWander(now, wanderDelay) {
 		return
 	}
 	area := npc.SpawnArea()

@@ -55,7 +55,7 @@ func TestModernItemMallResponseEchoesPackageCount(t *testing.T) {
 		DestinationSlots: []byte{14},
 		Quantity:         11,
 	})
-	if got, want := hex.EncodeToString(purchase.Payload()), "01181b0402010d010e0100"; got != want {
+	if got, want := hex.EncodeToString(purchase.Payload()), "01181b0402010d010e010000000000"; got != want {
 		t.Fatalf("modern purchase payload = %s, want %s", got, want)
 	}
 }

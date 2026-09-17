@@ -46,6 +46,9 @@ func (p *Player) ItemServiceRates(now time.Time) (experienceBonus, skillExperien
 		if premiumDailyServiceRefItemID(effect) != 0 && !effect.DailyActiveUntil.After(now) {
 			continue
 		}
+		if p.premiumPaused[byte(kind)+1] {
+			continue
+		}
 		experienceBonus += effect.ExperienceBonusPercent
 		skillExperienceBonus += effect.SkillExperienceBonusPercent
 	}

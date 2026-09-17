@@ -72,6 +72,10 @@ prepared-cache validation does.
 | `AGENT_TRADE_SAFETY_NUM` | `8` | Attempt limit used by counted safe trade and `0x34D5` |
 | `AGENT_TIMED_BUFF_DURATION` | `0` | Optional duration override for development timed-buff tests |
 | `AGENT_FEATURE_<NAME>_ENABLED` | `0` | Evidence-mapped optional legacy feature; unavailable features fail startup if enabled |
+| `AGENT_FEATURE_WINTER_EVENT_2009_ENABLED` | `0` | Enables the binary-confirmed snowman-to-snowflake event drop; its independent roll is not multiplied by ordinary loot rates |
+| `AGENT_FEATURE_CHRISTMAS_EVENT_2007_ENABLED` | `0` | Enables atomic red-socks exchange through the configured Christmas reward pool and native `0xB0ED` response |
+| `AGENT_FEATURE_SERVER_EVENT_SYSTEM_ENABLED` | `0` | Enables reconciliation of durable server-event timed-rate, skill/buff, and monster-spawn rewards |
+| `BATTLE_ARENA_TICKET_DROP_RATE` | `0` | Arena-world-only ticket probability (`0..100`); uses the native adaptive accumulator and is independent of ordinary loot rates |
 | `AGENT_DIAGNOSTICS_ENABLED` | `false` | Enable loopback-only pprof and runtime metrics |
 | `AGENT_DIAGNOSTICS_PORT` | `6060` | Loopback diagnostics port |
 | `AGENT_ADMISSION_HOST` | `127.0.0.1` | Private mTLS bind host |
@@ -85,9 +89,44 @@ prepared-cache validation does.
 | `AGENT_MANAGEMENT_TLS_CERT_FILE` | none | Management server certificate |
 | `AGENT_MANAGEMENT_TLS_KEY_FILE` | none | Management server private key |
 | `AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE` | none | CA that issued the SMC client certificate |
+| `AGENT_SCHEDULER_ENABLED` | `true` | Run the durable shard scheduler worker |
+| `AGENT_SCHEDULER_POLL_MS` | `1000` | Interval between durable scheduler cycles |
+| `AGENT_SCHEDULER_LEASE_SECONDS` | `30` | Processing lease granted to a claimed run |
+| `AGENT_SCHEDULER_BATCH_SIZE` | `64` | Maximum definitions and runs handled per cycle |
+| `AGENT_COMPETITIVE_MINIMUM_PLAYERS` | `2` | Minimum even participant count required to form a match |
+| `AGENT_COMPETITIVE_MAXIMUM_PLAYERS` | `16` | Maximum even participant count assigned to one match |
+| `AGENT_COMPETITIVE_MATCH_SECONDS` | `600` | Automatic Arena/Flag War match duration |
+| `AGENT_COMPETITIVE_WINNER_GOLD` | `1000000` | Idempotent gold reward per winning participant |
+| `AGENT_COMPETITIVE_LOSER_GOLD` | `250000` | Idempotent gold reward per losing or tied participant |
 | `GAME_TIME_TICKS_PER_SECOND` | `20` | World clock frequency |
 | `GAME_TIME_DAY_SPEED` | `1.0` | World clock multiplier |
 | `AGENT_POSITION_CHECKPOINT_SECONDS` | `30` | Position checkpoint interval |
+
+Durable scheduler handlers currently registered by Agent are:
+
+| Handler | JSON payload | Effect |
+| --- | --- | --- |
+| `agent.log` | `{"message":"maintenance preparation started"}` | Write an operational schedule message to the Agent log |
+| `server.notice` | `{"message":"Maintenance starts in 10 minutes"}` | Broadcast a notice to every active in-world player |
+| `unique.spawn` | `{"codeName":"MOB_CH_TIGERWOMAN","regionId":25000,"radius":25}` | Spawn one unique at its authored nest without changing normal respawn counts |
+| `competitive.run` | `{"event":"battle-arena","action":"open"}` | Open registration; use `start`, or `finish` with `matchId`, for `battle-arena` or `flag-war` |
+| `event.global` | `{"name":"summer","value":7}` | Broadcast the stock global-event display update (`0x3CA2`) |
+| `event.vietnam-mr` | `{"elapsedSeconds":3600,"startHour":1,"endHour":2}` | Broadcast the Vietnam MR-system window (`0x3122`) |
+| `event.server-data` | `{"records":[{"serverEventId":1,"value":2,"target":3}]}` | Broadcast a typed server-event data snapshot (`0x34F2`) |
+| `server-event.advance` | `{"instanceKey":"summer-1","serverEventId":1,"characterId":20,"delta":1,"target":10}` | Atomically advance durable character event progress and publish its updated state |
+
+`server.notice` accepts a trimmed message of 1-200 Unicode characters. Invalid
+payloads fail permanently; temporary broadcast errors follow the scheduler retry
+policy. When the private management API is enabled, its mTLS-protected scheduler
+routes are:
+
+| Method | Route | Effect |
+| --- | --- | --- |
+| `POST` | `/v1/management/schedules` | Validate and create a definition for a registered handler |
+| `GET` | `/v1/management/schedules` | List up to 500 definitions ordered by ID |
+| `GET` | `/v1/management/schedules/{id}` | Inspect one definition and its next run |
+| `PATCH` | `/v1/management/schedules/{id}` | Enable or disable using `expectedVersion` optimistic concurrency |
+| `GET` | `/v1/management/schedules/{id}/runs` | Inspect recent execution status, attempts, and errors |
 
 Shared `DB_ACCOUNT_*`, `DB_SHARD_*`, `DATABASE_*_DRIVER` and `LOG_LEVEL`
 settings are defined in `framework/config`. `SRO_SESSION_TRACE=1` enables both
@@ -200,9 +239,17 @@ accepts its bare `spawn MOB_CODE_NAME [count]` form.
 - Movement goes through game time and `WorldService.UpdatePosition`; server
   state, not untrusted client coordinates, drives visibility updates.
 - Blocked terrain/object edges remain collision candidates.
-- Group spawn admits players, ordinary NPCs and selected mob layouts.
-  Unsupported COS, item and specialized structures are deferred to protect
-  `0x3019` alignment.
+- Visibility delivery admits players, ordinary NPCs, selected mob layouts,
+  implemented COS pet/transport layouts, ground items, and verified teleport
+  structures. Single ground items use direct `0x3015`; the other supported
+  entities use the `0x3017`/`0x3019`/`0x3018` group envelope. Unsupported
+  variants remain deferred so a missing polymorphic tail cannot misalign the
+  rest of a batch.
+- `manager.TestTwoClientSpawnDespawnCoverage` exercises the complete delivery
+  lifecycle for two independent client sessions across players, mobs, drops,
+  growth pets, ride transports, service NPCs, and teleport structures. It
+  checks exact spawn bytes, opcode selection, matching despawn UIDs, and the
+  per-client known-object state.
 - Normal service NPC spawns use talk flag `2`; selected-NPC responses provide
   family-specific actions that remain capture-provisional.
 - Random respawn uses at most 32 resolved, same-region, direct-movement-safe
@@ -244,8 +291,10 @@ reduces parsing/startup work but is not region-scoped runtime storage.
 ## Known limitations
 
 - No sanitized stock-client capture corpus is checked in.
-- Dropped-item and specialized-structure spawn delivery is incomplete, and
-  player/COS/pet spawn fields still need capture-backed validation.
+- Automated delivery coverage now includes ordinary ground items, implemented
+  COS pet/transport layouts, and verified teleport structures. Specialized
+  item/COS/structure variants outside those serializers remain gated, and all
+  player/COS/pet spawn fields still need stock-client capture validation.
 - Skill learning and several attack/buff paths exist, but passive, healing,
   resurrection-skill and broader effect semantics remain incomplete.
 - Quest bootstrap, repository operations and abandon exist; full

@@ -18,6 +18,9 @@ func (w *WorldService) CanMoveDirectly(source, target navmeshv2.RtNavmeshPositio
 	if w == nil {
 		return false
 	}
+	if navmeshv2.IsDungeonRegion(source.Region.ID) || navmeshv2.IsDungeonRegion(target.Region.ID) {
+		return w.canMoveDirectlyInDungeon(source, target)
+	}
 	start := source.GetGlobalCoordinates()
 	end := target.GetGlobalCoordinates()
 	delta := end.Clone().Sub(start.Clone())
@@ -41,6 +44,36 @@ func (w *WorldService) CanMoveDirectly(source, target navmeshv2.RtNavmeshPositio
 		)
 		next, err := w.NewPosFromGlobalCoordinates(probeGlobal)
 		if err != nil || !w.canMoveDirectStep(current, next) {
+			return false
+		}
+		current = next
+	}
+	return true
+}
+
+func (w *WorldService) canMoveDirectlyInDungeon(source, target navmeshv2.RtNavmeshPosition) bool {
+	if source.Region.ID != target.Region.ID || !navmeshv2.IsDungeonRegion(source.Region.ID) || source.Offset == nil || target.Offset == nil {
+		return false
+	}
+	delta := target.Offset.Clone().Sub(source.Offset.Clone())
+	delta.Y = 0
+	distance := delta.Length()
+	if distance <= 0.0001 {
+		return true
+	}
+	steps := int(math.Ceil(float64(distance / directMotionProbeLength)))
+	current := source
+	for step := 1; step <= steps; step++ {
+		ratio := float32(step) / float32(steps)
+		next := navmeshv2.RtNavmeshPosition{
+			Region: source.Region,
+			Offset: math32.NewVector3(
+				source.Offset.X+delta.X*ratio,
+				source.Offset.Y+(target.Offset.Y-source.Offset.Y)*ratio,
+				source.Offset.Z+delta.Z*ratio,
+			),
+		}
+		if !w.canMoveDirectStep(current, next) {
 			return false
 		}
 		current = next

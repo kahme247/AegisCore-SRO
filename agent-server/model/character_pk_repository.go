@@ -20,9 +20,16 @@ type CharacterPKState struct {
 }
 
 type CharacterPKRepository interface {
+	CharacterPKKillRepository
 	LoadByName(context.Context, string) (CharacterPKState, error)
 	EditByName(context.Context, string, CharacterPKState) error
 }
+
+type CharacterPKKillRepository interface {
+	RecordKill(context.Context, int) (CharacterPKState, error)
+}
+
+const CharacterPKPenaltyPerKill int32 = 10_000
 
 type characterPKDatabase interface {
 	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
@@ -113,6 +120,66 @@ func (r *SQLCharacterPKRepository) EditByName(ctx context.Context, name string, 
 		return fmt.Errorf("commit character PK edit: %w", err)
 	}
 	return nil
+}
+
+// RecordKill applies the stock three-field PK mutation under a row lock. The
+// explicit clamps preserve the recovered wire widths instead of allowing a
+// long-running character to wrap back to an apparently clean state.
+func (r *SQLCharacterPKRepository) RecordKill(ctx context.Context, characterID int) (state CharacterPKState, resultErr error) {
+	if r == nil || r.shard == nil {
+		return state, ErrCharacterPKRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return state, ErrCharacterPKNotFound
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := r.shard.BeginTx(ctx, nil)
+	if err != nil {
+		return state, fmt.Errorf("begin character PK kill: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback character PK kill: %w", rollbackErr))
+		}
+	}()
+	if err = tx.QueryRowContext(ctx, "SELECT `DAILY_PK`,`TOTAL_PK`,`PK_PENALTY_POINT` FROM `SRO_SHARD`.`CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&state.DailyPK, &state.TotalPK, &state.PKPenaltyPoint); errors.Is(err, sql.ErrNoRows) {
+		return CharacterPKState{}, ErrCharacterPKNotFound
+	} else if err != nil {
+		return CharacterPKState{}, fmt.Errorf("lock character PK kill target: %w", err)
+	}
+	state = NextCharacterPKKillState(state)
+	result, err := tx.ExecContext(ctx, "UPDATE `SRO_SHARD`.`CHAR` SET `DAILY_PK`=?,`TOTAL_PK`=?,`PK_PENALTY_POINT`=? WHERE `id`=?", state.DailyPK, state.TotalPK, state.PKPenaltyPoint, characterID)
+	if err != nil {
+		return CharacterPKState{}, fmt.Errorf("persist character PK kill: %w", err)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		if affectedErr != nil {
+			return CharacterPKState{}, fmt.Errorf("read character PK kill result: %w", affectedErr)
+		}
+		return CharacterPKState{}, fmt.Errorf("character PK kill affected %d rows, want 1", affected)
+	}
+	if err = tx.Commit(); err != nil {
+		return CharacterPKState{}, fmt.Errorf("commit character PK kill: %w", err)
+	}
+	return state, nil
+}
+
+func NextCharacterPKKillState(state CharacterPKState) CharacterPKState {
+	if state.DailyPK < ^uint8(0) {
+		state.DailyPK++
+	}
+	if state.TotalPK < int16(^uint16(0)>>1) {
+		state.TotalPK++
+	}
+	penalty := RuntimePKPenaltyPerKill()
+	if state.PKPenaltyPoint <= int32(^uint32(0)>>1)-penalty {
+		state.PKPenaltyPoint += penalty
+	} else {
+		state.PKPenaltyPoint = int32(^uint32(0) >> 1)
+	}
+	return state
 }
 
 func validateCharacterPKName(name string) (string, error) {

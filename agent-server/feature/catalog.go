@@ -66,14 +66,17 @@ type BoolProvider interface {
 
 func Definitions() []Definition {
 	definitions := []Definition{
-		serverFlag(WinterEvent2009, "SR_GameServer.WINTER_EVENT_2009", false),
+		availableServerFlag(WinterEvent2009, "SR_GameServer.WINTER_EVENT_2009", false,
+			Evidence{Source: "SR_GameServer.exe", Locator: "0x00876DF0, 0x00877870"}),
 		serverFlag(EUBusinessEvent, "SR_GameServer.EUBUSINESS_EVENT", false),
 		serverFlag(GoldenPigEvent, "SR_GameServer.GOLDEN_PIG_FEBRUARY_EVENT", false),
 		serverFlag(ThanksgivingEvent, "SR_GameServer.THANKS_GIVING_EVENT", false),
 		serverFlag(LiberationEvent, "SR_GameServer.LIBERATION_EVENT", false),
 		serverFlag(OpenMarket, "SR_GameServer.SET_FEE_RATE", true, "SR_GameServer.SELL_FEE_RATE"),
-		serverFlag(ServerEventSystem, "SR_ShardManager.SERVER_EVENT_SYSTEM", false),
-		serverFlag(ChristmasEvent2007, "SR_ShardManager.ChristmasEvent2007", false),
+		availableServerFlag(ServerEventSystem, "SR_ShardManager.SERVER_EVENT_SYSTEM", false,
+			Evidence{Source: "SR_GameServer.exe", Locator: "0x0066F4B0, 0x0066F640, 0x00670CC0"}),
+		availableServerFlag(ChristmasEvent2007, "SR_ShardManager.ChristmasEvent2007", false,
+			Evidence{Source: "sro_client.exe", Locator: "0x008821C0 (0xB0ED)"}),
 		serverFlag(FlagEvent, "SR_ShardManager.FlagEvent", false),
 		serverFlag(BattleArenaRandom, "SR_ShardManager.BattleArenaRandom", false),
 		serverFlag(BattleArenaParty, "SR_ShardManager.BattleArenaParty", false),
@@ -203,6 +206,15 @@ func DirectiveMappings() []DirectiveMapping {
 func serverFlag(key Key, directive string, legacyEnabled bool, additional ...string) Definition {
 	directives := append([]string{directive}, additional...)
 	return unavailableDefinition(key, legacyEnabled, directives, Evidence{Source: "VSRO_TestIn(EPVP)/VSRO_TestIn/VSRO_TestIn/server.cfg", Locator: strings.Join(directives, ", ")})
+}
+
+func availableServerFlag(key Key, directive string, legacyEnabled bool, evidence Evidence) Definition {
+	upper := strings.ToUpper(strings.ReplaceAll(string(key), "-", "_"))
+	return Definition{
+		Key: key, ConfigKey: "agent.features." + string(key) + ".enabled", Environment: "AGENT_FEATURE_" + upper + "_ENABLED",
+		DefaultEnabled: false, LegacyEnabled: legacyEnabled, Available: true,
+		Evidence: []Evidence{evidence}, LegacyDirectives: []string{directive},
+	}
 }
 
 func scheduleFlag(key Key, locator string, legacyEnabled bool) Definition {

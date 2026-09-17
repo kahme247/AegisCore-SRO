@@ -12,12 +12,12 @@ import (
 func TestQuestOfferRepositoryListsOnlyQueryQualifiedRows(t *testing.T) {
 	resetCatalogRepositoryTestState()
 	setCatalogRepositoryTestResponse(selectAvailableQuestOffers, catalogRepositoryTestResponse{
-		columns: []string{"ID", "CODE_NAME", "NAME_STRING", "PAY_STRING", "PAY_CONTENTS", "OBJECTIVE_KEY", "REQUIRED_COUNT", "TASK_COUNT", "SELECTION_COUNT", "TIMER_DURATION", "DAY_LIMIT", "DAY_OR_NIGHT", "SHARED_PROGRESS", "INSTANT_READY"},
+		columns: []string{"ID", "CODE_NAME", "NAME_STRING", "PAY_STRING", "PAY_CONTENTS", "OBJECTIVE_KEY", "REQUIRED_COUNT", "TASK_COUNT", "SELECTION_COUNT", "TIMER_DURATION", "DAY_LIMIT", "DAY_OR_NIGHT", "SHARED_PROGRESS", "INSTANT_READY", "DELIVERY_ITEMS"},
 		rows: [][]driver.Value{
-			{int64(3), "QNO_CH_SMITH_1", "SN_QNO_CH_SMITH_1", "SN_PAY_QNO_CH_SMITH_1", "SN_PAYCON_QNO_CH_SMITH_1", "SN_CON_QNO_CH_SMITH_1", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), false, false},
-			{int64(58), "QNO_CH_SMITH_2", "SN_QNO_CH_SMITH_2", "SN_PAY_QNO_CH_SMITH_2", "SN_PAYCON_QNO_CH_SMITH_2", "SN_CON_QNO_CH_SMITH_2", int64(50), int64(1), int64(0), int64(0), int64(0), int64(0), false, false},
-			{int64(900), "QNO_CLASSIFIED", "SN_CLASSIFIED", "SN_PAY_CLASSIFIED", "SN_PAYCON_CLASSIFIED", "SN_NORMAL\x1fSN_CHAMPION\x1fSN_GIANT", int64(30), int64(3), int64(0), int64(0), int64(0), int64(0), false, false},
-			{int64(88), "QNO_WC_FERRY4_1", "SN_FERRY", "SN_PAY_FERRY", "SN_PAYCON_FERRY", "", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), false, true},
+			{int64(3), "QNO_CH_SMITH_1", "SN_QNO_CH_SMITH_1", "SN_PAY_QNO_CH_SMITH_1", "SN_PAYCON_QNO_CH_SMITH_1", "SN_CON_QNO_CH_SMITH_1", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), false, false, false},
+			{int64(58), "QNO_CH_SMITH_2", "SN_QNO_CH_SMITH_2", "SN_PAY_QNO_CH_SMITH_2", "SN_PAYCON_QNO_CH_SMITH_2", "SN_CON_QNO_CH_SMITH_2", int64(50), int64(1), int64(0), int64(0), int64(0), int64(0), false, false, false},
+			{int64(900), "QNO_CLASSIFIED", "SN_CLASSIFIED", "SN_PAY_CLASSIFIED", "SN_PAYCON_CLASSIFIED", "SN_NORMAL\x1fSN_CHAMPION\x1fSN_GIANT", int64(30), int64(3), int64(0), int64(0), int64(0), int64(0), false, false, false},
+			{int64(88), "QNO_WC_FERRY4_1", "SN_FERRY", "SN_PAY_FERRY", "SN_PAYCON_FERRY", "", int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), false, true, false},
 		},
 	})
 	repository, err := NewQuestOfferRepository(openCatalogRepositoryTestDB(t))
@@ -46,17 +46,32 @@ func TestQuestOfferRepositoryListsOnlyQueryQualifiedRows(t *testing.T) {
 	}
 }
 
-func TestQuestOfferQueryLetsAbandonedAndActiveQuestsBypassInitialLevelWindow(t *testing.T) {
+func TestQuestOfferQueryKeepsQuestsAvailableAboveMinimumLevel(t *testing.T) {
 	for _, required := range []string{
 		"current_quest.STATUS IN (1,6,7,8)",
 		"current_quest.STATUS IN (1,4,6,7,8)",
-		"character_state.CURRENT_LEVEL BETWEEN start_condition.LEVEL_LOWER AND start_condition.LEVEL_UPPER",
+		"character_state.CURRENT_LEVEL >= start_condition.LEVEL_LOWER",
 		"current_quest.STATUS IN (1,6,7,8) OR policy.ACHIEVEMENT_LIMIT IS NULL",
 		"dependency_state.STATUS = 4 AND dependency_state.ACHIEVEMENT_COUNT>0",
 		"dependency_group.RUNTIME_ENABLED<>1",
 	} {
 		if !strings.Contains(selectAvailableQuestOffers, required) {
 			t.Fatalf("offer query is missing %q", required)
+		}
+	}
+	if strings.Contains(selectAvailableQuestOffers, "CURRENT_LEVEL BETWEEN start_condition.LEVEL_LOWER AND start_condition.LEVEL_UPPER") {
+		t.Fatal("offer query still hides quests above the authored upper level")
+	}
+}
+
+func TestQuestOfferQueryDoesNotOfferStandardDeliveryAtItsTargetNPC(t *testing.T) {
+	for _, required := range []string{
+		"standard_deliver.QUEST_ID IS NOT NULL",
+		"standard_deliver.TARGET_NPC_REF_OBJECT_ID<>start_npc.NPC_REF_OBJECT_ID",
+		"current_quest.STATUS IN (1,7,8)",
+	} {
+		if !strings.Contains(selectAvailableQuestOffers, required) {
+			t.Fatalf("offer query is missing delivery-route guard %q", required)
 		}
 	}
 }

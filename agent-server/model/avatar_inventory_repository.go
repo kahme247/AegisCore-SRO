@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -29,8 +30,11 @@ type AvatarInventoryRepository interface {
 }
 
 type AvatarTransferResult struct {
-	Inventory       Inventory
-	AvatarInventory Inventory
+	Inventory                  Inventory
+	AvatarInventory            Inventory
+	ActivatedDevilSpiritRefID  uint32
+	ActivatedDevilSpiritItemID int
+	DevilSpiritExpiresAt       time.Time
 }
 
 type DevilSpiritActivation struct {
@@ -70,13 +74,39 @@ func (r *SQLAvatarInventoryRepository) TransferAvatarItem(ctx context.Context, c
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrAlchemyInvalidRequest
+		}
+		if err = tx.Rollback(); err != nil {
+			return result, err
+		}
+		inventoryRepository, repoErr := NewInventoryRepository(r.shard)
+		if repoErr != nil {
+			return result, repoErr
+		}
+		result.Inventory, err = inventoryRepository.GetCharacterInventory(ctx, characterID)
+		if err != nil {
+			return result, err
+		}
+		result.AvatarInventory, err = r.GetCharacterAvatarInventory(ctx, characterID)
+		result.ActivatedDevilSpiritRefID = replay.ActivatedDevilSpiritRefID
+		result.ActivatedDevilSpiritItemID = replay.ActivatedDevilSpiritItemID
+		result.DevilSpiritExpiresAt = replay.DevilSpiritExpiresAt
+		return result, err
+	}
 	if equip {
 		if sourceSlot < 13 || targetSlot >= AvatarInventorySize {
 			return result, ErrAvatarSlotOutOfRange
 		}
 		var itemID int
-		var refID, data, periodEnd uint32
-		if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.id=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, sourceSlot).Scan(&itemID, &refID, &data, &periodEnd); err != nil {
+		var refID, data, periodBegin, periodEnd uint32
+		if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.id=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, sourceSlot).Scan(&itemID, &refID, &data, &periodBegin, &periodEnd); err != nil {
 			return result, ErrAvatarItemTypeInvalid
 		}
 		ref, ok := RefItems[refID]
@@ -85,7 +115,25 @@ func (r *SQLAvatarInventoryRepository) TransferAvatarItem(ctx context.Context, c
 			return result, ErrAvatarItemTypeInvalid
 		}
 		if ref.IsDevilSpirit() && (data == 0 || periodEnd <= uint32(time.Now().Unix())) {
-			return result, ErrDevilSpiritInactive
+			// The stock confirmation's Yes callback equips through 0x7034. A
+			// never-awakened NASRUN therefore has to start its lifetime inside
+			// this same transfer transaction; waiting for a separate 0x704C
+			// request leaves the client pending with no visible result.
+			if periodBegin != 0 || periodEnd != 0 {
+				return result, ErrDevilSpiritInactive
+			}
+			duration, _ := devilSpiritDuration(data, 0, 0, ref.Param1)
+			if duration == 0 {
+				return result, ErrDevilSpiritDurationEmpty
+			}
+			now := time.Now()
+			expiresAt := devilSpiritExpiration(now, duration)
+			if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `DATA`=?,`RENT_PERIOD_BEGIN_TIME`=?,`RENT_PERIOD_END_TIME`=? WHERE `ID`=?", duration, uint32(now.Unix()), uint32(expiresAt.Unix()), itemID); err != nil {
+				return result, err
+			}
+			result.ActivatedDevilSpiritRefID = refID
+			result.ActivatedDevilSpiritItemID = itemID
+			result.DevilSpiritExpiresAt = expiresAt
 		}
 		if _, err = tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", characterID, sourceSlot, itemID); err != nil {
 			return result, err
@@ -128,6 +176,14 @@ func (r *SQLAvatarInventoryRepository) TransferAvatarItem(ctx context.Context, c
 	if err = rows.Close(); err != nil {
 		return AvatarTransferResult{}, err
 	}
+	topic := "inventory.avatar-item.unequipped"
+	if equip {
+		topic = "inventory.avatar-item.equipped"
+	}
+	replay := economyReplayResult{ActivatedDevilSpiritRefID: result.ActivatedDevilSpiritRefID, ActivatedDevilSpiritItemID: result.ActivatedDevilSpiritItemID, DevilSpiritExpiresAt: result.DevilSpiritExpiresAt}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, topic, replay); err != nil {
+		return AvatarTransferResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return AvatarTransferResult{}, fmt.Errorf("%w: %v", ErrAlchemyOutcomeUnknown, err)
 	}
@@ -147,16 +203,22 @@ func (r *SQLAvatarInventoryRepository) ActivateDevilSpirit(ctx context.Context, 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var itemID int
-	var refID, durationSeconds, periodEnd uint32
-	if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &durationSeconds, &periodEnd); err != nil {
+	var refID, durationSeconds, periodBegin, periodEnd uint32
+	if err = tx.QueryRowContext(ctx, "SELECT inv.FK_ITEM,it.FK_REF_ITEM,it.DATA,it.RENT_PERIOD_BEGIN_TIME,it.RENT_PERIOD_END_TIME FROM `INVENTORY` inv JOIN `ITEM` it ON it.ID=inv.FK_ITEM WHERE inv.FK_CHAR=? AND inv.SLOT=? FOR UPDATE", characterID, slot).Scan(&itemID, &refID, &durationSeconds, &periodBegin, &periodEnd); err != nil {
 		return activation, ErrAvatarItemTypeInvalid
 	}
 	ref, known := RefItems[refID]
 	if !known || !ref.IsDevilSpirit() {
 		return activation, ErrAvatarItemTypeInvalid
 	}
+	durationSeconds, initializeDuration := devilSpiritDuration(durationSeconds, periodBegin, periodEnd, ref.Param1)
 	if durationSeconds == 0 {
 		return activation, ErrDevilSpiritDurationEmpty
+	}
+	if initializeDuration {
+		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `DATA`=? WHERE `ID`=?", durationSeconds, itemID); err != nil {
+			return DevilSpiritActivation{}, err
+		}
 	}
 	now := time.Now()
 	activation.ExpiresAt = time.Unix(int64(periodEnd), 0)
@@ -184,6 +246,21 @@ func (r *SQLAvatarInventoryRepository) ActivateDevilSpirit(ctx context.Context, 
 
 func devilSpiritExpiration(now time.Time, durationSeconds uint32) time.Time {
 	return now.Add(time.Duration(durationSeconds) * time.Second)
+}
+
+func devilSpiritDuration(itemData, periodBegin, periodEnd uint32, referenceSeconds int) (uint32, bool) {
+	if itemData != 0 {
+		return itemData, false
+	}
+	// A freshly materialized NASRUN can inherit DATA=0 from shop/package
+	// goods even though RefObjItem Param1 contains its lifetime. Both rent
+	// timestamps are zero before the first awakening. Expiration writes a
+	// non-zero begin sentinel, preventing an exhausted Spirit from awakening
+	// again through this compatibility repair.
+	if periodBegin != 0 || periodEnd != 0 || referenceSeconds <= 0 || uint64(referenceSeconds) > uint64(^uint32(0)) {
+		return 0, false
+	}
+	return uint32(referenceSeconds), true
 }
 
 func (r *SQLAvatarInventoryRepository) ExpireDevilSpirit(ctx context.Context, characterID int64, itemID int, now time.Time) (expiration DevilSpiritExpiration, err error) {
@@ -249,7 +326,7 @@ func (r *SQLAvatarInventoryRepository) ExpireDevilSpirit(ctx context.Context, ch
 		expiration.WasEquipped = true
 		expiration.AvatarSlot = avatarSlot
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET DATA=0,RENT_PERIOD_BEGIN_TIME=0,RENT_PERIOD_END_TIME=0 WHERE ID=?", itemID); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET DATA=0,RENT_PERIOD_BEGIN_TIME=1,RENT_PERIOD_END_TIME=0 WHERE ID=?", itemID); err != nil {
 		return expiration, err
 	}
 	expiration.Inventory, err = loadInventoryInItemUseTransaction(ctx, tx, characterID)

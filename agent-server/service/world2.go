@@ -15,6 +15,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/Harvi8/AegisCore/protocol/profiles"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -136,6 +137,25 @@ func (w *WorldService) ObjectCount() int {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	return len(w.visibleObjects)
+}
+
+// OperatorStatistics returns the three counters consumed by operator command
+// 4 in the stock client: players, NPC/mobs, and dropped items.
+func (w *WorldService) OperatorStatistics() (uint32, uint32, uint32) {
+	if w == nil || w.mutex == nil {
+		return 0, 0, 0
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	players := uint32(len(w.playersByUniqueId))
+	npcs := uint32(len(w.npcsByUniqueId))
+	var dropped uint32
+	for _, object := range w.visibleObjects {
+		if item, ok := object.(*model.Item); ok && item != nil {
+			dropped++
+		}
+	}
+	return players, npcs, dropped
 }
 
 func (w *WorldService) ConfigureGameplayRates(rates interface{ Current() model.GameplayRates }) {
@@ -489,6 +509,7 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 		spawns  []model.SpawnDB
 	}
 	continents := make([]continentCatalog, 0, len(gsRegions))
+	hasTombSpawnCatalog := false
 	for _, region := range gsRegions {
 		spawns, err := w.loadSpawnsForContinent(ctx, region.ContinentName)
 		if err != nil {
@@ -499,6 +520,22 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 			regions: append([]int16(nil), region.Regions...),
 			spawns:  spawns,
 		})
+		if region.ContinentName == "TQ" {
+			hasTombSpawnCatalog = true
+		}
+	}
+	// Tomb DOF regions are admitted from Data.pk2 after the ordinary database
+	// partition is validated, so they are not present in gsRegions when spawn
+	// catalogs are queried. Their authoritative nests still live under the TQ
+	// continent and must be staged before world mutation like every other
+	// catalog. loadSpawnData will discard unrelated TQ regions that this Agent
+	// does not own after the dungeon regions have been admitted.
+	if !hasTombSpawnCatalog {
+		spawns, spawnErr := w.loadSpawnsForContinent(ctx, "TQ")
+		if spawnErr != nil {
+			return fmt.Errorf("load Tomb spawn catalog: %w", spawnErr)
+		}
+		continents = append(continents, continentCatalog{name: "TQ", spawns: spawns})
 	}
 	var teleportGates []model.TeleportGateSpawn
 	if teleportGateCatalog != nil {
@@ -576,11 +613,21 @@ func (w *WorldService) bootstrapGameServerRegionsContext(ctx context.Context, ga
 			if err := loader.LoadTerrainMeshes(nil); err != nil {
 				return fmt.Errorf("load raw navmesh terrain: %w", err)
 			}
+			if err := loader.LoadDungeonMeshes(); err != nil {
+				return fmt.Errorf("load raw dungeon metadata: %w", err)
+			}
+			if err := loader.AdmitDungeonRegions(); err != nil {
+				return fmt.Errorf("admit raw dungeon regions: %w", err)
+			}
 			if err := loader.CloseArchive(); err != nil {
 				return fmt.Errorf("close raw navmesh archive: %w", err)
 			}
 			archiveOpen = false
 		}
+	}
+	partition, err = extendWorldPartitionWithDungeonRegions(partition, loader)
+	if err != nil {
+		return fmt.Errorf("extend world partition with dungeon regions: %w", err)
 	}
 	measurement.log(loadSource, loader.Stats())
 	loadedRegions, err := stageWorldPartitionFromLoader(loader, partition)
@@ -1117,9 +1164,24 @@ func (movement movementCoordinator) updatePosition(p model.ICharacter) bool {
 
 		walkVector = math32.NewVector3(x, 0, z) // already normalized
 	}
-	nextPosVec := curWorldVec.Clone().Add(walkVector.MultiplyScalar(movementSpeed * float32(deltaTime.Seconds())))
+	stepVector := walkVector.Clone().MultiplyScalar(movementSpeed * float32(deltaTime.Seconds()))
+	nextPosVec := curWorldVec.Clone().Add(stepVector)
 
-	newPos, err := w.NewPosFromGlobalCoordinates(nextPosVec)
+	var newPos navmeshv2.RtNavmeshPosition
+	var err error
+	if navmeshv2.IsDungeonRegion(curPos.Region.ID) {
+		nextOffset := curPos.Offset.Clone().Add(stepVector)
+		terrain, lookupErr := w.lookupRegionPtr(curPos.Region.ID)
+		if lookupErr != nil {
+			err = lookupErr
+		} else if cell, cellErr := terrain.ResolveCell(nextOffset); cellErr != nil {
+			err = cellErr
+		} else {
+			newPos = navmeshv2.RtNavmeshPosition{Region: terrain.Region, Offset: nextOffset, Cell: &cell}
+		}
+	} else {
+		newPos, err = w.NewPosFromGlobalCoordinates(nextPosVec)
+	}
 
 	if err != nil {
 		log.Warn(errors.Wrap(err, "failed to calculate new player position"))
@@ -1436,4 +1498,43 @@ func (w *WorldService) Broadcast(packet network.Packet) {
 			_ = session.TrySend(packet)
 		}
 	}
+}
+
+func (w *WorldService) BroadcastGlobalEvent(name string, value uint32) (int, error) {
+	packet, err := vsro188.BuildGlobalEventUpdate(name, value)
+	if err != nil {
+		return 0, err
+	}
+	return w.broadcastCounted(packet), nil
+}
+
+func (w *WorldService) BroadcastVietnamMR(update vsro188.VietnamMRUpdate) (int, error) {
+	packet, err := vsro188.BuildVietnamMRSystemUpdate(update)
+	if err != nil {
+		return 0, err
+	}
+	return w.broadcastCounted(packet), nil
+}
+
+func (w *WorldService) BroadcastServerEventData(records []vsro188.ServerEventData) (int, error) {
+	return w.broadcastCounted(vsro188.BuildServerEventDataSnapshot(records)), nil
+}
+
+func (w *WorldService) broadcastCounted(packet network.Packet) int {
+	w.mutex.Lock()
+	players := make([]*model.Player, 0, len(w.playersByUniqueId))
+	for _, player := range w.playersByUniqueId {
+		players = append(players, player)
+	}
+	w.mutex.Unlock()
+	recipients := 0
+	for _, player := range players {
+		if player == nil || player.GetSession() == nil {
+			continue
+		}
+		if player.GetSession().TrySend(packet) == nil {
+			recipients++
+		}
+	}
+	return recipients
 }

@@ -2,24 +2,25 @@ package chat
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+	"unicode"
 
+	"github.com/Harvi8/AegisCore/agent-server/engine/environment"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
-
-var adminCommandRegex = regexp.MustCompile("^\\.(?P<command>\\w+)\\s?(?P<args>.*)$")
-var cheatCommandRegex = regexp.MustCompile("^(?P<command>\\w+)\\s?(?P<args>.*)$")
 
 type GmMessageHandler struct {
 }
@@ -32,6 +33,16 @@ const (
 	Takla2          string = "takla2"
 	LogLevel        string = "loglvl"
 	SpawnMonster    string = "spawn"
+	LoadMonster     string = "loadmonster"
+	SetWeather      string = "weather"
+	Invisible       string = "invisible"
+	Invincible      string = "invincible"
+	HwanMode        string = "hwanmode"
+	Day             string = "day"
+	Night           string = "night"
+	Rain            string = "rain"
+	Snow            string = "snow"
+	SetSpeedAlias   string = "setspeed"
 
 	defaultGMSpawnCount  = 1
 	maximumGMSpawnCount  = 20
@@ -62,10 +73,18 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 		logrus.Warnf("rejected GM chat from non-GM uid=%d", session.UserContext.UniqueID)
 		return nil
 	}
+	if request.ChatType == Notice {
+		if notice, ok := parseGMNotice(request.Message); ok {
+			if _, noticeErr := world.BroadcastNotice(notice); noticeErr != nil {
+				return sendGMSystemMessage(player.Session, noticeErr.Error())
+			}
+			return sendGMChatAck(session, request)
+		}
+	}
 	if command, args, commandOK := parseAdminCommand(request.Message, request.ChatType == Notice); commandOK {
 		logrus.Debugf("[GM] - gm command %v with args %v\n", command, args)
 		switch command {
-		case SetSpeed:
+		case SetSpeed, SetSpeedAlias:
 			newSpeed, err := strconv.ParseFloat(args, 32)
 			if err != nil {
 				// TODO send message back
@@ -115,7 +134,7 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 			if err := player.Session.Send(p); err != nil {
 				return err
 			}
-		case SpawnMonster:
+		case SpawnMonster, LoadMonster:
 			codeName, count, parseErr := parseGMSpawnArgs(args)
 			if parseErr != nil {
 				return sendGMSystemMessage(player.Session, parseErr.Error())
@@ -134,6 +153,66 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 			}
 			logrus.Infof("[GM] spawned %d x %s near %s", spawned, codeName, player.CharName)
 			return sendGMSystemMessage(player.Session, fmt.Sprintf("Spawned %d x %s nearby.", spawned, codeName))
+		case SetWeather:
+			weatherType, intensity, parseErr := parseGMWeatherArgs(args)
+			if parseErr != nil {
+				return sendGMSystemMessage(player.Session, parseErr.Error())
+			}
+			if setErr := environment.SetCurrentWeather(weatherType, intensity); setErr != nil {
+				return sendGMSystemMessage(player.Session, setErr.Error())
+			}
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("Weather changed to %s (%d%%).", strings.ToLower(argsWeatherName(weatherType)), intensity))
+		case Rain, Snow:
+			weatherType := model.Rain
+			if command == Snow {
+				weatherType = model.Snow
+			}
+			intensity, parseErr := parseGMWeatherIntensity(args)
+			if parseErr != nil {
+				return sendGMSystemMessage(player.Session, parseErr.Error())
+			}
+			if setErr := environment.SetCurrentWeather(weatherType, intensity); setErr != nil {
+				return setErr
+			}
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("Weather changed to %s (%d%%).", argsWeatherName(weatherType), intensity))
+		case Day, Night:
+			clock := time.Now()
+			if command == Day {
+				clock = time.Date(clock.Year(), clock.Month(), clock.Day(), 12, 0, 0, 0, clock.Location())
+			} else {
+				clock = time.Date(clock.Year(), clock.Month(), clock.Day(), 0, 0, 0, 0, clock.Location())
+			}
+			world.Broadcast(vsro188.BuildGameServerTime(clock))
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("Environment time changed to %s.", command))
+		case Invisible, Invincible:
+			state := model.GmInvisible
+			if command == Invincible {
+				state = model.GmInvincible
+			}
+			if player.GetBodyState() == state {
+				state = model.Normal
+			}
+			player.SetBodyState(state)
+			packet := model.BuildBodyStateUpdatePacket(player.GetUniqueID(), state)
+			player.SendToSelfAndKnown(&packet)
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("GM %s mode %s.", command, map[bool]string{true: "enabled", false: "disabled"}[state != model.Normal]))
+		case HwanMode:
+			mode, parseErr := strconv.Atoi(strings.TrimSpace(args))
+			if parseErr != nil || mode < 0 || mode > 3 {
+				return sendGMSystemMessage(player.Session, "Usage: .hwanmode 0|1|2|3")
+			}
+			state := model.Normal
+			variant := byte(0)
+			if mode != 0 {
+				state = model.Berserker
+				if mode == 2 || mode == 3 {
+					variant = 1
+				}
+			}
+			player.SetBodyState(state)
+			packet := model.BuildBodyStateUpdatePacket(player.GetUniqueID(), state, variant)
+			player.SendToSelfAndKnown(&packet)
+			return sendGMSystemMessage(player.Session, fmt.Sprintf("Hwan mode %d applied.", mode))
 		case JanganWest:
 			warpPlayer(
 				session.UserContext.UniqueID,
@@ -183,16 +262,99 @@ func (h *GmMessageHandler) HandleAdminMessage(request MessageRequest, session *s
 	return nil
 }
 
-func parseAdminCommand(message string, allowBare bool) (string, string, bool) {
-	matcher := adminCommandRegex
-	if allowBare && !strings.HasPrefix(message, ".") {
-		matcher = cheatCommandRegex
+func parseGMNotice(message string) (string, bool) {
+	if !strings.HasPrefix(message, "~") {
+		return "", false
 	}
-	components := matcher.FindStringSubmatch(message)
-	if len(components) != 3 {
+	return strings.TrimSpace(strings.TrimPrefix(message, "~")), true
+}
+
+func sendGMChatAck(session *server.Session, request MessageRequest) error {
+	if session == nil {
+		return errors.New("GM session is unavailable")
+	}
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ChatResponse
+	packet.WriteByte(1)
+	packet.WriteByte(request.ChatType)
+	packet.WriteByte(request.ChatIndex)
+	return session.Send(packet)
+}
+
+func parseGMWeatherArgs(arguments string) (model.WeatherType, byte, error) {
+	fields := strings.Fields(strings.ToLower(arguments))
+	if len(fields) < 1 || len(fields) > 2 {
+		return 0, 0, errors.New("Usage: .weather clear|rain|snow [intensity 1-100]")
+	}
+	weatherTypes := map[string]model.WeatherType{"clear": model.Clear, "rain": model.Rain, "snow": model.Snow}
+	weatherType, ok := weatherTypes[fields[0]]
+	if !ok {
+		return 0, 0, errors.New("Weather must be clear, rain, or snow")
+	}
+	if weatherType == model.Clear {
+		if len(fields) != 1 {
+			return 0, 0, errors.New("Clear weather does not accept an intensity")
+		}
+		return weatherType, 0, nil
+	}
+	intensity := 50
+	if len(fields) == 2 {
+		parsed, err := strconv.Atoi(fields[1])
+		if err != nil || parsed < 1 || parsed > 100 {
+			return 0, 0, errors.New("Weather intensity must be between 1 and 100")
+		}
+		intensity = parsed
+	}
+	return weatherType, byte(intensity), nil
+}
+
+func parseGMWeatherIntensity(arguments string) (byte, error) {
+	if strings.TrimSpace(arguments) == "" {
+		return 50, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(arguments))
+	if err != nil || parsed < 0 || parsed > 255 {
+		return 0, errors.New("Weather intensity must be between 0 and 255")
+	}
+	if parsed == 0 {
+		return 0, nil
+	}
+	// The client accepts 0..255; the shared runtime normalizes its gameplay
+	// intensity to 0..100, preserving the command's full-strength semantics.
+	return byte((parsed*100 + 127) / 255), nil
+}
+
+func argsWeatherName(weatherType model.WeatherType) string {
+	switch weatherType {
+	case model.Clear:
+		return "Clear"
+	case model.Rain:
+		return "Rain"
+	case model.Snow:
+		return "Snow"
+	default:
+		return "Unknown"
+	}
+}
+
+func parseAdminCommand(message string, allowBare bool) (string, string, bool) {
+	message = strings.TrimSpace(message)
+	hasPrefix := strings.HasPrefix(message, ".") || strings.HasPrefix(message, "/")
+	if hasPrefix {
+		message = strings.TrimSpace(message[1:])
+	} else if !allowBare {
 		return "", "", false
 	}
-	return components[1], components[2], true
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return "", "", false
+	}
+	command := strings.ToLower(fields[0])
+	if strings.IndexFunc(command, func(r rune) bool { return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) }) >= 0 {
+		return "", "", false
+	}
+	arguments := strings.TrimSpace(strings.TrimPrefix(message, fields[0]))
+	return command, arguments, true
 }
 
 func parseGMSpawnArgs(arguments string) (string, int, error) {

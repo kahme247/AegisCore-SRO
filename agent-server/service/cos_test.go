@@ -14,16 +14,30 @@ import (
 )
 
 type cosRepositoryFake struct {
-	record   model.COSRecord
-	saved    []model.COSRecord
-	saveErr  error
-	stored   []int
-	services []model.COSTimedService
-	cargo    []model.Item
-	released bool
+	record       model.COSRecord
+	saved        []model.COSRecord
+	saveErr      error
+	stored       []int
+	services     []model.COSTimedService
+	cargo        []model.Item
+	released     bool
+	releaseOwner int
+	releaseID    uint64
+	releaseErr   error
 }
 
 type cosGroundItemLifecycleFake struct{ canceled *model.Item }
+
+type cosGroundGoldFake struct {
+	characterID int64
+	itemID      int64
+	result      model.GroundGoldPickupResult
+}
+
+func (f *cosGroundGoldFake) PickupGold(_ context.Context, characterID, itemID int64) (model.GroundGoldPickupResult, error) {
+	f.characterID, f.itemID = characterID, itemID
+	return f.result, nil
+}
 
 type fixedCOSPolicyProvider struct{ policy model.COSPolicySnapshot }
 
@@ -42,6 +56,10 @@ func (f *cosRepositoryFake) Save(_ context.Context, record model.COSRecord) erro
 	return f.saveErr
 }
 func (f *cosRepositoryFake) Rename(context.Context, int, uint64, string) error { return nil }
+func (f *cosRepositoryFake) ReleaseOwnedGuildCOS(_ context.Context, owner int, id uint64) error {
+	f.releaseOwner, f.releaseID = owner, id
+	return f.releaseErr
+}
 func (f *cosRepositoryFake) LoadInventory(context.Context, int, uint64) (model.Inventory, error) {
 	return model.NewInventory(nil), nil
 }
@@ -381,6 +399,56 @@ func TestCOSAbilityPetPursuesAndStoresGroundItem(t *testing.T) {
 	if got, exists := stored.Items[0]; !exists || got.ID != 55 {
 		t.Fatalf("pet inventory = %+v", stored.Items)
 	}
+	if state := runtime.actions[pet.GetUniqueID()]; state.action != cosActionFollow {
+		t.Fatalf("pickup action = %d, want follow after completion", state.action)
+	}
+}
+
+func TestCOSAbilityPetCreditsGroundGoldToOwnerWithoutStoringItem(t *testing.T) {
+	old := model.RefChars
+	defer func() { model.RefChars = old }()
+	model.RefChars = map[uint32]model.RefChar{9003: {
+		RefObject: model.RefObject{ID: 9003, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 4}, Speed1: 20, Speed2: 60},
+		Level:     1, MaxHP: 100, InventorySize: 28,
+	}}
+	expires := time.Now().UTC().Add(time.Hour)
+	repository := &cosRepositoryFake{record: model.COSRecord{ID: 79, OwnerCharID: 6, RefObjectID: 9003, Kind: model.COSAbilityPet, Level: 1, Health: 100, MaxHealth: 100, InventorySlot: 17, RentEndsAt: &expires}}
+	owner := &model.Player{ID: 6, LifeState: model.Alive, Inventory: model.NewInventory(map[byte]model.Item{17: {Data: 79, SRObject: model.SRObject{TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 1}}}}), SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}}
+	goldItem := &model.Item{ID: 55, SRObject: model.SRObject{UniqueID: 300, RefObjectID: 1, TypeInfo: model.TypeInfo{TypeID1: model.TypeID1Item, TypeID2: 3, TypeID3: 5, TypeID4: 0}, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(3, 0, 0)}}, Data: 500, OwnerUniqueID: 10}
+	world := &cosWorldFake{next: 200, players: map[uint32]*model.Player{10: owner}, objects: map[uint32]model.ISRObject{300: goldItem}}
+	runtime := NewCOSService(repository, world)
+	gold := &cosGroundGoldFake{result: model.GroundGoldPickupResult{Gold: 1500, Amount: 500}}
+	runtime.ConfigureGroundGoldPickup(gold)
+	lifecycle := &cosGroundItemLifecycleFake{}
+	runtime.ConfigureGroundItemLifecycle(lifecycle)
+	pet, err := runtime.Summon(context.Background(), owner, 79)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.UpdateFollowers(time.Now())
+	if gold.characterID != 6 || gold.itemID != 55 || owner.Gold != 1500 {
+		t.Fatalf("gold pickup character=%d item=%d ownerGold=%d", gold.characterID, gold.itemID, owner.Gold)
+	}
+	if len(repository.stored) != 0 || len(pet.Inventory.Snapshot().Items) != 0 {
+		t.Fatalf("gold entered pet inventory: stored=%v inventory=%v", repository.stored, pet.Inventory.Snapshot().Items)
+	}
+	if lifecycle.canceled != goldItem || len(world.removed) != 1 {
+		t.Fatalf("gold world cleanup canceled=%v removed=%d", lifecycle.canceled, len(world.removed))
+	}
+}
+
+func TestCOSPickupDestinationMergesCompatibleStack(t *testing.T) {
+	old := model.RefItems
+	defer func() { model.RefItems = old }()
+	model.RefItems = map[uint32]model.RefItem{500: {RefObject: model.RefObject{ID: 500}, StackSize: 50}}
+	pet := &model.COS{InventorySize: 28, Inventory: model.NewInventory(map[byte]model.Item{
+		3: {ID: 41, SRObject: model.SRObject{RefObjectID: 500}, StackSize: 20},
+		9: {ID: 42, SRObject: model.SRObject{RefObjectID: 500}, StackSize: 10},
+	})}
+	slot, ok := cosPickupDestination(pet, &model.Item{SRObject: model.SRObject{RefObjectID: 500}, StackSize: 5})
+	if !ok || slot != 3 {
+		t.Fatalf("pickup destination = %d, %t; want existing stack slot 3", slot, ok)
+	}
 }
 
 func TestCOSServiceGrowthPetAssistsSharesOwnerKillEXPAndKeepsPursuit(t *testing.T) {
@@ -665,5 +733,40 @@ func TestCOSServiceSummonSaveFailureRollsBackRuntimeAndItemState(t *testing.T) {
 	}
 	if state := owner.GetInventory().Items[16].COS.State; state != model.COSItemActive {
 		t.Fatalf("rollback item state = %d, want active", state)
+	}
+}
+
+func TestTerminateGuildMercenariesDeletesBeforeRuntimeDetach(t *testing.T) {
+	repository := &cosRepositoryFake{}
+	runtime := NewCOSService(repository, &cosWorldFake{})
+	owner := &model.Player{ID: 7, SRObject: model.SRObject{UniqueID: 70}}
+	mercenary := &model.COS{PersistentID: 91, OwnerCharID: 7, OwnerUniqueID: 70, Kind: model.COSGuild}
+	mercenary.UniqueID = 900
+	runtime.byUID[900] = mercenary
+	runtime.byOwnerKind[7] = map[model.COSKind]*model.COS{model.COSGuild: mercenary}
+
+	count, err := runtime.TerminateGuildMercenaries(context.Background(), owner)
+	if err != nil || count != 1 || repository.releaseOwner != 7 || repository.releaseID != 91 {
+		t.Fatalf("count=%d err=%v release=(%d,%d)", count, err, repository.releaseOwner, repository.releaseID)
+	}
+	if _, exists := runtime.byUID[900]; exists {
+		t.Fatal("released Guild mercenary remains in runtime index")
+	}
+}
+
+func TestTerminateGuildMercenariesKeepsRuntimeOnDeleteFailure(t *testing.T) {
+	repository := &cosRepositoryFake{releaseErr: errors.New("delete failed")}
+	runtime := NewCOSService(repository, &cosWorldFake{})
+	owner := &model.Player{ID: 7, SRObject: model.SRObject{UniqueID: 70}}
+	mercenary := &model.COS{PersistentID: 91, OwnerCharID: 7, OwnerUniqueID: 70, Kind: model.COSGuild}
+	mercenary.UniqueID = 900
+	runtime.byUID[900] = mercenary
+	runtime.byOwnerKind[7] = map[model.COSKind]*model.COS{model.COSGuild: mercenary}
+
+	if _, err := runtime.TerminateGuildMercenaries(context.Background(), owner); err == nil {
+		t.Fatal("expected delete failure")
+	}
+	if runtime.byUID[900] != mercenary {
+		t.Fatal("runtime detached before durable release")
 	}
 }

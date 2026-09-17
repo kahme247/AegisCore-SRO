@@ -24,6 +24,8 @@ const (
 
 var Origin Region = NewRegionFromXAndY(OriginX, OriginY)
 
+func IsDungeonRegion(id int16) bool { return uint16(id)&DungeonMask != 0 }
+
 type Region struct {
 	value uint16
 	ID    int16

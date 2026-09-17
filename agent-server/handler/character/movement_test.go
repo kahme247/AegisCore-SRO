@@ -17,6 +17,15 @@ func (f *destinationPositionResolverFake) NewPosFromGlobalCoordinates(global *ma
 	return navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromXAndY(101, 100), Offset: math32.NewVector3(57, global.Y, 489)}, nil
 }
 
+func (f *destinationPositionResolverFake) GetRegion(regionID int16) (navmeshv2.RtNavmeshTerrain, error) {
+	terrain := navmeshv2.NewRtNavmeshTerrain("tomb", navmeshv2.NewRegionFromInt16(regionID))
+	terrain.DungeonMinimum = math32.NewVector3(-100, -100, -100)
+	terrain.DungeonMaximum = math32.NewVector3(100, 100, 100)
+	terrain.Cells = []navmeshv2.RtNavmeshCellQuad{{RtNavmeshCellBase: navmeshv2.RtNavmeshCellBase{Index: 0}}}
+	terrain.Cells[0].Mesh = &terrain
+	return terrain, nil
+}
+
 func TestParseForwardPacketFixtures(t *testing.T) {
 	stock := network.EmptyClientPacket()
 	stock.WriteUInt16(2468)
@@ -110,6 +119,20 @@ func TestResolveDestinationPositionNormalizesCoordinatesAcrossRegionSeam(t *test
 	}
 	if position.Region.X != 101 || position.Region.Y != 100 || position.Offset.X != 57 || position.Offset.Z != 489 {
 		t.Fatalf("normalized destination = region(%d,%d) offset=%v", position.Region.X, position.Region.Y, position.Offset)
+	}
+}
+
+func TestResolveDestinationPositionAcceptsDungeonLocalCoordinates(t *testing.T) {
+	resolver := &destinationPositionResolverFake{}
+	position, err := resolveDestinationPosition(resolver, -32762, math32.NewVector3(12, 3, -7))
+	if err != nil {
+		t.Fatalf("resolve dungeon destination: %v", err)
+	}
+	if position.Region.ID != -32762 || position.Offset.X != 12 || position.Offset.Y != 3 || position.Offset.Z != -7 || position.Cell == nil {
+		t.Fatalf("dungeon destination = %+v", position)
+	}
+	if resolver.global != nil {
+		t.Fatal("dungeon destination was incorrectly converted to global coordinates")
 	}
 }
 

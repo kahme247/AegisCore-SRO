@@ -99,6 +99,36 @@ func stageWorldPartitionFromLoader(loader *navmeshv2.Loader, partition worldPart
 	return loaded, nil
 }
 
+// extendWorldPartitionWithDungeonRegions publishes only dungeon planes that
+// were successfully decoded from the active Data.pk2. REGION_REFERENCE also
+// contains many event/instance regions whose navmesh is not loaded; deriving
+// this set from DungeonData prevents those unrelated rows from breaking boot.
+func extendWorldPartitionWithDungeonRegions(partition worldPartition, loader *navmeshv2.Loader) (worldPartition, error) {
+	if loader == nil {
+		return worldPartition{}, fmt.Errorf("%w: navmesh loader is unavailable", ErrWorldPartitionInvalid)
+	}
+	extended := worldPartition{regions: append([]worldPartitionRegion(nil), partition.regions...)}
+	seen := make(map[int16]struct{}, len(extended.regions)+len(loader.DungeonData))
+	for _, region := range extended.regions {
+		seen[region.id] = struct{}{}
+	}
+	for regionID := range loader.DungeonData {
+		if regionID >= 0 {
+			return worldPartition{}, fmt.Errorf("%w: decoded dungeon region %d is not negative", ErrWorldPartitionInvalid, regionID)
+		}
+		if _, exists := seen[regionID]; exists {
+			return worldPartition{}, fmt.Errorf("%w: dungeon region %d already has a catalog owner", ErrWorldPartitionInvalid, regionID)
+		}
+		if terrain := loader.RegionData[regionID]; terrain == nil {
+			return worldPartition{}, fmt.Errorf("%w: decoded dungeon region %d has no admitted terrain", ErrWorldPartitionInvalid, regionID)
+		}
+		seen[regionID] = struct{}{}
+		extended.regions = append(extended.regions, worldPartitionRegion{id: regionID, owner: "dungeon"})
+	}
+	sort.Slice(extended.regions, func(i, j int) bool { return extended.regions[i].id < extended.regions[j].id })
+	return extended, nil
+}
+
 // commitWorldPartition publishes a completely staged partition in one critical
 // section. Existing ownership is never overwritten, including by direct test
 // or future reload callers of AddRegions.

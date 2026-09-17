@@ -4,11 +4,41 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
+
+func TestAcademyInfoPacketMatchesRecovered3C81HeaderAndEightMemberLimit(t *testing.T) {
+	members := make([]model.AcademyMember, 9)
+	packet := buildAcademyInfoPacket(model.AcademySnapshot{ID: 0x11223344, Members: members}, nil)
+	if packet.MessageID != opcode.AcademyInfo {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.AcademyInfo)
+	}
+	payload := packet.Payload()
+	if len(payload) < 26 {
+		t.Fatalf("payload length = %d, want at least 26", len(payload))
+	}
+	if got, want := payload[:25], []byte{0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("0x3C81 header = % X, want % X", got, want)
+	}
+	if payload[25] != 8 {
+		t.Fatalf("0x3C81 member count = %d, want client limit 8", payload[25])
+	}
+}
+
+func TestAcademyBuffPacketMatchesRecovered3C82Shape(t *testing.T) {
+	now := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	packet := buildAcademyBuffPacket(model.AcademyBuffState{Type: 1, Value: 0x11223344, EndsAt: now.Add(90 * time.Second)}, now)
+	if packet.MessageID != opcode.AcademyBuffUpdate {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.AcademyBuffUpdate)
+	}
+	if got, want := packet.Payload(), []byte{1, 2, 0, 0, 0, 0x44, 0x33, 0x22, 0x11}; !bytes.Equal(got, want) {
+		t.Fatalf("0x3C82 payload = % X, want % X", got, want)
+	}
+}
 
 func TestSafeTradeRestoreUpdateMatchesGameServerDowngrade(t *testing.T) {
 	active, err := (vsro188.JobSafeTradeCodec{}).Encode(safeTradeRestoreUpdate(model.SafeTradeState{AbleCount: 3, Status: 1}, 8))

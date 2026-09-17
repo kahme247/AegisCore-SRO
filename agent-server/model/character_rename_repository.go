@@ -44,6 +44,13 @@ func (r *SQLCharacterRenameRepository) RenameCharacter(ctx context.Context, user
 		return fmt.Errorf("begin character rename: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	command, err := beginCharacterRosterCommand(ctx, tx, userID, shardID)
+	if err != nil {
+		return fmt.Errorf("begin durable character rename: %w", err)
+	}
+	if command.duplicate {
+		return nil
+	}
 	var characterID int64
 	if err = tx.QueryRowContext(ctx, "SELECT `ID` FROM `CHAR` WHERE LOWER(TRIM(`CHAR_NAME`))=LOWER(TRIM(?)) AND `FK_USER`=? AND `FK_SHARD`=? FOR UPDATE", currentName, userID, shardID).Scan(&characterID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -87,6 +94,10 @@ func (r *SQLCharacterRenameRepository) RenameCharacter(ctx context.Context, user
 			return fmt.Errorf("delete character rename item: %w", err)
 		}
 	}
+	payload := []byte(fmt.Sprintf(`{"character_id":%d,"old_name":%q,"new_name":%q}`, characterID, currentName, newName))
+	if err = completeCharacterRosterCommand(ctx, tx, userID, shardID, command, "character.renamed", payload); err != nil {
+		return fmt.Errorf("complete durable character rename: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit character rename: %w", err)
 	}
@@ -118,6 +129,13 @@ func (r *SQLCharacterRenameRepository) RenameGuild(ctx context.Context, userID u
 	if err != nil {
 		return fmt.Errorf("lock guild rename target: %w", err)
 	}
+	command, err := beginGuildCommand(ctx, tx, int(guildID))
+	if err != nil {
+		return fmt.Errorf("begin durable guild rename: %w", err)
+	}
+	if command.duplicate {
+		return nil
+	}
 	if !renameRequired {
 		return ErrGuildRenameNotRequired
 	}
@@ -143,6 +161,9 @@ func (r *SQLCharacterRenameRepository) RenameGuild(ctx context.Context, userID u
 	}
 	if affected != 1 {
 		return ErrGuildRenameNotRequired
+	}
+	if err = completeGuildCommand(ctx, tx, command, "guild.renamed"); err != nil {
+		return fmt.Errorf("complete durable guild rename: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit guild rename: %w", err)

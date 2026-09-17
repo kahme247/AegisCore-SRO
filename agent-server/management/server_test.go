@@ -2,16 +2,20 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	frameworkserver "github.com/Harvi8/AegisCore/framework/server"
 )
 
@@ -133,5 +137,95 @@ func TestBroadcastCommandValidatesAndSendsNotice(t *testing.T) {
 	handler.ServeHTTP(invalidResponse, invalid)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
+	}
+}
+
+type schedulerSourceStub struct {
+	definitions []scheduler.Definition
+	created     scheduler.Definition
+	handlers    map[string]bool
+}
+
+func (source *schedulerSourceStub) Create(_ context.Context, definition scheduler.Definition) (scheduler.Definition, error) {
+	source.created = definition
+	definition.Version = 1
+	definition.NextRunAt = definition.RunAt
+	source.definitions = append(source.definitions, definition)
+	return definition, nil
+}
+
+func (source *schedulerSourceStub) List(context.Context, int) ([]scheduler.Definition, error) {
+	return append([]scheduler.Definition(nil), source.definitions...), nil
+}
+
+func (source *schedulerSourceStub) Get(_ context.Context, id string) (scheduler.Definition, error) {
+	for _, definition := range source.definitions {
+		if definition.ID == id {
+			return definition, nil
+		}
+	}
+	return scheduler.Definition{}, scheduler.ErrDefinitionNotFound
+}
+
+func (source *schedulerSourceStub) HasHandler(name string) bool { return source.handlers[name] }
+
+func (source *schedulerSourceStub) SetEnabled(_ context.Context, id string, expectedVersion uint64, enabled bool) (scheduler.Definition, error) {
+	for index := range source.definitions {
+		if source.definitions[index].ID == id && source.definitions[index].Version == expectedVersion {
+			source.definitions[index].Enabled = enabled
+			source.definitions[index].Version++
+			return source.definitions[index], nil
+		}
+	}
+	return scheduler.Definition{}, scheduler.ErrDefinitionChanged
+}
+
+func (*schedulerSourceStub) ListRuns(context.Context, string, int) ([]scheduler.RunRecord, error) {
+	return []scheduler.RunRecord{}, nil
+}
+
+func TestScheduleManagementCreatesListsAndGetsDefinition(t *testing.T) {
+	source := &schedulerSourceStub{handlers: map[string]bool{"server.notice": true}}
+	handler := NewHandlerWithScheduler(fixedPlayers{}, source)
+	runAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	body := fmt.Sprintf(`{"id":"notice-1","name":"Maintenance warning","handler":"server.notice","recurrence":"one_time","phase":"warning","scope":"all_shards","timezone":"UTC","runAt":%q,"misfirePolicy":"run_once","enabled":true,"payload":{"message":"Maintenance soon"}}`, runAt.Format(time.RFC3339))
+	create := httptest.NewRequest(http.MethodPost, SchedulesPath, bytes.NewBufferString(body))
+	createResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createResponse, create)
+	if createResponse.Code != http.StatusCreated || source.created.ID != "notice-1" {
+		t.Fatalf("create response=%d %s definition=%+v", createResponse.Code, createResponse.Body.String(), source.created)
+	}
+
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, SchedulesPath, nil))
+	if listResponse.Code != http.StatusOK || !bytes.Contains(listResponse.Body.Bytes(), []byte(`"id":"notice-1"`)) {
+		t.Fatalf("list response=%d %s", listResponse.Code, listResponse.Body.String())
+	}
+
+	getResponse := httptest.NewRecorder()
+	handler.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, SchedulesPath+"/notice-1", nil))
+	if getResponse.Code != http.StatusOK || !bytes.Contains(getResponse.Body.Bytes(), []byte(`"handler":"server.notice"`)) {
+		t.Fatalf("get response=%d %s", getResponse.Code, getResponse.Body.String())
+	}
+	updateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPatch, SchedulesPath+"/notice-1", bytes.NewBufferString(`{"expectedVersion":1,"enabled":false}`)))
+	if updateResponse.Code != http.StatusOK || !bytes.Contains(updateResponse.Body.Bytes(), []byte(`"enabled":false`)) {
+		t.Fatalf("update response=%d %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	runsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(runsResponse, httptest.NewRequest(http.MethodGet, SchedulesPath+"/notice-1/runs", nil))
+	if runsResponse.Code != http.StatusOK || !bytes.Contains(runsResponse.Body.Bytes(), []byte(`"runs":[]`)) {
+		t.Fatalf("runs response=%d %s", runsResponse.Code, runsResponse.Body.String())
+	}
+}
+
+func TestScheduleManagementRejectsUnknownHandler(t *testing.T) {
+	source := &schedulerSourceStub{handlers: map[string]bool{}}
+	handler := NewHandlerWithScheduler(fixedPlayers{}, source)
+	body := `{"id":"bad","name":"Bad","handler":"missing","recurrence":"one_time","phase":"start","scope":"all_shards","timezone":"UTC","runAt":"2027-01-01T00:00:00Z","misfirePolicy":"run_once","enabled":true,"payload":{}}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, SchedulesPath, bytes.NewBufferString(body)))
+	if response.Code != http.StatusBadRequest || !bytes.Contains(response.Body.Bytes(), []byte("unknown_schedule_handler")) {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
 	}
 }

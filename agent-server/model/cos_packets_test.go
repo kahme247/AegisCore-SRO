@@ -91,6 +91,20 @@ func TestBuildCOSHGPUpdateMatchesClient30C9Type4Layout(t *testing.T) {
 	}
 }
 
+func TestBuildCOSInventoryUpdateMatchesClient30C9Type2Layout(t *testing.T) {
+	item := Item{SRObject: SRObject{RefObjectID: 500, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 0}}, StackSize: 3}
+	cos := &COS{
+		NPC:           NPC{SRObject: SRObject{UniqueID: 0x11223344}, Mutex: new(sync.Mutex)},
+		InventorySize: 5,
+		Inventory:     NewInventory(map[byte]Item{2: item}),
+	}
+	packet, ok := BuildCOSInventoryUpdate(cos)
+	want := []byte{0x44, 0x33, 0x22, 0x11, COSUpdateInventory, 5, 1, 2, 0, 0, 0, 0, 0xF4, 1, 0, 0, 3, 0}
+	if !ok || packet.MessageID != opcode.COSUpdateResponse || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("COS inventory update = ok=%t opcode=0x%04X payload=% X, want 0x%04X/% X", ok, packet.MessageID, packet.Payload(), opcode.COSUpdateResponse, want)
+	}
+}
+
 func TestBuildCOSItemStateUpdateMatchesInventoryStateLayout(t *testing.T) {
 	p := BuildCOSItemStateUpdate(17, COSItemActive)
 	want := []byte{17, 64, byte(COSItemActive)}

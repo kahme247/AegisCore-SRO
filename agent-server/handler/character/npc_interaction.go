@@ -24,7 +24,32 @@ type NPCInteraction struct {
 	DeliveryQuestIDs       []int
 	DeliveryKeys           []string
 	PendingInstanceQuestID int
+	PendingNoticeClose     bool
 	OpenedAt               time.Time
+}
+
+func (r *NPCInteractionRegistry) SetNoticeClose(playerUID uint32) bool {
+	if r == nil || playerUID == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	interaction, ok := r.entries[playerUID]
+	if !ok {
+		return false
+	}
+	interaction.PendingQuestID = 0
+	interaction.OfferedQuestIDs = nil
+	interaction.PendingDialogQuestID = 0
+	interaction.DialogQuestIDs = nil
+	interaction.DialogKeys = nil
+	interaction.PendingDeliveryQuestID = 0
+	interaction.DeliveryQuestIDs = nil
+	interaction.DeliveryKeys = nil
+	interaction.PendingInstanceQuestID = 0
+	interaction.PendingNoticeClose = true
+	r.entries[playerUID] = interaction
+	return true
 }
 
 func (r *NPCInteractionRegistry) SetInstanceEntry(playerUID uint32, questID int) bool {
@@ -286,4 +311,24 @@ func HasRecentNPCInteraction(playerUID, npcUID uint32, action byte, maxAge time.
 		now = npcInteractions.now
 	}
 	return !interaction.OpenedAt.IsZero() && now().Sub(interaction.OpenedAt) <= maxAge
+}
+
+// RecentNPCInteraction returns the latest server-validated interaction for an
+// empty follow-up request whose stock wire layout does not repeat the NPC UID.
+func RecentNPCInteraction(playerUID uint32, action byte, maxAge time.Duration) (NPCInteraction, bool) {
+	interaction, ok := npcInteractions.Get(playerUID)
+	if !ok || interaction.Action != action {
+		return NPCInteraction{}, false
+	}
+	if maxAge <= 0 {
+		return interaction, true
+	}
+	now := time.Now
+	if npcInteractions.now != nil {
+		now = npcInteractions.now
+	}
+	if interaction.OpenedAt.IsZero() || now().Sub(interaction.OpenedAt) > maxAge {
+		return NPCInteraction{}, false
+	}
+	return interaction, true
 }

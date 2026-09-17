@@ -9,12 +9,15 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/service"
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	frameworkserver "github.com/Harvi8/AegisCore/framework/server"
 )
 
@@ -22,6 +25,7 @@ const OnlinePlayersPath = "/v1/management/players"
 const PlayerDisconnectsPath = "/v1/management/player-disconnects"
 const BroadcastsPath = "/v1/management/broadcasts"
 const HealthPath = "/v1/management/health"
+const SchedulesPath = "/v1/management/schedules"
 
 type HealthSource interface {
 	DatabaseQueryCount() int
@@ -36,6 +40,15 @@ type PlayerControlSource interface {
 	BroadcastNotice(string) (int, error)
 }
 
+type SchedulerSource interface {
+	Create(context.Context, scheduler.Definition) (scheduler.Definition, error)
+	List(context.Context, int) ([]scheduler.Definition, error)
+	Get(context.Context, string) (scheduler.Definition, error)
+	HasHandler(string) bool
+	SetEnabled(context.Context, string, uint64, bool) (scheduler.Definition, error)
+	ListRuns(context.Context, string, int) ([]scheduler.RunRecord, error)
+}
+
 type Server struct {
 	address   string
 	tlsConfig *tls.Config
@@ -46,6 +59,10 @@ type Server struct {
 }
 
 func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSource, healthSources ...HealthSource) (*Server, error) {
+	return NewServerWithScheduler(address, tlsConfig, players, nil, healthSources...)
+}
+
+func NewServerWithScheduler(address string, tlsConfig *tls.Config, players PlayerControlSource, schedules SchedulerSource, healthSources ...HealthSource) (*Server, error) {
 	if strings.TrimSpace(address) == "" {
 		return nil, errors.New("Agent management listener address is required")
 	}
@@ -61,7 +78,7 @@ func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSourc
 	return &Server{
 		address: address, tlsConfig: tlsConfig.Clone(),
 		server: &http.Server{
-			Handler:           NewHandler(players, healthSources...),
+			Handler:           NewHandlerWithScheduler(players, schedules, healthSources...),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,
@@ -72,15 +89,25 @@ func NewServer(address string, tlsConfig *tls.Config, players PlayerControlSourc
 }
 
 func NewHandler(players PlayerControlSource, healthSources ...HealthSource) http.Handler {
+	return NewHandlerWithScheduler(players, nil, healthSources...)
+}
+
+func NewHandlerWithScheduler(players PlayerControlSource, schedules SchedulerSource, healthSources ...HealthSource) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+HealthPath, func(response http.ResponseWriter, request *http.Request) {
 		now := time.Now()
 		game := manager.GameHealth(now)
 		dbQueries := 0
 		dispatch := frameworkserver.DispatchMetrics{}
+		competitive := service.CompetitiveStatus{}
 		if len(healthSources) > 0 && healthSources[0] != nil {
 			dbQueries = healthSources[0].DatabaseQueryCount()
 			dispatch = healthSources[0].MessageDispatch()
+			if source, ok := healthSources[0].(interface {
+				CompetitiveStatus() service.CompetitiveStatus
+			}); ok {
+				competitive = source.CompetitiveStatus()
+			}
 		}
 		objects := 0
 		if players != nil {
@@ -98,7 +125,8 @@ func NewHandler(players PlayerControlSource, healthSources ...HealthSource) http
 			DatabaseQueryCount int                             `json:"databaseQueryCount"`
 			GameUpdate         manager.GameHealthSnapshot      `json:"gameUpdate"`
 			MessageDispatch    frameworkserver.DispatchMetrics `json:"messageDispatch"`
-		}{now.UTC(), objects, dbQueries, game, dispatch})
+			Competitive        service.CompetitiveStatus       `json:"competitive"`
+		}{now.UTC(), objects, dbQueries, game, dispatch, competitive})
 	})
 	mux.HandleFunc("GET "+OnlinePlayersPath, func(response http.ResponseWriter, _ *http.Request) {
 		if players == nil {
@@ -195,6 +223,127 @@ func NewHandler(players PlayerControlSource, healthSources ...HealthSource) http
 			Broadcast      bool `json:"broadcast"`
 			RecipientCount int  `json:"recipientCount"`
 		}{Broadcast: true, RecipientCount: recipientCount})
+	})
+	mux.HandleFunc("GET "+SchedulesPath, func(response http.ResponseWriter, request *http.Request) {
+		if schedules == nil {
+			writeCommandError(response, http.StatusServiceUnavailable, "scheduler_unavailable")
+			return
+		}
+		definitions, err := schedules.List(request.Context(), 500)
+		if err != nil {
+			writeCommandError(response, http.StatusInternalServerError, "scheduler_query_failed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(struct {
+			Schedules []scheduler.Definition `json:"schedules"`
+		}{Schedules: definitions})
+	})
+	mux.HandleFunc("GET "+SchedulesPath+"/{id}", func(response http.ResponseWriter, request *http.Request) {
+		if schedules == nil {
+			writeCommandError(response, http.StatusServiceUnavailable, "scheduler_unavailable")
+			return
+		}
+		definition, err := schedules.Get(request.Context(), request.PathValue("id"))
+		if errors.Is(err, scheduler.ErrDefinitionNotFound) {
+			writeCommandError(response, http.StatusNotFound, "schedule_not_found")
+			return
+		}
+		if err != nil {
+			writeCommandError(response, http.StatusInternalServerError, "scheduler_query_failed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(definition)
+	})
+	mux.HandleFunc("POST "+SchedulesPath, func(response http.ResponseWriter, request *http.Request) {
+		if schedules == nil {
+			writeCommandError(response, http.StatusServiceUnavailable, "scheduler_unavailable")
+			return
+		}
+		request.Body = http.MaxBytesReader(response, request.Body, 16<<10)
+		defer request.Body.Close()
+		decoder := json.NewDecoder(request.Body)
+		decoder.DisallowUnknownFields()
+		var definition scheduler.Definition
+		if err := decoder.Decode(&definition); err != nil || definition.Version != 0 || !definition.NextRunAt.IsZero() {
+			writeCommandError(response, http.StatusBadRequest, "invalid_schedule")
+			return
+		}
+		if !schedules.HasHandler(definition.Handler) {
+			writeCommandError(response, http.StatusBadRequest, "unknown_schedule_handler")
+			return
+		}
+		created, err := schedules.Create(request.Context(), definition)
+		if err != nil {
+			writeCommandError(response, http.StatusBadRequest, "invalid_schedule")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		response.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(response).Encode(created)
+	})
+	mux.HandleFunc("PATCH "+SchedulesPath+"/{id}", func(response http.ResponseWriter, request *http.Request) {
+		if schedules == nil {
+			writeCommandError(response, http.StatusServiceUnavailable, "scheduler_unavailable")
+			return
+		}
+		request.Body = http.MaxBytesReader(response, request.Body, 4<<10)
+		defer request.Body.Close()
+		decoder := json.NewDecoder(request.Body)
+		decoder.DisallowUnknownFields()
+		var command struct {
+			ExpectedVersion uint64 `json:"expectedVersion"`
+			Enabled         *bool  `json:"enabled"`
+		}
+		if err := decoder.Decode(&command); err != nil || command.ExpectedVersion == 0 || command.Enabled == nil {
+			writeCommandError(response, http.StatusBadRequest, "invalid_schedule_update")
+			return
+		}
+		definition, err := schedules.SetEnabled(request.Context(), request.PathValue("id"), command.ExpectedVersion, *command.Enabled)
+		if errors.Is(err, scheduler.ErrDefinitionChanged) {
+			writeCommandError(response, http.StatusConflict, "schedule_changed")
+			return
+		}
+		if errors.Is(err, scheduler.ErrDefinitionNotFound) {
+			writeCommandError(response, http.StatusNotFound, "schedule_not_found")
+			return
+		}
+		if err != nil {
+			writeCommandError(response, http.StatusBadRequest, "invalid_schedule_update")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(definition)
+	})
+	mux.HandleFunc("GET "+SchedulesPath+"/{id}/runs", func(response http.ResponseWriter, request *http.Request) {
+		if schedules == nil {
+			writeCommandError(response, http.StatusServiceUnavailable, "scheduler_unavailable")
+			return
+		}
+		limit := 100
+		if raw := request.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 500 {
+				writeCommandError(response, http.StatusBadRequest, "invalid_limit")
+				return
+			}
+			limit = parsed
+		}
+		runs, err := schedules.ListRuns(request.Context(), request.PathValue("id"), limit)
+		if err != nil {
+			writeCommandError(response, http.StatusInternalServerError, "scheduler_query_failed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(struct {
+			Runs []scheduler.RunRecord `json:"runs"`
+		}{Runs: runs})
 	})
 	return mux
 }

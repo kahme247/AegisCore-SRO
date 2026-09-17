@@ -119,6 +119,11 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 	if mob, ok := object.(*model.NPC); ok && mob != nil && mob.GetTypeInfo().IsNPCMob() {
 		return h.sendPacket(session, buildMobSelectionResponse(uniqueID, mob.CurrentHitPoints()))
 	}
+	if portal, ok := object.(*model.DimensionHolePortal); ok && model.IsDimensionHolePortalObject(portal) {
+		// INS_QUEST_TELEPORT uses the structure/NPC selection branch and therefore
+		// requires its counted action-list byte after the common prefix.
+		return h.sendPacket(session, buildDimensionHolePortalSelectionResponse(portal.GetUniqueID()))
+	}
 	if object.GetTypeInfo().IsNPCNpc() || model.IsTeleportGateObject(object) {
 		session.UserContext.SelectedNPCUniqueID = object.GetUniqueID()
 		session.UserContext.SelectedNPCRefObjID = object.GetRefObjectID()
@@ -130,7 +135,9 @@ func (h *SelectEntityHandler) handlePacket(_ context.Context, session *server.Se
 			// unexpected tax on an inactive fortress gate.
 			selectionData = teleportGateSelectionData(gate)
 		}
-		if model.IsTeleportServiceCodeName(object.GetName()) {
+		// Catalog-backed TeleportGate objects are authoritative even when their
+		// media code name uses a numbered suffix such as STORE_SD_GATE2.
+		if model.IsTeleportGateObject(object) || model.IsTeleportServiceCodeName(object.GetName()) {
 			npcInteractions.Record(player.GetUniqueID(), object.GetUniqueID(), object.GetRefObjectID(), teleportTaskUse)
 		}
 		logrus.Infof("NPC_SELECT player=%s uid=%d code=%s selectionData=%x", player.CharName, uniqueID, object.GetName(), selectionData)
@@ -151,6 +158,20 @@ func clearSelectedNPC(session *server.Session) {
 func buildEntitySelectionFailure() network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.EntitySelectResponse
+	p.WriteByte(0)
+	return p
+}
+
+func buildDimensionHolePortalSelectionResponse(uniqueID uint32) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.EntitySelectResponse
+	p.WriteByte(1)
+	p.WriteUInt32(uniqueID)
+	// INS_QUEST_TELEPORT resolves through the client's structure/NPC branch in
+	// CNetProcessIn::OnB045. That branch always consumes a counted action-list
+	// byte after the accepted-selection prefix, even when the structure exposes
+	// no NPC talk actions. Omitting the zero count makes the stock client assert
+	// in CMsgStreamBuffer when it reads past the five-byte packet.
 	p.WriteByte(0)
 	return p
 }
@@ -281,6 +302,14 @@ func validateEntitySelection(world selectEntityWorld, player *model.Player, uniq
 		if !ok || knownGate != typed {
 			return ErrSelectEntityTargetNotKnown
 		}
+	case *model.DimensionHolePortal:
+		if !model.IsDimensionHolePortalObject(typed) {
+			return ErrSelectEntityTargetUnsupported
+		}
+		knownPortal, ok := knownTarget.(*model.DimensionHolePortal)
+		if !ok || knownPortal != typed {
+			return ErrSelectEntityTargetNotKnown
+		}
 	default:
 		return ErrSelectEntityTargetUnsupported
 	}
@@ -299,7 +328,7 @@ func validateEntitySelection(world selectEntityWorld, player *model.Player, uniq
 	// set; the known-list identity check above and global-coordinate distance
 	// below provide the equivalent admission boundary here.
 	rangeLimit := selectionKnownRange
-	if model.IsTeleportGateObject(target) {
+	if model.IsTeleportGateObject(target) || model.IsDimensionHolePortalObject(target) {
 		rangeLimit = float32(model.RegionHeight)
 	}
 	distance := world.DistanceTo(playerPosition, targetPosition)

@@ -116,29 +116,56 @@ func TestWriteContainerActiveAbilityCOSItemUsesRemainingLifetime(t *testing.T) {
 	}
 }
 
-func TestWriteExpendableItemEncodesGachaMetadataOnlyForGachaType(t *testing.T) {
-	for _, typeID4 := range []int{1, 2} {
-		packet := network.EmptyPacket()
-		WriteExpendableItem(&packet, Item{
-			SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: typeID4}},
-			StackSize: 1,
-		})
-		if got, want := packet.Payload(), []byte{1, 0, 0}; !bytes.Equal(got, want) {
-			t.Fatalf("gacha TypeID4 %d payload = % X, want % X", typeID4, got, want)
-		}
+func TestWriteExpendableItemEncodesNormalGachaCardAsQuantityOnly(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 1}},
+		StackSize: 1,
+	})
+	if got, want := packet.Payload(), []byte{1, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("normal gacha card payload = % X, want % X", got, want)
+	}
+}
+
+func TestWriteExpendableItemEncodesGachaCouponMetadata(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 2}},
+		StackSize: 1,
+	})
+	if got, want := packet.Payload(), []byte{1, 0, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("gacha coupon payload = % X, want % X", got, want)
 	}
 }
 
 func TestWriteExpendableItemEncodesGachaMagicOptions(t *testing.T) {
 	packet := network.EmptyPacket()
 	WriteExpendableItem(&packet, Item{
-		SRObject:     SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 1}},
+		SRObject:     SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 2}},
 		StackSize:    1,
 		MagicOptions: []MagicOption{{Type: 0x11223344, Value: 0x55667788}},
 	})
 	want := []byte{1, 0, 1, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55}
 	if got := packet.Payload(); !bytes.Equal(got, want) {
 		t.Fatalf("gacha metadata payload = % X, want % X", got, want)
+	}
+}
+
+func TestGachaCouponRewardEncodingStaysServerSide(t *testing.T) {
+	encoded := encodeGachaCouponReward(4044, 3)
+	refID, quantity := decodeGachaCouponReward(encoded)
+	if refID != 4044 || quantity != 3 {
+		t.Fatalf("decoded reward = %d x%d, want 4044 x3", refID, quantity)
+	}
+
+	packet := network.EmptyPacket()
+	WriteExpendableItem(&packet, Item{
+		SRObject:  SRObject{TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 14, TypeID4: 2}},
+		StackSize: 1,
+		Variance:  encoded,
+	})
+	if got, want := packet.Payload(), []byte{1, 0, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("coupon wire payload = % X, want % X", got, want)
 	}
 }
 
@@ -150,6 +177,17 @@ func TestWriteMonsterMaskItemEncodesCapturedMonsterReference(t *testing.T) {
 	})
 	if got, want := packet.Payload(), []byte{0x92, 0x10, 0x00, 0x00}; !bytes.Equal(got, want) {
 		t.Fatalf("monster mask payload = % X, want % X", got, want)
+	}
+}
+
+func TestWriteMagicCubeItemEncodesStoredElixirQuantity(t *testing.T) {
+	packet := network.EmptyPacket()
+	WriteContainerItem(&packet, Item{
+		SRObject: SRObject{RefObjectID: 20200, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 2, TypeID3: 3}},
+		Data:     0x11223344,
+	})
+	if got, want := packet.Payload(), []byte{0x44, 0x33, 0x22, 0x11}; !bytes.Equal(got, want) {
+		t.Fatalf("magic-cube payload = % X, want % X", got, want)
 	}
 }
 

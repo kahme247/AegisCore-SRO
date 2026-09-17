@@ -105,6 +105,28 @@ func TestWorldVisibilityActivationQueuesPortalBeyondGenericObjectRange(t *testin
 	}
 }
 
+func TestWorldVisibilityActivationQueuesDimensionHoleBeyondGenericObjectRange(t *testing.T) {
+	regionID := int16(25000)
+	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	world := newVisibilityTestWorld(t, player)
+	portal, err := model.NewDimensionHolePortal(
+		model.DimensionHoleCatalog()[0], player,
+		visibilityTestPosition(regionID, 100+visibilityRange+500, 100),
+	)
+	if err != nil {
+		t.Fatalf("NewDimensionHolePortal() error = %v", err)
+	}
+	world.AddVisibleObject(portal)
+
+	world.ActivatePlayer(player)
+	if !player.GetKnownObjectList().Knows(portal) {
+		t.Fatal("Dimension Hole outside generic visibility range was not queued")
+	}
+	if queued := player.GetCharKnownObjectList().GetObjectsToSpawn(); queued[portal.GetUniqueID()] != portal {
+		t.Fatalf("Dimension Hole spawn was not queued for the client: %#v", queued)
+	}
+}
+
 func TestWorldNPCsKnownToPlayersOnlyIncludesVisibleNPCsAfterActivation(t *testing.T) {
 	regionID := int16(25000)
 	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
@@ -149,6 +171,33 @@ func TestWorldVisibilityNewNPCQueuesForStationaryPlayer(t *testing.T) {
 	world.AddVisibleObject(npc)
 	if queued := player.GetCharKnownObjectList().GetObjectsToSpawn(); queued[npc.GetUniqueID()] != npc {
 		t.Fatalf("new NPC was not queued for a stationary client: %#v", queued)
+	}
+}
+
+func TestWorldVisibilityGroundItemQueuesSpawnAndDespawnForStationaryPlayer(t *testing.T) {
+	regionID := int16(25000)
+	player := newVisibilityTestPlayer(1, "Alice", visibilityTestPosition(regionID, 100, 100))
+	world := newVisibilityTestWorld(t, player)
+	world.ActivatePlayer(player)
+	item := &model.Item{SRObject: model.SRObject{
+		RefObjectID:       900,
+		TypeInfo:          model.TypeInfo{TypeID1: model.TypeID1Item, TypeID2: 3},
+		RtNavmeshPosition: visibilityTestPosition(regionID, 140, 100),
+	}}
+
+	world.AddVisibleObject(item)
+	spawns := player.GetCharKnownObjectList().GetObjectsToSpawn()
+	if spawns[item.GetUniqueID()] != item || !player.GetKnownObjectList().Knows(item) {
+		t.Fatalf("ground-item spawn was not queued for the stationary client: %#v", spawns)
+	}
+	player.GetCharKnownObjectList().MarkSpawned(spawns)
+
+	world.RemoveVisibleObject(item)
+	if player.GetKnownObjectList().Knows(item) {
+		t.Fatal("removed ground item remained in the player's known-object list")
+	}
+	if despawns := player.GetCharKnownObjectList().GetObjectsToDespawn(); despawns[item.GetUniqueID()] != item {
+		t.Fatalf("ground-item despawn was not queued for the stationary client: %#v", despawns)
 	}
 }
 

@@ -253,6 +253,30 @@ func TestBridgeObjectBoundaryAllowsEntryAndExit(t *testing.T) {
 	}
 }
 
+func TestOneWayObjectBoundaryAllowsMovementFromPermittedSide(t *testing.T) {
+	object := rectangularTestObject(0, 0, 10, 10, LineSegment{
+		A: math32.NewVector3(10, 0, 0),
+		B: math32.NewVector3(10, 0, 10),
+	})
+	object.GlobalEdges[0].Flag = RtNavmeshEdgeFlag(1 << 0)
+	object.GlobalEdges[0].SrcCell = &object.Cells[0]
+	identity := math32.NewMatrix4()
+	region := NewRegionFromXAndY(100, 100)
+	instance := RtNavmeshInstObj{
+		RtNavmeshInstBase: RtNavmeshInstBase{Object: object, LocalToWorld: identity, WorldToLocal: identity},
+		Region:            region,
+	}
+
+	leaving := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(5, 0, 5)}
+	outside := RtNavmeshPosition{Region: region, Offset: math32.NewVector3(12, 0, 5)}
+	if collides, _, _, _ := FindObjectCollisions(leaving, outside, []RtNavmeshInstObj{instance}, nil); collides {
+		t.Fatal("one-way object boundary blocked movement from its permitted side")
+	}
+	if collides, _, _, _ := FindObjectCollisions(outside, leaving, []RtNavmeshInstObj{instance}, nil); !collides {
+		t.Fatal("one-way object boundary allowed movement from its blocked side")
+	}
+}
+
 func TestCrossRegionObjectDoesNotCreateLongLocalMovement(t *testing.T) {
 	identity := math32.NewMatrix4()
 	currentRegion := NewRegionFromXAndY(100, 100)

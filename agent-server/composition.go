@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/Harvi8/AegisCore/agent-server/handler/exchange"
@@ -12,6 +13,7 @@ import (
 	agentruntime "github.com/Harvi8/AegisCore/agent-server/runtime"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/server"
 	log "github.com/sirupsen/logrus"
@@ -40,6 +42,7 @@ type AgentDependencies struct {
 	DisconnectSaver        *service.DisconnectSaver
 	Lifecycle              *agentruntime.Lifecycle
 	Features               feature.Set
+	Scheduler              *scheduler.Runtime
 }
 
 // NewAgentServerWithDependencies constructs the lifecycle facade without
@@ -75,6 +78,8 @@ func NewAgentServerWithDependencies(dependencies AgentDependencies) (AgentServer
 		DisconnectSaver:        dependencies.DisconnectSaver,
 		Lifecycle:              lifecycle,
 		Features:               cloneFeatureSet(dependencies.Features),
+		Scheduler:              dependencies.Scheduler,
+		dependencyDrainMu:      &sync.Mutex{},
 	}
 	if dependencies.World != nil {
 		agent.GroundItems = service.NewGroundItemService(dependencies.World, service.GetPartyServiceInstance())

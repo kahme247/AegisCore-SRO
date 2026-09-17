@@ -430,6 +430,8 @@ func TestMobAINPCSkillAppliesDirectStatusActor(t *testing.T) {
 	manager.blockRoll = func(int) bool { return false }
 	manager.criticalRoll = func(int) bool { return false }
 	manager.hitRollPercent = func(int) bool { return true }
+	interrupted := uint32(0)
+	manager.ConfigurePlayerAttackInterrupter(func(player *model.Player) { interrupted = player.GetUniqueID() })
 	var scheduled []func()
 	manager.schedule = func(_ time.Duration, callback func()) { scheduled = append(scheduled, callback) }
 	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
@@ -443,6 +445,9 @@ func TestMobAINPCSkillAppliesDirectStatusActor(t *testing.T) {
 	manager.applyAttackDamageWithSkill(&mobAIWorldFake{}, npc, target, 12, 1, false, skillID, true, false)
 	if status, active := target.CombatStatus(model.CombatStatusStun, time.Now()); !active || status.SkillID != skillID || status.Level != 2 {
 		t.Fatalf("NPC skill status = %+v, active=%t", status, active)
+	}
+	if interrupted != target.GetUniqueID() {
+		t.Fatalf("controlled player interruption = %d, want %d", interrupted, target.GetUniqueID())
 	}
 	if len(scheduled) != 1 {
 		t.Fatalf("scheduled NPC status callbacks = %d, want 1", len(scheduled))
@@ -732,12 +737,62 @@ func TestMobAIZeroImpactTimingWaitsForClientActionRegistration(t *testing.T) {
 		},
 	}))
 
-	profile, ok := manager.attackProfile(npc, player, 160)
+	profile, ok := manager.attackProfile(npc, player, 160, time.Now())
 	if !ok {
 		t.Fatal("zero-timing attack profile was not found")
 	}
 	if profile.delay != mobClientActionRegistrationDelay {
 		t.Fatalf("zero-timing impact delay = %s, want %s", profile.delay, mobClientActionRegistrationDelay)
+	}
+}
+
+func TestMobAIFrostbiteSlowsImpactThroughCompleteAnimation(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(10)
+	npc.ConfigureCombat(100, 1)
+	manager := mobAIManagerForTest()
+
+	profile, ok := manager.attackProfile(npc, player, 160, now)
+	if !ok || profile.delay != 800*time.Millisecond {
+		t.Fatalf("normal impact profile = %+v/%t, want 800ms authored impact", profile, ok)
+	}
+	if !npc.ApplyCombatStatusAt(model.CombatStatus{Kind: model.CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 240, ExpiresAt: now.Add(time.Second)}, now) {
+		t.Fatal("apply frostbite")
+	}
+	profile, ok = manager.attackProfile(npc, player, 160, now)
+	if !ok || profile.delay != 6400*time.Millisecond || profile.cooldown != profile.delay {
+		t.Fatalf("frostbite impact profile = %+v/%t, want 6.4s delay and matching cooldown", profile, ok)
+	}
+}
+
+func TestMobAIFrostbiteRetimesPendingSwingOnApplyAndExpiry(t *testing.T) {
+	now := time.Unix(100, 0)
+	npc, _ := mobAIFixture(10)
+	npc.ConfigureCombat(100, 1)
+	manager := &MobAIManager{pending: map[uint32]mobPendingAttack{
+		npc.GetUniqueID(): {
+			npc: npc, readyAt: now.Add(800 * time.Millisecond),
+			impact: 800 * time.Millisecond, lifecycle: 3200 * time.Millisecond,
+		},
+	}}
+	status := model.CombatStatus{Kind: model.CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 240, ExpiresAt: now.Add(10 * time.Second)}
+	applyAt := now.Add(400 * time.Millisecond)
+	if !npc.ApplyCombatStatusAt(status, applyAt) {
+		t.Fatal("apply frostbite")
+	}
+	manager.ReconcileAttackTiming(npc, applyAt)
+	pending := manager.pending[npc.GetUniqueID()]
+	if got, want := pending.readyAt, applyAt.Add(5600*time.Millisecond); !got.Equal(want) || !pending.frosted {
+		t.Fatalf("frosted pending ready = %s frosted=%t, want %s/true", got, pending.frosted, want)
+	}
+	removeAt := applyAt.Add(time.Second)
+	if !npc.RemoveCombatStatus(model.CombatStatusFrostbite, status.Token) {
+		t.Fatal("remove frostbite")
+	}
+	manager.ReconcileAttackTiming(npc, removeAt)
+	pending = manager.pending[npc.GetUniqueID()]
+	if got, want := pending.readyAt, removeAt.Add(2300*time.Millisecond); !got.Equal(want) || pending.frosted {
+		t.Fatalf("restored pending ready = %s frosted=%t, want %s/false", got, pending.frosted, want)
 	}
 }
 

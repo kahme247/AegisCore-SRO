@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
+	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -12,6 +15,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
+	log "github.com/sirupsen/logrus"
 )
 
 const academyPageSize = 10
@@ -21,14 +25,86 @@ type worldLookup interface {
 	GetPlayerByCharacterID(int) (*model.Player, error)
 }
 
+type guildMercenaryTerminator interface {
+	TerminateGuildMercenaries(context.Context, *model.Player) (int, error)
+}
+
 // Handler owns the GameServer-equivalent protocol and online-publication
 // layer. Durable authority and transitions remain in SocialRepository.
 type Handler struct {
 	repo           model.SocialRepository
+	war            model.GuildWarRepository
+	election       model.GuildElectionRepository
+	siege          model.GuildSiegeRepository
+	mercenary      model.GuildMercenaryRepository
+	fortress       model.FortressExpenditureRepository
+	community      model.CommunityFriendRepository
+	communityBlock model.CommunityBlockRepository
+	memo           model.CommunityMemoRepository
+	cos            guildMercenaryTerminator
 	world          worldLookup
 	safeTrade      model.SafeTradeRepository
 	safeTradeLimit byte
 	send           func(*server.Session, network.Packet) error
+	startOnce      sync.Once
+	academyMu      sync.Mutex
+	academyInvites map[uint32]academyInvitation
+}
+
+const guildWarExpiryInterval = time.Minute
+
+func (h *Handler) Start(ctx context.Context) {
+	if h == nil || h.war == nil && h.election == nil {
+		return
+	}
+	h.startOnce.Do(func() { go h.runGuildWarExpiry(ctx) })
+}
+
+func (h *Handler) runGuildWarExpiry(ctx context.Context) {
+	ticker := time.NewTicker(guildWarExpiryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if h.war != nil {
+				if _, err := h.ExpireGuildWars(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+					log.WithError(err).Error("expire guild wars")
+				}
+			}
+			if h.election != nil {
+				if _, err := h.ExpireGuildElections(ctx, now); err != nil && !errors.Is(err, context.Canceled) {
+					log.WithError(err).Error("expire guild elections")
+				}
+			}
+		}
+	}
+}
+
+func (h *Handler) ExpireGuildWars(ctx context.Context, now time.Time) (int, error) {
+	if h == nil || h.war == nil {
+		return 0, model.ErrSocialRepositoryUnavailable
+	}
+	states, err := h.war.ExpireGuildWars(ctx, now, 100)
+	if err != nil {
+		return 0, err
+	}
+	for _, state := range states {
+		goldUpdates := map[int]uint64{}
+		if state.WinnerMaster == 0 {
+			goldUpdates[state.ChallengerMaster], goldUpdates[state.TargetMaster] = state.ChallengerGold, state.TargetGold
+		}
+		for characterID, gold := range goldUpdates {
+			h.commitGold(characterID, gold)
+			if player, lookupErr := h.world.GetPlayerByCharacterID(characterID); lookupErr == nil && player != nil && player.Session != nil {
+				if sendErr := h.sendPacket(player.Session, vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold})); sendErr != nil {
+					return 0, sendErr
+				}
+			}
+		}
+	}
+	return len(states), nil
 }
 
 func (h *Handler) ConfigureSafeTrade(repository model.SafeTradeRepository, limit uint) error {
@@ -38,6 +114,12 @@ func (h *Handler) ConfigureSafeTrade(repository model.SafeTradeRepository, limit
 	h.safeTrade = repository
 	h.safeTradeLimit = byte(limit)
 	return nil
+}
+
+func (h *Handler) ConfigureCOS(terminator guildMercenaryTerminator) {
+	if h != nil {
+		h.cos = terminator
+	}
 }
 
 func safeTradeRestoreUpdate(state model.SafeTradeState, limit byte) vsro188.SafeTradeUpdate {
@@ -51,7 +133,15 @@ func RegisterHandlers(target *server.Server, repo model.SocialRepository) *Handl
 	if target == nil || repo == nil {
 		return nil
 	}
-	h := &Handler{repo: repo, world: service.GetWorldServiceInstance()}
+	h := &Handler{repo: repo, world: service.GetWorldServiceInstance(), academyInvites: make(map[uint32]academyInvitation)}
+	h.war, _ = repo.(model.GuildWarRepository)
+	h.election, _ = repo.(model.GuildElectionRepository)
+	h.siege, _ = repo.(model.GuildSiegeRepository)
+	h.mercenary, _ = repo.(model.GuildMercenaryRepository)
+	h.fortress, _ = repo.(model.FortressExpenditureRepository)
+	h.community, _ = repo.(model.CommunityFriendRepository)
+	h.communityBlock, _ = repo.(model.CommunityBlockRepository)
+	h.memo, _ = repo.(model.CommunityMemoRepository)
 	target.RegisterHandler(opcode.GuildCreateRequest, h.guildCreate)
 	target.RegisterHandler(opcode.GuildDisbandRequest, h.guildDisband)
 	target.RegisterHandler(opcode.GuildLeaveRequest, h.guildLeave)
@@ -66,6 +156,42 @@ func RegisterHandlers(target *server.Server, repo model.SocialRepository) *Handl
 	target.RegisterHandler(opcode.GuildPermissionRequest, h.guildPermissions)
 	target.RegisterHandler(opcode.GuildNicknameRequest, h.guildNickname)
 	target.RegisterHandler(opcode.GuildDonateRequest, h.guildDonate)
+	if h.war != nil {
+		target.RegisterHandler(opcode.GuildWarRequest, h.guildWarPropose)
+		target.RegisterHandler(opcode.GuildWarEndRequest, h.guildWarEnd)
+		target.RegisterHandler(opcode.GuildWarCompensationClaimRequest, h.guildWarCompensationClaim)
+		target.RegisterHandler(opcode.GuildWarRewardRequest, h.guildWarReward)
+	}
+	if h.election != nil {
+		target.RegisterHandler(opcode.GuildElectionRequest, h.guildElectionStart)
+		target.RegisterHandler(opcode.GuildElectionParticipateRequest, h.guildElectionOpen)
+		target.RegisterHandler(opcode.GuildElectionVoteRequest, h.guildElectionVote)
+	}
+	if h.siege != nil {
+		target.RegisterHandler(opcode.GuildUpdateSiegeAuthorityRequest, h.guildSiegeAuthority)
+	}
+	if h.mercenary != nil {
+		target.RegisterHandler(opcode.GuildMercenaryAttrRequest, h.guildMercenaryAttribute)
+	}
+	target.RegisterHandler(opcode.GuildMercenaryTerminateRequest, h.guildMercenaryTerminate)
+	if h.fortress != nil {
+		target.RegisterHandler(opcode.GuildGPHistoryRequest, h.fortressExpenditureHistory)
+	}
+	if h.community != nil {
+		target.RegisterHandler(opcode.CommunityFriendAddRequest, h.communityFriendAdd)
+		target.RegisterHandler(opcode.CommunityFriendResponse, h.communityFriendResponse)
+		target.RegisterHandler(opcode.CommunityFriendDeleteRequest, h.communityFriendDelete)
+	}
+	if h.communityBlock != nil {
+		target.RegisterHandler(opcode.CommunityBlockUpdateRequest, h.communityBlockUpdate)
+	}
+	if h.memo != nil {
+		target.RegisterHandler(opcode.CommunityMemoOpenRequest, h.communityMemoOpen)
+		target.RegisterHandler(opcode.CommunityMemoSendRequest, h.communityMemoSend)
+		target.RegisterHandler(opcode.CommunityMemoDeleteRequest, h.communityMemoDelete)
+		target.RegisterHandler(opcode.CommunityMemoListRequest, h.communityMemoList)
+		target.RegisterHandler(opcode.CommunityMemoGroupSendRequest, h.communityMemoGroupSend)
+	}
 	target.RegisterHandler(opcode.AcademyCreateRequest, h.academyCreate)
 	target.RegisterHandler(opcode.AcademyDisbandRequest, h.academyDisband)
 	target.RegisterHandler(opcode.AcademyKickRequest, h.academyKick)
@@ -78,6 +204,10 @@ func RegisterHandlers(target *server.Server, repo model.SocialRepository) *Handl
 	target.RegisterHandler(opcode.AcademyMatchingDeleteRequest, h.academyMatchingDelete)
 	target.RegisterHandler(opcode.AcademyMatchingListRequest, h.academyMatchingList)
 	target.RegisterHandler(opcode.AcademyMatchingJoinRequest, h.academyMatchingJoin)
+	target.RegisterHandler(opcode.AcademyInviteRequest, h.academyInvite)
+	target.RegisterHandler(opcode.AcademyMemberActionRequest, h.academyMemberAction)
+	target.RegisterHandler(opcode.AcademyMatchingResponse, h.academyInvitationResponse)
+	target.RegisterHandler(opcode.AcademyUnknownOperationRequest, h.academyTimedOperation)
 	target.RegisterHandler(opcode.JobJoinRequest, h.jobJoin)
 	target.RegisterHandler(opcode.JobLeaveRequest, h.jobLeave)
 	target.RegisterHandler(opcode.JobAliasRequest, h.jobAlias)
@@ -117,6 +247,9 @@ func operationPacket(messageID uint16, err error) network.Packet {
 }
 
 func socialErrorCode(err error) uint16 {
+	if err == nil {
+		return 0
+	}
 	switch {
 	case errors.Is(err, model.ErrSocialInsufficientLevel):
 		return 0x4A01
@@ -136,6 +269,7 @@ func socialErrorCode(err error) uint16 {
 }
 
 func (h *Handler) guildCreate(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.create"})
 	characterID, err := socialCharacter(session)
 	if err != nil || packet.Remaining() < 6 {
 		return fmt.Errorf("invalid guild create request")
@@ -157,10 +291,14 @@ func (h *Handler) guildCreate(ctx context.Context, session *server.Session, pack
 		return err
 	}
 	h.commitGold(characterID, gold)
+	if err = h.publishGuildEntityUpdate(characterID, guild); err != nil {
+		return err
+	}
 	return h.publishGuildSnapshot(guild)
 }
 
 func (h *Handler) guildDisband(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.disband"})
 	characterID, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -183,6 +321,7 @@ func (h *Handler) guildDisband(ctx context.Context, session *server.Session, pac
 }
 
 func (h *Handler) guildLeave(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.leave"})
 	characterID, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -196,12 +335,13 @@ func (h *Handler) guildLeave(ctx context.Context, session *server.Session, packe
 		return sendErr
 	}
 	if err == nil {
-		return h.publishGuildRemovalFor(before, characterID)
+		return h.publishGuildRemovalFor(before, characterID, vsro188.GuildMemberLeft)
 	}
 	return nil
 }
 
 func (h *Handler) guildInvite(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.invite"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -244,7 +384,7 @@ func (h *Handler) AnswerGuildInvitation(ctx context.Context, session *server.Ses
 	if errors.Is(err, model.ErrSocialNotFound) {
 		union, unionErr := h.repo.AnswerGuildUnionInvite(ctx, characterID, accept)
 		if errors.Is(unionErr, model.ErrSocialNotFound) {
-			return false, nil
+			return h.answerGuildWarInvitation(ctx, session, characterID, accept)
 		}
 		if sendErr := h.sendPacket(session, operationPacket(opcode.GuildUnionInviteResponse, unionErr)); sendErr != nil {
 			return true, sendErr
@@ -258,12 +398,695 @@ func (h *Handler) AnswerGuildInvitation(ctx context.Context, session *server.Ses
 		return true, sendErr
 	}
 	if err == nil && accept {
-		return true, h.publishGuildSnapshot(guild)
+		if err = h.sendGuildSnapshot(characterID, guild); err != nil {
+			return true, err
+		}
+		for _, member := range guild.Members {
+			if member.CharacterID == characterID {
+				if err = h.publishGuildUpdateExcept(guild, vsro188.BuildGuildMemberJoinUpdate(guildMemberUpdate(member)), characterID); err != nil {
+					return true, err
+				}
+				break
+			}
+		}
+		return true, h.publishGuildEntityUpdate(characterID, guild)
 	}
 	return true, nil
 }
 
+func (h *Handler) guildWarPropose(ctx context.Context, session *server.Session, packet network.Packet) error {
+	if h.war == nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarStartResult(socialErrorCode(model.ErrSocialNotFound)))
+	}
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.war.propose"})
+	characterID, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	proposal, err := vsro188.DecodeGuildWarProposal(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarStartResult(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.war.ProposeGuildWar(ctx, characterID, model.GuildWarProposal{TargetGuildName: proposal.GuildName, WarPeriodID: proposal.WarPeriodID, VictoryPointID: proposal.VictoryPointID, Wager: proposal.Wager})
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarStartResult(socialErrorCode(err)))
+	}
+	h.commitGold(state.ChallengerMaster, state.ChallengerGold)
+	target, lookupErr := h.world.GetPlayerByCharacterID(state.TargetMaster)
+	if lookupErr != nil || target == nil || target.Session == nil {
+		rejected, rejectErr := h.war.AnswerGuildWar(ctx, state.TargetMaster, false)
+		if rejectErr == nil {
+			h.commitGold(rejected.ChallengerMaster, rejected.ChallengerGold)
+		}
+		return h.sendPacket(session, vsro188.BuildGuildWarStartResult(socialErrorCode(model.ErrSocialNotFound)))
+	}
+	if err = h.sendPacket(session, vsro188.BuildGuildWarStartResult(0)); err != nil {
+		return err
+	}
+	invite := vsro188.BuildGuildWarProposal(vsro188.GuildWarProposal{GuildName: state.ChallengerName, Mode: 0, WarPeriodID: state.WarPeriodID, VictoryPointID: state.VictoryPointID, Wager: state.Wager})
+	return h.sendPacket(target.Session, invite)
+}
+
+func (h *Handler) answerGuildWarInvitation(ctx context.Context, session *server.Session, characterID int, accept bool) (bool, error) {
+	if h.war == nil {
+		return false, nil
+	}
+	state, err := h.war.AnswerGuildWar(ctx, characterID, accept)
+	if errors.Is(err, model.ErrSocialNotFound) {
+		return false, nil
+	}
+	code := uint16(0)
+	if err != nil {
+		code = socialErrorCode(err)
+	}
+	if sendErr := h.sendPacket(session, vsro188.BuildGuildWarStartResult(code)); sendErr != nil {
+		return true, sendErr
+	}
+	if err != nil {
+		return true, nil
+	}
+	if accept {
+		h.commitGold(state.TargetMaster, state.TargetGold)
+	} else {
+		h.commitGold(state.ChallengerMaster, state.ChallengerGold)
+	}
+	if challenger, lookupErr := h.world.GetPlayerByCharacterID(state.ChallengerMaster); lookupErr == nil && challenger != nil && challenger.Session != nil {
+		if sendErr := h.sendPacket(challenger.Session, vsro188.BuildGuildWarStartResult(0)); sendErr != nil {
+			return true, sendErr
+		}
+	}
+	if accept {
+		return true, h.publishGuildWarInfo(ctx, state)
+	}
+	return true, nil
+}
+
+func guildWarInfoPacket(state model.GuildWarState) (network.Packet, error) {
+	if state.ID == 0 || state.ID > math.MaxUint32 || state.ChallengerGuild <= 0 || state.TargetGuild <= 0 {
+		return network.Packet{}, model.ErrSocialInvalidRequest
+	}
+	return vsro188.BuildGuildWarInfo(vsro188.GuildWarInfo{
+		WarID: uint32(state.ID), WarPeriodID: state.WarPeriodID, VictoryPointID: state.VictoryPointID,
+		Wager: state.Wager, ChallengerGuildID: uint32(state.ChallengerGuild), TargetGuildID: uint32(state.TargetGuild),
+		ChallengerScore: state.ChallengerScore, TargetScore: state.TargetScore,
+	})
+}
+
+func (h *Handler) RecordGuildWarKill(ctx context.Context, killerID, victimID int, victimLevel uint32) error {
+	if h == nil || h.war == nil {
+		return nil
+	}
+	state, err := h.war.RecordGuildWarKill(ctx, killerID, victimID, victimLevel)
+	if errors.Is(err, model.ErrSocialNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	killerName, victimName := "", ""
+	if killer, lookupErr := h.world.GetPlayerByCharacterID(killerID); lookupErr == nil && killer != nil {
+		killerName = killer.CharName
+	}
+	if victim, lookupErr := h.world.GetPlayerByCharacterID(victimID); lookupErr == nil && victim != nil {
+		victimName = victim.CharName
+	}
+	killerMaster, victimMaster := state.ChallengerMaster, state.TargetMaster
+	if state.ScoringGuild == state.TargetGuild {
+		killerMaster, victimMaster = state.TargetMaster, state.ChallengerMaster
+	}
+	for _, publication := range []struct {
+		master    int
+		side      byte
+		character int
+		name      string
+	}{{killerMaster, 1, killerID, killerName}, {victimMaster, 2, victimID, victimName}} {
+		guild, loadErr := h.repo.Guild(ctx, publication.master)
+		if loadErr != nil {
+			return loadErr
+		}
+		packet := vsro188.BuildGuildWarScoreUpdate(publication.side, uint32(state.ID), state.ScoreDelta, uint32(publication.character), publication.name)
+		if sendErr := h.publishGuildUpdate(guild, packet); sendErr != nil {
+			return sendErr
+		}
+	}
+	return nil
+}
+
+func (h *Handler) publishGuildWarInfo(ctx context.Context, state model.GuildWarState) error {
+	packet, err := guildWarInfoPacket(state)
+	if err != nil {
+		return err
+	}
+	seen := make(map[int]struct{})
+	for _, master := range []int{state.ChallengerMaster, state.TargetMaster} {
+		guild, loadErr := h.repo.Guild(ctx, master)
+		if loadErr != nil {
+			return loadErr
+		}
+		for _, member := range guild.Members {
+			if _, ok := seen[member.CharacterID]; ok {
+				continue
+			}
+			seen[member.CharacterID] = struct{}{}
+			if player, lookupErr := h.world.GetPlayerByCharacterID(member.CharacterID); lookupErr == nil && player != nil && player.Session != nil {
+				if err = h.sendPacket(player.Session, packet); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) guildWarEnd(ctx context.Context, session *server.Session, packet network.Packet) error {
+	if h.war == nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarEndResult(socialErrorCode(model.ErrSocialNotFound)))
+	}
+	characterID, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	warID, err := vsro188.DecodeGuildWarEndRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarEndResult(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.war.EndGuildWar(ctx, characterID, warID)
+	code := uint16(0)
+	if err != nil {
+		code = socialErrorCode(err)
+	}
+	if sendErr := h.sendPacket(session, vsro188.BuildGuildWarEndResult(code)); sendErr != nil {
+		return sendErr
+	}
+	if err != nil {
+		return nil
+	}
+	otherMaster := state.ChallengerMaster
+	if characterID == state.ChallengerMaster {
+		otherMaster = state.TargetMaster
+	}
+	if other, lookupErr := h.world.GetPlayerByCharacterID(otherMaster); lookupErr == nil && other != nil && other.Session != nil {
+		return h.sendPacket(other.Session, vsro188.BuildGuildWarEndResult(0))
+	}
+	return nil
+}
+
+func (h *Handler) guildWarReward(ctx context.Context, session *server.Session, packet network.Packet) error {
+	characterID, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	warID, err := vsro188.DecodeGuildWarRewardRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarRewardResult(0, socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.war.AvailableGuildWarReward(ctx, characterID, warID)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarRewardResult(0, socialErrorCode(err)))
+	}
+	return h.sendPacket(session, vsro188.BuildGuildWarRewardResult(state.RewardGold, 0))
+}
+
+func (h *Handler) guildWarCompensationClaim(ctx context.Context, session *server.Session, packet network.Packet) error {
+	characterID, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	reward, err := vsro188.DecodeGuildWarCompensationClaimRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarCompensationClaimResult(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.war.ClaimGuildWarReward(ctx, characterID, reward)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildWarCompensationClaimResult(socialErrorCode(err)))
+	}
+	h.commitGold(characterID, state.WinnerGold)
+	if err = h.sendPacket(session, vsro188.BuildGuildWarCompensationClaimResult(0)); err != nil {
+		return err
+	}
+	return h.sendPacket(session, vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: state.WinnerGold}))
+}
+
+func (h *Handler) guildElectionStart(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	masterID, err := vsro188.DecodeGuildElectionRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildElectionResult(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.election.StartGuildElection(ctx, actor, masterID, time.Now())
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildElectionResult(socialErrorCode(err)))
+	}
+	if err = h.sendPacket(session, vsro188.BuildGuildElectionResult(0)); err != nil {
+		return err
+	}
+	guild, err := h.repo.Guild(ctx, actor)
+	if err != nil {
+		return err
+	}
+	return h.publishGuildUpdate(guild, vsro188.BuildGuildElectionOpened(state.ID, 1, uint32(state.EndsAt.Unix())))
+}
+
+func (h *Handler) guildSiegeAuthority(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	request, err := vsro188.DecodeGuildSiegeAuthorityRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildSiegeAuthorityFailure(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	guild, err := h.siege.UpdateGuildSiegeAuthority(ctx, actor, int(request.CharacterID), request.Authority)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildSiegeAuthorityFailure(socialErrorCode(err)))
+	}
+	return h.publishGuildUpdate(guild, vsro188.BuildGuildSiegeAuthorityUpdate(request.CharacterID, request.Authority))
+}
+
+func (h *Handler) guildMercenaryAttribute(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	request, err := vsro188.DecodeGuildMercenaryAttributeRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryAttributeFailure(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	guild, gold, err := h.mercenary.UpdateGuildMercenaryAttribute(ctx, actor, request.Attribute)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryAttributeFailure(socialErrorCode(err)))
+	}
+	h.commitGold(actor, gold)
+	if err = h.publishGuildUpdate(guild, vsro188.BuildGuildMercenaryAttributeUpdate(guild.GatheredSP, guild.MercenaryAttr)); err != nil {
+		return err
+	}
+	return h.sendPacket(session, vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold}))
+}
+
+func (h *Handler) guildMercenaryTerminate(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	if vsro188.DecodeGuildMercenaryTerminateRequest(&packet) != nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryTerminateFailure(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	if h.cos == nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryTerminateFailure(socialErrorCode(model.ErrCOSRepositoryUnavailable)))
+	}
+	player, err := h.world.GetPlayerByCharacterID(actor)
+	if err != nil || player == nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryTerminateFailure(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	if _, err = h.cos.TerminateGuildMercenaries(ctx, player); err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildMercenaryTerminateFailure(socialErrorCode(err)))
+	}
+	return nil
+}
+
+func (h *Handler) fortressExpenditureHistory(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	if vsro188.DecodeFortressExpenditureHistoryRequest(&packet) != nil {
+		return h.sendPacket(session, vsro188.BuildFortressExpenditureHistoryFailure(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	history, err := h.fortress.FortressExpenditureHistory(ctx, actor, 255)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildFortressExpenditureHistoryFailure(socialErrorCode(err)))
+	}
+	entries := make([]vsro188.FortressExpenditureEntry, len(history))
+	for i, entry := range history {
+		entries[i] = vsro188.FortressExpenditureEntry{Timestamp: entry.Timestamp, CharacterName: entry.CharacterName, Amount: entry.Amount, Reason: byte(entry.Reason)}
+	}
+	response, err := vsro188.BuildFortressExpenditureHistory(entries)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, response)
+}
+
+func communityFriendRecord(friend model.CommunityFriend, online bool) vsro188.CommunityFriendRecord {
+	return vsro188.CommunityFriendRecord{CharacterID: friend.CharacterID, Name: friend.Name, RefObjectID: friend.RefObjectID, Online: online}
+}
+
+func (h *Handler) communityFriendOnline(characterID uint32) bool {
+	player, err := h.world.GetPlayerByCharacterID(int(characterID))
+	return err == nil && player != nil && player.Session != nil
+}
+
+func (h *Handler) CommunityOffline(ctx context.Context, characterID int) error {
+	if h == nil || h.community == nil || characterID <= 0 {
+		return nil
+	}
+	friends, err := h.community.CommunityFriends(ctx, characterID)
+	if err != nil {
+		return err
+	}
+	for _, friend := range friends {
+		player, lookupErr := h.world.GetPlayerByCharacterID(int(friend.CharacterID))
+		if lookupErr == nil && player != nil && player.Session != nil {
+			if err = h.sendPacket(player.Session, vsro188.BuildCommunityFriendState(uint32(characterID), false)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) communityFriendAdd(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	targetName, err := vsro188.DecodeCommunityFriendAddRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityFriendAddFailure(socialErrorCode(model.ErrSocialInvalidRequest), 0))
+	}
+	request, err := h.community.RequestCommunityFriend(ctx, actor, targetName, time.Now())
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityFriendAddFailure(socialErrorCode(err), 0))
+	}
+	target, lookupErr := h.world.GetPlayerByCharacterID(int(request.Target.CharacterID))
+	if lookupErr != nil || target == nil || target.Session == nil {
+		return nil
+	}
+	invitation, err := vsro188.BuildCommunityFriendInvitation(request.Requester.CharacterID, request.Target.CharacterID, request.Requester.Name)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(target.Session, invitation)
+}
+
+func (h *Handler) communityFriendResponse(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	response, err := vsro188.DecodeCommunityFriendResponse(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityFriendAddFailure(socialErrorCode(model.ErrSocialInvalidRequest), 0))
+	}
+	state, err := h.community.RespondCommunityFriend(ctx, actor, int(response.RequesterID), int(response.TargetID), response.Accepted, time.Now())
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityFriendAddFailure(socialErrorCode(err), 0))
+	}
+	requester, _ := h.world.GetPlayerByCharacterID(int(state.Requester.CharacterID))
+	if !response.Accepted {
+		if requester != nil && requester.Session != nil {
+			return h.sendPacket(requester.Session, vsro188.BuildCommunityFriendAddFailure(0x640b, 2))
+		}
+		return nil
+	}
+	requesterUpdate, err := vsro188.BuildCommunityFriendAdded(communityFriendRecord(state.Target, true))
+	if err != nil {
+		return err
+	}
+	targetUpdate, err := vsro188.BuildCommunityFriendAdded(communityFriendRecord(state.Requester, requester != nil && requester.Session != nil))
+	if err != nil {
+		return err
+	}
+	if requester != nil && requester.Session != nil {
+		if err = h.sendPacket(requester.Session, requesterUpdate); err != nil {
+			return err
+		}
+	}
+	return h.sendPacket(session, targetUpdate)
+}
+
+func (h *Handler) communityFriendDelete(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	friendID, err := vsro188.DecodeCommunityFriendDeleteRequest(&packet)
+	if err == nil {
+		err = h.community.DeleteCommunityFriend(ctx, actor, int(friendID))
+	}
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityFriendDeleteResult(friendID, socialErrorCode(err)))
+	}
+	if err = h.sendPacket(session, vsro188.BuildCommunityFriendDeleteResult(friendID, 0)); err != nil {
+		return err
+	}
+	friend, _ := h.world.GetPlayerByCharacterID(int(friendID))
+	if friend != nil && friend.Session != nil {
+		return h.sendPacket(friend.Session, vsro188.BuildCommunityFriendRemoved(uint32(actor)))
+	}
+	return nil
+}
+
+func communityBlockResultCode(action byte, err error) byte {
+	if err == nil {
+		return 0
+	}
+	if errors.Is(err, model.ErrSocialNotFound) {
+		if action == vsro188.CommunityBlockRemove {
+			return 2
+		}
+		return 1
+	}
+	if errors.Is(err, model.ErrSocialConflict) {
+		return 2
+	}
+	if errors.Is(err, model.ErrSocialCapacity) {
+		return 3
+	}
+	return 4
+}
+
+func (h *Handler) communityBlockUpdate(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	request, err := vsro188.DecodeCommunityBlockRequest(&packet)
+	if err != nil {
+		response, encodeErr := vsro188.BuildCommunityBlockResult(vsro188.CommunityBlockAdd, 4, "")
+		if encodeErr != nil {
+			return encodeErr
+		}
+		return h.sendPacket(session, response)
+	}
+	blocked, updateErr := h.communityBlock.UpdateCommunityBlock(ctx, actor, request.TargetName, request.Action, time.Now())
+	result := communityBlockResultCode(request.Action, updateErr)
+	name := ""
+	if result == 0 {
+		name = blocked.Name
+	}
+	response, err := vsro188.BuildCommunityBlockResult(request.Action, result, name)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, response)
+}
+
+func communityMemoEntry(memo model.CommunityMemo) vsro188.CommunityMemoListEntry {
+	return vsro188.CommunityMemoListEntry{SenderName: memo.SenderName, RefObjectID: memo.RefObjectID, Timestamp: memo.SentAt, Status: memo.Status}
+}
+
+func (h *Handler) communityMemoOpen(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	slot, err := vsro188.DecodeCommunityMemoSlotRequest(&packet)
+	if err != nil {
+		response, _ := vsro188.BuildCommunityMemoOpen(0, "", socialErrorCode(model.ErrSocialInvalidRequest))
+		return h.sendPacket(session, response)
+	}
+	memo, err := h.memo.OpenCommunityMemo(ctx, actor, slot)
+	if err != nil {
+		response, _ := vsro188.BuildCommunityMemoOpen(0, "", socialErrorCode(err))
+		return h.sendPacket(session, response)
+	}
+	response, err := vsro188.BuildCommunityMemoOpen(slot, memo.Message, 0)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, response)
+}
+
+func (h *Handler) sendCommunityMemo(ctx context.Context, actor int, targetName, message string, now time.Time) error {
+	memo, err := h.memo.SendCommunityMemo(ctx, actor, targetName, message, now)
+	if err != nil {
+		return err
+	}
+	if h.world == nil {
+		return nil
+	}
+	target, lookupErr := h.world.GetPlayerByCharacterID(int(memo.RecipientID))
+	if lookupErr != nil || target == nil || target.Session == nil {
+		return nil
+	}
+	notification, err := vsro188.BuildCommunityMemoNotification(communityMemoEntry(memo))
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(target.Session, notification)
+}
+
+func (h *Handler) communityMemoSend(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	request, err := vsro188.DecodeCommunityMemoSendRequest(&packet)
+	if err == nil {
+		err = h.sendCommunityMemo(ctx, actor, request.TargetName, request.Message, time.Now())
+	}
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityMemoSendResult(socialErrorCode(err)))
+	}
+	return h.sendPacket(session, vsro188.BuildCommunityMemoSendResult(0))
+}
+
+func (h *Handler) communityMemoDelete(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	slot, err := vsro188.DecodeCommunityMemoSlotRequest(&packet)
+	if err == nil {
+		err = h.memo.DeleteCommunityMemo(ctx, actor, slot)
+	}
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildCommunityMemoDeleteResult(0, socialErrorCode(err)))
+	}
+	return h.sendPacket(session, vsro188.BuildCommunityMemoDeleteResult(slot, 0))
+}
+
+func (h *Handler) communityMemoList(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	if err = vsro188.DecodeCommunityMemoListRequest(&packet); err != nil {
+		response, _ := vsro188.BuildCommunityMemoList(nil, socialErrorCode(model.ErrSocialInvalidRequest))
+		return h.sendPacket(session, response)
+	}
+	memos, err := h.memo.CommunityMemos(ctx, actor)
+	if err != nil {
+		response, _ := vsro188.BuildCommunityMemoList(nil, socialErrorCode(err))
+		return h.sendPacket(session, response)
+	}
+	entries := make([]vsro188.CommunityMemoListEntry, len(memos))
+	for i, memo := range memos {
+		entries[i] = communityMemoEntry(memo)
+	}
+	response, err := vsro188.BuildCommunityMemoList(entries, 0)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, response)
+}
+
+func (h *Handler) communityMemoGroupSend(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	request, err := vsro188.DecodeCommunityMemoGroupSendRequest(&packet)
+	if err != nil {
+		response, _ := vsro188.BuildCommunityMemoGroupResult(nil, socialErrorCode(model.ErrSocialInvalidRequest))
+		return h.sendPacket(session, response)
+	}
+	results := make([]vsro188.CommunityMemoGroupResult, len(request.Recipients))
+	now := time.Now()
+	for i, recipient := range request.Recipients {
+		sendErr := h.sendCommunityMemo(ctx, actor, recipient, request.Message, now)
+		results[i] = vsro188.CommunityMemoGroupResult{Recipient: recipient, Code: socialErrorCode(sendErr)}
+	}
+	response, err := vsro188.BuildCommunityMemoGroupResult(results, 0)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, response)
+}
+
+func (h *Handler) guildElectionOpen(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	electionID, err := vsro188.DecodeGuildElectionParticipateRequest(&packet)
+	if err != nil {
+		result, _ := vsro188.BuildGuildElectionOpenResult(0, 0, nil, socialErrorCode(model.ErrSocialInvalidRequest))
+		return h.sendPacket(session, result)
+	}
+	state, err := h.election.GuildElection(ctx, actor, electionID, time.Now())
+	if err != nil {
+		result, _ := vsro188.BuildGuildElectionOpenResult(0, 0, nil, socialErrorCode(err))
+		return h.sendPacket(session, result)
+	}
+	candidates := make([]vsro188.GuildElectionCandidate, len(state.Candidates))
+	for i, candidate := range state.Candidates {
+		candidates[i] = vsro188.GuildElectionCandidate{CharacterID: candidate.CharacterID, Votes: candidate.Votes}
+	}
+	result, err := vsro188.BuildGuildElectionOpenResult(state.ID, state.SelectedCandidateID, candidates, 0)
+	if err != nil {
+		return err
+	}
+	return h.sendPacket(session, result)
+}
+
+func (h *Handler) guildElectionVote(ctx context.Context, session *server.Session, packet network.Packet) error {
+	actor, err := socialCharacter(session)
+	if err != nil {
+		return err
+	}
+	vote, err := vsro188.DecodeGuildElectionVoteRequest(&packet)
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildElectionVoteResult(socialErrorCode(model.ErrSocialInvalidRequest)))
+	}
+	state, err := h.election.VoteGuildElection(ctx, actor, vote.ElectionID, vote.CandidateID, vote.Selection, time.Now())
+	if err != nil {
+		return h.sendPacket(session, vsro188.BuildGuildElectionVoteResult(socialErrorCode(err)))
+	}
+	if err = h.sendPacket(session, vsro188.BuildGuildElectionVoteResult(0)); err != nil {
+		return err
+	}
+	guild, err := h.repo.Guild(ctx, actor)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range state.Candidates {
+		if err = h.publishGuildUpdate(guild, vsro188.BuildGuildElectionCandidateState(candidate.CharacterID, 1, candidate.Votes, 0)); err != nil {
+			return err
+		}
+	}
+	if state.WinnerID != 0 {
+		if err = h.publishGuildUpdate(guild, vsro188.BuildGuildElectionWinner(state.ID, uint32(state.WinnerID))); err != nil {
+			return err
+		}
+		return h.publishGuildSnapshot(guild)
+	}
+	return nil
+}
+
+func (h *Handler) ExpireGuildElections(ctx context.Context, now time.Time) (int, error) {
+	states, err := h.election.ExpireGuildElections(ctx, now, 100)
+	if err != nil {
+		return 0, err
+	}
+	for _, state := range states {
+		guild, loadErr := h.repo.Guild(ctx, state.PreviousMasterID)
+		if loadErr != nil {
+			return 0, loadErr
+		}
+		if sendErr := h.publishGuildUpdate(guild, vsro188.BuildGuildElectionWinner(state.ID, 0)); sendErr != nil {
+			return 0, sendErr
+		}
+	}
+	return len(states), nil
+}
+
 func (h *Handler) guildKick(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.kick"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -281,12 +1104,13 @@ func (h *Handler) guildKick(ctx context.Context, session *server.Session, packet
 		return sendErr
 	}
 	if err == nil {
-		return h.publishGuildRemovalFor(before, int(target))
+		return h.publishGuildRemovalFor(before, int(target), vsro188.GuildMemberKicked)
 	}
 	return nil
 }
 
 func (h *Handler) guildNotice(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.notice.update"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -306,13 +1130,14 @@ func (h *Handler) guildNotice(ctx context.Context, session *server.Session, pack
 	if err == nil {
 		guild, loadErr := h.repo.Guild(ctx, actor)
 		if loadErr == nil {
-			return h.publishGuildSnapshot(guild)
+			return h.publishGuildUpdate(guild, vsro188.BuildGuildNoticeUpdate(guild.NoticeTitle, guild.NoticeBody))
 		}
 	}
 	return nil
 }
 
 func (h *Handler) guildPermissions(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.permissions.update"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -343,13 +1168,23 @@ func (h *Handler) guildPermissions(ctx context.Context, session *server.Session,
 	if err == nil {
 		guild, loadErr := h.repo.Guild(ctx, actor)
 		if loadErr == nil {
-			return h.publishGuildSnapshot(guild)
+			ids := make([]int, 0, len(updates))
+			for characterID := range updates {
+				ids = append(ids, characterID)
+			}
+			sort.Ints(ids)
+			permissionUpdates := make([]vsro188.GuildPermissionUpdate, 0, len(ids))
+			for _, characterID := range ids {
+				permissionUpdates = append(permissionUpdates, vsro188.GuildPermissionUpdate{CharacterID: uint32(characterID), Permissions: updates[characterID]})
+			}
+			return h.publishGuildUpdate(guild, vsro188.BuildGuildPermissionUpdate(permissionUpdates))
 		}
 	}
 	return nil
 }
 
 func (h *Handler) guildDonate(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.donate"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -373,13 +1208,21 @@ func (h *Handler) guildDonate(ctx context.Context, session *server.Session, pack
 	if err == nil {
 		guild, loadErr := h.repo.Guild(ctx, actor)
 		if loadErr == nil {
-			return h.publishGuildSnapshot(guild)
+			if publishErr := h.publishGuildUpdate(guild, vsro188.BuildGuildGPUpdate(total)); publishErr != nil {
+				return publishErr
+			}
+			for _, member := range guild.Members {
+				if member.CharacterID == actor {
+					return h.publishGuildUpdate(guild, vsro188.BuildGuildMemberGPUpdate(uint32(actor), member.Donation))
+				}
+			}
 		}
 	}
 	return nil
 }
 
 func (h *Handler) guildPromote(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.promote"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -396,12 +1239,13 @@ func (h *Handler) guildPromote(ctx context.Context, session *server.Session, pac
 	}
 	if err == nil {
 		h.commitGold(actor, gold)
-		return h.publishGuildSnapshot(guild)
+		return h.publishGuildUpdate(guild, vsro188.BuildGuildPromoteUpdate(guild.Level, guild.GatheredSP))
 	}
 	return nil
 }
 
 func (h *Handler) guildTransfer(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.transfer"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -423,12 +1267,13 @@ func (h *Handler) guildTransfer(ctx context.Context, session *server.Session, pa
 		return sendErr
 	}
 	if err == nil {
-		return h.publishGuildSnapshot(guild)
+		return h.publishGuildUpdate(guild, vsro188.BuildGuildLeaderTransferUpdate(uint32(actor), target))
 	}
 	return nil
 }
 
 func (h *Handler) guildNickname(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.nickname.update"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -448,13 +1293,18 @@ func (h *Handler) guildNickname(ctx context.Context, session *server.Session, pa
 	if err == nil {
 		guild, loadErr := h.repo.Guild(ctx, actor)
 		if loadErr == nil {
-			return h.publishGuildSnapshot(guild)
+			for _, member := range guild.Members {
+				if member.CharacterID == int(target) {
+					return h.publishGuildNicknameUpdate(guild, member)
+				}
+			}
 		}
 	}
 	return nil
 }
 
 func (h *Handler) guildUnionInvite(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.union.invite"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -484,6 +1334,7 @@ func (h *Handler) guildUnionInvite(ctx context.Context, session *server.Session,
 }
 
 func (h *Handler) guildUnionLeave(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.union.leave"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -503,6 +1354,7 @@ func (h *Handler) guildUnionLeave(ctx context.Context, session *server.Session, 
 }
 
 func (h *Handler) guildUnionKick(ctx context.Context, session *server.Session, packet network.Packet) error {
+	ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.union.kick"})
 	actor, err := socialCharacter(session)
 	if err != nil {
 		return err
@@ -606,26 +1458,135 @@ func writeGuild(packet *network.Packet, guild model.GuildSnapshot) {
 	}
 }
 
+func guildMemberUpdate(member model.GuildMember) vsro188.GuildMemberUpdate {
+	return vsro188.GuildMemberUpdate{
+		CharacterID:    uint32(member.CharacterID),
+		Name:           member.Name,
+		Class:          member.Class,
+		Level:          member.Level,
+		Donation:       member.Donation,
+		Permissions:    member.Permissions,
+		Contribution:   member.Contribution,
+		Nickname:       member.Nickname,
+		RefObjectID:    member.RefObjectID,
+		SiegeAuthority: member.SiegeAuthority,
+		Online:         member.Online,
+	}
+}
+
 func (h *Handler) publishGuildSnapshot(guild model.GuildSnapshot) error {
 	for _, m := range guild.Members {
-		player, err := h.world.GetPlayerByCharacterID(m.CharacterID)
+		if err := h.sendGuildSnapshot(m.CharacterID, guild); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) sendGuildSnapshot(characterID int, guild model.GuildSnapshot) error {
+	player, err := h.world.GetPlayerByCharacterID(characterID)
+	if err != nil || player == nil || player.Session == nil {
+		return nil
+	}
+	begin := network.EmptyPacket()
+	begin.MessageID = opcode.GuildInfoBegin
+	if err = h.sendPacket(player.Session, begin); err != nil {
+		return err
+	}
+	data := network.EmptyPacket()
+	data.MessageID = opcode.GuildInfoData
+	writeGuild(&data, guild)
+	if err = h.sendPacket(player.Session, data); err != nil {
+		return err
+	}
+	end := network.EmptyPacket()
+	end.MessageID = opcode.GuildInfoEnd
+	return h.sendPacket(player.Session, end)
+}
+
+func (h *Handler) publishGuildUpdate(guild model.GuildSnapshot, packet network.Packet) error {
+	return h.publishGuildUpdateExcept(guild, packet, 0)
+}
+
+func (h *Handler) publishGuildUpdateExcept(guild model.GuildSnapshot, packet network.Packet, excludedCharacterID int) error {
+	for _, member := range guild.Members {
+		if member.CharacterID == excludedCharacterID {
+			continue
+		}
+		player, err := h.world.GetPlayerByCharacterID(member.CharacterID)
 		if err != nil || player == nil || player.Session == nil {
 			continue
 		}
-		begin := network.EmptyPacket()
-		begin.MessageID = opcode.GuildInfoBegin
-		if err = h.sendPacket(player.Session, begin); err != nil {
+		if err = h.sendPacket(player.Session, packet); err != nil {
 			return err
 		}
-		data := network.EmptyPacket()
-		data.MessageID = opcode.GuildInfoData
-		writeGuild(&data, guild)
-		if err = h.sendPacket(player.Session, data); err != nil {
+	}
+	return nil
+}
+
+func (h *Handler) publishGuildEntityUpdate(characterID int, guild model.GuildSnapshot) error {
+	for _, member := range guild.Members {
+		if member.CharacterID != characterID {
+			continue
+		}
+		player, err := h.world.GetPlayerByCharacterID(characterID)
+		if err != nil || player == nil {
+			return nil
+		}
+		packet := vsro188.BuildGuildEntityUpdate(player.GetUniqueID(), uint32(guild.ID), guild.Name, member.Nickname)
+		return h.publishVisiblePlayerPacket(player, packet)
+	}
+	return nil
+}
+
+func (h *Handler) publishGuildNicknameUpdate(guild model.GuildSnapshot, member model.GuildMember) error {
+	packet := vsro188.BuildGuildEntityNicknameUpdate(uint32(guild.ID), member.Name, member.Nickname)
+	recipients := make(map[*server.Session]struct{})
+	for _, guildMember := range guild.Members {
+		player, err := h.world.GetPlayerByCharacterID(guildMember.CharacterID)
+		if err == nil && player != nil && player.Session != nil {
+			recipients[player.Session] = struct{}{}
+		}
+	}
+	if player, err := h.world.GetPlayerByCharacterID(member.CharacterID); err == nil && player != nil {
+		collectVisiblePlayerSessions(player, recipients)
+	}
+	for session := range recipients {
+		if err := h.sendPacket(session, packet); err != nil {
 			return err
 		}
-		end := network.EmptyPacket()
-		end.MessageID = opcode.GuildInfoEnd
-		if err = h.sendPacket(player.Session, end); err != nil {
+	}
+	return nil
+}
+
+func collectVisiblePlayerSessions(player *model.Player, recipients map[*server.Session]struct{}) {
+	if player == nil {
+		return
+	}
+	if player.Session != nil {
+		recipients[player.Session] = struct{}{}
+	}
+	known := player.GetCharKnownObjectList()
+	if known == nil {
+		return
+	}
+	for _, object := range known.GetKnownObjects() {
+		observer, ok := object.(model.IPlayer)
+		if !ok || observer.GetSession() == nil {
+			continue
+		}
+		observerKnown := observer.GetCharKnownObjectList()
+		if observerKnown != nil && observerKnown.ClientKnows(player.GetUniqueID()) {
+			recipients[observer.GetSession()] = struct{}{}
+		}
+	}
+}
+
+func (h *Handler) publishVisiblePlayerPacket(player *model.Player, packet network.Packet) error {
+	recipients := make(map[*server.Session]struct{})
+	collectVisiblePlayerSessions(player, recipients)
+	for session := range recipients {
+		if err := h.sendPacket(session, packet); err != nil {
 			return err
 		}
 	}
@@ -640,36 +1601,21 @@ func (h *Handler) publishGuildRemoval(guild model.GuildSnapshot) error {
 	}
 	return nil
 }
-func (h *Handler) publishGuildRemovalFor(guild model.GuildSnapshot, characterID int) error {
+func (h *Handler) publishGuildRemovalFor(guild model.GuildSnapshot, characterID int, reason vsro188.GuildMemberLeaveReason) error {
 	if err := h.sendGuildRemove(characterID); err != nil {
 		return err
 	}
-	if len(guild.Members) > 0 {
-		return h.publishGuildSnapshotAfterRemoval(guild, characterID)
-	}
-	return nil
-}
-func (h *Handler) publishGuildSnapshotAfterRemoval(before model.GuildSnapshot, removed int) error {
-	for _, m := range before.Members {
-		if m.CharacterID == removed {
-			continue
-		}
-		current, err := h.repo.Guild(context.Background(), m.CharacterID)
-		if err == nil {
-			return h.publishGuildSnapshot(current)
-		}
-	}
-	return nil
+	return h.publishGuildUpdateExcept(guild, vsro188.BuildGuildMemberLeaveUpdate(uint32(characterID), reason), characterID)
 }
 func (h *Handler) sendGuildRemove(characterID int) error {
 	player, err := h.world.GetPlayerByCharacterID(characterID)
-	if err != nil || player == nil || player.Session == nil {
+	if err != nil || player == nil {
 		return nil
 	}
 	p := network.EmptyPacket()
 	p.MessageID = opcode.GuildEntityRemove
 	p.WriteUInt32(player.UniqueID)
-	return h.sendPacket(player.Session, p)
+	return h.publishVisiblePlayerPacket(player, p)
 }
 
 func (h *Handler) academyCreate(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -791,7 +1737,8 @@ func (h *Handler) academyGrade(ctx context.Context, session *server.Session, pac
 		return err
 	}
 	before, _ := h.repo.Academy(ctx, actor)
-	err = h.repo.GraduateAcademyMember(ctx, actor, int(target))
+	commandKey := fmt.Sprintf("academy:graduate:%s:%02x:%d", session.ID, packet.Sequence, target)
+	_, err = h.repo.GraduateAcademyMember(ctx, actor, int(target), commandKey)
 	if sendErr := h.sendPacket(session, operationPacket(opcode.AcademyGradeResponse, err)); sendErr != nil {
 		return sendErr
 	}
@@ -947,13 +1894,102 @@ func (h *Handler) academyMatchingJoin(ctx context.Context, session *server.Sessi
 	return nil
 }
 func (h *Handler) publishAcademy(a model.AcademySnapshot) error {
-	// The vSRO 1.188 client does not accept the former snapshot encoding for
-	// 0x3C81. Its handler reads a different record shape and deliberately
-	// raises an access violation when that contract is violated. Keep the
-	// persistent Academy operations available, but do not publish an
-	// unverified wire representation to connected clients.
-	_ = a
+	packet := buildAcademyInfoPacket(a, h.world)
+	for _, member := range a.Members {
+		player, err := h.world.GetPlayerByCharacterID(member.CharacterID)
+		if err != nil || player == nil || player.Session == nil {
+			continue
+		}
+		if err = h.sendPacket(player.Session, packet); err != nil {
+			return err
+		}
+		buffs, loadErr := h.repo.AcademyBuffs(context.Background(), member.CharacterID, time.Now().UTC())
+		if loadErr != nil {
+			return loadErr
+		}
+		for _, buff := range buffs {
+			if err = h.sendPacket(player.Session, buildAcademyBuffPacket(buff, time.Now().UTC())); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// PublishAcademyBuffs sends committed mentor/apprentice accumulation state to
+// whichever affected characters are online. Offline state remains durable.
+func (h *Handler) PublishAcademyBuffs(states []model.AcademyBuffState) {
+	now := time.Now().UTC()
+	for _, state := range states {
+		player, err := h.world.GetPlayerByCharacterID(state.CharacterID)
+		if err != nil || player == nil || player.Session == nil {
+			continue
+		}
+		_ = h.sendPacket(player.Session, buildAcademyBuffPacket(state, now))
+	}
+}
+
+func buildAcademyInfoPacket(academy model.AcademySnapshot, world worldLookup) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.AcademyInfo
+	packet.WriteUInt32(uint32(academy.ID))
+	packet.WriteUInt32(uint32(academy.LeaderCharacter))
+	packet.WriteUInt32(academy.GraduatedCount)
+	packet.WriteUInt32(academy.HonorPoints)
+	packet.WriteUInt32(uint32(academy.HonorRank))
+	packet.WriteByte(academy.HonorRank)
+	packet.WriteString(academy.CommentTitle)
+	packet.WriteString(academy.CommentBody)
+	members := academy.Members
+	if len(members) > 8 {
+		members = members[:8]
+	}
+	packet.WriteByte(byte(len(members)))
+	for _, member := range members {
+		runtimeUID := uint32(0)
+		if world != nil {
+			if player, err := world.GetPlayerByCharacterID(member.CharacterID); err == nil && player != nil {
+				runtimeUID = player.GetUniqueID()
+			}
+		}
+		packet.WriteUInt32(uint32(member.CharacterID))
+		packet.WriteUInt32(member.RefObjectID)
+		packet.WriteUInt32(runtimeUID)
+		packet.WriteString(member.Name)
+		packet.WriteByte(member.Class)
+		packet.WriteByte(member.Level)
+		for range 4 {
+			packet.WriteUInt32(0)
+		}
+		if member.Online {
+			packet.WriteByte(1)
+		} else {
+			packet.WriteByte(0)
+		}
+		packet.WriteByte(0)
+		packet.WriteUInt32(uint32(min(member.AccumulatedExperience, math.MaxUint32)))
+		packet.WriteByte(0)
+		packet.WriteUInt32(uint32(member.MentorID))
+		for range 4 {
+			packet.WriteUInt16(0)
+		}
+		packet.WriteString(member.MentorName)
+	}
+	return packet
+}
+
+func buildAcademyBuffPacket(buff model.AcademyBuffState, now time.Time) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.AcademyBuffUpdate
+	packet.WriteByte(buff.Type)
+	remaining := uint32(0)
+	if buff.EndsAt.After(now) {
+		minutes := (buff.EndsAt.Sub(now) + time.Minute - 1) / time.Minute
+		remaining = uint32(min(minutes, time.Duration(math.MaxUint32)))
+	}
+	packet.WriteUInt32(remaining)
+	packet.WriteUInt32(uint32(min(buff.Value, uint64(math.MaxUint32))))
+	return packet
 }
 func (h *Handler) publishAcademyRemoval(a model.AcademySnapshot) error {
 	_ = a
@@ -1181,8 +2217,76 @@ func (h *Handler) Bootstrap(ctx context.Context, session *server.Session) error 
 	if err != nil {
 		return err
 	}
+	if h.community != nil {
+		friends, loadErr := h.community.CommunityFriends(ctx, characterID)
+		if loadErr != nil {
+			return loadErr
+		}
+		records := make([]vsro188.CommunityFriendRecord, len(friends))
+		for i, friend := range friends {
+			online := h.communityFriendOnline(friend.CharacterID)
+			records[i] = communityFriendRecord(friend, online)
+			if online {
+				player, _ := h.world.GetPlayerByCharacterID(int(friend.CharacterID))
+				if player != nil && player.Session != nil {
+					if sendErr := h.sendPacket(player.Session, vsro188.BuildCommunityFriendState(uint32(characterID), true)); sendErr != nil {
+						return sendErr
+					}
+				}
+			}
+		}
+		info, encodeErr := vsro188.BuildCommunityFriendInfo(records)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if err = h.sendPacket(session, info); err != nil {
+			return err
+		}
+		pending, loadErr := h.community.PendingCommunityFriendRequests(ctx, characterID)
+		if loadErr != nil {
+			return loadErr
+		}
+		for _, request := range pending {
+			invitation, encodeErr := vsro188.BuildCommunityFriendInvitation(request.Requester.CharacterID, request.Target.CharacterID, request.Requester.Name)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if err = h.sendPacket(session, invitation); err != nil {
+				return err
+			}
+		}
+	}
+	if h.war != nil {
+		if war, loadErr := h.war.ActiveGuildWar(ctx, characterID); loadErr == nil {
+			packet, encodeErr := guildWarInfoPacket(war)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if err = h.sendPacket(session, packet); err != nil {
+				return err
+			}
+		} else if !errors.Is(loadErr, model.ErrSocialNotFound) {
+			return loadErr
+		}
+	}
+	if h.election != nil {
+		now := time.Now()
+		if touchErr := h.election.TouchGuildMemberOnline(ctx, characterID, now); touchErr != nil {
+			return touchErr
+		}
+		if election, loadErr := h.election.ActiveGuildElection(ctx, characterID, now); loadErr == nil {
+			if err = h.sendPacket(session, vsro188.BuildGuildElectionOpened(election.ID, 1, uint32(election.EndsAt.Unix()))); err != nil {
+				return err
+			}
+		} else if !errors.Is(loadErr, model.ErrSocialNotFound) {
+			return loadErr
+		}
+	}
 	if guild, loadErr := h.repo.Guild(ctx, characterID); loadErr == nil {
 		if err = h.publishGuildSnapshot(guild); err != nil {
+			return err
+		}
+		if err = h.publishGuildUpdateExcept(guild, vsro188.BuildGuildMemberStateUpdate(uint32(characterID), true), characterID); err != nil {
 			return err
 		}
 	} else if !errors.Is(loadErr, model.ErrSocialNotFound) {

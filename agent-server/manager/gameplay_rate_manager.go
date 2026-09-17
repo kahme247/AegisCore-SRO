@@ -20,6 +20,47 @@ var safeGameplayRates = model.GameplayRates{
 	MobCountRatePercent:        100,
 	MobRespawnRatePercent:      100,
 	LootDropRatePercent:        100,
+	GoldDropAmountRatePercent:  100,
+	PartyExperienceRange:       100,
+	GroundPickupRange:          160,
+	JobSuitEquipDelayMS:        30000,
+	PartyInvitationTTLMS:       10000,
+	MobAttackCooldownMS:        1500,
+	MobWanderDelayMS:           8000,
+	MobAggroReactionMinMS:      750,
+	MobAggroReactionMaxMS:      1500,
+	MobPursuitRefreshMS:        1000,
+	GuildCreationCost:          500000,
+	AcademyCreationCost:        100000,
+	AcademyMinimumLevel:        60,
+	GuildWarMaximumWager:       500000000,
+	MarketLifetimeMinutes:      4320,
+	CharacterDeletionHours:     168,
+	RecallConfirmationTTLMS:    60000,
+	GuildElectionDurationMin:   10,
+	GuildMasterAbsenceDays:     45,
+	GuildRecentMemberDays:      15,
+	FriendLimit:                20,
+	BlockLimit:                 20,
+	MemoLimit:                  20,
+	PKPenaltyPerKill:           10000,
+	BerserkDurationPerPointMS:  12000,
+	WinterDropChanceBP:         5000,
+	WinterDropItemCount:        1,
+	BattleArenaTicketRate:      0,
+	BattleArenaWorldIDs:        "42,43,44,45,46,47,48,49,50",
+	HwanBaseChanceBP:           800,
+	HwanOverlevelGrace:         5,
+	HwanPenaltyPerLevelBP:      25,
+	HwanMinimumChanceBP:        25,
+	HwanGiantMultiplier:        5,
+	HwanEliteMultiplier:        2,
+	ServerMaxLevel:             110,
+	EUMasteryMaxTotal:          240,
+	EUMasteryPointsPerLevel:    2,
+	CHMasteryMaxTotal:          330,
+	CHMasteryPointsPerLevel:    3,
+	MaxSpeedEffectMinutes:      1440,
 }
 
 type GameplayRateManager struct {
@@ -40,6 +81,7 @@ func NewGameplayRateManager(repository model.GameplayRateRepository, interval ti
 	}
 	manager := &GameplayRateManager{repository: repository, interval: interval, done: make(chan struct{})}
 	manager.current.Store(&safeGameplayRates)
+	model.StoreRuntimeGameplayPolicy(safeGameplayRates)
 	return manager, nil
 }
 
@@ -64,10 +106,55 @@ func (m *GameplayRateManager) Refresh(ctx context.Context) error {
 	}
 	previous := m.Current()
 	m.current.Store(&rates)
+	model.StoreRuntimeGameplayPolicy(rates)
 	if rates != previous {
-		log.Infof("gameplay rates refreshed experience=%d%% party-experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%% loot-drop=%d%%", rates.ExperienceRatePercent, rates.PartyExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent, rates.LootDropRatePercent)
+		log.Infof("gameplay rates refreshed experience=%d%% party-experience=%d%% skill-experience=%d%% mob-count=%d%% mob-respawn=%d%% loot-drop=%d%% gold-drop-amount=%d%%", rates.ExperienceRatePercent, rates.PartyExperienceRatePercent, rates.SkillExperienceRatePercent, rates.MobCountRatePercent, rates.MobRespawnRatePercent, rates.LootDropRatePercent, rates.GoldDropAmountRatePercent)
 	}
 	return nil
+}
+
+func (m *GameplayRateManager) ActivateOverride(ctx context.Context, eventID string, rates model.GameplayRateOverride) error {
+	repository, ok := m.repository.(model.GameplayRateOverrideRepository)
+	if !ok {
+		return model.ErrGameplayRateRepositoryUnavailable
+	}
+	if err := repository.ActivateRateOverride(ctx, eventID, rates); err != nil {
+		return err
+	}
+	return m.Refresh(ctx)
+}
+
+func (m *GameplayRateManager) DeactivateOverride(ctx context.Context, eventID string) error {
+	repository, ok := m.repository.(model.GameplayRateOverrideRepository)
+	if !ok {
+		return model.ErrGameplayRateRepositoryUnavailable
+	}
+	if err := repository.DeactivateRateOverride(ctx, eventID); err != nil {
+		return err
+	}
+	return m.Refresh(ctx)
+}
+
+func (m *GameplayRateManager) ActivateMobOverride(ctx context.Context, eventID string, rates model.GameplayMobRateOverride) error {
+	repository, ok := m.repository.(model.GameplayRateOverrideRepository)
+	if !ok {
+		return model.ErrGameplayRateRepositoryUnavailable
+	}
+	if err := repository.ActivateMobRateOverride(ctx, eventID, rates); err != nil {
+		return err
+	}
+	return m.Refresh(ctx)
+}
+
+func (m *GameplayRateManager) DeactivateMobOverride(ctx context.Context, eventID string) error {
+	repository, ok := m.repository.(model.GameplayRateOverrideRepository)
+	if !ok {
+		return model.ErrGameplayRateRepositoryUnavailable
+	}
+	if err := repository.DeactivateMobRateOverride(ctx, eventID); err != nil {
+		return err
+	}
+	return m.Refresh(ctx)
 }
 
 func (m *GameplayRateManager) Start(ctx context.Context) {

@@ -192,7 +192,7 @@ func (p *PartyService) AutoMatch(applicantUID uint32, purpose model.PartyPurpose
 			continue
 		}
 		for _, pending := range p.JoinRequests {
-			if pending.PlayerUniqueID == applicantUID && pending.PartyNumber == number && p.nowTime().Sub(pending.CreatedAt) < partyInvitationTTL {
+			if pending.PlayerUniqueID == applicantUID && pending.PartyNumber == number && p.nowTime().Sub(pending.CreatedAt) < p.invitationTTL() {
 				return AutoMatchResult{}, ErrPartyInvitationPending
 			}
 		}
@@ -236,7 +236,7 @@ func (p *PartyService) ExperienceRecipients(uid uint32) []*model.Player {
 			continue
 		}
 		position := member.GetNavmeshPosition()
-		if position.Region.ID != anchor.Region.ID || navmeshv2.HorizontalDistance(position, anchor) > PartyExperienceRange {
+		if position.Region.ID != anchor.Region.ID || navmeshv2.HorizontalDistance(position, anchor) > p.experienceRange() {
 			continue
 		}
 		recipients = append(recipients, member)
@@ -303,7 +303,7 @@ func (p *PartyService) Invite(inviterUID, targetUID uint32, settings model.Party
 	}
 	now := p.nowTime()
 	if pending, ok := p.pendingInvites[targetUID]; ok {
-		if now.Sub(pending.CreatedAt) < partyInvitationTTL {
+		if now.Sub(pending.CreatedAt) < p.invitationTTL() {
 			return PartyInvitation{}, nil, ErrPartyInvitationPending
 		}
 		delete(p.pendingInvites, targetUID)
@@ -339,7 +339,7 @@ func (p *PartyService) AnswerInvitation(targetUID uint32, accept bool) (PartyTra
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	invite, ok := p.pendingInvites[targetUID]
-	if !ok || p.nowTime().Sub(invite.CreatedAt) >= partyInvitationTTL {
+	if !ok || p.nowTime().Sub(invite.CreatedAt) >= p.invitationTTL() {
 		delete(p.pendingInvites, targetUID)
 		return PartyTransition{}, ErrPartyInvitationMissing
 	}
@@ -415,7 +415,7 @@ func (p *PartyService) CreateMatchingJoinRequest(partyNumber, applicantUID uint3
 		return nil, nil, nil, ErrPartyInvalidRequest
 	}
 	for _, pending := range p.JoinRequests {
-		if pending.PlayerUniqueID == applicantUID && p.nowTime().Sub(pending.CreatedAt) < partyInvitationTTL {
+		if pending.PlayerUniqueID == applicantUID && p.nowTime().Sub(pending.CreatedAt) < p.invitationTTL() {
 			return nil, nil, nil, ErrPartyInvitationPending
 		}
 	}
@@ -437,7 +437,7 @@ func (p *PartyService) purgeExpiredMatchingRequestsLocked() {
 	}
 	now := p.nowTime()
 	for requestID, request := range p.JoinRequests {
-		if request == nil || now.Sub(request.CreatedAt) >= partyInvitationTTL {
+		if request == nil || now.Sub(request.CreatedAt) >= p.invitationTTL() {
 			delete(p.JoinRequests, requestID)
 		}
 	}
@@ -447,7 +447,7 @@ func (p *PartyService) AnswerMatchingJoin(requestID, applicantUID, masterUID uin
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	request := p.JoinRequests[requestID]
-	if request == nil || request.PlayerUniqueID != applicantUID || p.nowTime().Sub(request.CreatedAt) >= partyInvitationTTL {
+	if request == nil || request.PlayerUniqueID != applicantUID || p.nowTime().Sub(request.CreatedAt) >= p.invitationTTL() {
 		delete(p.JoinRequests, requestID)
 		return PartyTransition{}, ErrPartyInvitationMissing
 	}

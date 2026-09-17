@@ -22,6 +22,22 @@ func TestCanMoveDirectlyAcceptsReachableTerrainBeforePursuit(t *testing.T) {
 	}
 }
 
+func TestCanMoveDirectlyAcceptsDungeonLocalMotion(t *testing.T) {
+	const regionID = int16(-32762)
+	region := navmeshv2.NewRegionFromInt16(regionID)
+	terrain := navmeshv2.NewRtNavmeshTerrain("dungeon-direct-motion", region)
+	terrain.DungeonMinimum = math32.NewVector3(-20000, -1000, -10000)
+	terrain.DungeonMaximum = math32.NewVector3(20000, 1000, 10000)
+	terrain.Cells = []navmeshv2.RtNavmeshCellQuad{{RtNavmeshCellBase: navmeshv2.RtNavmeshCellBase{Index: 0}}}
+	terrain.Cells[0].Mesh = &terrain
+	world := &WorldService{regions: map[int16]*navmeshv2.RtNavmeshTerrain{regionID: &terrain}, mutex: &sync.Mutex{}}
+	source := navmeshv2.RtNavmeshPosition{Region: region, Offset: math32.NewVector3(-1000, 0, 500)}
+	target := navmeshv2.RtNavmeshPosition{Region: region, Offset: math32.NewVector3(-800, 0, 500)}
+	if !world.CanMoveDirectly(source, target) {
+		t.Fatal("reachable dungeon-local movement skill path was rejected")
+	}
+}
+
 func TestFindTerrainCollisionAlongPathCatchesIntermediateCellWall(t *testing.T) {
 	const regionID = int16(25000)
 	region := navmeshv2.NewRegionFromInt16(regionID)

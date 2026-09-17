@@ -17,14 +17,23 @@ var ErrMonsterDropCatalogUnavailable = errors.New("monster-drop catalog reposito
 // drop-reference migration. The client CSV names are preserved in the import
 // command, while runtime code consumes only this typed boundary.
 const (
-	selectMonsterDirectDrops = "SELECT `REF_MONSTER_ID`,`REF_ITEM_ID`,`DROP_GROUP_TYPE`,`OPT_LEVEL`,`DROP_AMOUNT_MIN`,`DROP_AMOUNT_MAX`,`DROP_RATIO`,`REF_MAGIC_OPTION_ID1`,`CUSTOM_VALUE1`,`REF_MAGIC_OPTION_ID2`,`CUSTOM_VALUE2`,`REF_MAGIC_OPTION_ID3`,`CUSTOM_VALUE3`,`REF_MAGIC_OPTION_ID4`,`CUSTOM_VALUE4`,`REF_MAGIC_OPTION_ID5`,`CUSTOM_VALUE5`,`REF_MAGIC_OPTION_ID6`,`CUSTOM_VALUE6`,`REF_MAGIC_OPTION_ID7`,`CUSTOM_VALUE7`,`REF_MAGIC_OPTION_ID8`,`CUSTOM_VALUE8`,`REF_MAGIC_OPTION_ID9`,`CUSTOM_VALUE9`,`RENT_CODE_NAME` FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_DROP` WHERE `SERVICE`=1 ORDER BY `REF_MONSTER_ID`,`REF_ITEM_ID`"
-	selectMonsterRandomDrops = "SELECT `REF_MONSTER_ID`,`REF_ITEM_GROUP_ID`,`OVERLAP`,`DROP_AMOUNT_MIN`,`DROP_AMOUNT_MAX`,`DROP_RATIO` FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_RND_DROP` WHERE `SERVICE`=1 ORDER BY `REF_MONSTER_ID`,`REF_ITEM_GROUP_ID`"
-	selectDropGroups         = "SELECT `REF_ITEM_GROUP_ID`,`REF_ITEM_ID`,`REF_MAGIC_GROUP_ID`,`SELECT_RATIO` FROM `SRO_SHARD`.`REF_DROP_ITEM_GROUP` WHERE `SERVICE`=1 ORDER BY `REF_ITEM_GROUP_ID`,`REF_ITEM_ID`"
-	selectDropGold           = "SELECT `MON_LEVEL`,`DROP_PROB`,`GOLD_MIN`,`GOLD_MAX` FROM `SRO_SHARD`.`REF_DROP_GOLD` WHERE `SERVICE`=1 ORDER BY `MON_LEVEL`"
-	selectDropClassProfiles  = "SELECT `FAMILY`,`MON_LEVEL`,`PROB_GROUP`,`PROB` FROM `SRO_SHARD`.`REF_DROP_CLASS_SELECTION` ORDER BY `FAMILY`,`MON_LEVEL`,`PROB_GROUP`"
-	selectDropItemProfiles   = "SELECT a.`SOURCE_ROW`,a.`REF_ITEM_ID`,a.`PROB_RELATIVE`,a.`PROB_ABSOLUTE`,a.`ASSIGNED_GROUP`,a.`DROP_COUNT`,i.`TypeID_2`,i.`TypeID_3`,i.`TypeID_4`,i.`Rarity`,i.`Country`,i.`ItemClass`,i.`Dur_L`,i.`Dur_U`,i.`MaxMagicOptCount` FROM `SRO_SHARD`.`REF_DROP_ITEM_ASSIGN` a JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=a.`REF_ITEM_ID` WHERE a.`SERVICE`=1 ORDER BY a.`SOURCE_ROW`"
-	selectDropOptProfiles    = "SELECT `OPT_LEVEL`,`PROB`,`REQ_ONLINE_TIME` FROM `SRO_SHARD`.`REF_DROP_OPT_LEVEL_SELECTION` ORDER BY `OPT_LEVEL`"
-	selectDropMagicProfiles  = "SELECT a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`,o.`CODE_NAME`,o.`DROP_RATIO`,MIN(ap.`MIN_ITEM_CLASS`),o.`PARAM_TYPE`,o.`PARAM_VALUE` FROM `SRO_SHARD`.`REF_DROP_MAGIC_OPTION_ASSIGN` a JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` o ON o.`CODE_NAME`=a.`OPTION_CODE_NAME` JOIN `SRO_SHARD`.`REF_MAGIC_OPTION_APPLICABILITY` ap ON ap.`REF_MAGIC_OPTION_ID`=o.`ID` AND (ap.`ITEM_FAMILY`=CASE WHEN a.`TYPE_ID3`=6 THEN 'weapon' WHEN a.`TYPE_ID3`=4 THEN 'shield' WHEN a.`TYPE_ID3` IN (5,12) THEN 'accessory' ELSE 'armor' END OR a.`TYPE_ID3` IN (5,12) AND ap.`ITEM_FAMILY`=CASE a.`TYPE_ID4` WHEN 1 THEN 'earring' WHEN 2 THEN 'necklace' WHEN 3 THEN 'ring' ELSE '' END OR a.`TYPE_ID3` IN (1,2,3,9,10,11) AND ap.`ITEM_FAMILY`=CASE a.`TYPE_ID4` WHEN 1 THEN 'helm' WHEN 2 THEN 'mail_addon' WHEN 3 THEN 'mail' WHEN 4 THEN 'pants' ELSE '' END) WHERE a.`SERVICE`=1 GROUP BY a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`,o.`CODE_NAME`,o.`DROP_RATIO`,o.`PARAM_TYPE`,o.`PARAM_VALUE` ORDER BY a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`"
+	selectMonsterDirectDrops   = "SELECT d.`REF_MONSTER_ID`,d.`REF_ITEM_ID`,d.`DROP_GROUP_TYPE`,d.`OPT_LEVEL`,d.`DROP_AMOUNT_MIN`,d.`DROP_AMOUNT_MAX`,d.`DROP_RATIO`,d.`REF_MAGIC_OPTION_ID1`,d.`CUSTOM_VALUE1`,d.`REF_MAGIC_OPTION_ID2`,d.`CUSTOM_VALUE2`,d.`REF_MAGIC_OPTION_ID3`,d.`CUSTOM_VALUE3`,d.`REF_MAGIC_OPTION_ID4`,d.`CUSTOM_VALUE4`,d.`REF_MAGIC_OPTION_ID5`,d.`CUSTOM_VALUE5`,d.`REF_MAGIC_OPTION_ID6`,d.`CUSTOM_VALUE6`,d.`REF_MAGIC_OPTION_ID7`,d.`CUSTOM_VALUE7`,d.`REF_MAGIC_OPTION_ID8`,d.`CUSTOM_VALUE8`,d.`REF_MAGIC_OPTION_ID9`,d.`CUSTOM_VALUE9`,d.`RENT_CODE_NAME` FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_DROP` d JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` monster_ref ON monster_ref.`ID`=d.`REF_MONSTER_ID` AND monster_ref.`SERVICE`=1 AND monster_ref.`TYPE_ID_1`=1 JOIN `SRO_SHARD`.`CHAR_REF_DATA` monster ON monster.`RefObjID`=d.`REF_MONSTER_ID` JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` item_ref ON item_ref.`ID`=d.`REF_ITEM_ID` AND item_ref.`SERVICE`=1 AND item_ref.`TYPE_ID_1`=3 JOIN `SRO_SHARD`.`ITEMDATA` item ON item.`ItemID`=d.`REF_ITEM_ID` WHERE d.`SERVICE`=1 ORDER BY d.`REF_MONSTER_ID`,d.`REF_ITEM_ID`"
+	selectMonsterRandomDrops   = "SELECT d.`REF_MONSTER_ID`,d.`REF_ITEM_GROUP_ID`,d.`OVERLAP`,d.`DROP_AMOUNT_MIN`,d.`DROP_AMOUNT_MAX`,d.`DROP_RATIO` FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_RND_DROP` d JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` monster_ref ON monster_ref.`ID`=d.`REF_MONSTER_ID` AND monster_ref.`SERVICE`=1 AND monster_ref.`TYPE_ID_1`=1 JOIN `SRO_SHARD`.`CHAR_REF_DATA` monster ON monster.`RefObjID`=d.`REF_MONSTER_ID` WHERE d.`SERVICE`=1 ORDER BY d.`REF_MONSTER_ID`,d.`REF_ITEM_GROUP_ID`"
+	selectDropGroups           = "SELECT d.`REF_ITEM_GROUP_ID`,d.`REF_ITEM_ID`,d.`REF_MAGIC_GROUP_ID`,d.`SELECT_RATIO` FROM `SRO_SHARD`.`REF_DROP_ITEM_GROUP` d JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` item_ref ON item_ref.`ID`=d.`REF_ITEM_ID` AND item_ref.`SERVICE`=1 AND item_ref.`TYPE_ID_1`=3 JOIN `SRO_SHARD`.`ITEMDATA` item ON item.`ItemID`=d.`REF_ITEM_ID` WHERE d.`SERVICE`=1 ORDER BY d.`REF_ITEM_GROUP_ID`,d.`REF_ITEM_ID`"
+	selectDropGold             = "SELECT `MON_LEVEL`,`DROP_PROB`,`GOLD_MIN`,`GOLD_MAX` FROM `SRO_SHARD`.`REF_DROP_GOLD` WHERE `SERVICE`=1 ORDER BY `MON_LEVEL`"
+	selectDropClassProfiles    = "SELECT `FAMILY`,`MON_LEVEL`,`PROB_GROUP`,`PROB` FROM `SRO_SHARD`.`REF_DROP_CLASS_SELECTION` ORDER BY `FAMILY`,`MON_LEVEL`,`PROB_GROUP`"
+	selectDropItemProfiles     = "SELECT a.`SOURCE_ROW`,a.`REF_ITEM_ID`,a.`PROB_RELATIVE`,a.`PROB_ABSOLUTE`,a.`ASSIGNED_GROUP`,a.`DROP_COUNT`,i.`TypeID_2`,i.`TypeID_3`,i.`TypeID_4`,i.`Rarity`,i.`Country`,i.`ItemClass`,i.`Dur_L`,i.`Dur_U`,i.`MaxMagicOptCount` FROM `SRO_SHARD`.`REF_DROP_ITEM_ASSIGN` a JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` item_ref ON item_ref.`ID`=a.`REF_ITEM_ID` AND item_ref.`SERVICE`=1 AND item_ref.`TYPE_ID_1`=3 JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=a.`REF_ITEM_ID` WHERE a.`SERVICE`=1 ORDER BY a.`SOURCE_ROW`"
+	selectReservedDropItems    = "SELECT a.`SOURCE_ROW`,a.`COUNTRY_MASK`,a.`REF_ITEM_ID`,a.`PROB_RELATIVE`,a.`PROB_ABSOLUTE`,a.`ASSIGNED_GROUP`,a.`DROP_COUNT`,i.`TypeID_2`,i.`TypeID_3`,i.`TypeID_4`,i.`Rarity`,i.`ItemClass`,i.`Dur_L`,i.`Dur_U`,i.`MaxMagicOptCount` FROM `SRO_SHARD`.`REF_CUSTOMIZING_RESERVED_ITEM_DROP_FOR_MONSTER` a JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` item_ref ON item_ref.`ID`=a.`REF_ITEM_ID` AND item_ref.`SERVICE`=1 AND item_ref.`TYPE_ID_1`=3 JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=a.`REF_ITEM_ID` WHERE a.`SERVICE`=1 ORDER BY a.`SOURCE_ROW`"
+	selectDropOptProfiles      = "SELECT `OPT_LEVEL`,`PROB`,`REQ_ONLINE_TIME` FROM `SRO_SHARD`.`REF_DROP_OPT_LEVEL_SELECTION` ORDER BY `OPT_LEVEL`"
+	selectDropMagicProfiles    = "SELECT a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`,o.`CODE_NAME`,o.`DROP_RATIO`,MIN(ap.`MIN_ITEM_CLASS`),o.`PARAM_TYPE`,o.`PARAM_VALUE` FROM `SRO_SHARD`.`REF_DROP_MAGIC_OPTION_ASSIGN` a JOIN `SRO_SHARD`.`REF_MAGIC_OPTION` o ON o.`CODE_NAME`=a.`OPTION_CODE_NAME` JOIN `SRO_SHARD`.`REF_MAGIC_OPTION_APPLICABILITY` ap ON ap.`REF_MAGIC_OPTION_ID`=o.`ID` AND (ap.`ITEM_FAMILY`=CASE WHEN a.`TYPE_ID3`=6 THEN 'weapon' WHEN a.`TYPE_ID3`=4 THEN 'shield' WHEN a.`TYPE_ID3` IN (5,12) THEN 'accessory' ELSE 'armor' END OR a.`TYPE_ID3` IN (5,12) AND ap.`ITEM_FAMILY`=CASE a.`TYPE_ID4` WHEN 1 THEN 'earring' WHEN 2 THEN 'necklace' WHEN 3 THEN 'ring' ELSE '' END OR a.`TYPE_ID3` IN (1,2,3,9,10,11) AND ap.`ITEM_FAMILY`=CASE a.`TYPE_ID4` WHEN 1 THEN 'helm' WHEN 2 THEN 'mail_addon' WHEN 3 THEN 'mail' WHEN 4 THEN 'pants' ELSE '' END) WHERE a.`SERVICE`=1 GROUP BY a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`,o.`CODE_NAME`,o.`DROP_RATIO`,o.`PARAM_TYPE`,o.`PARAM_VALUE` ORDER BY a.`COUNTRY`,a.`TYPE_ID3`,a.`TYPE_ID4`,a.`SLOT`,o.`ID`"
+	selectInvalidDropReference = "SELECT invalid.`KIND`,invalid.`SOURCE_ID`,invalid.`REF_ID`,invalid.`REASON` FROM (" +
+		"SELECT 'direct_monster' `KIND`,d.`REF_MONSTER_ID` `SOURCE_ID`,d.`REF_MONSTER_ID` `REF_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>1 THEN 'wrong object type' ELSE 'enabled object missing CHAR_REF_DATA' END `REASON` FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_DROP` d LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=d.`REF_MONSTER_ID` LEFT JOIN `SRO_SHARD`.`CHAR_REF_DATA` r ON r.`RefObjID`=d.`REF_MONSTER_ID` WHERE d.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>1 OR c.`SERVICE`=1 AND r.`RefObjID` IS NULL) UNION ALL " +
+		"SELECT 'direct_item',d.`REF_MONSTER_ID`,d.`REF_ITEM_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>3 THEN 'wrong object type' ELSE 'enabled object missing ITEMDATA' END FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_DROP` d LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=d.`REF_ITEM_ID` LEFT JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=d.`REF_ITEM_ID` WHERE d.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>3 OR c.`SERVICE`=1 AND i.`ItemID` IS NULL) UNION ALL " +
+		"SELECT 'random_monster',d.`REF_MONSTER_ID`,d.`REF_MONSTER_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>1 THEN 'wrong object type' ELSE 'enabled object missing CHAR_REF_DATA' END FROM `SRO_SHARD`.`REF_MONSTER_ASSIGNED_ITEM_RND_DROP` d LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=d.`REF_MONSTER_ID` LEFT JOIN `SRO_SHARD`.`CHAR_REF_DATA` r ON r.`RefObjID`=d.`REF_MONSTER_ID` WHERE d.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>1 OR c.`SERVICE`=1 AND r.`RefObjID` IS NULL) UNION ALL " +
+		"SELECT 'group_item',d.`REF_ITEM_GROUP_ID`,d.`REF_ITEM_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>3 THEN 'wrong object type' ELSE 'enabled object missing ITEMDATA' END FROM `SRO_SHARD`.`REF_DROP_ITEM_GROUP` d LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=d.`REF_ITEM_ID` LEFT JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=d.`REF_ITEM_ID` WHERE d.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>3 OR c.`SERVICE`=1 AND i.`ItemID` IS NULL) UNION ALL " +
+		"SELECT 'profile_item',a.`SOURCE_ROW`,a.`REF_ITEM_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>3 THEN 'wrong object type' ELSE 'enabled object missing ITEMDATA' END FROM `SRO_SHARD`.`REF_DROP_ITEM_ASSIGN` a LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=a.`REF_ITEM_ID` LEFT JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=a.`REF_ITEM_ID` WHERE a.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>3 OR c.`SERVICE`=1 AND i.`ItemID` IS NULL) UNION ALL " +
+		"SELECT 'reserved_item',a.`SOURCE_ROW`,a.`REF_ITEM_ID`,CASE WHEN c.`ID` IS NULL THEN 'missing common object' WHEN c.`TYPE_ID_1`<>3 THEN 'wrong object type' ELSE 'enabled object missing ITEMDATA' END FROM `SRO_SHARD`.`REF_CUSTOMIZING_RESERVED_ITEM_DROP_FOR_MONSTER` a LEFT JOIN `SRO_SHARD`.`REF_OBJ_COMMON_VSRO` c ON c.`ID`=a.`REF_ITEM_ID` LEFT JOIN `SRO_SHARD`.`ITEMDATA` i ON i.`ItemID`=a.`REF_ITEM_ID` WHERE a.`SERVICE`=1 AND (c.`ID` IS NULL OR c.`TYPE_ID_1`<>3 OR c.`SERVICE`=1 AND i.`ItemID` IS NULL)" +
+		") invalid ORDER BY invalid.`KIND`,invalid.`SOURCE_ID`,invalid.`REF_ID` LIMIT 1"
 )
 
 type MonsterDropCatalogRepository struct {
@@ -44,6 +53,9 @@ func (r *MonsterDropCatalogRepository) Load(ctx context.Context) (*service.Monst
 	if r == nil || r.shard == nil {
 		return nil, ErrMonsterDropCatalogUnavailable
 	}
+	if err := r.validateReferences(ctx); err != nil {
+		return nil, err
+	}
 	tables := make(map[uint32]service.MonsterDropTable)
 	if err := r.loadDirect(ctx, tables); err != nil {
 		return nil, err
@@ -52,6 +64,9 @@ func (r *MonsterDropCatalogRepository) Load(ctx context.Context) (*service.Monst
 		return nil, err
 	}
 	if err := r.loadGroups(ctx, tables); err != nil {
+		return nil, err
+	}
+	if err := validateLoadedDropTables(tables); err != nil {
 		return nil, err
 	}
 	goldByLevel, err := r.loadGold(ctx, tables)
@@ -63,6 +78,38 @@ func (r *MonsterDropCatalogRepository) Load(ctx context.Context) (*service.Monst
 		return nil, err
 	}
 	return service.NewMonsterDropCatalogWithProfiles(tables, goldByLevel, profiles), nil
+}
+
+func (r *MonsterDropCatalogRepository) validateReferences(ctx context.Context) error {
+	rows, err := r.shard.QueryContext(ctx, selectInvalidDropReference)
+	if err != nil {
+		return fmt.Errorf("validate monster-drop references: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err = rows.Err(); err != nil {
+			return fmt.Errorf("iterate invalid monster-drop references: %w", err)
+		}
+		return nil
+	}
+	var kind, reason string
+	var sourceID, refID uint32
+	if err = rows.Scan(&kind, &sourceID, &refID, &reason); err != nil {
+		return fmt.Errorf("scan invalid monster-drop reference: %w", err)
+	}
+	return fmt.Errorf("validate monster-drop references: %s source %d reference %d: %s", kind, sourceID, refID, reason)
+}
+
+func validateLoadedDropTables(tables map[uint32]service.MonsterDropTable) error {
+	for monsterID, table := range tables {
+		for _, assignment := range table.Random {
+			group, exists := table.Groups[assignment.GroupID]
+			if !exists || len(group.Candidates) == 0 {
+				return fmt.Errorf("validate monster-drop table %d: group %d has no enabled candidates", monsterID, assignment.GroupID)
+			}
+		}
+	}
+	return nil
 }
 
 func (r *MonsterDropCatalogRepository) loadProfiles(ctx context.Context) (*service.DropProfileCatalog, error) {
@@ -113,6 +160,39 @@ func (r *MonsterDropCatalogRepository) loadProfiles(ctx context.Context) (*servi
 		return nil, fmt.Errorf("iterate drop item profiles: %w", err)
 	}
 	_ = assignmentRows.Close()
+
+	reservedRows, err := r.shard.QueryContext(ctx, selectReservedDropItems)
+	if err != nil {
+		return nil, fmt.Errorf("load customizing reserved drop items: %w", err)
+	}
+	for reservedRows.Next() {
+		var row service.DropItemAssignment
+		var countryMask, typeID2, typeID3, typeID4, rarity, itemClass int
+		if err = reservedRows.Scan(&row.SourceRow, &countryMask, &row.ReferenceItemID, &row.Relative, &row.Absolute, &row.AssignedGroup, &row.DropCount, &typeID2, &typeID3, &typeID4, &rarity, &itemClass, &row.DurabilityLower, &row.DurabilityUpper, &row.MaxMagicOptions); err != nil {
+			_ = reservedRows.Close()
+			return nil, fmt.Errorf("scan customizing reserved drop item: %w", err)
+		}
+		if row.AssignedGroup < 0 {
+			row.AssignedGroup = itemClass
+		}
+		row.AssignedGroup--
+		row.Family = service.ClassifyDropProfileFamily(typeID2, typeID3, typeID4, rarity)
+		row.TypeID3, row.TypeID4, row.ItemClass = typeID3, typeID4, itemClass
+		for country := 0; country < 2; country++ {
+			if countryMask&(1<<country) == 0 {
+				continue
+			}
+			copy := row
+			copy.Country = country
+			copy.SourceRow = 0x80000000 | row.SourceRow<<1 | uint32(country)
+			assignments = append(assignments, copy)
+		}
+	}
+	if err = reservedRows.Err(); err != nil {
+		_ = reservedRows.Close()
+		return nil, fmt.Errorf("iterate customizing reserved drop items: %w", err)
+	}
+	_ = reservedRows.Close()
 
 	optRows, err := r.shard.QueryContext(ctx, selectDropOptProfiles)
 	if err != nil {

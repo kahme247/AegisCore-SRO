@@ -18,11 +18,29 @@ func TestItemMallStacksSplitsAtReferenceLimit(t *testing.T) {
 	}
 }
 
-func TestReverseReturnMultiBuySplitsFiftyFiveAcrossStacks(t *testing.T) {
-	got := itemMallStacks(50, 5*11)
-	want := []int{50, 5}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+func TestReverseReturnMultiBuyPreservesPackageResultGroups(t *testing.T) {
+	got := itemMallPackageStacks(50, 11, 5)
+	want := []int{11, 11, 11, 11, 11}
+	if len(got) != len(want) {
 		t.Fatalf("stacks = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("stacks = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestItemMallPackageStacksSplitsEachOversizedPackageIndependently(t *testing.T) {
+	got := itemMallPackageStacks(50, 55, 2)
+	want := []int{50, 5, 50, 5}
+	if len(got) != len(want) {
+		t.Fatalf("stacks = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("stacks = %v, want %v", got, want)
+		}
 	}
 }
 

@@ -33,3 +33,16 @@ func TestClearNPCInteractionRemovesGlobalPlayerContext(t *testing.T) {
 		t.Fatal("interaction remained after clear")
 	}
 }
+
+func TestRecentNPCInteractionSupportsEmptyFollowUpPackets(t *testing.T) {
+	const playerUID uint32 = 9882
+	npcInteractions.Record(playerUID, 201, 301, 0x0D)
+	t.Cleanup(func() { ClearNPCInteraction(playerUID) })
+	interaction, ok := RecentNPCInteraction(playerUID, 0x0D, time.Minute)
+	if !ok || interaction.NPCUniqueID != 201 {
+		t.Fatalf("interaction = %#v, ok=%t", interaction, ok)
+	}
+	if _, ok = RecentNPCInteraction(playerUID, 0x0E, time.Minute); ok {
+		t.Fatal("accepted a different NPC action")
+	}
+}

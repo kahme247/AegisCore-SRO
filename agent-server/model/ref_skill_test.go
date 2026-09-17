@@ -272,6 +272,29 @@ func TestRefSkillParsesPiercingForceDamageAfterReservedValue(t *testing.T) {
 	}
 }
 
+func TestRefSkillAdmitsOnlyRepresentedMallSystemItemBuffs(t *testing.T) {
+	hp := RefSkill{CodeName: "SKILL_MALL_HP_INC_430_POTION_01", BasicActivity: 2}
+	copy(hp.Params[:], []int{3, skillParameterSystemBuff, skillParameterDuration, 1_800_000, skillParameterHP, 430, 0})
+	hp.parseParameters()
+	if hp.ExecutionKind() != SkillExecutionSystem || !hp.SupportsItemUseBuff() || hp.BuffModifiers.HP != 430 {
+		t.Fatalf("mall HP item buff = kind %d supported %t modifiers %+v", hp.ExecutionKind(), hp.SupportsItemUseBuff(), hp.BuffModifiers)
+	}
+
+	damage := RefSkill{CodeName: "SKILL_MALL_DAMAGE_INC_20P_SCROLL_01", BasicActivity: 2}
+	copy(damage.Params[:], []int{3, skillParameterSystemBuff, skillParameterDuration, 1_800_000, skillParameterDamage, 20, 20})
+	damage.parseParameters()
+	if !damage.SupportsItemUseBuff() || damage.BuffModifiers.DamagePercent != 20 {
+		t.Fatalf("mall damage item buff = supported %t modifiers %+v", damage.SupportsItemUseBuff(), damage.BuffModifiers)
+	}
+
+	unresolved := RefSkill{CodeName: "SKILL_MALL_DAMAGE_ABS_20P_SCROLL_01", BasicActivity: 2}
+	copy(unresolved.Params[:], []int{3, skillParameterSystemBuff, skillParameterDuration, 1_800_000, 1868849522, 15, 20})
+	unresolved.parseParameters()
+	if unresolved.SupportsItemUseBuff() {
+		t.Fatal("unresolved rado damage-absorption descriptor was admitted")
+	}
+}
+
 func TestRefSkillClassifiesStatusOnlyEnemySkills(t *testing.T) {
 	skill := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
 	skill.Params[0] = skillParameterFrostbite

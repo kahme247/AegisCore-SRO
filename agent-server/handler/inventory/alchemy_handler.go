@@ -792,7 +792,7 @@ func buildAlchemyMaterialQuantity(slot byte, remaining uint16) network.Packet {
 }
 
 func buildAlchemyMaterialRemoved(slot byte) network.Packet {
-	return vsro188.BuildItemOperationSlotSuccess(vsro188.ItemOperationServerDelete, slot)
+	return vsro188.BuildItemOperationServerDeleteSuccess(slot)
 }
 
 func (h *AlchemyHandler) sendPacket(session *server.Session, packet network.Packet) error {

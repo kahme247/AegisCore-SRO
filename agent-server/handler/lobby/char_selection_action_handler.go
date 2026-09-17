@@ -63,6 +63,9 @@ func (h *CharacterSelectionHandler) handleAction(ctx context.Context, session *s
 	if err != nil {
 		return sendCharacterActionResult(session, 0, ResultFalse, 0)
 	}
+	if action == CharActionCreate || action == CharActionDelete || action == CharActionRestore {
+		ctx = model.WithCharacterCommand(ctx, model.CharacterCommandIdentity{Key: fmt.Sprintf("character:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: fmt.Sprintf("character.action.%d", action)})
+	}
 
 	switch action {
 	case CharActionCreate:

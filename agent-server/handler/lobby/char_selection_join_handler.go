@@ -139,6 +139,7 @@ func (h *CharacterSelectionHandler) handleJoin(ctx context.Context, session *ser
 		return err
 	}
 	h.publishRestoredSpeedEffect(player)
+	h.publishRestoredItemServices(player)
 
 	bootstrapComplete = true
 	log.Infof("sent Agent spawn data for character %s; awaiting GameReady", player.CharName)
@@ -350,6 +351,29 @@ func (h *CharacterSelectionHandler) publishRestoredSpeedEffect(player *model.Pla
 			player.SendMovementSpeedUpdate()
 		}
 	})
+}
+
+func (h *CharacterSelectionHandler) publishRestoredItemServices(player *model.Player) {
+	if player == nil {
+		return
+	}
+	now := time.Now()
+	for _, state := range player.ItemServiceStates(now) {
+		remaining := time.Until(state.Effect.ExpiresAt)
+		if remaining <= 0 || state.Token == 0 {
+			continue
+		}
+		if model.ItemServiceUsesItemPerk(state.Effect) {
+			added := model.BuildItemPerkAdd(player.GetUniqueID(), state.Effect.SourceRefItemID, state.Token, state.Effect.DailyBudget, remaining)
+			player.SendToSelfAndKnown(&added)
+		}
+		if premiumAdded, exists := model.BuildPremiumDailyAdd(state.Token, state.Effect, remaining); exists {
+			player.SendToSelf(&premiumAdded)
+		}
+		if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), state.Token, state.Effect, remaining); exists {
+			player.SendToSelfAndKnown(&buffAdded)
+		}
+	}
 }
 
 func (h *CharacterSelectionHandler) playerMovementSettings(ctx context.Context) (model.MovementSettings, error) {
@@ -593,10 +617,7 @@ func sendCharacterBootstrapBody(session *server.Session, player *model.Player) e
 	}
 
 	weatherType, intensity := environment.GetCurrentWeather()
-	pWeather := network.EmptyPacket()
-	pWeather.MessageID = opcode.WeatherUpdate
-	pWeather.WriteByte(byte(weatherType))
-	pWeather.WriteByte(intensity)
+	pWeather := environment.BuildWeatherUpdate(weatherType, intensity)
 	if err := session.Send(pWeather); err != nil {
 		return err
 	}

@@ -69,6 +69,7 @@ type IPlayer interface {
 	GetPKState() PKState
 	GetJob() PlayerJob
 	GetInventory() Inventory
+	GetAvatarInventory() Inventory
 	GetSession() *server.Session
 	GetScale() byte
 	GetPVPCape() PVPCape
@@ -86,6 +87,7 @@ type Player struct {
 	Session               *server.Session
 	Mutex                 sync.Mutex
 	economyGate           sync.Mutex
+	activeMagicCubeID     int
 	Scale                 byte
 	ID                    int
 	CharName              string
@@ -129,6 +131,7 @@ type Player struct {
 	Level                 int
 	MaxLevel              int
 	PKState               PKState
+	pkCounters            CharacterPKState
 	CTFTeam               CTFTeam
 	PVPCape               PVPCape
 	IsGm                  bool
@@ -148,6 +151,8 @@ type Player struct {
 	speedEffectExpiresAt  time.Time
 	itemServices          map[ItemServiceKind]ItemServiceEffect
 	itemServiceTokens     map[ItemServiceKind]uint32
+	premiumDecoration     PremiumDecorationState
+	premiumPaused         map[byte]bool
 	COSState              PlayerCOSState
 
 	/* TODO
@@ -156,6 +161,84 @@ type Player struct {
 	- TeleportLocation
 	- Active Buffs / Effects
 	*/
+}
+
+// ActivateMagicCube records the authenticated ITEM identity selected through
+// the stock 0x704C item-use path. The following context-free 0x27 operation
+// is authorized only against this per-player state.
+func (p *Player) ActivateMagicCube(itemID int) bool {
+	if p == nil || itemID <= 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	p.activeMagicCubeID = itemID
+	p.Mutex.Unlock()
+	return true
+}
+
+func (p *Player) ActiveMagicCube() (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	p.Mutex.Lock()
+	itemID := p.activeMagicCubeID
+	p.Mutex.Unlock()
+	return itemID, itemID > 0
+}
+
+func (p *Player) DeactivateMagicCube() {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.activeMagicCubeID = 0
+	p.Mutex.Unlock()
+}
+
+type PremiumDecorationState struct {
+	Token     uint32
+	Reference uint32
+	Value     uint32
+}
+
+func (p *Player) SetPremiumDecoration(state PremiumDecorationState) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.premiumDecoration = state
+	p.Mutex.Unlock()
+}
+
+func (p *Player) PremiumDecoration() PremiumDecorationState {
+	if p == nil {
+		return PremiumDecorationState{}
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.premiumDecoration
+}
+
+func (p *Player) SetPremiumCategoryActive(category byte, active bool) bool {
+	if p == nil || category == 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.premiumPaused == nil {
+		p.premiumPaused = make(map[byte]bool)
+	}
+	p.premiumPaused[category] = !active
+	return true
+}
+
+func (p *Player) PremiumCategoryPaused(category byte) bool {
+	if p == nil || category == 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.premiumPaused[category]
 }
 
 // ActiveCombatDamagePercent is SR_GameServer's urd modifier. Unlike ordinary
@@ -438,6 +521,16 @@ func (p *Player) CommitQuestMutation(quest CharacterQuest) {
 }
 
 func (p *Player) CommitQuestItemGrant(result QuestItemGrantResult) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.Inventory = result.Inventory.Snapshot()
+	p.commitQuestLocked(result.Quest)
+	p.Mutex.Unlock()
+}
+
+func (p *Player) CommitQuestActivationWithItems(result QuestActivationResult) {
 	if p == nil {
 		return
 	}
@@ -843,6 +936,24 @@ func BuildLifeStateUpdatePacket(uniqueID uint32, state LifeState) network.Packet
 	return packet
 }
 
+// BuildMotionStateUpdatePacket emits entity state category 1, which the stock
+// vSRO 1.188 client parses as MotionState (stand/walk/run/sit).
+func BuildMotionStateUpdatePacket(uniqueID uint32, state MotionState) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.EntityUpdateMovementState
+	packet.WriteUInt32(uniqueID)
+	packet.WriteByte(1)
+	// The stock parser uses 0 for stand/reset and 2/3/4 for walk/run/sit.
+	// Internal locomotion is compact 0/1/2/3, so only active movement states
+	// need the +1 conversion.
+	wireState := byte(0)
+	if state != Stand {
+		wireState = byte(state) + 1
+	}
+	packet.WriteByte(wireState)
+	return packet
+}
+
 func (p *Player) SendVitalsUpdate() {
 	hp, mp := p.CurrentVitals()
 	packet := BuildVitalsUpdatePacket(p.GetUniqueID(), hp, mp)
@@ -1145,7 +1256,7 @@ func (p *Player) Broadcast(packet *network.Packet) {
 			}
 			playerCount++
 			if player.GetSession() != nil {
-				_ = player.GetSession().Send(*packet)
+				_ = player.GetSession().TrySend(*packet)
 			}
 		}
 	}
@@ -1158,7 +1269,10 @@ func (p *Player) SendToSelfAndKnown(packet *network.Packet) {
 }
 
 func (p *Player) SendToSelf(packet *network.Packet) {
-	if p != nil && packet != nil && p.Session != nil && p.Session.Conn != nil {
+	// Opcode zero is never a stock application message. Codec failures return
+	// the zero Packet value; sending it makes the vSRO client deliberately
+	// fault when its dispatcher tries to read the missing first payload byte.
+	if p != nil && packet != nil && packet.MessageID != 0 && p.Session != nil && p.Session.Conn != nil {
 		_ = p.Session.Send(*packet)
 	}
 }
@@ -1204,7 +1318,40 @@ func (p *Player) GetScale() byte {
 }
 
 func (p *Player) GetPVPCape() PVPCape {
+	if p == nil {
+		return PvpCapeNone
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
 	return p.PVPCape
+}
+
+func (p *Player) SetPVPCape(cape PVPCape) bool {
+	if p == nil || cape < PvpCapeNone || cape > PvpCapeGold {
+		return false
+	}
+	p.Mutex.Lock()
+	p.PVPCape = cape
+	p.Mutex.Unlock()
+	return true
+}
+
+func (p *Player) CommitPKCounters(state CharacterPKState) {
+	if p == nil {
+		return
+	}
+	p.Mutex.Lock()
+	p.pkCounters = state
+	p.Mutex.Unlock()
+}
+
+func (p *Player) PKCounters() CharacterPKState {
+	if p == nil {
+		return CharacterPKState{}
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.pkCounters
 }
 
 func (p *Player) GetType() string {

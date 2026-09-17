@@ -39,6 +39,10 @@ func NPCSelectionTalkData(codeName string) []byte {
 	upper := strings.ToUpper(codeName)
 	var data []byte
 	switch {
+	case upper == "NPC_CH_GACHA_MACHINE":
+		data = []byte{0, 1, 0x11, 0}
+	case upper == "NPC_CH_GACHA_OPERATOR":
+		data = []byte{0, 1, 0x12, 0}
 	case strings.Contains(upper, "SMITH"):
 		data = []byte{0, 4, 1, 2, 4, 0x20, 0}
 	case strings.Contains(upper, "ARMOR"):

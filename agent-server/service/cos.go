@@ -11,8 +11,10 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/questwire"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 	"github.com/sirupsen/logrus"
 )
@@ -107,6 +109,8 @@ type COSService struct {
 		Current() model.COSPolicySnapshot
 	}
 	groundItemLifecycle interface{ Cancel(*model.Item) }
+	groundGold          model.GroundGoldPickupRepository
+	questProgress       model.QuestRuntimeRepository
 	cargoGround         interface {
 		Spawn(*model.Item, uint32) error
 	}
@@ -161,6 +165,26 @@ func (s *COSService) ConfigureGroundItemLifecycle(lifecycle interface{ Cancel(*m
 	}
 	s.mu.Lock()
 	s.groundItemLifecycle = lifecycle
+	s.mu.Unlock()
+}
+
+func (s *COSService) ConfigureGroundGoldPickup(repository model.GroundGoldPickupRepository) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.groundGold = repository
+	s.mu.Unlock()
+}
+
+// ConfigureQuestProgress connects companion collection to the same quest
+// runtime accounting used by direct player pickup.
+func (s *COSService) ConfigureQuestProgress(repository model.QuestRuntimeRepository) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.questProgress = repository
 	s.mu.Unlock()
 }
 
@@ -563,6 +587,32 @@ func (s *COSService) Unsummon(ctx context.Context, owner *model.Player, uid uint
 	return nil
 }
 
+func (s *COSService) TerminateGuildMercenaries(ctx context.Context, owner *model.Player) (int, error) {
+	if s == nil || owner == nil || owner.ID <= 0 {
+		return 0, model.ErrCOSRepositoryUnavailable
+	}
+	s.mu.Lock()
+	mercenary := s.byOwnerKind[owner.ID][model.COSGuild]
+	if mercenary == nil {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	if mercenary.OwnerUniqueID != owner.GetUniqueID() || mercenary.PersistentID == 0 {
+		s.mu.Unlock()
+		return 0, model.ErrCOSNotOwned
+	}
+	s.mu.Unlock()
+	repository, ok := s.repository.(model.COSGuildReleaseRepository)
+	if !ok {
+		return 0, model.ErrCOSRepositoryUnavailable
+	}
+	if err := repository.ReleaseOwnedGuildCOS(ctx, owner.ID, mercenary.PersistentID); err != nil {
+		return 0, err
+	}
+	s.detachRuntime(owner, mercenary, model.COSItemInactive)
+	return 1, nil
+}
+
 func (s *COSService) detachRuntime(owner *model.Player, cos *model.COS, itemState model.COSItemState) {
 	if s == nil || owner == nil || cos == nil {
 		return
@@ -801,7 +851,10 @@ func (s *COSService) Pickup(owner *model.Player, petUID, itemUID uint32) error {
 	if navmeshv2.HorizontalDistance(itemPos, ownerPos) > s.currentPolicy().Settings.PickupCollectionRange || (item.GetOwner() != 0 && item.GetOwner() != owner.GetUniqueID()) {
 		return model.ErrItemUseInvalidRequest
 	}
-	slot, available := pet.Inventory.FirstFreeSlot(pet.InventorySize)
+	slot, available := byte(0), true
+	if !cosGeneratedGoldItem(item) {
+		slot, available = cosPickupDestination(pet, item)
+	}
 	if !available {
 		return model.ErrItemUseInvalidRequest
 	}
@@ -877,11 +930,48 @@ func (s *COSService) updateAbilityPetPickup(followerWorld cosFollowerWorld, pet 
 		return true
 	}
 	world.StopMovingCharacter(pet, petPos, "cos-pickup-in-range", false)
-	if err = repository.StoreItem(context.Background(), owner.ID, pet.PersistentID, state.storageSlot, item.ID); err != nil {
+	if cosGeneratedGoldItem(item) {
+		s.mu.Lock()
+		goldRepository := s.groundGold
+		lifecycle := s.groundItemLifecycle
+		s.mu.Unlock()
+		if goldRepository == nil {
+			s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
+			return false
+		}
+		gold, pickupErr := goldRepository.PickupGold(context.Background(), int64(owner.ID), int64(item.ID))
+		if pickupErr != nil {
+			s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
+			return false
+		}
+		owner.SetGold(gold.Gold)
+		if lifecycle != nil {
+			lifecycle.Cancel(item)
+		}
+		pickup := vsro188.BuildEntityPickupAnimation(pet.GetUniqueID(), 0)
+		owner.SendToSelfAndKnown(&pickup)
+		world.RemoveVisibleObject(object)
+		goldUpdate := vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold.Gold, TrailingFlag: 1})
+		owner.SendToSelf(&goldUpdate)
+		s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
+		return true
+	}
+	existing, stacking := pet.Inventory.Snapshot().Items[state.storageSlot]
+	if stacking {
+		stackRepository, stackOK := s.repository.(model.COSInventoryStackRepository)
+		if !stackOK || stackRepository == nil || existing.GetRefObjectID() != item.GetRefObjectID() || existing.StackSize+item.StackSize > model.RefItems[item.GetRefObjectID()].StackSize {
+			s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
+			return false
+		}
+		err = stackRepository.StackItem(context.Background(), owner.ID, pet.PersistentID, existing.ID, item.ID, item.StackSize)
+	} else {
+		err = repository.StoreItem(context.Background(), owner.ID, pet.PersistentID, state.storageSlot, item.ID)
+	}
+	if err != nil {
 		s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
 		return false
 	}
-	if !pet.Inventory.Put(state.storageSlot, pet.InventorySize, *item) {
+	if (stacking && !pet.Inventory.AddToStack(state.storageSlot, item.StackSize)) || (!stacking && !pet.Inventory.Put(state.storageSlot, pet.InventorySize, *item)) {
 		s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
 		return false
 	}
@@ -891,11 +981,79 @@ func (s *COSService) updateAbilityPetPickup(followerWorld cosFollowerWorld, pet 
 	if lifecycle != nil {
 		lifecycle.Cancel(item)
 	}
-	world.RemoveVisibleObject(object)
-	update := model.BuildCOSPickupInventoryUpdate(pet.GetUniqueID(), state.storageSlot, *item)
+	// Send the post-merge slot state. Sending the ground item here leaves the
+	// client with a stale quantity when a pet pickup merges into an existing
+	// stack.
+	updatedItem, _ := pet.Inventory.Snapshot().Items[state.storageSlot]
+	update := model.BuildCOSPickupInventoryUpdate(pet.GetUniqueID(), state.storageSlot, updatedItem)
 	owner.SendToSelf(&update)
+	if inventoryUpdate, supported := model.BuildCOSInventoryUpdate(pet); supported {
+		owner.SendToSelf(&inventoryUpdate)
+	}
+	// SR_GameServer.exe 0x004D4F60 commits/publishes the COS inventory change
+	// through sub_4B29A0 before it builds 0x3036. Preserve that ordering: the
+	// client resolves operation 0x17 into the pet slot first, then completes the
+	// pickup action animation. Reversing them leaves the action controller and
+	// visible COS inventory stale.
+	pickup := vsro188.BuildEntityPickupAnimation(pet.GetUniqueID(), 0)
+	owner.SendToSelfAndKnown(&pickup)
+	if s.questProgress != nil {
+		quantity := item.StackSize
+		if quantity <= 0 {
+			quantity = 1
+		}
+		if progress, progressErr := s.questProgress.RecordCollectedItem(context.Background(), owner.ID, item.GetRefObjectID(), uint32(quantity)); progressErr == nil {
+			for _, result := range progress {
+				if !result.Changed {
+					continue
+				}
+				owner.CommitQuestMutation(result.Quest)
+				if questUpdate, buildErr := questwire.BuildUpdate(result.Quest, vsro188.QuestUpdateDelta); buildErr == nil {
+					owner.SendToSelf(&questUpdate)
+				}
+			}
+		}
+	}
+	// Stock SR_GameServer emits the B034/0x17 transfer completion before its
+	// post-completion ground-object cleanup. The client resolves the item from
+	// that still-live object when applying the COS slot update; despawning it
+	// first commits SQL but leaves both client inventories visually unchanged.
+	world.RemoveVisibleObject(object)
 	s.finishPickupAction(pet.GetUniqueID(), state.targetUID)
 	return true
+}
+
+func cosPickupDestination(pet *model.COS, item *model.Item) (byte, bool) {
+	if pet == nil || item == nil {
+		return 0, false
+	}
+	if ref, ok := model.RefItems[item.GetRefObjectID()]; ok && ref.StackSize > 1 && item.StackSize > 0 {
+		items := pet.Inventory.Snapshot().Items
+		// SR_GameServer 0x004B2890 walks COS slots in ascending order and
+		// selects the first compatible stack with sufficient remaining room;
+		// only then does it ask the free-slot selector for a new destination.
+		for slot := byte(0); slot < pet.InventorySize; slot++ {
+			existing, occupied := items[slot]
+			if occupied && existing.GetRefObjectID() == item.GetRefObjectID() && existing.StackSize+item.StackSize <= ref.StackSize {
+				return slot, true
+			}
+		}
+	}
+	return pet.Inventory.FirstFreeSlot(pet.InventorySize)
+}
+
+func cosGeneratedGoldItem(item *model.Item) bool {
+	if item == nil {
+		return false
+	}
+	// The maintained monster-drop materializer uses the three stock vSRO gold
+	// object references directly. Keep that identity check authoritative even
+	// if a partially hydrated world object has not received its TypeInfo yet.
+	if refID := item.GetRefObjectID(); refID >= 1 && refID <= 3 {
+		return true
+	}
+	typeInfo := item.GetTypeInfo()
+	return typeInfo.TypeID1 == model.TypeID1Item && typeInfo.TypeID2 == 3 && typeInfo.TypeID3 == 5 && typeInfo.TypeID4 != 1
 }
 
 func cosGroundItem(object model.ISRObject) (*model.Item, bool) {

@@ -39,13 +39,31 @@ type COSRepository interface {
 	Rename(context.Context, int, uint64, string) error
 }
 
+type COSGuildReleaseRepository interface {
+	ReleaseOwnedGuildCOS(context.Context, int, uint64) error
+}
+
 type COSInventoryRepository interface {
 	LoadInventory(context.Context, int, uint64) (Inventory, error)
 	StoreItem(context.Context, int, uint64, byte, int) error
 }
 
+// COSInventoryStackRepository atomically consumes a ground-item row into an
+// existing compatible COS stack. Repositories that do not implement it retain
+// the one-ground-item-per-slot behavior.
+type COSInventoryStackRepository interface {
+	StackItem(context.Context, int, uint64, int, int, int) error
+}
+
 type COSInventoryTransferRepository interface {
 	TransferItem(context.Context, int, uint64, byte, byte, bool) (Inventory, Inventory, error)
+}
+
+// COSInventoryReorderRepository swaps two slots within one pet inventory.
+// It is separate so older integrations can continue to support character↔pet
+// transfers without silently accepting an in-memory-only reorder.
+type COSInventoryReorderRepository interface {
+	ReorderItem(context.Context, int, uint64, byte, byte) (Inventory, error)
 }
 
 type COSCargoLossRepository interface {
@@ -147,6 +165,24 @@ func (r *SQLCOSRepository) Save(ctx context.Context, record COSRecord) error {
 	}
 	affected, affectedErr := result.RowsAffected()
 	if affectedErr != nil || !validCOSSaveAffected(affected) {
+		return ErrCOSNotFound
+	}
+	return nil
+}
+
+func (r *SQLCOSRepository) ReleaseOwnedGuildCOS(ctx context.Context, ownerCharID int, id uint64) error {
+	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 {
+		return ErrCOSRepositoryUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := r.shard.ExecContext(ctx, "DELETE FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? AND `KIND`=?", id, ownerCharID, COSGuild)
+	if err != nil {
+		return fmt.Errorf("release owned Guild COS: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
 		return ErrCOSNotFound
 	}
 	return nil
@@ -334,6 +370,44 @@ func (r *SQLCOSRepository) StoreItem(ctx context.Context, ownerCharID int, id ui
 	return nil
 }
 
+func (r *SQLCOSRepository) StackItem(ctx context.Context, ownerCharID int, id uint64, destinationItemID, groundItemID, quantity int) (err error) {
+	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 || destinationItemID <= 0 || groundItemID <= 0 || quantity <= 0 {
+		return ErrCOSRepositoryUnavailable
+	}
+	beginner, ok := r.shard.(cosTransactionBeginner)
+	if !ok {
+		return ErrCOSRepositoryUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin COS stack pickup: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var ownedID uint64
+	if err = tx.QueryRowContext(ctx, "SELECT ci.COS_ID FROM `COS_INVENTORY` ci JOIN `CHAR_COS` cos ON cos.ID=ci.COS_ID WHERE ci.COS_ID=? AND ci.FK_ITEM=? AND cos.OWNER_CHAR_ID=? FOR UPDATE", id, destinationItemID, ownerCharID).Scan(&ownedID); err != nil {
+		return ErrCOSNotFound
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE `ITEM` dst JOIN `ITEM` src ON src.id=? SET dst.STACK_COUNT=dst.STACK_COUNT+?,dst.DATA=dst.DATA+? WHERE dst.id=? AND dst.FK_REF_ITEM=src.FK_REF_ITEM AND src.STACK_COUNT=?", groundItemID, quantity, quantity, destinationItemID, quantity)
+	if err != nil || !singleAffectedRow(result) {
+		return ErrCOSNotFound
+	}
+	result, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE id=? AND NOT EXISTS (SELECT 1 FROM `INVENTORY` WHERE FK_ITEM=?) AND NOT EXISTS (SELECT 1 FROM `STORAGE` WHERE FK_ITEM=?) AND NOT EXISTS (SELECT 1 FROM `COS_INVENTORY` WHERE FK_ITEM=?)", groundItemID, groundItemID, groundItemID, groundItemID)
+	if err != nil || !singleAffectedRow(result) {
+		return ErrCOSNotFound
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit COS stack pickup: %w", err)
+	}
+	return nil
+}
+
 func (r *SQLCOSRepository) TransferItem(ctx context.Context, ownerCharID int, id uint64, source, destination byte, toCOS bool) (Inventory, Inventory, error) {
 	empty := NewInventory(nil)
 	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 {
@@ -370,7 +444,21 @@ func (r *SQLCOSRepository) TransferItem(ctx context.Context, ownerCharID int, id
 			return empty, empty, fmt.Errorf("lock player COS transfer item: %w", err)
 		}
 		var occupied int
-		if scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? FOR UPDATE", id, destination).Scan(&occupied); scanErr == nil || !errors.Is(scanErr, sql.ErrNoRows) {
+		scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? FOR UPDATE", id, destination).Scan(&occupied)
+		if scanErr == nil {
+			if err = mergeTransferredStack(ctx, tx, itemID, occupied); err != nil {
+				return empty, empty, err
+			}
+			result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", ownerCharID, source, itemID)
+			if deleteErr != nil || !singleAffectedRow(result) {
+				return empty, empty, ErrInventoryRelocationConflict
+			}
+			if result, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", itemID); err != nil || !singleAffectedRow(result) {
+				return empty, empty, ErrInventoryRelocationConflict
+			}
+			goto commitTransfer
+		}
+		if !errors.Is(scanErr, sql.ErrNoRows) {
 			return empty, empty, ErrInventoryRelocationConflict
 		}
 		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", ownerCharID, source, itemID)
@@ -385,7 +473,21 @@ func (r *SQLCOSRepository) TransferItem(ctx context.Context, ownerCharID int, id
 			return empty, empty, fmt.Errorf("lock pet COS transfer item: %w", err)
 		}
 		var occupied int
-		if scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? FOR UPDATE", ownerCharID, destination).Scan(&occupied); scanErr == nil || !errors.Is(scanErr, sql.ErrNoRows) {
+		scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? FOR UPDATE", ownerCharID, destination).Scan(&occupied)
+		if scanErr == nil {
+			if err = mergeTransferredStack(ctx, tx, itemID, occupied); err != nil {
+				return empty, empty, err
+			}
+			result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", id, source, itemID)
+			if deleteErr != nil || !singleAffectedRow(result) {
+				return empty, empty, ErrInventoryRelocationConflict
+			}
+			if result, err = tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=?", itemID); err != nil || !singleAffectedRow(result) {
+				return empty, empty, ErrInventoryRelocationConflict
+			}
+			goto commitTransfer
+		}
+		if !errors.Is(scanErr, sql.ErrNoRows) {
 			return empty, empty, ErrInventoryRelocationConflict
 		}
 		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", id, source, itemID)
@@ -396,6 +498,8 @@ func (r *SQLCOSRepository) TransferItem(ctx context.Context, ownerCharID int, id
 			return empty, empty, fmt.Errorf("insert player COS transfer item: %w", err)
 		}
 	}
+
+commitTransfer:
 	if err = tx.Commit(); err != nil {
 		return empty, empty, fmt.Errorf("commit COS inventory transfer: %w", errors.Join(ErrInventoryRelocationOutcomeUnknown, err))
 	}
@@ -413,6 +517,80 @@ func (r *SQLCOSRepository) TransferItem(ctx context.Context, ownerCharID int, id
 		return empty, empty, err
 	}
 	return playerInventory, cosInventory, nil
+}
+
+func (r *SQLCOSRepository) ReorderItem(ctx context.Context, ownerCharID int, id uint64, source, destination byte) (Inventory, error) {
+	empty := NewInventory(nil)
+	if r == nil || r.shard == nil || ownerCharID <= 0 || id == 0 || source == destination {
+		return empty, ErrInventoryRelocationConflict
+	}
+	beginner, ok := r.shard.(cosTransactionBeginner)
+	if !ok {
+		return empty, ErrCOSRepositoryUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tx, err := beginner.BeginTx(ctx, nil)
+	if err != nil {
+		return empty, fmt.Errorf("begin COS inventory reorder: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var locked int
+	if err = tx.QueryRowContext(ctx, "SELECT `id` FROM `CHAR` WHERE `id`=? FOR UPDATE", ownerCharID).Scan(&locked); err != nil {
+		return empty, fmt.Errorf("lock reorder character: %w", err)
+	}
+	if err = tx.QueryRowContext(ctx, "SELECT `ID` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", id, ownerCharID).Scan(&locked); err != nil {
+		return empty, fmt.Errorf("lock reorder pet: %w", err)
+	}
+	var sourceItem, destinationItem int
+	if err = tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? FOR UPDATE", id, source).Scan(&sourceItem); err != nil {
+		return empty, ErrInventoryRelocationConflict
+	}
+	if err = tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `COS_INVENTORY` WHERE `COS_ID`=? AND `SLOT`=? FOR UPDATE", id, destination).Scan(&destinationItem); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return empty, ErrInventoryRelocationConflict
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `COS_INVENTORY` SET `SLOT`=? WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", destination, id, source, sourceItem); err != nil {
+			return empty, ErrInventoryRelocationConflict
+		}
+	} else {
+		// Use the unused wire slot 255 to avoid the unique (COS_ID,SLOT) key.
+		if _, err = tx.ExecContext(ctx, "UPDATE `COS_INVENTORY` SET `SLOT`=255 WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", id, source, sourceItem); err != nil {
+			return empty, ErrInventoryRelocationConflict
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `COS_INVENTORY` SET `SLOT`=? WHERE `COS_ID`=? AND `SLOT`=? AND `FK_ITEM`=?", source, id, destination, destinationItem); err != nil {
+			return empty, ErrInventoryRelocationConflict
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `COS_INVENTORY` SET `SLOT`=? WHERE `COS_ID`=? AND `SLOT`=255 AND `FK_ITEM`=?", destination, id, sourceItem); err != nil {
+			return empty, ErrInventoryRelocationConflict
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return empty, fmt.Errorf("commit COS inventory reorder: %w", errors.Join(ErrInventoryRelocationOutcomeUnknown, err))
+	}
+	committed = true
+	return r.LoadInventory(ctx, ownerCharID, id)
+}
+
+func mergeTransferredStack(ctx context.Context, tx *sql.Tx, sourceItemID, destinationItemID int) error {
+	var sourceRef, sourceCount, destinationRef, destinationCount, maxStack int
+	if err := tx.QueryRowContext(ctx, "SELECT src.FK_REF_ITEM,src.STACK_COUNT,dst.FK_REF_ITEM,dst.STACK_COUNT,COALESCE(NULLIF(data.Stack_Size,0),1) FROM `ITEM` src JOIN `ITEM` dst ON dst.id=? JOIN `ITEMDATA` data ON data.ItemID=src.FK_REF_ITEM WHERE src.id=? FOR UPDATE", destinationItemID, sourceItemID).Scan(&sourceRef, &sourceCount, &destinationRef, &destinationCount, &maxStack); err != nil {
+		return ErrInventoryRelocationConflict
+	}
+	if sourceRef != destinationRef || maxStack <= 1 || sourceCount <= 0 || destinationCount+sourceCount > maxStack {
+		return ErrInventoryRelocationConflict
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=`STACK_COUNT`+?,`DATA`=`DATA`+? WHERE `id`=? AND `STACK_COUNT`=?", sourceCount, sourceCount, destinationItemID, destinationCount)
+	if err != nil || !singleAffectedRow(result) {
+		return ErrInventoryRelocationConflict
+	}
+	return nil
 }
 
 func singleAffectedRow(result sql.Result) bool {

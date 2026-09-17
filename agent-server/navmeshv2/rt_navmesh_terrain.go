@@ -40,6 +40,11 @@ type RtNavmeshTerrain struct {
 
 	GlobalEdges   []RtNavmeshEdgeGlobal `json:"-"`
 	InternalEdges []RtNavmeshEdgeInternal
+	// Dungeon bounds are populated for DOF-backed instance regions. Their
+	// collision cells use dungeon-local coordinates instead of the normal
+	// terrain grid's 0..1920 tile addressing.
+	DungeonMinimum *math32.Vector3
+	DungeonMaximum *math32.Vector3
 }
 
 func (t *RtNavmeshTerrain) GetNavmeshType() RtNavmeshType {
@@ -79,6 +84,15 @@ func (t *RtNavmeshTerrain) ResolveCell(pos *math32.Vector3) (RtNavmeshCellQuad, 
 	}
 	if pos == nil {
 		return RtNavmeshCellQuad{}, fmt.Errorf("%w: position is nil", ErrInvalidNavmeshData)
+	}
+	if uint16(t.Region.ID)&DungeonMask != 0 && t.DungeonMinimum != nil && t.DungeonMaximum != nil {
+		if pos.X < t.DungeonMinimum.X || pos.X > t.DungeonMaximum.X || pos.Y < t.DungeonMinimum.Y-1000 || pos.Y > t.DungeonMaximum.Y+1000 || pos.Z < t.DungeonMinimum.Z || pos.Z > t.DungeonMaximum.Z {
+			return RtNavmeshCellQuad{}, fmt.Errorf("position %v is outside dungeon %04x bounds", pos, uint16(t.Region.ID))
+		}
+		if len(t.Cells) == 0 {
+			return RtNavmeshCellQuad{}, fmt.Errorf("%w: dungeon %04x has no navigation cell", ErrInvalidNavmeshData, uint16(t.Region.ID))
+		}
+		return t.Cells[0], nil
 	}
 	if pos.X < 0 || pos.X >= TerrainWidth || pos.Z < 0 || pos.Z >= TerrainHeight {
 		return RtNavmeshCellQuad{}, fmt.Errorf("position %v is not in terrain", pos)

@@ -1,6 +1,7 @@
 package party
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -169,6 +170,13 @@ func TestBuildInvitationVSROLayout(t *testing.T) {
 	}
 }
 
+func TestBuildPartyCreateSuccessVSROLayout(t *testing.T) {
+	packet := buildPartyCreateSuccess(0x11223344)
+	if packet.MessageID != opcode.PartyCreateResponse || !bytes.Equal(packet.Payload(), []byte{1, 0x44, 0x33, 0x22, 0x11}) {
+		t.Fatalf("party create response = opcode 0x%04X payload % X", packet.MessageID, packet.Payload())
+	}
+}
+
 func TestBuildPartySnapshotVSROLayoutWithTwoMembers(t *testing.T) {
 	first := testPartyPlayer(0x01020304, 1907, "Leader", 1, 70, 60, 10, 20, 0x1234, 101, -303, 202, map[uint32]byte{257: 40, 258: 60, 259: 60})
 	second := testPartyPlayer(0xA1A2A3A4, 1920, "Member", 1, 0, 500, 10, 20, 0x2345, 404, 606, 505, map[uint32]byte{300: 20})
@@ -176,12 +184,12 @@ func TestBuildPartySnapshotVSROLayoutWithTwoMembers(t *testing.T) {
 		Number: 77, MasterUniqueID: first.GetUniqueID(), Settings: model.ExpShareItemShare,
 		Members: []*model.Player{first, second},
 	}, false)
-	if packet.MessageID != opcode.PartyCreate {
-		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.PartyCreate)
+	if packet.MessageID != 0x3065 {
+		t.Fatalf("opcode = 0x%04X, want 0x3065", packet.MessageID)
 	}
 	r := newPartyPacketReader(t, packet.Payload())
-	if splitter, master, settings, count := r.byte(), r.uint32(), r.byte(), r.byte(); splitter != 0xFF || master != 0x01020304 || settings != 7 || count != 2 {
-		t.Fatalf("snapshot header = splitter %02X master %08X settings %d count %d", splitter, master, settings, count)
+	if flags, number, master, settings, count := r.byte(), r.uint32(), r.uint32(), r.byte(), r.byte(); flags != 0x03 || number != 77 || master != 0x01020304 || settings != 7 || count != 2 {
+		t.Fatalf("snapshot header = flags %02X number %d master %08X settings %d count %d", flags, number, master, settings, count)
 	}
 	// Level 1 maxima are Str*10 and Int*10: 70/100 => 7; 60/200 => 3, packed MP:HP as 0x37.
 	assertPartyMember(t, decodePartyMember(t, r), 0x01020304, 1907, "Leader", 1, 0x37, 0x1234, 101, 202, 0xFED1, 258, 259)

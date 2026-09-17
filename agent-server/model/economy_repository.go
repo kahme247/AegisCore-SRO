@@ -3,11 +3,153 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
+	"time"
 )
+
+type economyCommandState struct {
+	identity  InventoryCommandIdentity
+	version   uint64
+	duplicate bool
+	result    []byte
+}
+
+type economyReplayResult struct {
+	Gold                       uint64      `json:"gold"`
+	StorageGold                uint64      `json:"storage_gold,omitempty"`
+	Item                       Item        `json:"item"`
+	SourceSlot                 byte        `json:"source_slot,omitempty"`
+	BuybackSlot                byte        `json:"buyback_slot,omitempty"`
+	DestinationSlots           []byte      `json:"destination_slots,omitempty"`
+	Amount                     uint16      `json:"amount,omitempty"`
+	Specialty                  bool        `json:"specialty,omitempty"`
+	TriJobType                 byte        `json:"tri_job_type,omitempty"`
+	TriJobReward               uint64      `json:"tri_job_reward,omitempty"`
+	TradeScale                 byte        `json:"trade_scale,omitempty"`
+	SafeTradeReset             bool        `json:"safe_trade_reset,omitempty"`
+	Job                        JobSnapshot `json:"job,omitempty"`
+	JobAdvanced                bool        `json:"job_advanced,omitempty"`
+	ActivatedDevilSpiritRefID  uint32      `json:"activated_devil_spirit_ref_id,omitempty"`
+	ActivatedDevilSpiritItemID int         `json:"activated_devil_spirit_item_id,omitempty"`
+	DevilSpiritExpiresAt       time.Time   `json:"devil_spirit_expires_at,omitempty"`
+}
+
+type storageCommandState struct {
+	identity  InventoryCommandIdentity
+	version   uint64
+	duplicate bool
+	result    []byte
+}
+
+func beginStorageCommand(ctx context.Context, tx *sql.Tx, userID uint32) (storageCommandState, error) {
+	identity, ok := inventoryCommand(ctx)
+	if !ok {
+		return storageCommandState{}, nil
+	}
+	aggregateID := fmt.Sprintf("%d", userID)
+	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO `AEGIS_AGGREGATE_VERSION` (`AGGREGATE_KIND`,`AGGREGATE_ID`,`VERSION`) VALUES ('storage',?,0)", aggregateID); err != nil {
+		return storageCommandState{}, err
+	}
+	var version uint64
+	if err := tx.QueryRowContext(ctx, "SELECT `VERSION` FROM `AEGIS_AGGREGATE_VERSION` WHERE `AGGREGATE_KIND`='storage' AND `AGGREGATE_ID`=? FOR UPDATE", aggregateID).Scan(&version); err != nil {
+		return storageCommandState{}, err
+	}
+	var name, kind, storedID, status string
+	var result []byte
+	err := tx.QueryRowContext(ctx, "SELECT `COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`STATUS`,`RESULT_PAYLOAD` FROM `AEGIS_COMMAND_IDEMPOTENCY` WHERE `IDEMPOTENCY_KEY`=? FOR UPDATE", identity.Key).Scan(&name, &kind, &storedID, &status, &result)
+	if err == nil {
+		if name != identity.Name || kind != "storage" || storedID != aggregateID || status != "completed" {
+			return storageCommandState{}, ErrEconomyConflict
+		}
+		return storageCommandState{identity: identity, version: version, duplicate: true, result: append([]byte(nil), result...)}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return storageCommandState{}, err
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_COMMAND_IDEMPOTENCY` (`IDEMPOTENCY_KEY`,`COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`EXPECTED_VERSION`,`STATUS`) VALUES (?,?,'storage',?,?,'in_progress')", identity.Key, identity.Name, aggregateID, version)
+	return storageCommandState{identity: identity, version: version}, err
+}
+
+func completeStorageCommand(ctx context.Context, tx *sql.Tx, userID uint32, state storageCommandState, topic string, replay economyReplayResult) error {
+	if state.identity.Key == "" {
+		return nil
+	}
+	payload, err := json.Marshal(replay)
+	if err != nil {
+		return err
+	}
+	aggregateID := fmt.Sprintf("%d", userID)
+	next := state.version + 1
+	result, err := tx.ExecContext(ctx, "UPDATE `AEGIS_AGGREGATE_VERSION` SET `VERSION`=? WHERE `AGGREGATE_KIND`='storage' AND `AGGREGATE_ID`=? AND `VERSION`=?", next, aggregateID, state.version)
+	if err != nil {
+		return err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return ErrEconomyConflict
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_OUTBOX_MESSAGE` (`MESSAGE_ID`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`AGGREGATE_VERSION`,`TOPIC`,`PAYLOAD`,`OCCURRED_AT`) VALUES (?,'storage',?,?,?,?,CURRENT_TIMESTAMP(6))", state.identity.Key, aggregateID, next, topic, payload); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE `AEGIS_COMMAND_IDEMPOTENCY` SET `STATUS`='completed',`RESULT_VERSION`=?,`RESULT_PAYLOAD`=?,`COMPLETED_AT`=CURRENT_TIMESTAMP(6) WHERE `IDEMPOTENCY_KEY`=? AND `STATUS`='in_progress'", next, payload, state.identity.Key)
+	return err
+}
+
+func beginEconomyCommand(ctx context.Context, tx *sql.Tx, characterID int64) (economyCommandState, error) {
+	identity, ok := inventoryCommand(ctx)
+	if !ok {
+		return economyCommandState{}, nil
+	}
+	aggregateID := fmt.Sprintf("%d", characterID)
+	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO `AEGIS_AGGREGATE_VERSION` (`AGGREGATE_KIND`,`AGGREGATE_ID`,`VERSION`) VALUES ('inventory',?,0)", aggregateID); err != nil {
+		return economyCommandState{}, err
+	}
+	var version uint64
+	if err := tx.QueryRowContext(ctx, "SELECT `VERSION` FROM `AEGIS_AGGREGATE_VERSION` WHERE `AGGREGATE_KIND`='inventory' AND `AGGREGATE_ID`=? FOR UPDATE", aggregateID).Scan(&version); err != nil {
+		return economyCommandState{}, err
+	}
+	var name, kind, storedID, status string
+	var result []byte
+	err := tx.QueryRowContext(ctx, "SELECT `COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`STATUS`,`RESULT_PAYLOAD` FROM `AEGIS_COMMAND_IDEMPOTENCY` WHERE `IDEMPOTENCY_KEY`=? FOR UPDATE", identity.Key).Scan(&name, &kind, &storedID, &status, &result)
+	if err == nil {
+		if name != identity.Name || kind != "inventory" || storedID != aggregateID || status != "completed" {
+			return economyCommandState{}, ErrEconomyConflict
+		}
+		return economyCommandState{identity: identity, version: version, duplicate: true, result: append([]byte(nil), result...)}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return economyCommandState{}, err
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_COMMAND_IDEMPOTENCY` (`IDEMPOTENCY_KEY`,`COMMAND_NAME`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`EXPECTED_VERSION`,`STATUS`) VALUES (?,?,'inventory',?,?,'in_progress')", identity.Key, identity.Name, aggregateID, version)
+	return economyCommandState{identity: identity, version: version}, err
+}
+
+func completeEconomyCommand(ctx context.Context, tx *sql.Tx, characterID int64, state economyCommandState, topic string, replay economyReplayResult) error {
+	if state.identity.Key == "" {
+		return nil
+	}
+	payload, err := json.Marshal(replay)
+	if err != nil {
+		return err
+	}
+	aggregateID := fmt.Sprintf("%d", characterID)
+	next := state.version + 1
+	result, err := tx.ExecContext(ctx, "UPDATE `AEGIS_AGGREGATE_VERSION` SET `VERSION`=? WHERE `AGGREGATE_KIND`='inventory' AND `AGGREGATE_ID`=? AND `VERSION`=?", next, aggregateID, state.version)
+	if err != nil {
+		return err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return ErrEconomyConflict
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO `AEGIS_OUTBOX_MESSAGE` (`MESSAGE_ID`,`AGGREGATE_KIND`,`AGGREGATE_ID`,`AGGREGATE_VERSION`,`TOPIC`,`PAYLOAD`,`OCCURRED_AT`) VALUES (?,'inventory',?,?,?,?,CURRENT_TIMESTAMP(6))", state.identity.Key, aggregateID, next, topic, payload); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE `AEGIS_COMMAND_IDEMPOTENCY` SET `STATUS`='completed',`RESULT_VERSION`=?,`RESULT_PAYLOAD`=?,`COMPLETED_AT`=CURRENT_TIMESTAMP(6) WHERE `IDEMPOTENCY_KEY`=? AND `STATUS`='in_progress'", next, payload, state.identity.Key)
+	return err
+}
 
 var (
 	ErrEconomyRepositoryUnavailable = errors.New("economy repository is unavailable")
@@ -108,6 +250,25 @@ func (r *SQLEconomyRepository) Buy(ctx context.Context, characterID int64, userI
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return EconomyResult{}, err
+		}
+		committed = true
+		inventory, loadErr := r.loadInventory(ctx, characterID)
+		if loadErr != nil {
+			return EconomyResult{}, loadErr
+		}
+		return EconomyResult{Gold: replay.Gold, Inventory: inventory, Item: replay.Item, DestinationSlots: replay.DestinationSlots, Amount: replay.Amount}, nil
+	}
 	good, err := loadShopGood(ctx, tx, npc, tab, shopSlot)
 	if err != nil {
 		return EconomyResult{}, err
@@ -158,6 +319,9 @@ func (r *SQLEconomyRepository) Buy(ctx context.Context, characterID int64, userI
 	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
 		return EconomyResult{}, err
 	}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.purchased", economyReplayResult{Gold: gold, Item: first, DestinationSlots: free, Amount: quantity}); err != nil {
+		return EconomyResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
@@ -187,6 +351,25 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	owner, gold, err := lockEconomyCharacter(ctx, tx, characterID)
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
+	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return EconomyResult{}, err
+		}
+		committed = true
+		inventory, loadErr := r.loadInventory(ctx, characterID)
+		if loadErr != nil {
+			return EconomyResult{}, loadErr
+		}
+		return EconomyResult{Gold: replay.Gold, Inventory: inventory, Item: replay.Item, SourceSlot: replay.SourceSlot, BuybackSlot: replay.BuybackSlot, Amount: replay.Amount, Specialty: replay.Specialty, TriJobType: replay.TriJobType, TriJobReward: replay.TriJobReward}, nil
 	}
 	if resetBuyback {
 		if err = clearBuybackItems(ctx, tx, characterID); err != nil {
@@ -238,6 +421,16 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
 		return EconomyResult{}, err
 	}
+	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	soldItem.CreatorName = creatorName
+	reward := sellPrice * uint64(amount)
+	triJobReward := SpecialtyTriJobReward(reward)
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.sold", economyReplayResult{Gold: gold, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: triJobReward}); err != nil {
+		return EconomyResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
@@ -246,13 +439,6 @@ func (r *SQLEconomyRepository) Sell(ctx context.Context, characterID int64, user
 	if err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
-	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
-	if err != nil {
-		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
-	}
-	soldItem.CreatorName = creatorName
-	reward := sellPrice * uint64(amount)
-	triJobReward := SpecialtyTriJobReward(reward)
 	return EconomyResult{Gold: gold, Inventory: inventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: triJobReward}, nil
 }
 
@@ -274,6 +460,29 @@ func (r *SQLEconomyRepository) SellCOS(ctx context.Context, characterID int64, u
 	owner, gold, err := lockEconomyCharacter(ctx, tx, characterID)
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
+	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return EconomyResult{}, err
+		}
+		committed = true
+		cosRepository, repoErr := NewCOSRepository(r.shard)
+		if repoErr != nil {
+			return EconomyResult{}, repoErr
+		}
+		cosInventory, loadErr := cosRepository.LoadInventory(ctx, int(characterID), cosID)
+		if loadErr != nil {
+			return EconomyResult{}, loadErr
+		}
+		return EconomyResult{Gold: replay.Gold, COSInventory: cosInventory, Item: replay.Item, SourceSlot: replay.SourceSlot, BuybackSlot: replay.BuybackSlot, Amount: replay.Amount, Specialty: replay.Specialty, TriJobType: replay.TriJobType, TriJobReward: replay.TriJobReward, TradeScale: replay.TradeScale, SafeTradeReset: replay.SafeTradeReset, Job: replay.Job, JobAdvanced: replay.JobAdvanced}, nil
 	}
 	var kind byte
 	if err = tx.QueryRowContext(ctx, "SELECT `KIND` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", cosID, characterID).Scan(&kind); err != nil || kind != byte(COSJobTransport) {
@@ -364,6 +573,15 @@ func (r *SQLEconomyRepository) SellCOS(ctx context.Context, characterID int64, u
 	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
 		return EconomyResult{}, err
 	}
+	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	soldItem.CreatorName = creatorName
+	replay := economyReplayResult{Gold: gold, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: SpecialtyTriJobReward(reward), TradeScale: tradeScale, SafeTradeReset: specialty, Job: job, JobAdvanced: specialty}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.cos-item.sold", replay); err != nil {
+		return EconomyResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
@@ -376,11 +594,6 @@ func (r *SQLEconomyRepository) SellCOS(ctx context.Context, characterID int64, u
 	if err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
-	soldItem, err := economyItem(soldItemID, refID, variance, int(amount), opt, data, rent)
-	if err != nil {
-		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
-	}
-	soldItem.CreatorName = creatorName
 	return EconomyResult{Gold: gold, COSInventory: cosInventory, Item: soldItem, SourceSlot: source, BuybackSlot: buybackSlot, Amount: amount, Specialty: specialty, TriJobType: triJobType, TriJobReward: SpecialtyTriJobReward(reward), TradeScale: tradeScale, SafeTradeReset: specialty, Job: job, JobAdvanced: specialty}, nil
 }
 
@@ -501,6 +714,25 @@ func (r *SQLEconomyRepository) BuyBack(ctx context.Context, characterID int64, u
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return EconomyResult{}, err
+		}
+		committed = true
+		inventory, loadErr := r.loadInventory(ctx, characterID)
+		if loadErr != nil {
+			return EconomyResult{}, loadErr
+		}
+		return EconomyResult{Gold: replay.Gold, Inventory: inventory, Item: replay.Item, SourceSlot: replay.SourceSlot, DestinationSlots: replay.DestinationSlots, Amount: replay.Amount}, nil
+	}
 	var itemID int64
 	var refID uint32
 	var stack int
@@ -534,15 +766,18 @@ func (r *SQLEconomyRepository) BuyBack(ctx context.Context, characterID int64, u
 	if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `GOLD`=? WHERE `id`=?", gold, characterID); err != nil {
 		return EconomyResult{}, err
 	}
+	item, err := economyItem(itemID, refID, variance, stack, opt, data, rent)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.bought-back", economyReplayResult{Gold: gold, Item: item, SourceSlot: source, DestinationSlots: free, Amount: uint16(stack)}); err != nil {
+		return EconomyResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
 	committed = true
 	inventory, err := r.loadInventory(ctx, characterID)
-	if err != nil {
-		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
-	}
-	item, err := economyItem(itemID, refID, variance, stack, opt, data, rent)
 	if err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
@@ -700,6 +935,17 @@ func (r *SQLEconomyRepository) transferStorageGold(ctx context.Context, characte
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	command, err := beginStorageCommand(ctx, tx, userID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		return EconomyResult{Gold: replay.Gold, StorageGold: replay.StorageGold, Amount: replay.Amount}, nil
+	}
 	if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO `STORAGE_INFO` (`FK_USER`) VALUES (?)", userID); err != nil {
 		return EconomyResult{}, err
 	}
@@ -726,6 +972,13 @@ func (r *SQLEconomyRepository) transferStorageGold(ctx context.Context, characte
 	if _, err = tx.ExecContext(ctx, "UPDATE `STORAGE_INFO` SET `GOLD`=? WHERE `FK_USER`=?", storageGold, userID); err != nil {
 		return EconomyResult{}, err
 	}
+	topic := "storage.gold.withdrawn"
+	if deposit {
+		topic = "storage.gold.deposited"
+	}
+	if err = completeStorageCommand(ctx, tx, userID, command, topic, economyReplayResult{Gold: characterGold, StorageGold: storageGold, Amount: 1}); err != nil {
+		return EconomyResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
@@ -735,7 +988,7 @@ func (r *SQLEconomyRepository) transferStorageGold(ctx context.Context, characte
 
 func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, userID uint32, source, destination byte, deposit bool) (EconomyResult, error) {
 	ctx = normalizeEconomyContext(ctx)
-	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || destination >= baseStorageCapacity(deposit) {
+	if r == nil || r.shard == nil || characterID <= 0 || userID == 0 || (!deposit && destination >= BaseInventorySize) {
 		return EconomyResult{}, ErrEconomyConflict
 	}
 	tx, err := r.shard.BeginTx(normalizeEconomyContext(ctx), nil)
@@ -752,16 +1005,46 @@ func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, 
 	if err != nil || owner != userID {
 		return EconomyResult{}, ErrEconomyConflict
 	}
+	command, err := beginStorageCommand(ctx, tx, userID)
+	if err != nil {
+		return EconomyResult{}, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return EconomyResult{}, err
+		}
+		committed = true
+		inv, loadErr := r.loadInventory(ctx, characterID)
+		if loadErr != nil {
+			return EconomyResult{}, loadErr
+		}
+		return EconomyResult{Gold: replay.Gold, Inventory: inv, SourceSlot: replay.SourceSlot, DestinationSlots: replay.DestinationSlots}, nil
+	}
 	if _, err = tx.ExecContext(ctx, "INSERT IGNORE INTO `STORAGE_INFO` (`FK_USER`) VALUES (?)", userID); err != nil {
 		return EconomyResult{}, err
 	}
 	var itemID int64
 	if deposit {
-		err = tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? FOR UPDATE", characterID, source).Scan(&itemID)
+		var cosState byte
+		err = tx.QueryRowContext(ctx, "SELECT inv.`FK_ITEM`,COALESCE(cos.`STATE`,0) FROM `INVENTORY` inv JOIN `ITEM` it ON it.`ID`=inv.`FK_ITEM` LEFT JOIN `CHAR_COS` cos ON cos.`ID`=it.`DATA` AND cos.`OWNER_CHAR_ID`=inv.`FK_CHAR` WHERE inv.`FK_CHAR`=? AND inv.`SLOT`=? FOR UPDATE", characterID, source).Scan(&itemID, &cosState)
 		if err != nil {
 			return EconomyResult{}, ErrEconomyConflict
 		}
-		var occupied int
+		if cosState == byte(COSItemSummoned) || cosState == byte(COSItemActive) {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		var capacity int
+		if err = tx.QueryRowContext(ctx, "SELECT `CAPACITY` FROM `STORAGE_INFO` WHERE `FK_USER`=? FOR UPDATE", userID).Scan(&capacity); err != nil || capacity <= 0 || capacity > 150 {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if int(destination) >= capacity {
+			return EconomyResult{}, ErrEconomyStorageFull
+		}
+		var occupied int64
 		scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `STORAGE` WHERE `FK_USER`=? AND `SLOT`=? FOR UPDATE", userID, destination).Scan(&occupied)
 		if scanErr == nil {
 			return EconomyResult{}, ErrEconomyConflict
@@ -776,8 +1059,12 @@ func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, 
 			return EconomyResult{}, err
 		}
 	} else {
-		err = tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `STORAGE` WHERE `FK_USER`=? AND `SLOT`=? FOR UPDATE", userID, source).Scan(&itemID)
+		var cosState byte
+		err = tx.QueryRowContext(ctx, "SELECT st.`FK_ITEM`,COALESCE(cos.`STATE`,0) FROM `STORAGE` st JOIN `ITEM` it ON it.`ID`=st.`FK_ITEM` LEFT JOIN `CHAR_COS` cos ON cos.`ID`=it.`DATA` AND cos.`OWNER_CHAR_ID`=? WHERE st.`FK_USER`=? AND st.`SLOT`=? FOR UPDATE", characterID, userID, source).Scan(&itemID, &cosState)
 		if err != nil {
+			return EconomyResult{}, ErrEconomyConflict
+		}
+		if cosState == byte(COSItemSummoned) || cosState == byte(COSItemActive) {
 			return EconomyResult{}, ErrEconomyConflict
 		}
 		var occupied int
@@ -794,6 +1081,13 @@ func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, 
 		if _, err = tx.ExecContext(ctx, "INSERT INTO `INVENTORY` (`FK_CHAR`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", characterID, destination, itemID); err != nil {
 			return EconomyResult{}, err
 		}
+	}
+	topic := "storage.item.withdrawn"
+	if deposit {
+		topic = "storage.item.deposited"
+	}
+	if err = completeStorageCommand(ctx, tx, userID, command, topic, economyReplayResult{Gold: gold, SourceSlot: source, DestinationSlots: []byte{destination}}); err != nil {
+		return EconomyResult{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
@@ -820,26 +1114,64 @@ func (r *SQLEconomyRepository) MoveStorage(ctx context.Context, userID uint32, s
 			_ = tx.Rollback()
 		}
 	}()
+	command, err := beginStorageCommand(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	if command.duplicate {
+		return nil
+	}
 	var itemID int64
-	var stack int
-	if err = tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`STACK_COUNT` FROM `STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` WHERE s.`FK_USER`=? AND s.`SLOT`=? FOR UPDATE", userID, source).Scan(&itemID, &stack); err != nil {
+	var refID uint32
+	var stack, maxStack int
+	if err = tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`FK_REF_ITEM`,i.`STACK_COUNT`,COALESCE(NULLIF(d.`Stack_Size`,0),1) FROM `STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=i.`FK_REF_ITEM` WHERE s.`FK_USER`=? AND s.`SLOT`=? FOR UPDATE", userID, source).Scan(&itemID, &refID, &stack, &maxStack); err != nil {
 		return ErrEconomyConflict
 	}
-	if amount == 0 {
-		amount = uint16(stack)
-	}
-	if int(amount) != stack {
+	var occupied int64
+	var occupiedRef uint32
+	var occupiedStack int
+	scanErr := tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`FK_REF_ITEM`,i.`STACK_COUNT` FROM `STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` WHERE s.`FK_USER`=? AND s.`SLOT`=? FOR UPDATE", userID, destination).Scan(&occupied, &occupiedRef, &occupiedStack)
+	if resolved, valid := resolveStorageMoveAmount(stack, maxStack, amount, scanErr == nil, occupiedRef == refID, occupiedStack); valid {
+		amount = uint16(resolved)
+	} else {
 		return ErrEconomyConflict
 	}
-	var occupied int
-	scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `STORAGE` WHERE `FK_USER`=? AND `SLOT`=? FOR UPDATE", userID, destination).Scan(&occupied)
 	if scanErr == nil {
-		return ErrEconomyConflict
-	}
-	if !errors.Is(scanErr, sql.ErrNoRows) {
+		if occupiedRef != refID {
+			return ErrEconomyConflict
+		}
+		if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", occupiedStack+int(amount), occupied, occupiedStack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrEconomyConflict
+		}
+		if int(amount) == stack {
+			if result, err := tx.ExecContext(ctx, "DELETE FROM `STORAGE` WHERE `FK_USER`=? AND `SLOT`=? AND `FK_ITEM`=?", userID, source, itemID); err != nil || !singleAffectedRow(result) {
+				return ErrEconomyConflict
+			}
+			if result, err := tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=? AND `STACK_COUNT`=?", itemID, stack); err != nil || !singleAffectedRow(result) {
+				return ErrEconomyConflict
+			}
+		} else if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", stack-int(amount), itemID, stack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrEconomyConflict
+		}
+	} else if !errors.Is(scanErr, sql.ErrNoRows) {
 		return scanErr
+	} else if int(amount) == stack {
+		if result, moveErr := tx.ExecContext(ctx, "UPDATE `STORAGE` SET `SLOT`=? WHERE `FK_USER`=? AND `SLOT`=? AND `FK_ITEM`=?", destination, userID, source, itemID); moveErr != nil || !singleAffectedRow(result) {
+			return ErrEconomyConflict
+		}
+	} else {
+		newItemID, splitErr := cloneStorageItemStack(ctx, tx, itemID, amount)
+		if splitErr != nil {
+			return splitErr
+		}
+		if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", stack-int(amount), itemID, stack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrEconomyConflict
+		}
+		if _, insertErr := tx.ExecContext(ctx, "INSERT INTO `STORAGE` (`FK_USER`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", userID, destination, newItemID); insertErr != nil {
+			return insertErr
+		}
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE `STORAGE` SET `SLOT`=? WHERE `FK_USER`=? AND `SLOT`=? AND `FK_ITEM`=?", destination, userID, source, itemID); err != nil {
+	if err = completeStorageCommand(ctx, tx, userID, command, "storage.item.moved", economyReplayResult{SourceSlot: source, DestinationSlots: []byte{destination}, Amount: amount}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -847,6 +1179,32 @@ func (r *SQLEconomyRepository) MoveStorage(ctx context.Context, userID uint32, s
 	}
 	committed = true
 	return nil
+}
+
+func cloneStorageItemStack(ctx context.Context, tx *sql.Tx, itemID int64, amount uint16) (int64, error) {
+	result, err := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) SELECT `VARIANCE`,`FK_REF_ITEM`,?,`OPT_LEVEL`,`DATA`,`CREATOR_NAME`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME` FROM `ITEM` WHERE `id`=?", amount, itemID)
+	if err != nil || !singleAffectedRow(result) {
+		return 0, ErrEconomyConflict
+	}
+	created, err := result.LastInsertId()
+	if err != nil || created <= 0 {
+		return 0, ErrEconomyConflict
+	}
+	return created, nil
+}
+
+func resolveStorageMoveAmount(sourceStack, maxStack int, requested uint16, targetExists, targetSameReference bool, targetStack int) (int, bool) {
+	amount := int(requested)
+	if amount == 0 {
+		amount = sourceStack
+	}
+	if sourceStack <= 0 || amount <= 0 || amount > sourceStack {
+		return 0, false
+	}
+	if targetExists && (!targetSameReference || maxStack <= 1 || targetStack <= 0 || targetStack+amount > maxStack) {
+		return 0, false
+	}
+	return amount, true
 }
 
 func lockEconomyCharacter(ctx context.Context, tx *sql.Tx, characterID int64) (uint32, uint64, error) {

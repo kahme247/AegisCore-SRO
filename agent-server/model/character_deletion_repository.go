@@ -30,7 +30,7 @@ func (r *SQLCharacterRepository) PurgeExpiredCharacters(ctx context.Context, now
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rows, err := database.QueryContext(ctx, "SELECT c.`ID` FROM `SRO_SHARD`.`CHAR` c WHERE c.`DELETING`=TRUE AND c.`DELETION_REQUESTED_AT` IS NOT NULL AND c.`DELETION_REQUESTED_AT`<=? AND NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`GUILD_MEMBER` gm WHERE gm.`FK_CHAR`=c.`ID` AND gm.`MEMBER_CLASS`=0) ORDER BY c.`DELETION_REQUESTED_AT`,c.`ID` LIMIT ?", now.UTC().Add(-CharacterDeletionRetention), limit)
+	rows, err := database.QueryContext(ctx, "SELECT c.`ID` FROM `SRO_SHARD`.`CHAR` c WHERE c.`DELETING`=TRUE AND c.`DELETION_REQUESTED_AT` IS NOT NULL AND c.`DELETION_REQUESTED_AT`<=? AND NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`GUILD_MEMBER` gm WHERE gm.`FK_CHAR`=c.`ID` AND gm.`MEMBER_CLASS`=0) ORDER BY c.`DELETION_REQUESTED_AT`,c.`ID` LIMIT ?", now.UTC().Add(-RuntimeCharacterDeletionRetention()), limit)
 	if err != nil {
 		return 0, fmt.Errorf("query expired character deletions: %w", err)
 	}
@@ -119,7 +119,7 @@ func deleteCharacterTransaction(ctx context.Context, database *sql.DB, character
 	if err != nil {
 		return fmt.Errorf("lock character deletion target: %w", err)
 	}
-	if requireExpired && (!deleting || !requestedAt.Valid || requestedAt.Time.UTC().Add(CharacterDeletionRetention).After(now.UTC())) {
+	if requireExpired && (!deleting || !requestedAt.Valid || requestedAt.Time.UTC().Add(RuntimeCharacterDeletionRetention()).After(now.UTC())) {
 		return ErrCharacterDeletionNotEligible
 	}
 

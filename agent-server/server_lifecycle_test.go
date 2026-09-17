@@ -95,6 +95,24 @@ func TestAgentDegradeFailsReadyStateClosed(t *testing.T) {
 	}
 }
 
+func TestAgentDependencyLossDrainFailsReadinessClosedWithoutStoppingProcess(t *testing.T) {
+	lifecycle := agentruntime.NewLifecycle()
+	_ = lifecycle.Transition(agentruntime.Loading, "")
+	_ = lifecycle.Transition(agentruntime.Ready, "")
+	engine := server.NewEngine("127.0.0.1", 0, network.EncodingOptions{})
+	agent := AgentServer{Server: &engine, Lifecycle: lifecycle}
+	if err := agent.DrainForDependencyLoss(context.Background(), "shard persistence unavailable"); err != nil {
+		t.Fatalf("DrainForDependencyLoss() error = %v", err)
+	}
+	snapshot := lifecycle.Snapshot()
+	if snapshot.State != agentruntime.Degraded || snapshot.Reason != "shard persistence unavailable" || lifecycle.IsReady() {
+		t.Fatalf("dependency-loss snapshot = %+v ready=%t", snapshot, lifecycle.IsReady())
+	}
+	if err := agent.DrainForDependencyLoss(context.Background(), "duplicate notification"); err != nil {
+		t.Fatalf("duplicate DrainForDependencyLoss() error = %v", err)
+	}
+}
+
 func TestAgentPacketLoopStopsWhenShutdownContextIsCancelled(t *testing.T) {
 	engine := server.NewEngine("127.0.0.1", 0, network.EncodingOptions{})
 	packetContext, cancelPackets := context.WithCancel(context.Background())

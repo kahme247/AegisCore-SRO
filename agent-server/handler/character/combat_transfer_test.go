@@ -89,6 +89,22 @@ func TestTransferFalloffAccountsForPrimaryHit(t *testing.T) {
 	}
 }
 
+func TestMergeCombatDamageTargetsKeepsOneEntryPerTarget(t *testing.T) {
+	primary := model.CombatDamageTarget{TargetUID: 200, Records: []model.CombatDamageRecord{{Damage: 100}}}
+	transfer := model.CombatDamageTarget{TargetUID: 201, Records: []model.CombatDamageRecord{{Damage: 50}}}
+	imbue := model.CombatDamageTarget{TargetUID: 201, Records: []model.CombatDamageRecord{{Damage: 25}}}
+
+	targets := mergeCombatDamageTargets([]model.CombatDamageTarget{primary}, []model.CombatDamageTarget{transfer})
+	targets = mergeCombatDamageTargets(targets, []model.CombatDamageTarget{imbue})
+
+	if len(targets) != 2 {
+		t.Fatalf("merged targets = %d, want primary and one transferred target", len(targets))
+	}
+	if targets[1].TargetUID != 201 || len(targets[1].Records) != 2 {
+		t.Fatalf("transferred target = %#v, want skill and imbue records under UID 201", targets[1])
+	}
+}
+
 func TestHealingTransferTargetsChainAcrossEligiblePartyMembers(t *testing.T) {
 	party := &model.Party{Number: 1}
 	newPlayer := func(uid uint32, x float32, member bool) *model.Player {

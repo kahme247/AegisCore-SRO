@@ -74,6 +74,7 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 	transition, err := h.core().AnswerInvitation(session.UserContext.UniqueID, accept)
 	if err != nil {
 		if errors.Is(err, service.ErrPartyInvitationMissing) && h.invitationFallback != nil {
+			ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.invitation.answer"})
 			handled, fallbackErr := h.invitationFallback.AnswerGuildInvitation(ctx, session, accept)
 			if handled || fallbackErr != nil {
 				return fallbackErr
@@ -88,7 +89,11 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 	if !transition.Accepted {
 		return h.sendPacket(transition.Inviter.GetSession(), buildPartyOperationResponse(responseOpcode, false))
 	}
-	if err = h.sendPacket(transition.Inviter.GetSession(), buildPartyOperationResponse(responseOpcode, true)); err != nil {
+	response := buildPartyOperationResponse(responseOpcode, true)
+	if responseOpcode == opcode.PartyCreateResponse {
+		response = buildPartyCreateSuccess(transition.Inviter.GetUniqueID())
+	}
+	if err = h.sendPacket(transition.Inviter.GetSession(), response); err != nil {
 		return err
 	}
 	full := buildPartySnapshot(transition.Party, false)

@@ -37,6 +37,126 @@ func (r *scriptedDropRandom) Float64() float64 {
 	return value
 }
 
+func TestWinterEventDropUsesBinaryAuthoredMonsterItemChanceAndCount(t *testing.T) {
+	previousChars, previousItems := model.RefChars, model.RefItems
+	t.Cleanup(func() {
+		model.RefChars, model.RefItems = previousChars, previousItems
+	})
+	model.RefChars = map[uint32]model.RefChar{
+		28811: {RefObject: model.RefObject{ID: 28811, CodeName: winterEventMonsterCode}},
+	}
+	model.RefItems = map[uint32]model.RefItem{
+		28681: {RefObject: model.RefObject{ID: 28681, CodeName: winterEventItemCode}},
+	}
+	random := &scriptedDropRandom{floats: []float64{0.4999, 0.5}}
+	service := NewMonsterDropService(nil, random, nil, nil)
+	if err := service.ConfigureWinterEvent(true); err != nil {
+		t.Fatalf("ConfigureWinterEvent() error = %v", err)
+	}
+	snowman := &model.NPC{SRObject: model.SRObject{RefObjectID: 28811}}
+	first := service.appendWinterEventDrop(nil, snowman)
+	if len(first) != 1 || first[0].ReferenceItemID != 28681 || first[0].StackCount != 1 {
+		t.Fatalf("first Winter drop = %#v, want one snowflake", first)
+	}
+	if second := service.appendWinterEventDrop(nil, snowman); len(second) != 0 {
+		t.Fatalf("boundary roll produced %#v, want no drop", second)
+	}
+}
+
+func TestWinterEventDropRequiresFeatureAndExactReferences(t *testing.T) {
+	previousChars, previousItems := model.RefChars, model.RefItems
+	t.Cleanup(func() {
+		model.RefChars, model.RefItems = previousChars, previousItems
+	})
+	model.RefChars = map[uint32]model.RefChar{28811: {RefObject: model.RefObject{ID: 28811, CodeName: winterEventMonsterCode}}}
+	model.RefItems = map[uint32]model.RefItem{28681: {RefObject: model.RefObject{ID: 28681, CodeName: winterEventItemCode}}}
+	service := NewMonsterDropService(nil, &scriptedDropRandom{floats: []float64{0}}, nil, nil)
+	snowman := &model.NPC{SRObject: model.SRObject{RefObjectID: 28811}}
+	if got := service.appendWinterEventDrop(nil, snowman); len(got) != 0 {
+		t.Fatalf("disabled Winter event produced %#v", got)
+	}
+	if err := service.ConfigureWinterEvent(true); err != nil {
+		t.Fatalf("ConfigureWinterEvent() error = %v", err)
+	}
+	ordinary := &model.NPC{SRObject: model.SRObject{RefObjectID: 123}}
+	if got := service.appendWinterEventDrop(nil, ordinary); len(got) != 0 {
+		t.Fatalf("ordinary monster produced Winter drop %#v", got)
+	}
+	model.RefItems = nil
+	if err := service.ConfigureWinterEvent(true); err == nil {
+		t.Fatal("ConfigureWinterEvent accepted a missing snowflake reference")
+	}
+}
+
+func TestBattleArenaTicketDropRequiresAuthoredArenaInstance(t *testing.T) {
+	previousItems := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousItems })
+	model.RefItems = map[uint32]model.RefItem{
+		25835: {RefObject: model.RefObject{ID: 25835, CodeName: battleArenaTicketCode}},
+	}
+	service := NewMonsterDropService(nil, &scriptedDropRandom{}, nil, nil)
+	if err := service.ConfigureBattleArenaTicketDropRate(100); err != nil {
+		t.Fatalf("ConfigureBattleArenaTicketDropRate() error = %v", err)
+	}
+	arenaScope, err := model.NewGameWorldScope(42, 7)
+	if err != nil {
+		t.Fatalf("NewGameWorldScope() error = %v", err)
+	}
+	arenaMonster := &model.NPC{SRObject: model.SRObject{RefObjectID: 900}}
+	arenaMonster.SetGameWorldID(uint32(arenaScope))
+	got := service.appendBattleArenaTicket(nil, arenaMonster)
+	if len(got) != 1 || got[0].ReferenceItemID != 25835 || got[0].StackCount != 1 {
+		t.Fatalf("Arena ticket drop = %#v, want one ticket", got)
+	}
+	questScope, err := model.NewGameWorldScope(10, 7)
+	if err != nil {
+		t.Fatalf("NewGameWorldScope() error = %v", err)
+	}
+	arenaMonster.SetGameWorldID(uint32(questScope))
+	if got := service.appendBattleArenaTicket(nil, arenaMonster); len(got) != 0 {
+		t.Fatalf("quest instance produced Arena ticket %#v", got)
+	}
+	arenaMonster.SetGameWorldID(42) // world without an allocated match layer
+	if got := service.appendBattleArenaTicket(nil, arenaMonster); len(got) != 0 {
+		t.Fatalf("uninstanced Arena world produced ticket %#v", got)
+	}
+}
+
+func TestBattleArenaTicketAdaptiveAccumulatorIsScopedPerMatch(t *testing.T) {
+	service := NewMonsterDropService(nil, &scriptedDropRandom{ints: []int{75, 100, 75, 0}}, nil, nil)
+	service.battleArena = battleArenaTicketDrop{rate: 50, itemRefID: 25835, accumulator: make(map[uint32]int)}
+	if service.rollBattleArenaTicket(0x0007002A) {
+		t.Fatal("first roll 75 unexpectedly passed rate 50")
+	}
+	if !service.rollBattleArenaTicket(0x0007002A) {
+		t.Fatal("second adaptive roll 100 did not pass accumulator 100")
+	}
+	if service.rollBattleArenaTicket(0x0007002A) {
+		t.Fatal("third roll 75 unexpectedly passed accumulator 50")
+	}
+	if !service.rollBattleArenaTicket(0x0008002A) {
+		t.Fatal("separate match did not start a fresh accumulator")
+	}
+	if got := service.battleArena.accumulator[0x0007002A]; got != 100 {
+		t.Fatalf("first match accumulator = %d, want 100", got)
+	}
+	if got := service.battleArena.accumulator[0x0008002A]; got != 0 {
+		t.Fatalf("second match accumulator = %d, want 0", got)
+	}
+}
+
+func TestBattleArenaTicketDropRateValidationAndDisabledCatalogDefault(t *testing.T) {
+	service := NewMonsterDropService(nil, &scriptedDropRandom{}, nil, nil)
+	if err := service.ConfigureBattleArenaTicketDropRate(0); err != nil {
+		t.Fatalf("zero authored rate error = %v", err)
+	}
+	for _, rate := range []int{-1, 101} {
+		if err := service.ConfigureBattleArenaTicketDropRate(rate); err == nil {
+			t.Fatalf("rate %d was accepted", rate)
+		}
+	}
+}
+
 func TestMonsterDropRollDirectCountAndGoldClassification(t *testing.T) {
 	random := &scriptedDropRandom{ints: []int{0, 0, 0, 0, 0, 16384}}
 	catalog := NewMonsterDropCatalog(map[uint32]MonsterDropTable{
@@ -162,6 +282,24 @@ func TestMonsterDropRuntimeRateMultipliesAuthoredLootProbability(t *testing.T) {
 	}
 }
 
+func TestGoldAmountRateScalesAmountWithoutChangingProbability(t *testing.T) {
+	record := &GoldDropRecord{Chance: 50, Min: 10, Max: 10}
+	if _, ok := rollBinaryGoldAtAmountRate(record, 0, &scriptedDropRandom{ints: []int{75}}, 10_000); ok {
+		t.Fatal("gold amount rate incorrectly increased drop probability")
+	}
+	amount, ok := rollBinaryGoldAtAmountRate(record, 0, &scriptedDropRandom{ints: []int{25, 0}}, 500)
+	if !ok || amount != 50 {
+		t.Fatalf("scaled gold = %d, %t; want 50, true", amount, ok)
+	}
+}
+
+func TestLootRateScalesGoldProbability(t *testing.T) {
+	record := &GoldDropRecord{Chance: 0.7, Min: 10, Max: 10}
+	if _, ok := rollBinaryGoldAtRates(record, 0, &scriptedDropRandom{ints: []int{75, 0}}, 10_000, 100); !ok {
+		t.Fatal("10000x loot rate did not scale the native gold probability")
+	}
+}
+
 func TestMonsterDropCatalogUsesLevelGoldForUnassignedMonster(t *testing.T) {
 	catalog := NewMonsterDropCatalogWithGold(nil, map[int]GoldDropRecord{
 		42: {Chance: 100, Min: 100, Max: 100},
@@ -222,6 +360,26 @@ func TestMonsterDropServicePlacesDropsAtKilledMobPosition(t *testing.T) {
 	}
 	if len(spawned) != 1 || world.object != spawned[0] || spawned[0].GetRefObjectID() != 900 {
 		t.Fatalf("spawned = %+v/world=%v", spawned, world.object)
+	}
+}
+
+func TestMonsterDropServiceUsesSpawnedNPCRarityAsDropClass(t *testing.T) {
+	world := &groundItemWorldFake{}
+	groundItems := NewGroundItemService(world, nil)
+	materializer := &groundItemMaterializerFake{}
+	catalog := NewMonsterDropCatalog(map[uint32]MonsterDropTable{77: {
+		Gold: &GoldDropRecord{Chance: 100, Min: 10, Max: 10},
+	}})
+	service := NewMonsterDropService(catalog, &scriptedDropRandom{}, groundItems, materializer)
+	target := &model.NPC{SRObject: model.SRObject{RefObjectID: 77}}
+	target.SetRarity(byte(model.MonsterPartyGiant))
+
+	spawned, err := service.SpawnForKill(context.Background(), nil, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawned) != 5 {
+		t.Fatalf("spawned %d drops, want five selector passes for party giant class 0x14", len(spawned))
 	}
 }
 

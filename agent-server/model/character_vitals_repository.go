@@ -160,10 +160,25 @@ func (r *SQLCharacterVitalsRepository) SaveVitals(ctx context.Context, character
 		return fmt.Errorf("invalid character vitals")
 	}
 	if hp == 0 {
-		_, err := r.shard.ExecContext(ctx, "INSERT INTO `SRO_SHARD`.`CHAR_DEATH_POSITION` (`CHAR_ID`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID`) SELECT `ID`,`FK_REGION`,`POS_X`,`POS_Y`,`POS_Z`,1 FROM `SRO_SHARD`.`CHAR` WHERE `ID`=? AND `HP`>0 ON DUPLICATE KEY UPDATE `REGION_ID`=VALUES(`REGION_ID`),`POS_X`=VALUES(`POS_X`),`POS_Y`=VALUES(`POS_Y`),`POS_Z`=VALUES(`POS_Z`),`WORLD_ID`=VALUES(`WORLD_ID`),`SAVED_AT`=CURRENT_TIMESTAMP(6)", characterID)
-		if err != nil {
-			return fmt.Errorf("save character death position: %w", err)
+		if tx, ok := r.shard.(*sql.Tx); ok {
+			return saveDeadCharacterVitals(ctx, tx, characterID, mp)
 		}
+		beginner, ok := r.shard.(vitalsTransactionBeginner)
+		if !ok {
+			return ErrCharacterVitalsRepositoryUnavailable
+		}
+		tx, err := beginner.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return fmt.Errorf("begin character death save: %w", err)
+		}
+		defer tx.Rollback()
+		if err = saveDeadCharacterVitals(ctx, tx, characterID, mp); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("commit character death save: %w", err)
+		}
+		return nil
 	}
 	result, err := r.shard.ExecContext(ctx, "UPDATE `SRO_SHARD`.`CHAR` SET `HP`=?, `MP`=? WHERE `ID`=?", hp, mp, characterID)
 	if err != nil {
@@ -173,8 +188,25 @@ func (r *SQLCharacterVitalsRepository) SaveVitals(ctx context.Context, character
 	if err != nil {
 		return fmt.Errorf("read character vitals result: %w", err)
 	}
-	if affected > 1 {
-		return fmt.Errorf("save character vitals affected %d rows, want at most 1", affected)
+	if affected != 1 {
+		return fmt.Errorf("save character vitals affected %d rows, want 1", affected)
+	}
+	return nil
+}
+
+func saveDeadCharacterVitals(ctx context.Context, executor frameworkdb.Execer, characterID, mp int) error {
+	if _, err := executor.ExecContext(ctx, "INSERT INTO `SRO_SHARD`.`CHAR_DEATH_POSITION` (`CHAR_ID`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID`) SELECT `ID`,`FK_REGION`,`POS_X`,`POS_Y`,`POS_Z`,1 FROM `SRO_SHARD`.`CHAR` WHERE `ID`=? AND `HP`>0 ON DUPLICATE KEY UPDATE `REGION_ID`=VALUES(`REGION_ID`),`POS_X`=VALUES(`POS_X`),`POS_Y`=VALUES(`POS_Y`),`POS_Z`=VALUES(`POS_Z`),`WORLD_ID`=VALUES(`WORLD_ID`),`SAVED_AT`=CURRENT_TIMESTAMP(6)", characterID); err != nil {
+		return fmt.Errorf("save character death position: %w", err)
+	}
+	result, err := executor.ExecContext(ctx, "UPDATE `SRO_SHARD`.`CHAR` SET `HP`=0, `MP`=? WHERE `ID`=?", mp, characterID)
+	if err != nil {
+		return fmt.Errorf("save dead character vitals: %w", err)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		if affectedErr != nil {
+			return fmt.Errorf("read dead character vitals result: %w", affectedErr)
+		}
+		return fmt.Errorf("save dead character vitals affected %d rows, want 1", affected)
 	}
 	return nil
 }

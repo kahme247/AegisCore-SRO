@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
@@ -12,6 +13,108 @@ import (
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/g3n/engine/math32"
 )
+
+func TestTwoClientSpawnDespawnCoverage(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(25000),
+		Offset: math32.NewVector3(12, 0, 34),
+	}
+	character := func(uid, ref uint32, typeInfo model.TypeInfo) model.NPC {
+		return model.NPC{
+			SRObject: model.SRObject{UniqueID: uid, RefObjectID: ref, TypeInfo: typeInfo, RtNavmeshPosition: position},
+			Mutex:    &sync.Mutex{}, LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
+		}
+	}
+	petNPC := character(104, 5004, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(model.COSGrowthPet)})
+	transportNPC := character(105, 5005, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(model.COSRideTransport)})
+
+	scenarios := []struct {
+		name   string
+		object model.ISRObject
+	}{
+		{name: "player", object: &model.Player{
+			SRObject: model.SRObject{UniqueID: 101, RefObjectID: 1907, TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 1}, RtNavmeshPosition: position},
+			Scale:    34, CharName: "VisiblePlayer", LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
+			Inventory: model.NewInventory(nil),
+		}},
+		{name: "mob", object: func() model.ISRObject {
+			mob := character(102, 5002, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1})
+			return &mob
+		}()},
+		{name: "drop", object: &model.Item{SRObject: model.SRObject{
+			UniqueID: 103, RefObjectID: 1, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5}, RtNavmeshPosition: position,
+		}, Data: 777}},
+		{name: "pet", object: &model.COS{NPC: petNPC, OwnerUniqueID: 900, OwnerName: "Owner", Kind: model.COSGrowthPet, Level: 10, Health: 100, MaxHealth: 100}},
+		{name: "transport", object: &model.COS{NPC: transportNPC, OwnerUniqueID: 900, OwnerName: "Owner", Kind: model.COSRideTransport, Level: 1, Health: 200, MaxHealth: 200}},
+		{name: "npc", object: func() model.ISRObject {
+			npc := character(106, 5006, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 2})
+			return &npc
+		}()},
+		{name: "specialized_structure", object: &model.TeleportGate{SRObject: model.SRObject{
+			UniqueID: 107, RefObjectID: 2094, TypeInfo: model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1}, RtNavmeshPosition: position,
+		}, TeleportID: 1}},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			for _, clientName := range []string{"alice", "bob"} {
+				t.Run(clientName, func(t *testing.T) {
+					_, observer := mobAIFixture(100)
+					conn := &mobAICaptureConn{}
+					observer.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "spawn-coverage-"+clientName)
+					defer observer.Session.Close()
+
+					objects := map[uint32]model.ISRObject{scenario.object.GetUniqueID(): scenario.object}
+					groupSpawnObjects(observer, objects, true)
+					spawnPacketCount := 3
+					if _, isItem := scenario.object.(model.IItem); isItem {
+						spawnPacketCount = 1
+					}
+					packets := readCapturedPackets(t, conn, spawnPacketCount)
+					if len(packets) != spawnPacketCount {
+						t.Fatalf("spawn packet count = %d, want %d", len(packets), spawnPacketCount)
+					}
+					expected := network.EmptyPacket()
+					model.WriteEntitySpawnData(&expected, scenario.object)
+					expectedSpawnData := expected.Payload()
+					spawnData := packets[0].Payload()
+					if spawnPacketCount == 3 {
+						if got := packetOpcodes(packets); got[0] != opcode.EntityGroupSpawnBegin || got[1] != opcode.EntityGroupSpawnData || got[2] != opcode.EntityGroupSpawnEnd {
+							t.Fatalf("spawn opcodes = %#v", got)
+						}
+						spawnData = packets[1].Payload()
+					} else if packets[0].MessageID != opcode.EntitySingleSpawn {
+						t.Fatalf("spawn opcode = 0x%04X, want 0x%04X", packets[0].MessageID, opcode.EntitySingleSpawn)
+					} else {
+						// Direct 0x3015 has the one-byte CIItem update-state tail
+						// that is deliberately absent from grouped 0x3019 records.
+						expectedSpawnData = append(expectedSpawnData, 0)
+					}
+					if !bytes.Equal(spawnData, expectedSpawnData) {
+						t.Fatalf("spawn data lost alignment: got % X, want % X", spawnData, expectedSpawnData)
+					}
+					if !observer.GetCharKnownObjectList().ClientKnows(scenario.object.GetUniqueID()) {
+						t.Fatal("client object table was not updated after spawn")
+					}
+
+					groupSpawnObjects(observer, objects, false)
+					packets = readCapturedPackets(t, conn, spawnPacketCount+1)
+					despawn := packets[spawnPacketCount]
+					if despawn.MessageID != opcode.EntitySingleDespawn || !bytes.Equal(despawn.Payload(), func() []byte {
+						b := make([]byte, 4)
+						binary.LittleEndian.PutUint32(b, scenario.object.GetUniqueID())
+						return b
+					}()) {
+						t.Fatalf("despawn packet = opcode 0x%04X payload % X", despawn.MessageID, despawn.Payload())
+					}
+					if observer.GetCharKnownObjectList().ClientKnows(scenario.object.GetUniqueID()) {
+						t.Fatal("client object table retained entity after despawn")
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestBuildGroupSpawnPacketsDespawnSortsUniqueIDs(t *testing.T) {
 	objects := map[uint32]model.ISRObject{
@@ -247,6 +350,47 @@ func TestSupportedSpawnObjectsAdmitsTeleportGatesWithVerifiedStructureLayout(t *
 	}
 	if len(end.Payload()) != 0 {
 		t.Fatalf("teleport gate group end = %x, want empty", end.Payload())
+	}
+}
+
+func TestSupportedSpawnObjectsAdmitsDimensionHoleStateSixLayout(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region:  navmeshv2.NewRegionFromInt16(25000),
+		Offset:  math32.NewVector3(1254, -6, 1374),
+		Heading: 0,
+	}
+	owner := &model.Player{ID: 7, CharName: "Owner", SRObject: model.SRObject{UniqueID: 900}}
+	portal, err := model.NewDimensionHolePortal(model.DimensionHoleCatalog()[0], owner, position)
+	if err != nil {
+		t.Fatalf("NewDimensionHolePortal() error = %v", err)
+	}
+	portal.SetUniqueID(77)
+	malformed := &model.DimensionHolePortal{SRObject: model.SRObject{
+		UniqueID: 78, RefObjectID: model.DimensionHolePortalRefObjectID,
+		TypeInfo: model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 2}, RtNavmeshPosition: position,
+	}}
+	filtered := supportedSpawnObjects(map[uint32]model.ISRObject{77: portal, 78: malformed})
+	if len(filtered) != 1 || filtered[77] != portal {
+		t.Fatalf("supported Dimension Hole objects = %#v, want only UID 77", filtered)
+	}
+
+	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	if err != nil {
+		t.Fatalf("build Dimension Hole group spawn: %v", err)
+	}
+	if got := begin.Payload(); !bytes.Equal(got, []byte{1, 1, 0}) {
+		t.Fatalf("Dimension Hole group begin = %x, want 010100", got)
+	}
+	wantBody := []byte{
+		0x64, 0x4c, 0, 0, 0x4d, 0, 0, 0,
+		0xa8, 0x61, 0, 0xc0, 0x9c, 0x44, 0, 0, 0xc0, 0xc0, 0, 0xc0, 0xab, 0x44, 0, 0,
+		0, 0, 1, 6, 5, 0, 'O', 'w', 'n', 'e', 'r', 0x2b, 0x8c, 0, 0,
+	}
+	if got := body.Payload(); !bytes.Equal(got, wantBody) {
+		t.Fatalf("Dimension Hole group data = %x, want %x", got, wantBody)
+	}
+	if len(end.Payload()) != 0 {
+		t.Fatalf("Dimension Hole group end = %x, want empty", end.Payload())
 	}
 }
 

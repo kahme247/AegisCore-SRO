@@ -76,6 +76,10 @@ func (h *AuthRequestHandler) HandlePacket(packet server.PacketChannelData) error
 	if err != nil {
 		return h.reject(packet.Session, err)
 	}
+	if !packet.Session.BindAdmissionAccount(ticket.AccountID) {
+		h.Tickets.ReleaseAccount(ticket.AccountID)
+		return h.reject(packet.Session, auth.ErrAdmissionTicketInvalid)
+	}
 
 	packet.Session.UserContext = server.UserContext{
 		UserID:   ticket.AccountID,

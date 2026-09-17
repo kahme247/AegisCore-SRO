@@ -139,6 +139,23 @@ func (i *Inventory) Put(slot, capacity byte, item Item) bool {
 	return true
 }
 
+func (i *Inventory) AddToStack(slot byte, quantity int) bool {
+	if i == nil || quantity <= 0 {
+		return false
+	}
+	mutex := i.synchronizationMutex()
+	mutex.Lock()
+	defer mutex.Unlock()
+	item, occupied := i.Items[slot]
+	if !occupied {
+		return false
+	}
+	item.StackSize += quantity
+	item.Data += uint32(quantity)
+	i.Items[slot] = item
+	return true
+}
+
 func (i *Inventory) MoveItems(sourceSlot, targetSlot byte, player *Player) (bool, int) {
 	if i == nil {
 		return false, -1

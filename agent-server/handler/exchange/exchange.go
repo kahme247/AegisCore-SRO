@@ -19,6 +19,7 @@ const (
 	exchangeRemoveItem byte = 5
 	exchangeSetGold    byte = 13
 	maxExchangeItems        = 12
+	exchangeCooldown        = 10 * time.Second
 )
 
 var (
@@ -42,6 +43,7 @@ type participant struct {
 type exchangeSession struct {
 	a, b       *participant
 	revision   uint64
+	started    bool
 	committing bool
 	terminal   bool
 }
@@ -61,11 +63,14 @@ type Manager struct {
 	players    PlayerLookup
 	repository model.ExchangeRepository
 	byChar     map[int]*exchangeSession
+	cooldowns  map[exchangePair]time.Time
 	send       func(*server.Session, network.Packet) error
 }
 
+type exchangePair struct{ first, second int }
+
 func NewManager(players PlayerLookup, repository model.ExchangeRepository) *Manager {
-	return &Manager{players: players, repository: repository, byChar: make(map[int]*exchangeSession)}
+	return &Manager{players: players, repository: repository, byChar: make(map[int]*exchangeSession), cooldowns: make(map[exchangePair]time.Time)}
 }
 
 func RegisterHandlers(target *server.Server, manager *Manager) error {
@@ -73,6 +78,7 @@ func RegisterHandlers(target *server.Server, manager *Manager) error {
 		return ErrExchangeUnavailable
 	}
 	target.RegisterHandler(opcode.ExchangeStartRequest, manager.handleStart)
+	target.RegisterHandler(opcode.ExchangeInvitationRequest, manager.handleInvitation)
 	target.RegisterHandler(opcode.ExchangeConfirmRequest, manager.handleConfirm)
 	target.RegisterHandler(opcode.ExchangeApproveRequest, manager.handleApprove)
 	target.RegisterHandler(opcode.ExchangeCancelRequest, manager.handleCancel)
@@ -140,11 +146,6 @@ func (m *Manager) handleStart(_ context.Context, session *server.Session, packet
 
 	m.mu.Lock()
 	if existing := m.byChar[requester.ID]; existing != nil {
-		_, peer := existing.side(requester.ID)
-		if peer != nil && peer.player == target && !existing.terminal {
-			m.mu.Unlock()
-			return m.sendPacket(session, exchangeStartSuccess(targetUID))
-		}
 		m.mu.Unlock()
 		return m.sendPacket(session, exchangeFailure(opcode.ExchangeStartResponse))
 	}
@@ -152,20 +153,64 @@ func (m *Manager) handleStart(_ context.Context, session *server.Session, packet
 		m.mu.Unlock()
 		return m.sendPacket(session, exchangeFailure(opcode.ExchangeStartResponse))
 	}
+	pair := orderedPair(requester.ID, target.ID)
+	now := time.Now()
+	if until := m.cooldowns[pair]; until.After(now) {
+		m.mu.Unlock()
+		return m.sendPacket(session, exchangeFailure(opcode.ExchangeStartResponse))
+	}
+	delete(m.cooldowns, pair)
 	state := &exchangeSession{
 		a: &participant{player: requester, items: make(map[byte]model.ExchangeOfferedItem)},
 		b: &participant{player: target, items: make(map[byte]model.ExchangeOfferedItem)},
 	}
 	m.byChar[requester.ID], m.byChar[target.ID] = state, state
 	m.mu.Unlock()
-	if err = m.sendPacket(session, exchangeStartSuccess(targetUID)); err != nil {
+	if err = m.sendPacket(target.Session, exchangeInvitation(requester.GetUniqueID())); err != nil {
+		m.cancelState(state)
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) handleInvitation(_ context.Context, session *server.Session, packet network.Packet) error {
+	if packet.Remaining() != 1 {
+		return ErrExchangeInvalid
+	}
+	accepted, err := packet.ReadByte()
+	if err != nil || packet.Remaining() != 0 {
+		return ErrExchangeInvalid
+	}
+	responder, err := m.resolve(session)
+	if err != nil {
+		return ErrExchangeInvalid
+	}
+
+	m.mu.Lock()
+	state := m.byChar[responder.ID]
+	if state == nil || state.a == nil || state.b == nil || state.b.player != responder || state.started || state.terminal || state.committing {
+		m.mu.Unlock()
+		return ErrExchangeState
+	}
+	requester := state.a.player
+	if accepted != 1 {
+		state.terminal = true
+		delete(m.byChar, state.a.player.ID)
+		delete(m.byChar, state.b.player.ID)
+		m.mu.Unlock()
+		return m.sendPacket(requester.Session, exchangeFailure(opcode.ExchangeStartResponse))
+	}
+	state.started = true
+	m.mu.Unlock()
+
+	if err = m.sendPacket(requester.Session, exchangeStartSuccess(responder.GetUniqueID())); err != nil {
 		m.cancelState(state)
 		return err
 	}
 	started := network.EmptyPacket()
 	started.MessageID = opcode.ExchangeStartedResponse
 	started.WriteUInt32(requester.GetUniqueID())
-	if err = m.sendPacket(target.Session, started); err != nil {
+	if err = m.sendPacket(responder.Session, started); err != nil {
 		m.cancelState(state)
 		return err
 	}
@@ -201,7 +246,7 @@ func (m *Manager) HandleInventoryOperation(_ context.Context, session *server.Se
 	m.mu.Lock()
 	state := m.byChar[player.ID]
 	owner, peer := state.side(player.ID)
-	if state == nil || owner == nil || peer == nil || state.terminal || state.committing {
+	if state == nil || owner == nil || peer == nil || !state.started || state.terminal || state.committing {
 		m.mu.Unlock()
 		return m.sendPacket(session, inventoryOperationFailure())
 	}
@@ -275,7 +320,7 @@ func (m *Manager) handleConfirm(_ context.Context, session *server.Session, pack
 	m.mu.Lock()
 	state := m.byChar[player.ID]
 	owner, peer := state.side(player.ID)
-	if state == nil || owner == nil || peer == nil || state.terminal || state.committing {
+	if state == nil || owner == nil || peer == nil || !state.started || state.terminal || state.committing {
 		m.mu.Unlock()
 		return m.sendPacket(session, exchangeFailure(opcode.ExchangeConfirmResponse))
 	}
@@ -335,7 +380,7 @@ func (m *Manager) handleApprove(_ context.Context, session *server.Session, pack
 	}
 	a.player.CommitEconomy(result.FirstGold, result.FirstInventory)
 	b.player.CommitEconomy(result.SecondGold, result.SecondInventory)
-	m.finishState(state)
+	m.finishCompletedState(state)
 	if err = m.sendPacket(session, exchangeSuccess(opcode.ExchangeApproveResponse)); err != nil {
 		return err
 	}
@@ -456,6 +501,17 @@ func (m *Manager) finishState(state *exchangeSession) {
 	m.mu.Unlock()
 }
 
+func (m *Manager) finishCompletedState(state *exchangeSession) {
+	m.mu.Lock()
+	if state != nil {
+		state.terminal = true
+		delete(m.byChar, state.a.player.ID)
+		delete(m.byChar, state.b.player.ID)
+		m.cooldowns[orderedPair(state.a.player.ID, state.b.player.ID)] = time.Now().Add(exchangeCooldown)
+	}
+	m.mu.Unlock()
+}
+
 func participantOffer(p *participant) model.ExchangeOffer {
 	return model.ExchangeOffer{CharacterID: int64(p.player.ID), UserID: p.player.Session.UserContext.UserID, Gold: p.gold, Items: sortedParticipantItems(p.items)}
 }
@@ -495,6 +551,21 @@ func orderedPlayers(a, b *model.Player) (*model.Player, *model.Player) {
 		return a, b
 	}
 	return b, a
+}
+
+func orderedPair(a, b int) exchangePair {
+	if a <= b {
+		return exchangePair{first: a, second: b}
+	}
+	return exchangePair{first: b, second: a}
+}
+
+func exchangeInvitation(requester uint32) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.ExchangeInvitationResponse
+	p.WriteByte(1)
+	p.WriteUInt32(requester)
+	return p
 }
 
 func exchangeStartSuccess(target uint32) network.Packet {

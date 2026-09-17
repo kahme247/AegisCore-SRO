@@ -137,11 +137,15 @@ func (s *GroundItemService) Spawn(item *model.Item, partyNumber uint32) error {
 	// keeps the client-visible assignment and world admission ordered when the
 	// transport boundary reports an error.
 	s.world.AddVisibleObject(item)
-	if s.lifecycle != nil && (s.ownershipAfter > 0 || s.despawnAfter > 0) {
+	despawnAfter := s.despawnAfter
+	if ref, ok := model.RefItems[item.GetRefObjectID()]; ok && ref.DecayTime > 0 {
+		despawnAfter = time.Duration(ref.DecayTime) * time.Millisecond
+	}
+	if s.lifecycle != nil && (s.ownershipAfter > 0 || despawnAfter > 0) {
 		// World admission owns UID allocation; Track therefore runs after the
 		// add. A failed timer registration must not roll back a visible object,
 		// so the scheduler treats this as a diagnostic-only boundary.
-		_ = s.lifecycle.Track(item, s.ownershipAfter, s.despawnAfter)
+		_ = s.lifecycle.Track(item, s.ownershipAfter, despawnAfter)
 	}
 	return nil
 }
@@ -183,6 +187,10 @@ func BuildPartyDistributionPacket(memberUID uint32, item *model.Item) (network.P
 	case typeInfo.TypeID1 != model.TypeID1Item:
 		// The recovered common prefix is still valid for non-item references;
 		// no branch-specific bytes are present.
+	case typeInfo.IsGold():
+		// The 0x3068 client parser consumes an eight-byte currency amount even
+		// though the persisted ground-gold authority is the u32 Item.Data field.
+		packet.WriteUInt64(uint64(item.Data))
 	case typeInfo.TypeID2 == model.TypeID2Wearable:
 		packet.WriteByte(item.OptLevel)
 	case typeInfo.TypeID2 == 2:

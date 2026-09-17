@@ -53,8 +53,7 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 				}
 			}
 
-			p.WriteByte(5) // Avatar Inventory Slots
-			p.WriteByte(0) // Avatar Items
+			writeAvatarAppearance(p, player.GetAvatarInventory())
 
 			mask, hasMask := CharacterMask{}, false
 			if masked, ok := player.(interface {
@@ -224,8 +223,17 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		// Item
 		item := object.(IItem)
 		if item.GetTypeInfo().IsEquipment() {
-			eq := item.(IEquipment)
-			p.WriteByte(eq.GetOptLevel())
+			// Persisted inventory drops are materialized as *Item even when their
+			// reference type is equipment. Do not require the world representation
+			// to be the *Equipment wrapper just to serialize its option level.
+			switch equipment := item.(type) {
+			case IEquipment:
+				p.WriteByte(equipment.GetOptLevel())
+			case *Item:
+				p.WriteByte(equipment.OptLevel)
+			default:
+				p.WriteByte(0)
+			}
 		} else if typeInfo.IsExpendable() {
 			if typeInfo.IsGold() {
 				// Gold candidates carry the amount in ITEM.DATA (the same
@@ -236,7 +244,11 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 					p.WriteUInt32(0)
 				}
 			} else if typeInfo.IsTradeItem() || typeInfo.IsQuestItem() {
-				p.WriteString("Owner") // FIXME correct owner name
+				creator := ""
+				if concrete, ok := object.(*Item); ok && concrete != nil {
+					creator = concrete.CreatorName
+				}
+				p.WriteString(creator)
 			}
 		}
 
@@ -255,29 +267,32 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		p.WriteUInt32(object.GetUniqueID())
 		WritePosition(p, object.GetNavmeshPosition())
 
-		p.WriteByte(0) // TODO unkByte0
-		p.WriteByte(0) // TODO unkByte1
-		p.WriteByte(0) // TODO unkByte2
-		p.WriteByte(1) // CGObjStruct's normal runtime state
+		p.WriteByte(0) // CGObjStruct +0x15C
+		p.WriteByte(0) // CGObjStruct +0x15D
+		if portal, ok := object.(*DimensionHolePortal); ok && IsDimensionHolePortalObject(portal) {
+			// SR_GameServer 0x00601EB0 passes item Param7 (1) into
+			// CGObjStruct +0x15E and CRefObjCommon +0x08 (the source item
+			// reference ID loaded at 0x006A3090) into the final dword. Its
+			// 0x0052F000 serializer and the stock client's 0x0056DFA0 decoder
+			// agree on the remaining field order.
+			p.WriteByte(1)
+			p.WriteByte(6)
+			p.WriteString(portal.OwnerName)
+			p.WriteUInt32(portal.Definition.ItemRefID)
+		} else {
+			p.WriteByte(0) // CGObjStruct +0x15E
+			p.WriteByte(1) // CGObjStruct's normal runtime state
 
-		if IsTeleportGateObject(object) {
-			// These are CGObjStruct runtime-state fields, not RefTeleport IDs.
-			// The client resolves the teleport-data record from RefObjectID. Treating
-			// TeleportID as the first runtime field makes it an invalid object/state
-			// reference and crashes while the group-spawn record is consumed.
-			p.WriteUInt32(0)
-			p.WriteUInt32(0)
+			if IsTeleportGateObject(object) {
+				// These are CGObjStruct runtime-state fields, not RefTeleport IDs.
+				// The client resolves the teleport-data record from RefObjectID. Treating
+				// TeleportID as the first runtime field makes it an invalid object/state
+				// reference and crashes while the group-spawn record is consumed.
+				p.WriteUInt32(0)
+				p.WriteUInt32(0)
+			}
 		}
 
-		// if unkByte3 == 1 {
-		//     p.WriteUint32(0) // TODO unkUint0
-		//     p.WriteUint32(0) // TODO unkUint1
-		// } else if unkByte3 == 6 {
-		//     // Dimension Hole
-		//     p.WriteString("owner")
-		//     p.WriteUint32(owner.UniqueID)
-		// }
-		//
 		// if unkByte1 == 1 {
 		//     p.WriteUint32(0) // TODO unkUint2
 		// 	   p.WriteByte(0)	// TODO unkByte4
@@ -362,8 +377,7 @@ func WriteEntitySpawn(p *network.Packet, player *Player) {
 		}
 	}
 
-	p.WriteByte(5) // Avatar Inventory Slots
-	p.WriteByte(0) // Avatar Items
+	writeAvatarAppearance(p, player.GetAvatarInventory())
 
 	p.WriteByte(0) // HasMask
 	p.WriteUInt32(player.UniqueID)
@@ -414,6 +428,10 @@ func writePlayerJobState(packet *network.Packet, job PlayerJob) {
 		return
 	}
 	packet.WriteByte(PlayerJobNone)
+	// The 0x3015/0x3019 player-spawn reader always consumes a level byte,
+	// including the no-job discriminator. This differs from the B045 player
+	// selection body, whose no-job branch omits the level.
+	packet.WriteByte(0)
 }
 
 func equippedAppearanceSlots(inventory Inventory) []byte {
@@ -425,6 +443,19 @@ func equippedAppearanceSlots(inventory Inventory) []byte {
 		}
 	}
 	return slots
+}
+
+func writeAvatarAppearance(p *network.Packet, inventory Inventory) {
+	slots := SortedInventorySlots(inventory.Items)
+	p.WriteByte(AvatarInventorySize)
+	p.WriteByte(byte(len(slots)))
+	for _, slot := range slots {
+		item := inventory.Items[slot]
+		p.WriteUInt32(item.GetRefObjectID())
+		if item.IsEquipment() {
+			p.WriteByte(item.OptLevel)
+		}
+	}
 }
 
 func playerInventorySize(player IPlayer) byte {

@@ -8,7 +8,16 @@ import (
 const (
 	SelectAllRefItems     = "SELECT * FROM `SRO_SHARD`.`ITEMDATA`;"
 	SelectCountOfRefItems = "SELECT COUNT(*) FROM `SRO_SHARD`.`ITEMDATA`;"
+	// The vSRO 1.188 client performs stack arithmetic through signed 16-bit
+	// fields even though the wire and database columns are unsigned uint16.
+	ClientSafeMaxStack = 32767
 )
+
+func ApplyClientSafeStackLimit(refItem *RefItem) {
+	if refItem != nil && refItem.StackSize > ClientSafeMaxStack {
+		refItem.StackSize = ClientSafeMaxStack
+	}
+}
 
 type RefItem struct {
 	RefObject
@@ -302,6 +311,7 @@ func GetAllRefItems() map[uint32]RefItem {
 			&refItem.ChildItemCount,
 		)
 		counter++
+		ApplyClientSafeStackLimit(&refItem)
 		refItems[refItem.ID] = refItem
 	}
 	logrus.Infoln("finished loading ref items")

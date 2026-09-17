@@ -24,6 +24,7 @@ const (
 	ItemMallSilk ItemMallCurrency = iota
 	ItemMallGiftSilk
 	ItemMallPoint
+	ItemMallAll
 )
 
 type ItemMallBalances struct {
@@ -54,6 +55,15 @@ type ItemMallRepository interface {
 	Purchase(context.Context, int64, uint32, ItemMallPosition, uint16) (ItemMallPurchaseResult, error)
 }
 
+type ItemMallHistoryEntry struct {
+	Timestamp time.Time
+	Amount    uint32
+}
+
+type SilkHistoryRepository interface {
+	SilkHistory(context.Context, uint32, ItemMallCurrency, int) ([]ItemMallHistoryEntry, error)
+}
+
 type SQLItemMallRepository struct{ shard *sql.DB }
 
 func NewItemMallRepository(shard *sql.DB) (*SQLItemMallRepository, error) {
@@ -73,6 +83,33 @@ func (r *SQLItemMallRepository) Balances(ctx context.Context, userID uint32) (It
 		return ItemMallBalances{}, ErrItemMallConflict
 	}
 	return balances, err
+}
+
+func (r *SQLItemMallRepository) SilkHistory(ctx context.Context, userID uint32, currency ItemMallCurrency, limit int) ([]ItemMallHistoryEntry, error) {
+	if r == nil || r.shard == nil || userID == 0 || currency > ItemMallAll || limit <= 0 || limit > 100 {
+		return nil, ErrItemMallConflict
+	}
+	query := "SELECT `CTIME`,`PRICE` FROM `ITEM_MALL_PURCHASE` WHERE `FK_USER`=? AND `CURRENCY`=? ORDER BY `CTIME` DESC,`ID` DESC LIMIT ?"
+	args := []any{userID, currency, limit}
+	if currency == ItemMallAll {
+		query = "SELECT `CTIME`,`PRICE` FROM `ITEM_MALL_PURCHASE` WHERE `FK_USER`=? ORDER BY `CTIME` DESC,`ID` DESC LIMIT ?"
+		args = []any{userID, limit}
+	}
+	rows, err := r.shard.QueryContext(normalizeEconomyContext(ctx), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := make([]ItemMallHistoryEntry, 0, limit)
+	for rows.Next() {
+		var entry ItemMallHistoryEntry
+		if err = rows.Scan(&entry.Timestamp, &entry.Amount); err != nil {
+			return nil, err
+		}
+		entry.Timestamp = entry.Timestamp.UTC()
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
 }
 
 type itemMallGood struct {
@@ -130,50 +167,38 @@ func (r *SQLItemMallRepository) Purchase(ctx context.Context, characterID int64,
 
 	var free []byte
 	var first Item
-	var serviceEffect *ItemServiceEffect
-	if ref, exists := RefItems[good.RefItemID]; exists {
-		if effect, effectErr := itemServiceFromReference(ref, time.Now().UTC()); effectErr == nil {
-			if purchaseCount != 1 {
-				return ItemMallPurchaseResult{}, ErrItemMallConflict
-			}
-			if err = persistItemService(ctx, tx, characterID, &effect); err != nil {
-				return ItemMallPurchaseResult{}, err
-			}
-			serviceEffect = &effect
-			totalQuantity = 0
-		}
+	occupied, lockErr := lockCharacterInventoryEconomy(ctx, tx, characterID)
+	if lockErr != nil {
+		return ItemMallPurchaseResult{}, lockErr
 	}
-	if serviceEffect == nil {
-		occupied, lockErr := lockCharacterInventoryEconomy(ctx, tx, characterID)
-		if lockErr != nil {
-			return ItemMallPurchaseResult{}, lockErr
+	// Operation 0x18 is the stock cash-item inventory-insertion path. Service
+	// tickets (including Premium) are delivered here and activated only when
+	// the player later uses the inventory item.
+	stacks := itemMallPackageStacks(good.MaxStack, good.Quantity, purchaseCount)
+	if len(stacks) == 0 {
+		return ItemMallPurchaseResult{}, ErrItemMallConflict
+	}
+	free = freeInventorySlots(occupied, len(stacks))
+	if len(free) != len(stacks) {
+		return ItemMallPurchaseResult{}, ErrItemMallInventoryFull
+	}
+	for index, slot := range free {
+		stack := stacks[index]
+		insert, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", good.Variance, good.RefItemID, stack, good.OptLevel, good.Data, good.RentInfo.Type, good.RentInfo.CanDelete, good.RentInfo.CanRecharge, good.RentInfo.PeriodBeginTime, good.RentInfo.PeriodEndTime, good.RentInfo.MeterRateTime, good.RentInfo.PackingTime)
+		if insertErr != nil {
+			return ItemMallPurchaseResult{}, insertErr
 		}
-		stacks := itemMallStacks(good.MaxStack, totalQuantity)
-		if len(stacks) == 0 {
-			return ItemMallPurchaseResult{}, ErrItemMallConflict
+		itemID, insertErr := insert.LastInsertId()
+		if insertErr != nil {
+			return ItemMallPurchaseResult{}, insertErr
 		}
-		free = freeInventorySlots(occupied, len(stacks))
-		if len(free) != len(stacks) {
-			return ItemMallPurchaseResult{}, ErrItemMallInventoryFull
+		if _, insertErr = tx.ExecContext(ctx, "INSERT INTO `INVENTORY` (`FK_CHAR`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", characterID, slot, itemID); insertErr != nil {
+			return ItemMallPurchaseResult{}, insertErr
 		}
-		for index, slot := range free {
-			stack := stacks[index]
-			insert, insertErr := tx.ExecContext(ctx, "INSERT INTO `ITEM` (`VARIANCE`,`FK_REF_ITEM`,`STACK_COUNT`,`OPT_LEVEL`,`DATA`,`RENT_TYPE`,`RENT_CAN_DELETE`,`RENT_CAN_RECHARGE`,`RENT_PERIOD_BEGIN_TIME`,`RENT_PERIOD_END_TIME`,`RENT_METER_RATE_TIME`,`RENT_PACKING_TIME`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", good.Variance, good.RefItemID, stack, good.OptLevel, good.Data, good.RentInfo.Type, good.RentInfo.CanDelete, good.RentInfo.CanRecharge, good.RentInfo.PeriodBeginTime, good.RentInfo.PeriodEndTime, good.RentInfo.MeterRateTime, good.RentInfo.PackingTime)
+		if index == 0 {
+			first, insertErr = economyItem(itemID, good.RefItemID, good.Variance, stack, good.OptLevel, good.Data, good.RentInfo)
 			if insertErr != nil {
 				return ItemMallPurchaseResult{}, insertErr
-			}
-			itemID, insertErr := insert.LastInsertId()
-			if insertErr != nil {
-				return ItemMallPurchaseResult{}, insertErr
-			}
-			if _, insertErr = tx.ExecContext(ctx, "INSERT INTO `INVENTORY` (`FK_CHAR`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", characterID, slot, itemID); insertErr != nil {
-				return ItemMallPurchaseResult{}, insertErr
-			}
-			if index == 0 {
-				first, insertErr = economyItem(itemID, good.RefItemID, good.Variance, stack, good.OptLevel, good.Data, good.RentInfo)
-				if insertErr != nil {
-					return ItemMallPurchaseResult{}, insertErr
-				}
 			}
 		}
 	}
@@ -197,7 +222,7 @@ func (r *SQLItemMallRepository) Purchase(ctx context.Context, characterID int64,
 	if err != nil {
 		return ItemMallPurchaseResult{}, errors.Join(ErrItemMallOutcomeUnknown, err)
 	}
-	return ItemMallPurchaseResult{Balances: balances, Inventory: snapshot, Item: first, Position: position, DestinationSlots: free, Quantity: totalQuantity, ItemService: serviceEffect}, nil
+	return ItemMallPurchaseResult{Balances: balances, Inventory: snapshot, Item: first, Position: position, DestinationSlots: free, Quantity: totalQuantity}, nil
 }
 
 func persistItemService(ctx context.Context, tx *sql.Tx, characterID int64, effect *ItemServiceEffect) error {
@@ -290,6 +315,18 @@ func itemMallStacks(maxStack int, quantity uint16) []int {
 		stack := min(remaining, maxStack)
 		stacks = append(stacks, stack)
 		remaining -= stack
+	}
+	return stacks
+}
+
+func itemMallPackageStacks(maxStack int, packageQuantity, packageCount uint16) []int {
+	if maxStack < 1 || packageQuantity == 0 || packageCount == 0 {
+		return nil
+	}
+	perPackage := itemMallStacks(maxStack, packageQuantity)
+	stacks := make([]int, 0, len(perPackage)*int(packageCount))
+	for range packageCount {
+		stacks = append(stacks, perPackage...)
 	}
 	return stacks
 }

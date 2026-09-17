@@ -31,9 +31,11 @@ type gameReadyVisibilityActivator interface {
 // GameReadyHandler confirms the client has received the character bootstrap.
 // A staged player remains Spawning until this one-way confirmation succeeds.
 type GameReadyHandler struct {
-	players gameReadyPlayerLookup
-	mall    model.ItemMallRepository
-	cos     interface {
+	players     gameReadyPlayerLookup
+	mall        model.ItemMallRepository
+	pk          model.CharacterPKRepository
+	decorations model.PremiumDecorationRepository
+	cos         interface {
 		RehydratePlayer(context.Context, *model.Player) error
 	}
 	social interface {
@@ -42,6 +44,18 @@ type GameReadyHandler struct {
 	}
 	countdowns interface {
 		Rehydrate(context.Context, *server.Session, *model.Player) error
+	}
+}
+
+func (h *GameReadyHandler) ConfigurePremiumDecoration(repository model.PremiumDecorationRepository) {
+	if h != nil {
+		h.decorations = repository
+	}
+}
+
+func (h *GameReadyHandler) ConfigurePKRepository(repository model.CharacterPKRepository) {
+	if h != nil {
+		h.pk = repository
 	}
 }
 
@@ -120,6 +134,22 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 			return fmt.Errorf("load item mall balances: %w", err)
 		}
 	}
+	var pkState model.CharacterPKState
+	if h.pk != nil {
+		pkState, err = h.pk.LoadByName(ctx, player.CharName)
+		if err != nil {
+			return fmt.Errorf("load character PK state: %w", err)
+		}
+		player.CommitPKCounters(pkState)
+	}
+	var decoration model.PremiumDecorationState
+	if h.decorations != nil {
+		decoration, err = h.decorations.LoadPremiumDecoration(ctx, player.ID)
+		if err != nil {
+			return fmt.Errorf("load premium decoration: %w", err)
+		}
+		player.SetPremiumDecoration(decoration)
+	}
 	// Durable state that participates in the player's spawn encoding must be
 	// loaded before visibility activation. Otherwise observers can receive an
 	// entering job character as no-job until the later social bootstrap.
@@ -173,6 +203,22 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 		})
 		if err := session.Send(balancePacket); err != nil {
 			return fmt.Errorf("send item mall balances: %w", err)
+		}
+	}
+	if h.pk != nil {
+		for _, update := range []network.Packet{
+			vsro188.BuildPKPenaltyUpdate(pkState.PKPenaltyPoint),
+			vsro188.BuildPKDailyUpdate(pkState.DailyPK),
+			vsro188.BuildPKLevelUpdate(pkState.TotalPK),
+		} {
+			if err := session.Send(update); err != nil {
+				return fmt.Errorf("send character PK state: %w", err)
+			}
+		}
+	}
+	if decoration.Token != 0 {
+		if err := session.Send(vsro188.BuildPremiumDecoration(vsro188.PremiumDecoration{Token: decoration.Token, Reference: decoration.Reference, Value: decoration.Value})); err != nil {
+			return fmt.Errorf("send premium decoration: %w", err)
 		}
 	}
 	if h.cos != nil {

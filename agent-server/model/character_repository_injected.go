@@ -195,6 +195,51 @@ func (r *SQLCharacterRepository) SetCharacterDeletionForOwner(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
+	if _, coordinated := ctx.Value(characterCommandContextKey{}).(CharacterCommandIdentity); coordinated {
+		beginner, ok := r.shard.(interface {
+			BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+		})
+		if !ok {
+			return false, &CharacterRepositoryError{Operation: "begin character deletion command", Err: ErrCharacterRepositoryUnavailable}
+		}
+		tx, beginErr := beginner.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return false, &CharacterRepositoryError{Operation: "begin character deletion command", Err: beginErr}
+		}
+		defer tx.Rollback()
+		command, commandErr := beginCharacterRosterCommand(ctx, tx, userID, shardID)
+		if commandErr != nil {
+			return false, &CharacterRepositoryError{Operation: "begin durable character deletion command", Err: commandErr}
+		}
+		if command.duplicate {
+			return true, nil
+		}
+		query := restore_deleting_for_owner
+		topic := "character.deletion-restored"
+		if deleting {
+			query = update_is_deleting_for_owner
+			topic = "character.deletion-requested"
+		}
+		result, execErr := tx.ExecContext(ctx, query, charName, userID, shardID)
+		if execErr != nil {
+			return false, &CharacterRepositoryError{Operation: "update character deletion state for owner", Err: execErr}
+		}
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return false, &CharacterRepositoryError{Operation: "read character deletion update count", Err: rowsErr}
+		}
+		if affected == 0 {
+			return false, nil
+		}
+		payload := []byte(fmt.Sprintf(`{"name":%q,"deleting":%t}`, charName, deleting))
+		if commandErr = completeCharacterRosterCommand(ctx, tx, userID, shardID, command, topic, payload); commandErr != nil {
+			return false, &CharacterRepositoryError{Operation: "complete durable character deletion command", Err: commandErr}
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return false, &CharacterRepositoryError{Operation: "commit character deletion command", Err: commitErr}
+		}
+		return true, nil
+	}
 
 	query := restore_deleting_for_owner
 	if deleting {

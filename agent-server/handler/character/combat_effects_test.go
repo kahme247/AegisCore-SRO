@@ -12,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 )
 
@@ -33,6 +34,33 @@ func TestNASRUNRequiresActiveEquippedDevilSpirit(t *testing.T) {
 	player.AvatarInventory = model.NewInventory(map[byte]model.Item{4: devil})
 	if !playerHasRequiredSkillItem(player, skill) {
 		t.Fatal("active equipped Devil Spirit did not satisfy NASRUN requirement")
+	}
+}
+
+func TestNASRUNSkillOwnershipComesFromActiveDevilSpirit(t *testing.T) {
+	original := model.RefItems
+	model.RefItems = map[uint32]model.RefItem{24405: {
+		RefObject: model.RefObject{ID: 24405, CodeName: "ITEM_MALL_AVATAR_M_NASRUN", TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 14, TypeID4: 1}},
+	}}
+	t.Cleanup(func() { model.RefItems = original })
+
+	devil := model.Item{SRObject: model.SRObject{RefObjectID: 24405}, Data: 2_419_200, StackSize: 1}
+	devil.SetTypeInfo(model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 14, TypeID4: 1})
+	devil.RentInfo.PeriodEndTime = uint32(time.Now().Add(28 * 24 * time.Hour).Unix())
+	player := &model.Player{Inventory: model.NewInventory(nil), AvatarInventory: model.NewInventory(map[byte]model.Item{4: devil})}
+	skill := model.RefSkill{
+		ID:            31142,
+		CodeName:      "SKILL_MALL_NASRUN_ECCENTRICDEMON_01",
+		RequiredItems: []model.SkillRequiredItem{{TypeID3: 14, TypeID4: 1}},
+	}
+
+	if !playerOwnsSkill(player, skill.ID, skill) {
+		t.Fatal("active Devil Spirit did not grant its NASRUN skill")
+	}
+	devil.RentInfo.PeriodEndTime = uint32(time.Now().Add(-time.Second).Unix())
+	player.AvatarInventory = model.NewInventory(map[byte]model.Item{4: devil})
+	if playerOwnsSkill(player, skill.ID, skill) {
+		t.Fatal("expired Devil Spirit still granted its NASRUN skill")
 	}
 }
 
@@ -79,6 +107,25 @@ func TestActionTimeProviderScalesCastAndReuseLifecycle(t *testing.T) {
 	handler.registerSkillCooldownForPlayer(player, key, skill, now)
 	if got, want := handler.nextSkill[key], now.Add(3400*time.Millisecond); !got.Equal(want) {
 		t.Fatalf("scaled reuse = %s, want %s", got, want)
+	}
+}
+
+func TestFrostbiteScalesPlayerAndEachComboPhaseActionTime(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 7}}
+	player.SetLifeState(model.Alive)
+	handler := &CombatHandler{now: func() time.Time { return now }}
+	if !player.ApplyCombatStatusAt(model.CombatStatus{Kind: model.CombatStatusFrostbite, Token: 1, SkillID: 7972, ExpiresAt: now.Add(time.Second)}, now) {
+		t.Fatal("apply player frostbite")
+	}
+	phase2 := model.RefSkill{ID: 2, ActionCastingTime: 300, ActionDuration: 700}
+	handler.referenceData = model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{2: phase2}})
+	phase1 := model.RefSkill{ID: 1, BasicChainCode: 2, ActionCastingTime: 200, ActionDuration: 800}
+	if got := handler.skillActionTimePercent(player, phase1); got != 200 {
+		t.Fatalf("frostbite action time = %g%%, want 200%%", got)
+	}
+	if got := handler.skillComboImpactDuration(player, phase1); got != 4*time.Second {
+		t.Fatalf("frostbite combo lifecycle = %s, want 4s", got)
 	}
 }
 
@@ -331,6 +378,27 @@ func TestSiegeTargetsProduceStateOnlyTargetResult(t *testing.T) {
 	}
 }
 
+func TestSiegeStructureDamageUsesDurableAuthority(t *testing.T) {
+	player := &model.Player{ID: 77, SRObject: model.SRObject{UniqueID: 100}}
+	target := combatEffectNPC(211, 9000, 1000)
+	target.TypeInfo = model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 5, TypeID4: 7}
+	var gotUniqueID uint32
+	var gotActor int
+	var gotDamage uint32
+	handler := &CombatHandler{}
+	handler.ConfigureFortressDamage(func(_ context.Context, uniqueID uint32, actor int, damage uint32, _ time.Time) (model.FortressDamageResult, error) {
+		gotUniqueID, gotActor, gotDamage = uniqueID, actor, damage
+		return model.FortressDamageResult{Structure: model.FortressStructure{FortressID: 1, UniqueID: uniqueID, RefEventID: 2, State: 1}}, nil
+	})
+	result := handler.resolvePlayerDamage(player, target, 500, false, false, time.Now())
+	if result.attackState != model.DamageResultTargetState || gotUniqueID != target.GetUniqueID() || gotActor != player.ID || gotDamage != 500 {
+		t.Fatalf("siege damage result=%+v callback=(%d,%d,%d)", result, gotUniqueID, gotActor, gotDamage)
+	}
+	if hp := target.CurrentHitPoints(); hp != 1000 {
+		t.Fatalf("generic NPC HP mutated to %d", hp)
+	}
+}
+
 func TestPlayerTargetSkillAppliesMitigatedDamage(t *testing.T) {
 	attacker := &model.Player{
 		SRObject:        model.SRObject{UniqueID: 100},
@@ -570,6 +638,26 @@ func TestCancelledDelayedHealingDoesNotApply(t *testing.T) {
 	scheduled()
 	if got := caster.CurrentHP(); got != 100 {
 		t.Fatalf("cancelled healing changed hp=%d", got)
+	}
+}
+
+func TestReplacingDelayedCastCompletesSupersededAction(t *testing.T) {
+	handler := &CombatHandler{}
+	playerUID := uint32(107)
+	firstCancelled := 0
+	secondCancelled := 0
+
+	firstToken := handler.beginDelayedCast(playerUID, func() { firstCancelled++ })
+	secondToken := handler.beginDelayedCast(playerUID, func() { secondCancelled++ })
+
+	if firstCancelled != 1 || secondCancelled != 0 {
+		t.Fatalf("replacement cleanup calls = first:%d second:%d, want first:1 second:0", firstCancelled, secondCancelled)
+	}
+	if handler.consumeDelayedCast(playerUID, firstToken) {
+		t.Fatal("superseded cast token remained consumable")
+	}
+	if !handler.consumeDelayedCast(playerUID, secondToken) {
+		t.Fatal("replacement cast token was not consumable")
 	}
 }
 
@@ -975,6 +1063,37 @@ func TestPlayerAbnormalDamageTicksAfterPvPStatus(t *testing.T) {
 	}
 }
 
+func TestNPCAbnormalDamageTickDoesNotReplayPlayerAttackAnimation(t *testing.T) {
+	now := time.Unix(1000, 0)
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 320}}
+	target := combatEffectNPC(321, 9000, 1000)
+	status := model.CombatStatus{Kind: model.CombatStatusBurn, Token: 77, SkillID: 8214, SourceUID: player.GetUniqueID(), Payload: 10, ExpiresAt: now.Add(11 * time.Second)}
+	if !target.ApplyCombatStatus(status) {
+		t.Fatal("failed to install NPC abnormal status")
+	}
+	var tick func()
+	var sent network.Packet
+	handler := &CombatHandler{
+		now:      func() time.Time { return now },
+		schedule: func(_ time.Duration, fn func()) { tick = fn },
+		broadcast: func(_ *model.Player, packet *network.Packet) {
+			sent = *packet
+		},
+	}
+	handler.scheduleStatusDamageTick(&server.Session{}, player, target, status, now.Add(5*time.Second))
+	if tick == nil {
+		t.Fatal("NPC abnormal damage tick was not scheduled")
+	}
+	tick()
+	decoded, err := vsro188.DecodeCombatAttackBeginResponse(sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SourceUID != target.GetUniqueID() {
+		t.Fatalf("periodic damage source UID = %d, want afflicted target %d", decoded.SourceUID, target.GetUniqueID())
+	}
+}
+
 func TestPlayerAttackRatingDoesNotCreateSyntheticMisses(t *testing.T) {
 	now := time.Now()
 	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}}
@@ -1177,6 +1296,10 @@ func TestSkillDisplacementUsesAuthoredKBAndFixedKOEndpoints(t *testing.T) {
 	handler := &CombatHandler{world: world, interruptMob: func(npc *model.NPC) {
 		interruptedUID = npc.GetUniqueID()
 	}}
+	// Skill impact runs under the combat mutex. Displacement must not attempt
+	// to acquire that same mutex recursively before it can emit B071.
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
 
 	kb := model.CombatDamageRecord{}
 	if !handler.applySkillDisplacement(player, target, model.RefSkill{KnockbackDistance: 35}, &kb) {

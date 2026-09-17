@@ -3,6 +3,7 @@ package lobby
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
@@ -57,6 +58,11 @@ func (h *characterRenameHandler) handlePacket(ctx context.Context, session *serv
 	action, err := packet.ReadByte()
 	if err != nil {
 		return err
+	}
+	if action == CharSelectionCharacterRename {
+		ctx = model.WithCharacterCommand(ctx, model.CharacterCommandIdentity{Key: fmt.Sprintf("character:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: fmt.Sprintf("lobby.rename.%d", action)})
+	} else if action == CharSelectionGuildRename {
+		ctx = model.WithSocialCommand(ctx, model.SocialCommandIdentity{Key: fmt.Sprintf("social:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: "guild.forced-rename"})
 	}
 
 	if action == CharSelectionCharacterRename || action == CharSelectionGuildRename {

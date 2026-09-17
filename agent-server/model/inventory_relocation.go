@@ -16,6 +16,8 @@ const (
 	InventoryRelocationEquip   InventoryRelocationAction = InventoryRelocationAction(EquipItem)
 	InventoryRelocationUnequip InventoryRelocationAction = InventoryRelocationAction(UnequipItem)
 	InventoryRelocationMove    InventoryRelocationAction = InventoryRelocationAction(MoveItem)
+	InventoryRelocationMerge   InventoryRelocationAction = 4
+	InventoryRelocationSplit   InventoryRelocationAction = 5
 )
 
 var (
@@ -50,12 +52,56 @@ type InventoryRelocationPlan struct {
 	SourceReferenceID uint32
 	SourceOneHanded   bool
 	SourceAmmunition  bool
+	TransferQuantity  uint16
+	SourceStackBefore int
+	TargetStackBefore int
 
 	// AdditionalMoves carries body items displaced by a paired equipment
 	// transition. SR_GameServer's attach path explicitly handles slots 6 and
 	// 7 as a unit; retaining these moves in the same plan keeps persistence and
 	// runtime state atomic rather than leaving an incompatible off-hand item.
 	AdditionalMoves []InventoryRelocationAdditionalMove
+}
+
+// PlanInventoryRelocationAmount extends ordinary relocation with the stock
+// operation-0x00 quantity semantics used when one stack is dropped on another.
+func PlanInventoryRelocationAmount(items map[byte]Item, sourceSlot, targetSlot byte, quantity uint16, player *Player) (InventoryRelocationPlan, error) {
+	plan, err := PlanInventoryRelocation(items, sourceSlot, targetSlot, player)
+	if err != nil || quantity == 0 {
+		return plan, err
+	}
+	source, target := items[sourceSlot], items[targetSlot]
+	if plan.TargetItemID == 0 {
+		ref, exists := RefItems[source.GetRefObjectID()]
+		// The stock client sends quantity 1 for ordinary equipment moves even
+		// though equipment is not stackable. Preserve the normal relocation
+		// plan; quantity semantics apply only to stackable items.
+		if exists && ref.StackSize <= 1 {
+			return plan, nil
+		}
+		if !exists || int(quantity) > source.StackSize {
+			return InventoryRelocationPlan{}, fmt.Errorf("%w: invalid stack split quantity %d from %d", ErrInventoryRelocationNotAllowed, quantity, source.StackSize)
+		}
+		if int(quantity) == source.StackSize {
+			return plan, nil
+		}
+		plan.Action = InventoryRelocationSplit
+		plan.TransferQuantity = quantity
+		plan.SourceStackBefore = source.StackSize
+		return plan, nil
+	}
+	if source.GetRefObjectID() != target.GetRefObjectID() || source.StackSize < 1 || target.StackSize < 1 {
+		return plan, nil
+	}
+	ref, exists := RefItems[source.GetRefObjectID()]
+	if !exists || ref.StackSize <= 1 || int(quantity) > source.StackSize || target.StackSize+int(quantity) > ref.StackSize {
+		return InventoryRelocationPlan{}, fmt.Errorf("%w: invalid stack merge %d + %d (max %d)", ErrInventoryRelocationNotAllowed, target.StackSize, quantity, ref.StackSize)
+	}
+	plan.Action = InventoryRelocationMerge
+	plan.TransferQuantity = quantity
+	plan.SourceStackBefore = source.StackSize
+	plan.TargetStackBefore = target.StackSize
+	return plan, nil
 }
 
 type InventoryRelocationAdditionalMove struct {
@@ -265,11 +311,25 @@ func ApplyInventoryRelocation(items map[byte]Item, plan InventoryRelocationPlan)
 		return fmt.Errorf("%w: target slot %d", ErrInventoryRelocationRuntimeConflict, plan.TargetSlot)
 	}
 
-	next[plan.TargetSlot] = sourceItem
-	if targetExists {
-		next[plan.SourceSlot] = targetItem
+	if plan.Action == InventoryRelocationMerge {
+		if sourceItem.StackSize != plan.SourceStackBefore || targetItem.StackSize != plan.TargetStackBefore {
+			return fmt.Errorf("%w: stack counts changed", ErrInventoryRelocationRuntimeConflict)
+		}
+		targetItem.StackSize += int(plan.TransferQuantity)
+		next[plan.TargetSlot] = targetItem
+		if remaining := sourceItem.StackSize - int(plan.TransferQuantity); remaining > 0 {
+			sourceItem.StackSize = remaining
+			next[plan.SourceSlot] = sourceItem
+		} else {
+			delete(next, plan.SourceSlot)
+		}
 	} else {
-		delete(next, plan.SourceSlot)
+		next[plan.TargetSlot] = sourceItem
+		if targetExists {
+			next[plan.SourceSlot] = targetItem
+		} else {
+			delete(next, plan.SourceSlot)
+		}
 	}
 	for _, move := range plan.AdditionalMoves {
 		item, exists := next[move.SourceSlot]
@@ -297,6 +357,10 @@ func ApplyInventoryRelocation(items map[byte]Item, plan InventoryRelocationPlan)
 // successful commit. A database failure therefore leaves the visible player
 // inventory exactly as it was before the packet arrived.
 func (i *Inventory) CommitRelocation(player *Player, sourceSlot, targetSlot byte, commit InventoryRelocationCommit) (InventoryRelocationPlan, error) {
+	return i.CommitRelocationAmount(player, sourceSlot, targetSlot, 0, commit)
+}
+
+func (i *Inventory) CommitRelocationAmount(player *Player, sourceSlot, targetSlot byte, quantity uint16, commit InventoryRelocationCommit) (InventoryRelocationPlan, error) {
 	if i == nil {
 		return InventoryRelocationPlan{}, ErrInventoryRelocationRuntimeConflict
 	}
@@ -308,12 +372,17 @@ func (i *Inventory) CommitRelocation(player *Player, sourceSlot, targetSlot byte
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	plan, err := PlanInventoryRelocation(i.Items, sourceSlot, targetSlot, player)
+	plan, err := PlanInventoryRelocationAmount(i.Items, sourceSlot, targetSlot, quantity, player)
 	if err != nil {
 		return InventoryRelocationPlan{}, err
 	}
 	if err := commit(plan); err != nil {
 		return InventoryRelocationPlan{}, err
+	}
+	// A split creates a new persistent item identity. The handler reloads the
+	// committed snapshot from the repository before releasing the economy gate.
+	if plan.Action == InventoryRelocationSplit {
+		return plan, nil
 	}
 	if err := ApplyInventoryRelocation(i.Items, plan); err != nil {
 		return InventoryRelocationPlan{}, err
@@ -354,6 +423,17 @@ func validateInventoryRelocationPlan(plan InventoryRelocationPlan) error {
 	}
 	switch plan.Action {
 	case InventoryRelocationEquip, InventoryRelocationUnequip, InventoryRelocationMove:
+		if plan.TransferQuantity != 0 || plan.SourceStackBefore != 0 || plan.TargetStackBefore != 0 {
+			return ErrInventoryRelocationInvalidPlan
+		}
+	case InventoryRelocationMerge:
+		if plan.TargetItemID <= 0 || plan.TransferQuantity == 0 || plan.SourceStackBefore < int(plan.TransferQuantity) || plan.TargetStackBefore < 1 {
+			return ErrInventoryRelocationInvalidPlan
+		}
+	case InventoryRelocationSplit:
+		if plan.TargetItemID != 0 || plan.TransferQuantity == 0 || plan.SourceStackBefore <= int(plan.TransferQuantity) || plan.TargetStackBefore != 0 {
+			return ErrInventoryRelocationInvalidPlan
+		}
 	default:
 		return ErrInventoryRelocationInvalidPlan
 	}

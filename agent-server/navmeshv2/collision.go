@@ -188,8 +188,8 @@ func edgeBlocksMovementFrom(edge RtNavmeshEdge, currentCell RtNavmeshCellQuad) b
 // scan enters its attached cell from the opposite side.
 func edgeBlocksCrossRegionMovement(edge RtNavmeshEdge, attachedCell RtNavmeshCellQuad, entering bool) bool {
 	flag := edge.GetFlag()
-	isSource := edgeCellMatches(edge.GetSrcCell(), attachedCell)
-	isDestination := edgeCellMatches(edge.GetDstCell(), attachedCell)
+	isSource := edgeCellMatches(edge.GetSrcCell(), &attachedCell)
+	isDestination := edgeCellMatches(edge.GetDstCell(), &attachedCell)
 	if !isSource && !isDestination {
 		// Blocked global edges do not link their destination cell. Recover the
 		// attached side from the authored indexes when they are unambiguous.
@@ -212,11 +212,48 @@ func edgeBlocksCrossRegionMovement(edge RtNavmeshEdge, attachedCell RtNavmeshCel
 	return flag.IsBlocked()
 }
 
-func edgeCellMatches(candidate RtNavmeshCell, cell RtNavmeshCellQuad) bool {
-	if candidate == nil || candidate.GetIndex() != cell.Index {
+func edgeCellMatches(candidate, cell RtNavmeshCell) bool {
+	if candidate == nil || cell == nil || candidate.GetIndex() != cell.GetIndex() {
 		return false
 	}
 	return candidate.GetMesh() == cell.GetMesh()
+}
+
+func edgeBlocksObjectMovement(edge RtNavmeshEdge, currentCell, nextCell RtNavmeshCell, currentInObject, nextInObject bool) bool {
+	if edgeCellMatches(edge.GetSrcCell(), currentCell) {
+		return edge.GetFlag().IsBlockedSrcToDst()
+	}
+	if edgeCellMatches(edge.GetDstCell(), currentCell) {
+		return edge.GetFlag().IsBlockedDstToSrc()
+	}
+
+	// A global object edge commonly links only the cell on the object side.
+	// When movement enters that cell, apply the opposite direction from the
+	// one used while leaving it. Treating either blocked bit as bidirectional
+	// creates invisible walls at valid object/terrain transitions.
+	if edgeCellMatches(edge.GetSrcCell(), nextCell) {
+		return edge.GetFlag().IsBlockedDstToSrc()
+	}
+	if edgeCellMatches(edge.GetDstCell(), nextCell) {
+		return edge.GetFlag().IsBlockedSrcToDst()
+	}
+	if currentInObject && !nextInObject {
+		if edge.GetSrcCell() != nil && edge.GetDstCell() == nil {
+			return edge.GetFlag().IsBlockedSrcToDst()
+		}
+		if edge.GetDstCell() != nil && edge.GetSrcCell() == nil {
+			return edge.GetFlag().IsBlockedDstToSrc()
+		}
+	}
+	if !currentInObject && nextInObject {
+		if edge.GetSrcCell() != nil && edge.GetDstCell() == nil {
+			return edge.GetFlag().IsBlockedDstToSrc()
+		}
+		if edge.GetDstCell() != nil && edge.GetSrcCell() == nil {
+			return edge.GetFlag().IsBlockedSrcToDst()
+		}
+	}
+	return edge.GetFlag().IsBlocked()
 }
 
 func FindObjectCollisions(currentPosition, nextPosition RtNavmeshPosition,
@@ -266,6 +303,17 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 			A: vCurLocal.Clone(),
 			B: vNextLocal.Clone(),
 		}
+		var currentObjectCell, nextObjectCell RtNavmeshCell
+		if curInObject {
+			if cell, err := object.Object.ResolveCell(vCurLocal); err == nil {
+				currentObjectCell = &cell
+			}
+		}
+		if nextInObject {
+			if cell, err := object.Object.ResolveCell(vNextLocal); err == nil {
+				nextObjectCell = &cell
+			}
+		}
 
 		var nearestCollision Collision
 		var nearestIntersection math32.Vector3
@@ -286,7 +334,7 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 				// walkable surface and the surrounding terrain. They must remain
 				// passable in both directions; treating a bridge as blocked while
 				// exiting traps players inside structures such as Jangan's gates.
-				if gEdge.GetFlag().IsBlocked() {
+				if edgeBlocksObjectMovement(gEdge, currentObjectCell, nextObjectCell, curInObject, nextInObject) {
 					candidate := Collision{
 						ContactEdge:   gEdge,
 						Region:        object.Region,
@@ -311,7 +359,7 @@ func FindCollisionsInObjects(cur, next RtNavmeshPosition, objects []RtNavmeshIns
 				if vIntersection.Y < vCurLocal.Y && vCurLocal.Y-vIntersection.Y > objectCollisionVerticalTolerance {
 					continue
 				}
-				if iEdge.GetFlag().IsBlocked() {
+				if edgeBlocksObjectMovement(iEdge, currentObjectCell, nextObjectCell, curInObject, nextInObject) {
 					candidate := Collision{
 						ContactEdge:   iEdge,
 						Region:        object.Region,

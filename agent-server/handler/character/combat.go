@@ -2,6 +2,7 @@ package character
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -49,6 +50,7 @@ var ErrCombatTargetInvalid = errors.New("combat target is invalid")
 type combatWorld interface {
 	GetPlayerByUniqueId(uint32) (*model.Player, error)
 	GetObjectByUniqueId(uint32) (model.ISRObject, error)
+	DistanceTo(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) float32
 	RemoveVisibleObject(model.ISRObject)
 	StopMovingCharacter(model.ICharacter, navmeshv2.RtNavmeshPosition, string, bool) bool
 	NewPosFromGlobalCoordinates(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
@@ -88,6 +90,10 @@ type jobProgressionRepository interface {
 	AdvanceJob(context.Context, int, uint64, uint64) (model.JobSnapshot, error)
 }
 
+type academyExperienceRepository interface {
+	AccumulateAcademyExperience(context.Context, int, uint64) ([]model.AcademyBuffState, error)
+}
+
 type questCollectionDropRepository interface {
 	CollectionDropsForKill(context.Context, int, uint32) ([]model.QuestCollectionDrop, error)
 }
@@ -104,13 +110,25 @@ type nativeQuestInstanceTeleportSubmitter interface {
 	SubmitNativeQuestInstanceTeleport(*model.QuestInstanceRegistry, model.NativeQuestInstanceDeathPlan, *model.Player) error
 }
 
+type dimensionHoleEntrySubmitter interface {
+	Enter(context.Context, uint32, *model.Player) (service.DimensionHoleAdmission, error)
+}
+
 type CombatHandler struct {
 	mu               sync.Mutex
 	dropsMu          sync.RWMutex
 	world            combatWorld
+	groundItemPickup func(context.Context, *server.Session, uint32) error
 	referenceData    *model.ReferenceDataCatalog
 	progress         model.CharacterProgressRepository
 	jobProgress      jobProgressionRepository
+	academyProgress  academyExperienceRepository
+	academyBuffs     func([]model.AcademyBuffState)
+	guildWarKill     func(context.Context, int, int, uint32) error
+	competitiveKill  func(int, int) error
+	fortressDamage   func(context.Context, uint32, int, uint32, time.Time) (model.FortressDamageResult, error)
+	fortressKill     func(context.Context, int, int, time.Time) error
+	pkKills          model.CharacterPKKillRepository
 	quests           model.QuestRuntimeRepository
 	vitals           model.CharacterVitalsRepository
 	rangedAmmo       model.RangedAmmoRepository
@@ -145,8 +163,18 @@ type CombatHandler struct {
 	pvpAdmission     func(*model.Player, *model.Player, model.RefSkill) bool
 	longCooldown     func(*model.Player, model.RefSkill, time.Time)
 	interruptMob     func(*model.NPC)
+	retimeMob        func(*model.NPC, time.Time)
 	questInstances   *model.QuestInstanceRegistry
 	instanceTeleport nativeQuestInstanceTeleportSubmitter
+	dimensionHoles   dimensionHoleEntrySubmitter
+}
+
+// ConfigureGroundItemPickup routes the stock client's kind-4 ground-item
+// action through the inventory handler's persistence-first pickup boundary.
+func (h *CombatHandler) ConfigureGroundItemPickup(pickup func(context.Context, *server.Session, uint32) error) {
+	if h != nil {
+		h.groundItemPickup = pickup
+	}
 }
 
 func (h *CombatHandler) ConfigureNativeQuestInstanceDeaths(registry *model.QuestInstanceRegistry, teleport nativeQuestInstanceTeleportSubmitter) {
@@ -159,9 +187,58 @@ func (h *CombatHandler) ConfigureNativeQuestInstanceDeaths(registry *model.Quest
 	h.mu.Unlock()
 }
 
+// ConfigureDimensionHoleEntry connects the strict structure-interaction
+// boundary to admission and loading. Leaving it unset keeps 0x7074 fail-closed;
+// startup must not install it until the destination/transfer authority exists.
+func (h *CombatHandler) ConfigureDimensionHoleEntry(entry dimensionHoleEntrySubmitter) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.dimensionHoles = entry
+	h.mu.Unlock()
+}
+
 func (h *CombatHandler) ConfigureJobProgression(repository jobProgressionRepository) {
 	if h != nil {
 		h.jobProgress = repository
+	}
+}
+
+func (h *CombatHandler) ConfigureAcademyProgression(repository academyExperienceRepository, publish func([]model.AcademyBuffState)) {
+	if h != nil {
+		h.academyProgress = repository
+		h.academyBuffs = publish
+	}
+}
+
+func (h *CombatHandler) ConfigureGuildWarScoring(record func(context.Context, int, int, uint32) error) {
+	if h != nil {
+		h.guildWarKill = record
+	}
+}
+
+func (h *CombatHandler) ConfigureCompetitiveScoring(record func(int, int) error) {
+	if h != nil {
+		h.competitiveKill = record
+	}
+}
+
+func (h *CombatHandler) ConfigureFortressDamage(record func(context.Context, uint32, int, uint32, time.Time) (model.FortressDamageResult, error)) {
+	if h != nil {
+		h.fortressDamage = record
+	}
+}
+
+func (h *CombatHandler) ConfigureFortressKillScoring(record func(context.Context, int, int, time.Time) error) {
+	if h != nil {
+		h.fortressKill = record
+	}
+}
+
+func (h *CombatHandler) ConfigurePKPenalties(repository model.CharacterPKKillRepository) {
+	if h != nil {
+		h.pkKills = repository
 	}
 }
 
@@ -174,6 +251,15 @@ func (h *CombatHandler) ConfigureMobAttackInterrupter(interrupt func(*model.NPC)
 	}
 	h.mu.Lock()
 	h.interruptMob = interrupt
+	h.mu.Unlock()
+}
+
+func (h *CombatHandler) ConfigureMobActionTiming(reconcile func(*model.NPC, time.Time)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.retimeMob = reconcile
 	h.mu.Unlock()
 }
 
@@ -205,15 +291,20 @@ func (h *CombatHandler) ConfigureActionTimeProvider(provider func(*model.Player,
 }
 
 func (h *CombatHandler) skillActionTimePercent(player *model.Player, skill model.RefSkill) float64 {
-	if h == nil || h.actionTime == nil {
-		return 100
+	percent := float64(100)
+	if h != nil && h.actionTime != nil {
+		percent = h.actionTime(player, skill)
 	}
-	percent := h.actionTime(player, skill)
 	if math.IsNaN(percent) || math.IsInf(percent, 0) {
-		return 100
+		percent = 100
 	}
 	if percent < 0 {
-		return 0
+		percent = 0
+	}
+	if player != nil {
+		if _, frosted := player.CombatStatus(model.CombatStatusFrostbite, h.combatNow()); frosted {
+			percent *= 2
+		}
 	}
 	return percent
 }
@@ -414,13 +505,77 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		logrus.Infof("COMBAT_ACTION_TRACE payload=% X", packet.Payload())
 	}
 	var candidateAction *vsro188.CombatCandidateActionRequest
+	var interactionAction *vsro188.EntityActionInteractionRequest
 	if packet.Remaining() == 7 {
 		if decoded, decodeErr := (vsro188.CombatCandidateActionRequestCodec{}).Decode(packet); decodeErr == nil {
 			candidateAction = &decoded
 		}
+		if decoded, decodeErr := (vsro188.EntityActionInteractionRequestCodec{}).Decode(packet); decodeErr == nil {
+			interactionAction = &decoded
+		}
+		// Some stock clients use a nonzero final context byte on the same kind-4
+		// envelope. Accept that variant only when its UID resolves to a live ground
+		// item; combat targets remain governed by the strict codec above.
+		if candidateAction == nil && interactionAction == nil && h.world != nil {
+			payload := packet.Payload()
+			if payload[0] == actionPhaseStart && payload[1] == vsro188.EntityActionKindInteraction && payload[6] != 0 &&
+				payload[2] != vsro188.EntityActionTargetModeEntity && payload[2] != vsro188.EntityActionTargetModePosition {
+				candidateID := binary.LittleEndian.Uint32(payload[2:6])
+				if object, lookupErr := h.world.GetObjectByUniqueId(candidateID); lookupErr == nil {
+					switch object.(type) {
+					case *model.Item, *model.Equipment:
+						candidateAction = &vsro188.CombatCandidateActionRequest{CandidateID: candidateID}
+						logrus.Infof("GROUND_PICKUP_ACTION_VARIANT uid=%d context=0x%02X", candidateID, payload[6])
+					}
+				}
+			}
+		}
+	}
+	// A ground-item click uses the same seven-byte kind-4 envelope as a basic
+	// target action. Route it before the in-flight combat suppression below:
+	// a pending cast must not swallow a non-combat pickup command.
+	if candidateAction != nil && h.groundItemPickup != nil && h.world != nil {
+		object, lookupErr := h.world.GetObjectByUniqueId(candidateAction.CandidateID)
+		switch object.(type) {
+		case *model.Item, *model.Equipment:
+			if lookupErr != nil {
+				return h.sendActionState(session, false)
+			}
+			if pickupErr := h.groundItemPickup(ctx, session, candidateAction.CandidateID); pickupErr != nil {
+				return pickupErr
+			}
+			return nil
+		}
+	}
+	// Stock ground-item clicks use the interaction form
+	// `01 | 02 | 01 | targetUID:u32`. Dimension Hole portals share this
+	// envelope, so route it to inventory pickup only after the target resolves
+	// to a ground item; portal interactions continue through the switch below.
+	if interactionAction != nil && h.groundItemPickup != nil && h.world != nil {
+		object, lookupErr := h.world.GetObjectByUniqueId(interactionAction.TargetUID)
+		if lookupErr == nil {
+			switch object.(type) {
+			case *model.Item, *model.Equipment:
+				if pickupErr := h.groundItemPickup(ctx, session, interactionAction.TargetUID); pickupErr != nil {
+					return pickupErr
+				}
+				return nil
+			}
+		}
 	}
 	if packet.Remaining() < 1 {
 		return fmt.Errorf("combat action payload length %d, want at least 1", packet.Remaining())
+	}
+	// Native 0x004AD630 keeps a conflicting start behind the actor-owned
+	// action instead of replacing the in-flight engage task. Until the full
+	// action queue is represented here, ignore rapid starts so they cannot
+	// overwrite the delayed impact token. The phase-only cancel below remains
+	// authoritative and still interrupts the current cast.
+	payload := packet.Payload()
+	if session != nil && payload[0] == actionPhaseStart && (len(payload) < 2 || payload[1] != vsro188.EntityActionKindInteraction) && h.delayedCasts != nil {
+		if active, exists := h.delayedCasts[session.UserContext.UniqueID]; exists && active.token != 0 {
+			return nil
+		}
 	}
 	phase, err := packet.ReadByte()
 	if err != nil {
@@ -448,6 +603,14 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	if err != nil {
 		return err
 	}
+	if actionType == actionTypeAttack || actionType == actionTypeAttackLegacy {
+		actingPlayer, resolveErr := h.resolveCombatPlayer(session)
+		if resolveErr == nil && actingPlayer.GetMotionState() == model.Sitting {
+			actingPlayer.SetMotionState(model.Stand)
+			stand := model.BuildMotionStateUpdatePacket(actingPlayer.GetUniqueID(), model.Stand)
+			actingPlayer.SendToSelfAndKnown(&stand)
+		}
+	}
 	var targetUID uint32
 	var skill model.RefSkill
 	var areaTarget *navmeshv2.RtNavmeshPosition
@@ -460,6 +623,26 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	isBarrier := false
 	var player *model.Player
 	switch actionType {
+	case vsro188.EntityActionKindInteraction:
+		if interactionAction == nil {
+			return h.sendActionState(session, false)
+		}
+		player, portal, resolveErr := h.resolveDimensionHolePortalInteraction(session, interactionAction.TargetUID)
+		if resolveErr != nil {
+			return h.sendActionState(session, false)
+		}
+		entry := h.dimensionHoles
+		if entry == nil {
+			return h.sendActionState(session, false)
+		}
+		if _, entryErr := entry.Enter(ctx, portal.GetUniqueID(), player); entryErr != nil {
+			logrus.WithError(entryErr).WithFields(logrus.Fields{
+				"uid": player.GetUniqueID(), "portal_uid": portal.GetUniqueID(),
+			}).Debug("rejected Dimension Hole entry")
+		}
+		// B074 acknowledges the one-shot action boundary; the entry coordinator
+		// owns the independent loading exchange and rolls admission back on error.
+		return h.sendActionState(session, false)
 	case actionTypeDispel:
 		if packet.Remaining() != 5 {
 			return fmt.Errorf("buff cancellation payload has %d trailing bytes, want 5", packet.Remaining())
@@ -489,7 +672,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 			kind := candidate.ExecutionKind()
 			if exists && (kind == model.SkillExecutionBuff || kind == model.SkillExecutionBarrier || kind == model.SkillExecutionMovement || kind == model.SkillExecutionStatusAttack && !candidate.TargetRequired || kind == model.SkillExecutionCure && !candidate.TargetRequired || kind == model.SkillExecutionAggro && !candidate.TargetRequired || kind == model.SkillExecutionHealing && (candidate.TargetSelf || !candidate.TargetRequired)) {
 				player, err = h.resolveCombatPlayer(session)
-				if err == nil && playerOwnsSkill(player, candidateID) {
+				if err == nil && playerOwnsSkill(player, candidateID, candidate) {
 					skill, isSkillCast = candidate, true
 					isSelfBuff = kind == model.SkillExecutionBuff
 					isSelfHealing = kind == model.SkillExecutionHealing
@@ -543,7 +726,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 				return err
 			}
 			candidate, exists := h.referenceSkill(skillID)
-			if !exists || candidate.ExecutionKind() != model.SkillExecutionMovement || regionID < 0 {
+			if !exists || candidate.ExecutionKind() != model.SkillExecutionMovement {
 				return h.sendActionState(session, false)
 			}
 			// The action-position tuple is X, Z(height), Y(map axis).
@@ -596,14 +779,14 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionMovement {
 		player, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(player, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(player, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		return h.executeMovementSkill(ctx, session, player, skill, areaTarget)
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionBuff {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		if h.world == nil {
@@ -618,7 +801,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionHealing {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -630,7 +813,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionResurrection {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -642,7 +825,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionCure {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -654,7 +837,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionTransform {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -666,7 +849,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.ExecutionKind() == model.SkillExecutionAggro && !skill.TargetEnemyMob {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -679,7 +862,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 
 	if isSkillCast && skill.TargetEnemyPVP && skill.ExecutionKind() == model.SkillExecutionStatusAttack {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) || h.world == nil {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) || h.world == nil {
 			return h.sendActionState(session, false)
 		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
@@ -696,7 +879,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	}
 	if isSkillCast && skill.TargetEnemyPVP && (skill.ExecutionKind() == model.SkillExecutionPhysicalAttack || skill.ExecutionKind() == model.SkillExecutionMagicalAttack) {
 		caster, resolveErr := h.resolveCombatPlayer(session)
-		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID) {
+		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
 			return h.sendActionState(session, false)
 		}
 		if h.world == nil {
@@ -721,7 +904,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		_ = h.sendActionState(session, false)
 		return nil
 	}
-	if isSkillCast && !playerOwnsSkill(player, skill.ID) {
+	if isSkillCast && !playerOwnsSkill(player, skill.ID, skill) {
 		logrus.Infof("COMBAT_REJECT_TRACE gate=skill-ownership skill=%d target=%d", skill.ID, targetUID)
 		return h.sendActionState(session, false)
 	}
@@ -798,6 +981,9 @@ func (h *CombatHandler) executeTargetedPlayerStatusSkill(ctx context.Context, se
 }
 
 func (h *CombatHandler) cancelSelfBuff(session *server.Session, player *model.Player, skillID uint32) error {
+	// Cancellation is authorized by the player's persisted skill ownership and
+	// active-buff state. It must remain available if the optional reference
+	// catalog is absent or being refreshed.
 	if player == nil || !playerOwnsSkill(player, skillID) {
 		return h.sendActionState(session, false)
 	}
@@ -1391,7 +1577,7 @@ func (h *CombatHandler) referenceSkill(skillID uint32) (model.RefSkill, bool) {
 	return h.referenceData.Skill(skillID)
 }
 
-func playerOwnsSkill(player *model.Player, skillID uint32) bool {
+func playerOwnsSkill(player *model.Player, skillID uint32, references ...model.RefSkill) bool {
 	if player == nil {
 		return false
 	}
@@ -1400,6 +1586,16 @@ func playerOwnsSkill(player *model.Player, skillID uint32) bool {
 	}
 	for _, skill := range player.SkillSnapshot() {
 		if skill.ID == skillID && skill.Enabled == 1 {
+			return true
+		}
+	}
+	if len(references) != 0 {
+		skill := references[0]
+		// NASRUN actions are granted by the equipped Devil Spirit and are not
+		// persisted in CHAR_SKILL. The stock skill rows carry the explicit
+		// required-item tuple (TypeID3 14, TypeID4 1), so use that tuple as the
+		// ownership boundary instead of admitting arbitrary mall skills.
+		if strings.Contains(strings.ToUpper(skill.CodeName), "_NASRUN_") && playerHasRequiredSkillItem(player, skill) {
 			return true
 		}
 	}
@@ -1516,10 +1712,16 @@ func (h *CombatHandler) consumeRangedAmmo(ctx context.Context, session *server.S
 	}
 	player.CommitInventory(inventory)
 
+	var mutation network.Packet
 	if remaining == 0 {
-		return h.sendPlayerPacket(session, vsro188.BuildItemOperationSlotSuccess(vsro188.ItemOperationServerDelete, model.SlotSecondaryWeapon))
+		mutation = vsro188.BuildItemOperationServerDeleteSuccess(model.SlotSecondaryWeapon)
+	} else {
+		mutation = vsro188.BuildInventoryItemQuantityUpdate(model.SlotSecondaryWeapon, uint16(remaining))
 	}
-	return h.sendPlayerPacket(session, vsro188.BuildInventoryItemQuantityUpdate(model.SlotSecondaryWeapon, uint16(remaining)))
+	if err := h.sendPlayerPacket(session, mutation); err != nil {
+		return err
+	}
+	return h.sendPlayerPacket(session, vsro188.BuildInventoryAmmoUpdate(uint16(remaining)))
 }
 
 func playerCanBaseAttack(player *model.Player) bool {
@@ -2349,7 +2551,7 @@ func (h *CombatHandler) executeSkillAttack(ctx context.Context, session *server.
 	h.registerSkillCooldownForPlayer(player, key, skill, now)
 	h.engageGrowthPet(player, target)
 	h.facePlayerTowardTarget(player, target)
-	impactDelay := skill.RuntimeImpactDurationAt(h.skillActionTimePercent(player, skill))
+	impactDelay := skill.RuntimeCastingDurationAt(h.skillActionTimePercent(player, skill))
 	if impactDelay > 0 && h.schedule != nil {
 		if err := h.sendActionState(session, true); err != nil {
 			return err
@@ -2475,7 +2677,7 @@ func (h *CombatHandler) executePlayerSkillAttack(ctx context.Context, session *s
 	}
 	h.registerSkillCooldownForPlayer(player, key, skill, now)
 	h.facePlayerTowardTarget(player, target)
-	impactDelay := skill.RuntimeImpactDurationAt(h.skillActionTimePercent(player, skill))
+	impactDelay := skill.RuntimeCastingDurationAt(h.skillActionTimePercent(player, skill))
 	if impactDelay > 0 && h.schedule != nil {
 		if err := h.sendActionState(session, true); err != nil {
 			return err
@@ -2940,6 +3142,8 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 		}
 		if h.world != nil && statusRestrainsMovement(effect.Kind) {
 			h.world.StopMovingCharacter(target, target.GetNavmeshPosition(), "combat-status-control", true)
+			h.interruptPlayerActionLocked(target.GetUniqueID())
+			_ = h.sendActionState(target.Session, false)
 		}
 		if bit := model.CombatStatusBadEffectBit(effect.Kind); bit != 0 {
 			badMask |= bit
@@ -3059,6 +3263,44 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 func (h *CombatHandler) recordPlayerKill(ctx context.Context, killer, target *model.Player) error {
 	if h == nil || killer == nil || target == nil || killer == target {
 		return nil
+	}
+	if h.guildWarKill != nil {
+		if err := h.guildWarKill(ctx, killer.ID, target.ID, uint32(max(target.Level, 1))); err != nil {
+			return err
+		}
+	}
+	competitiveScored := false
+	if h.competitiveKill != nil {
+		if err := h.competitiveKill(killer.ID, target.ID); err != nil && !errors.Is(err, service.ErrCompetitiveMatchNotFound) {
+			return err
+		} else if err == nil {
+			competitiveScored = true
+		}
+	}
+	fortressScored := false
+	if h.fortressKill != nil {
+		err := h.fortressKill(ctx, killer.ID, target.ID, time.Now().UTC())
+		if err == nil {
+			fortressScored = true
+		} else if !errors.Is(err, model.ErrSocialNotFound) && !errors.Is(err, model.ErrSocialAccessDenied) && !errors.Is(err, model.ErrSocialConflict) {
+			return err
+		}
+	}
+	if h.pkKills != nil && !competitiveScored && !fortressScored {
+		state, err := h.pkKills.RecordKill(ctx, killer.ID)
+		if err != nil {
+			return err
+		}
+		killer.CommitPKCounters(state)
+		for _, packet := range []network.Packet{
+			vsro188.BuildPKPenaltyUpdate(state.PKPenaltyPoint),
+			vsro188.BuildPKDailyUpdate(state.DailyPK),
+			vsro188.BuildPKLevelUpdate(state.TotalPK),
+		} {
+			if err = h.sendPlayerPacket(killer.GetSession(), packet); err != nil {
+				return err
+			}
+		}
 	}
 	repository, ok := h.quests.(questPlayerKillRepository)
 	if !ok {
@@ -3233,13 +3475,21 @@ func (h *CombatHandler) executeMovementSkill(ctx context.Context, session *serve
 			// TestIn clamps the requested direction to the skill-authored
 			// distance. Falling back to the actor heading here can land at a
 			// different point when the client cursor is beyond maximum range.
-			candidateGlobal := candidate.GetGlobalCoordinates()
 			scale := distance / candidateDistance
-			destination, err = h.world.NewPosFromGlobalCoordinates(math32.NewVector3(
-				global.X+(candidateGlobal.X-global.X)*scale,
-				global.Y,
-				global.Z+(candidateGlobal.Z-global.Z)*scale,
-			))
+			if navmeshv2.IsDungeonRegion(start.Region.ID) && candidate.Region.ID == start.Region.ID {
+				destination, err = resolveDestinationPosition(h.world, start.Region.ID, math32.NewVector3(
+					start.Offset.X+(candidate.Offset.X-start.Offset.X)*scale,
+					start.Offset.Y,
+					start.Offset.Z+(candidate.Offset.Z-start.Offset.Z)*scale,
+				))
+			} else {
+				candidateGlobal := candidate.GetGlobalCoordinates()
+				destination, err = h.world.NewPosFromGlobalCoordinates(math32.NewVector3(
+					global.X+(candidateGlobal.X-global.X)*scale,
+					global.Y,
+					global.Z+(candidateGlobal.Z-global.Z)*scale,
+				))
+			}
 		}
 	}
 	if err != nil || !h.world.CanMoveDirectly(start, destination) {
@@ -3329,15 +3579,18 @@ func (h *CombatHandler) resolveDelayedSkillAttack(session *server.Session, playe
 		damageRecords[len(damageRecords)-1].EffectMask = effectMask
 	}
 	_ = h.restoreDamageVitals(context.Background(), session, player, skill, appliedDamage)
-	end := model.BuildAttackEndDamageRecords(target.GetUniqueID(), castUID, damageRecords)
-	_ = h.emitAttack(player, &end)
-	_ = h.applySkillTransfers(context.Background(), session, player, target, skill, now)
+	targets := []model.CombatDamageTarget{{TargetUID: target.GetUniqueID(), Records: damageRecords}}
+	transferTargets, _ := h.resolveTransfers(context.Background(), session, player, target, skill, now, h.skillStrikeDamage(player, target, skill))
+	targets = mergeCombatDamageTargets(targets, transferTargets)
 	if hasImbue {
-		_ = h.applyImbueTransfers(context.Background(), session, player, target, imbue, now)
+		imbueTargets, _ := h.resolveTransfers(context.Background(), session, player, target, imbue, now, h.weaponImbueDamage(player, target, imbue))
+		targets = mergeCombatDamageTargets(targets, imbueTargets)
 	}
-	// The delayed impact already waited through ACTION_DURATION, so completing
-	// the action here avoids adding the animation duration a second time.
-	h.finishActionAfter(session, 0)
+	end := model.BuildAttackEndDamageTargets(castUID, targets)
+	_ = h.emitAttack(player, &end)
+	impactDelay := skill.RuntimeCastingDurationAt(h.skillActionTimePercent(player, skill))
+	recovery := h.skillComboImpactDuration(player, skill) - impactDelay
+	h.finishActionAfter(session, max(recovery, 0))
 	if killed {
 		_ = h.awardPlayerKill(context.Background(), session, player, target, target.GetUniqueID())
 	}
@@ -3554,6 +3807,17 @@ func (h *CombatHandler) skillStrikes(skill model.RefSkill) []model.RefSkill {
 	return strikes
 }
 
+func (h *CombatHandler) skillComboImpactDuration(player *model.Player, skill model.RefSkill) time.Duration {
+	var duration time.Duration
+	for _, phase := range h.skillStrikes(skill) {
+		// Resolve action time per phase so chained skills can carry distinct
+		// speed policy and future phase schedulers do not inherit phase one's
+		// stale timing.
+		duration += phase.RuntimeImpactDurationAt(h.skillActionTimePercent(player, phase))
+	}
+	return duration
+}
+
 func (h *CombatHandler) skillStrikeDamage(player *model.Player, target *model.NPC, skill model.RefSkill) int {
 	if skill.AbsoluteDamage > 0 {
 		return skill.AbsoluteDamage
@@ -3656,6 +3920,9 @@ func (h *CombatHandler) applySkillStatuses(session *server.Session, player *mode
 		if h.world != nil && statusRestrainsMovement(effect.Kind) {
 			h.world.StopMovingCharacter(target, target.GetNavmeshPosition(), "combat-status-control", true)
 		}
+		if effect.Kind == model.CombatStatusFrostbite && h.retimeMob != nil {
+			h.retimeMob(target, now)
+		}
 		badEffect := model.CombatStatusBadEffectBit(effect.Kind)
 		if badEffect != 0 {
 			appliedBadEffects |= badEffect
@@ -3730,6 +3997,9 @@ func (h *CombatHandler) scheduleBadEffectExpiration(player *model.Player, target
 			return
 		}
 		h.publishBadEffectState(player, target, current)
+		if expected.Kind == model.CombatStatusFrostbite && h.retimeMob != nil {
+			h.retimeMob(target, current)
+		}
 	})
 }
 
@@ -3768,7 +4038,10 @@ func (h *CombatHandler) scheduleStatusDamageTick(session *server.Session, player
 			return
 		}
 		castUID := model.NextActionUID()
-		packet := model.BuildAttackBeginWithSkillHits(status.SkillID, player.GetUniqueID(), target.GetUniqueID(), castUID, []uint32{uint32(result.wireDamage)}, result.killed)
+		// Periodic abnormal damage is target-owned. Reusing the original
+		// player's UID makes the stock client replay that player's attack
+		// animation every five seconds, even after knockback moved the target.
+		packet := model.BuildAttackBeginWithSkillHits(status.SkillID, target.GetUniqueID(), target.GetUniqueID(), castUID, []uint32{uint32(result.wireDamage)}, result.killed)
 		_ = h.emitAttack(player, &packet)
 		if result.killed {
 			_ = h.awardPlayerKill(context.Background(), session, player, target, target.GetUniqueID())
@@ -3783,13 +4056,29 @@ func (h *CombatHandler) applyImbueTransfers(ctx context.Context, session *server
 }
 
 func (h *CombatHandler) applyTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, skill model.RefSkill, now time.Time, damage int) error {
+	targets, err := h.resolveTransfers(ctx, session, player, primary, skill, now, damage)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		castUID := model.NextActionUID()
+		packet := model.BuildAttackBeginWithSkillDamageRecords(skill.ID, player.GetUniqueID(), target.TargetUID, castUID, target.Records)
+		if err := h.emitAttack(player, &packet); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *CombatHandler) resolveTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, skill model.RefSkill, now time.Time, damage int) ([]model.CombatDamageTarget, error) {
 	// REF_SKILL's transfer count is the simultaneous target count, including
 	// the primary target. A value of five therefore permits four nearby mobs.
 	secondaryCount := skill.TransferCount - 1
 	if h == nil || player == nil || primary == nil || secondaryCount <= 0 || skill.TransferRange <= 0 || damage <= 0 {
-		return nil
+		return nil, nil
 	}
 	candidates := h.transferTargets(player, primary, skill, secondaryCount)
+	targets := make([]model.CombatDamageTarget, 0, len(candidates))
 	falloff := min(max(skill.TransferFalloffPercent, 0), 100)
 	// Each native geometry producer initializes its byte accumulator to
 	// 100-falloff, accounting for the primary hit, and multiplies it once more
@@ -3803,25 +4092,38 @@ func (h *CombatHandler) applyTransfers(ctx context.Context, session *server.Sess
 		if result.appliedDamage > 0 {
 			effectMask = h.applySkillStatuses(session, player, candidate, skill, now)
 			if err := h.restoreDamageVitals(ctx, session, player, skill, result.appliedDamage); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		castUID := model.NextActionUID()
 		record := result.combatRecord(effectMask)
 		if result.appliedDamage > 0 && !result.killed {
 			h.applySkillDisplacement(player, candidate, skill, &record)
 		}
-		packet := model.BuildAttackBeginWithSkillDamageRecords(skill.ID, player.GetUniqueID(), candidate.GetUniqueID(), castUID, []model.CombatDamageRecord{record})
-		if err := h.emitAttack(player, &packet); err != nil {
-			return err
-		}
+		targets = append(targets, model.CombatDamageTarget{TargetUID: candidate.GetUniqueID(), Records: []model.CombatDamageRecord{record}})
 		if result.killed {
 			if err := h.awardPlayerKill(ctx, session, player, candidate, candidate.GetUniqueID()); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return nil
+	return targets, nil
+}
+
+func mergeCombatDamageTargets(targets, additions []model.CombatDamageTarget) []model.CombatDamageTarget {
+	for _, addition := range additions {
+		merged := false
+		for index := range targets {
+			if targets[index].TargetUID == addition.TargetUID {
+				targets[index].Records = append(targets[index].Records, addition.Records...)
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			targets = append(targets, addition)
+		}
+	}
+	return targets
 }
 
 func nextTransferFactor(current, falloff int) int {
@@ -3990,9 +4292,9 @@ func (h *CombatHandler) applySkillDisplacement(source *model.Player, target *mod
 	}
 	h.world.StopMovingCharacter(target, destination, "skill-displacement", false)
 	target.SetNavmeshPosition(destination)
-	h.mu.Lock()
+	// Combat execution owns h.mu, including delayed impact callbacks. Taking
+	// the same mutex again here deadlocks displacement skills before B071.
 	interruptMob := h.interruptMob
-	h.mu.Unlock()
 	if interruptMob != nil {
 		interruptMob(target)
 	}
@@ -4171,6 +4473,16 @@ func (h *CombatHandler) resolvePlayerDamageWithAggro(player *model.Player, targe
 		return playerDamageResult{attackState: model.DamageResultSourceState}
 	}
 	if targetUsesStateOnlyResult(target) {
+		if target != nil && target.TypeInfo.IsSiegeStruct() && h.fortressDamage != nil && damage > 0 {
+			result, err := h.fortressDamage(context.Background(), target.GetUniqueID(), player.ID, uint32(damage), now)
+			if err != nil {
+				return playerDamageResult{attackState: model.DamageAttackStateBlock}
+			}
+			update, buildErr := vsro188.BuildSiegeStructureStateUpdate(uint32(result.Structure.FortressID), result.Structure.UniqueID, result.Structure.RefEventID, result.Structure.State, result.Structure.Heart, "")
+			if buildErr == nil && h.broadcast != nil {
+				h.broadcast(player, &update)
+			}
+		}
 		return playerDamageResult{attackState: model.DamageResultTargetState}
 	}
 	if !absolute && h.playerAttackBlocked(target) {
@@ -4389,6 +4701,7 @@ func (h *CombatHandler) awardPartyKill(ctx context.Context, killer *model.Player
 			return err
 		}
 		recipient.CommitProgress(progress)
+		h.tryAccumulateAcademyExperience(ctx, recipient, reward)
 		if err := sendExperienceUpdate(recipient.GetSession(), targetUID, reward, skillReward, progress); err != nil {
 			return err
 		}
@@ -4437,6 +4750,7 @@ func (h *CombatHandler) awardKill(ctx context.Context, session *server.Session, 
 		return err
 	}
 	player.CommitProgress(progress)
+	h.tryAccumulateAcademyExperience(ctx, player, reward)
 	if err := sendExperienceUpdate(session, targetUID, reward, skillReward, progress); err != nil {
 		return err
 	}
@@ -4445,6 +4759,20 @@ func (h *CombatHandler) awardKill(ctx context.Context, session *server.Session, 
 		h.tryAwardCombatJobExperience(ctx, player, model.CombatJobExperience(h.levels, player.Level, h.combatTargetLevel(target), player.GetJob().Type), targetUID)
 	}
 	return h.finishKill(ctx, session, player, target, targetUID, shareGrowthPetExperience)
+}
+
+func (h *CombatHandler) tryAccumulateAcademyExperience(ctx context.Context, player *model.Player, amount uint64) {
+	if h == nil || h.academyProgress == nil || player == nil || amount == 0 {
+		return
+	}
+	states, err := h.academyProgress.AccumulateAcademyExperience(ctx, player.ID, amount)
+	if err != nil {
+		logrus.WithError(err).WithField("character_id", player.ID).Warn("academy experience accumulation failed")
+		return
+	}
+	if len(states) != 0 && h.academyBuffs != nil {
+		h.academyBuffs(states)
+	}
 }
 
 func (h *CombatHandler) isJobExperienceTarget(target *model.NPC) bool {
@@ -4743,6 +5071,36 @@ func (h *CombatHandler) resolveAttack(session *server.Session, targetUID uint32)
 	return player, target, nil
 }
 
+func (h *CombatHandler) resolveDimensionHolePortalInteraction(session *server.Session, targetUID uint32) (*model.Player, *model.DimensionHolePortal, error) {
+	player, err := h.resolveCombatPlayer(session)
+	if err != nil || targetUID == 0 || session.UserContext.CharacterID <= 0 || player.ID != session.UserContext.CharacterID || player.GetUniqueID() != session.UserContext.UniqueID {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	object, err := h.world.GetObjectByUniqueId(targetUID)
+	portal, isPortal := object.(*model.DimensionHolePortal)
+	if err != nil || !isPortal || !model.IsDimensionHolePortalObject(portal) || portal.GetUniqueID() != targetUID || portal.GetGameWorldID() != player.GetGameWorldID() {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	known := player.GetKnownObjectList()
+	if known == nil {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	knownPortal, knownAsPortal := known.GetKnownObjects()[targetUID].(*model.DimensionHolePortal)
+	if !knownAsPortal || knownPortal != portal {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	playerPosition := player.GetNavmeshPosition()
+	portalPosition := portal.GetNavmeshPosition()
+	if playerPosition.Offset == nil || portalPosition.Offset == nil {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	distance := h.world.DistanceTo(playerPosition, portalPosition)
+	if math.IsNaN(float64(distance)) || math.IsInf(float64(distance), 0) || distance < 0 || distance > float32(model.RegionHeight) {
+		return nil, nil, ErrCombatTargetInvalid
+	}
+	return player, portal, nil
+}
+
 func (h *CombatHandler) resolveCombatPlayer(session *server.Session) (*model.Player, error) {
 	if session == nil || session.UserContext.UniqueID == 0 || h.world == nil {
 		return nil, ErrCombatTargetInvalid
@@ -4831,6 +5189,13 @@ func (h *CombatHandler) beginDelayedCast(playerUID uint32, cancel ...func()) uin
 	entry := delayedCast{token: token}
 	if len(cancel) > 0 {
 		entry.cancel = cancel[0]
+	}
+	// A rapid follow-up skill replaces the actor-owned cast slot. Finish the
+	// superseded cast before installing the new token; otherwise its scheduled
+	// callback is correctly ignored, but its cast-end/action-state cleanup is
+	// lost and the stock client remains stuck in the cancelled action.
+	if previous, exists := h.delayedCasts[playerUID]; exists && previous.cancel != nil {
+		previous.cancel()
 	}
 	h.delayedCasts[playerUID] = entry
 	return token

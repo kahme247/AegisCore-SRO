@@ -45,6 +45,24 @@ type fakeGameReadySocial struct {
 	bootstrapped int
 }
 
+type fakeGameReadyPK struct {
+	state model.CharacterPKState
+	name  string
+}
+
+func (f *fakeGameReadyPK) LoadByName(_ context.Context, name string) (model.CharacterPKState, error) {
+	f.name = name
+	return f.state, nil
+}
+
+func (f *fakeGameReadyPK) EditByName(context.Context, string, model.CharacterPKState) error {
+	return nil
+}
+
+func (f *fakeGameReadyPK) RecordKill(context.Context, int) (model.CharacterPKState, error) {
+	return f.state, nil
+}
+
 func (f *fakeGameReadySocial) PreparePlayer(_ context.Context, player *model.Player) error {
 	f.prepared++
 	player.SetJob(model.PlayerJob{Type: model.PlayerJobTrader, Level: 4, Alias: "Aegis"})
@@ -78,6 +96,30 @@ func TestGameReadyPreparesSpawnStateBeforeVisibilityActivation(t *testing.T) {
 	}
 	if got := players.jobAtActivation; got.Type != model.PlayerJobTrader || got.Level != 4 || got.Alias != "Aegis" {
 		t.Fatalf("job at visibility activation = %+v", got)
+	}
+}
+
+func TestGameReadyLoadsAndPublishesPersistedPKState(t *testing.T) {
+	session := newGameReadyTestSession(t)
+	if !session.BeginCharacterLoading() {
+		t.Fatal("test session could not enter character loading")
+	}
+	player := &model.Player{
+		ID: session.UserContext.CharacterID, Session: session,
+		CharName: session.UserContext.CharName, LifeState: model.Spawning,
+		BaseStats: model.BaseStats{HP: 100, MP: 100},
+	}
+	repository := &fakeGameReadyPK{state: model.CharacterPKState{DailyPK: 7, TotalPK: -12, PKPenaltyPoint: 345}}
+	handler := NewGameReadyHandler(&fakeGameReadyPlayers{player: player})
+	handler.ConfigurePKRepository(repository)
+	if err := handler.handleSessionPacket(context.Background(), session, network.EmptyClientPacket()); err != nil {
+		t.Fatalf("GameReady rejected: %v", err)
+	}
+	if repository.name != player.CharName {
+		t.Fatalf("loaded PK name = %q", repository.name)
+	}
+	if got := player.PKCounters(); got != repository.state {
+		t.Fatalf("PK state = %+v, want %+v", got, repository.state)
 	}
 }
 

@@ -31,6 +31,9 @@ type ItemUseResult struct {
 	SpeedPercent                int
 	EffectDuration              int
 	EffectExpiresAt             time.Time
+	ItemCure                    *ItemCureEffect
+	ItemCureApplication         ItemCureApplication
+	ItemCureAppliedAt           time.Time
 	ItemService                 *ItemServiceEffect
 	ItemServiceToken            uint32
 	ReplacedItemServiceToken    uint32
@@ -60,6 +63,7 @@ type ItemUseResult struct {
 	CollectionSlotIndex         uint16
 	CollectionThemeComplete     bool
 	CollectionQuestProgress     []QuestProgressResult
+	DimensionHolePortal         *DimensionHoleDefinition
 }
 
 // COSItemTarget is the item-family-specific target carried by 0x704C.
@@ -79,6 +83,10 @@ type ItemUseVitals struct {
 	Level               int
 	ReverseReturnOption byte
 	ReverseReturnMapID  uint32
+	// DimensionHolePreparedItemRefID is nonzero only after the runtime has
+	// reserved a direct-world lease. SQL refuses to consume a portal item
+	// through the ordinary unprepared UseItem path.
+	DimensionHolePreparedItemRefID uint32
 }
 
 type ItemUseRepository interface {
@@ -243,6 +251,9 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	if requestedType != itemType {
 		return result, ErrItemUseInvalidRequest
 	}
+	if vitals.DimensionHolePreparedItemRefID != 0 && vitals.DimensionHolePreparedItemRefID != refID {
+		return result, ErrItemUseInvalidRequest
+	}
 	newHP, newMP := vitals.HP, vitals.MP
 	isRecovery := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 >= 1 && ref.TypeID4 <= 3
 	isSpeedDrug := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1
@@ -258,15 +269,23 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	isCOSRevival := IsCOSRevival(ref)
 	isMonsterMask := ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 2 && itemData != 0
 	isCollectionTalisman := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 12 && ref.TypeID4 == 5
+	isCharacterStatusCure := isCharacterStatusCureType(ref)
+	itemCure, validItemCure := ItemCureFromReference(ref)
 	questInstanceEntryQuestID, isQuestInstanceEntry := QuestInstanceEntryQuestID(ref.CodeName)
+	dimensionHole, isDimensionHole := DimensionHoleDefinitionForReference(ref)
 	linkedSkill, hasLinkedSkill := RefSkills[uint32(skillID)]
 	isSkillBuff := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1 &&
-		hasLinkedSkill && linkedSkill.ExecutionKind() == SkillExecutionBuff && linkedSkill.BuffDuration > 0 && linkedSkill.BuffModifiers != (BuffModifiers{})
+		hasLinkedSkill && linkedSkill.SupportsItemUseBuff()
 	switch {
 	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
 	case isQuestInstanceEntry:
 		result.QuestInstanceEntryQuestID = questInstanceEntryQuestID
+	case isDimensionHole:
+		if target != nil || vitals.DimensionHolePreparedItemRefID != ref.ID {
+			return result, ErrItemUseUnsupported
+		}
+		result.DimensionHolePortal = &dimensionHole
 	case isCOSScroll:
 		if itemData != 0 {
 			var cosOwnerID int64
@@ -515,6 +534,14 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=?", newHP, newMP, characterID); err != nil {
 			return result, fmt.Errorf("persist item-use recovery: %w", err)
 		}
+	case isCharacterStatusCure:
+		if !validItemCure {
+			return result, ErrItemUseUnsupported
+		}
+		// The stock callback returns success even when no matching status is
+		// active or its random cure roll fails. Carry the descriptor across the
+		// committed consume boundary; runtime status authority applies it later.
+		result.ItemCure = &itemCure
 	case isSkillBuff:
 		now := time.Now().UTC()
 		expiresAt := now.Add(time.Duration(linkedSkill.BuffDuration) * time.Millisecond)
@@ -1121,7 +1148,7 @@ func (r *SQLItemUseRepository) LoadItemBuffs(ctx context.Context, characterID in
 			return nil, fmt.Errorf("scan character item buff: %w", err)
 		}
 		skill, exists := RefSkills[effect.SkillID]
-		if !exists || skill.ExecutionKind() != SkillExecutionBuff || skill.BuffModifiers == (BuffModifiers{}) {
+		if !exists || !skill.SupportsItemUseBuff() {
 			return nil, fmt.Errorf("load character item buff skill %d: %w", effect.SkillID, ErrItemUseUnsupported)
 		}
 		effect.ExpiresAt = effect.ExpiresAt.UTC()
@@ -1188,7 +1215,7 @@ const maximumSpeedEffectDuration = 24 * time.Hour
 
 func extendedSpeedEffectExpiration(now, current time.Time, added time.Duration) (time.Time, bool) {
 	now = now.UTC()
-	maximum := now.Add(maximumSpeedEffectDuration)
+	maximum := now.Add(RuntimeMaxSpeedEffectDuration())
 	base := now
 	if current.After(now) {
 		base = current

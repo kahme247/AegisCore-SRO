@@ -110,6 +110,22 @@ func BuildCOSTerminatedUpdate(uniqueID uint32) network.Packet {
 	return p
 }
 
+// BuildCOSInventoryUpdate publishes the complete live COS inventory through
+// the stock client's 0x30C9 subtype-2 decoder. Unlike 0x30C8, this packet is
+// safe while the owner is already in the world.
+func BuildCOSInventoryUpdate(cos *COS) (network.Packet, bool) {
+	if cos == nil {
+		return network.EmptyPacket(), false
+	}
+	s := cos.Snapshot()
+	p := network.EmptyPacket()
+	p.MessageID = opcode.COSUpdateResponse
+	p.WriteUInt32(s.UniqueID)
+	p.WriteByte(COSUpdateInventory)
+	writeCOSInventory(&p, s.InventorySize, s.Inventory)
+	return p, true
+}
+
 // BuildCOSItemStateUpdate publishes the state byte for the inventory item that
 // owns a persistent COS. The same proven layout is used by manual unsummon and
 // automatic fixed-period rental expiry.

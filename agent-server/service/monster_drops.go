@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 )
@@ -182,6 +185,14 @@ func (c *MonsterDropCatalog) rollForMonsterIdentity(monsterRefID uint32, monster
 }
 
 func (c *MonsterDropCatalog) rollForMonsterIdentityAtRate(monsterRefID uint32, monsterLevel, country int, exception NativeDropExceptionContext, random DropRandom, ratePercent uint32) ([]model.GroundItemSpec, error) {
+	return c.rollForMonsterIdentityAtRates(monsterRefID, monsterLevel, country, exception, random, ratePercent, 100)
+}
+
+func (c *MonsterDropCatalog) rollForMonsterIdentityAtRates(monsterRefID uint32, monsterLevel, country int, exception NativeDropExceptionContext, random DropRandom, itemRatePercent, goldAmountRatePercent uint32) ([]model.GroundItemSpec, error) {
+	return c.rollForMonsterIdentityAtRuntimeRates(monsterRefID, monsterLevel, country, exception, random, itemRatePercent, goldAmountRatePercent, nil)
+}
+
+func (c *MonsterDropCatalog) rollForMonsterIdentityAtRuntimeRates(monsterRefID uint32, monsterLevel, country int, exception NativeDropExceptionContext, random DropRandom, itemRatePercent, goldAmountRatePercent uint32, runtimeDropClass *byte) ([]model.GroundItemSpec, error) {
 	if c == nil || c.tables == nil {
 		return nil, ErrMonsterDropCatalogUnavailable
 	}
@@ -195,10 +206,13 @@ func (c *MonsterDropCatalog) rollForMonsterIdentityAtRate(monsterRefID uint32, m
 	if random == nil {
 		return nil, ErrMonsterDropCatalogUnavailable
 	}
+	if runtimeDropClass != nil {
+		table.DropClass = *runtimeDropClass
+	}
 	if table.DropClass&0x0f == 3 || table.DropClass&0x0f == 8 {
 		exception.ItemsByCode = nativeExceptionItemReferences()
 	}
-	return rollMonsterDropTableAtRate(table, monsterLevel, country, exception, c.profiles, random, ratePercent)
+	return rollMonsterDropTableAtRates(table, monsterLevel, country, exception, c.profiles, random, itemRatePercent, goldAmountRatePercent)
 }
 
 func rollMonsterDropTable(table MonsterDropTable, monsterLevel, country int, exception NativeDropExceptionContext, profiles *DropProfileCatalog, random DropRandom) ([]model.GroundItemSpec, error) {
@@ -206,6 +220,10 @@ func rollMonsterDropTable(table MonsterDropTable, monsterLevel, country int, exc
 }
 
 func rollMonsterDropTableAtRate(table MonsterDropTable, monsterLevel, country int, exception NativeDropExceptionContext, profiles *DropProfileCatalog, random DropRandom, ratePercent uint32) ([]model.GroundItemSpec, error) {
+	return rollMonsterDropTableAtRates(table, monsterLevel, country, exception, profiles, random, ratePercent, 100)
+}
+
+func rollMonsterDropTableAtRates(table MonsterDropTable, monsterLevel, country int, exception NativeDropExceptionContext, profiles *DropProfileCatalog, random DropRandom, ratePercent, goldAmountRatePercent uint32) ([]model.GroundItemSpec, error) {
 	if table.MaxItems <= 0 {
 		table.MaxItems = nativeDropItemCap(table.DropClass)
 	}
@@ -280,7 +298,7 @@ func rollMonsterDropTableAtRate(table MonsterDropTable, monsterLevel, country in
 	passes := nativeDropSelectorPasses(table.DropClass)
 	for pass := 0; pass < passes && len(result) < table.MaxItems; pass++ {
 		if gold != nil {
-			if amount, ok := rollBinaryGoldAtRate(gold, table.DropClass, random, ratePercent); ok {
+			if amount, ok := rollBinaryGoldAtRates(gold, table.DropClass, random, factor, goldAmountRatePercent); ok {
 				refID := uint32(3)
 				switch {
 				case amount < 1000:
@@ -442,19 +460,20 @@ func binaryModuloRoll(random DropRandom, modulus int) int {
 }
 
 func rollBinaryGold(record *GoldDropRecord, dropClass byte, random DropRandom) (uint64, bool) {
-	return rollBinaryGoldAtRate(record, dropClass, random, 100)
+	return rollBinaryGoldAtAmountRate(record, dropClass, random, 100)
 }
 
-func rollBinaryGoldAtRate(record *GoldDropRecord, dropClass byte, random DropRandom, ratePercent uint32) (uint64, bool) {
+func rollBinaryGoldAtAmountRate(record *GoldDropRecord, dropClass byte, random DropRandom, amountRatePercent uint32) (uint64, bool) {
+	return rollBinaryGoldAtRates(record, dropClass, random, 1, amountRatePercent)
+}
+
+func rollBinaryGoldAtRates(record *GoldDropRecord, dropClass byte, random DropRandom, chanceFactor float64, amountRatePercent uint32) (uint64, bool) {
 	if record == nil || random == nil || record.Max < record.Min {
 		return 0, false
 	}
 	// 0x00724330 uses rand() % 101 <= DropProb. DropProb is the
 	// percentage field in _RefDropGold, not the million-point item ratio.
-	if ratePercent == 0 {
-		ratePercent = 100
-	}
-	if float64(random.Intn(101)) > record.Chance*float64(ratePercent)/100 {
+	if float64(random.Intn(101)) > record.Chance*chanceFactor {
 		return 0, false
 	}
 	// The source uses a 15-bit rand() value and divides by 32767.0.
@@ -482,6 +501,10 @@ func rollBinaryGoldAtRate(record *GoldDropRecord, dropClass byte, random DropRan
 	case 4, 7:
 		amount = math.Round(amount * 4.0)
 	}
+	if amountRatePercent == 0 {
+		amountRatePercent = 100
+	}
+	amount = math.Round(amount * float64(amountRatePercent) / 100)
 	if amount <= 0 || amount >= float64(^uint64(0)) {
 		return 0, false
 	}
@@ -511,12 +534,105 @@ type MonsterDropService struct {
 	groundItems   *GroundItemService
 	materializer  model.GroundItemMaterializer
 	gameplayRates interface{ Current() model.GameplayRates }
+	winterEvent   winterEventDrop
+	battleArena   battleArenaTicketDrop
+}
+
+const (
+	winterEventMonsterCode = "MOB_EV_WINTER_SNOWMAN"
+	winterEventItemCode    = "ITEM_ETC_E091216_SNOWFLAKE"
+	winterEventChance      = 50.0
+	winterEventCount       = 1
+)
+
+// winterEventDrop is the maintained form of the hardcoded Winter Event 2009
+// fields recovered at SR_GameServer 0x00876DF0/0x00877870. It deliberately
+// does not share the ordinary monster-drop profile or its rate multiplier.
+type winterEventDrop struct {
+	enabled      bool
+	monsterRefID uint32
+	itemRefID    uint32
+}
+
+const battleArenaTicketCode = "ITEM_ETC_BATTLE_ARENA_TICKET"
+
+var battleArenaWorldIDs = map[uint16]struct{}{
+	42: {}, 43: {}, 44: {}, // occupy 8/16/32
+	45: {}, 46: {}, 47: {}, // flag 8/16/32
+	48: {}, 49: {}, 50: {}, // score 8/16/32
+}
+
+// battleArenaTicketDrop mirrors the per-CBattleArenaInfo probability state.
+// Native helper 0x00599CC0 stores its accumulator under key 1111; one state
+// per packed world/layer scope prevents separate matches influencing each
+// other while preserving the recovered adaptive sequence.
+type battleArenaTicketDrop struct {
+	mu          sync.Mutex
+	rate        int
+	itemRefID   uint32
+	accumulator map[uint32]int
 }
 
 func (s *MonsterDropService) ConfigureGameplayRates(rates interface{ Current() model.GameplayRates }) {
 	if s != nil {
 		s.gameplayRates = rates
 	}
+}
+
+// ConfigureWinterEvent resolves the binary-authored identities from the
+// already-published reference snapshot. Enabling the feature with incomplete
+// Media data is a startup error instead of silently inventing another item.
+func (s *MonsterDropService) ConfigureWinterEvent(enabled bool) error {
+	if s == nil {
+		return ErrMonsterDropCatalogUnavailable
+	}
+	s.winterEvent = winterEventDrop{}
+	if !enabled {
+		return nil
+	}
+	for id, ref := range model.RefChars {
+		if ref.CodeName == winterEventMonsterCode {
+			s.winterEvent.monsterRefID = id
+			break
+		}
+	}
+	for id, ref := range model.RefItems {
+		if ref.CodeName == winterEventItemCode {
+			s.winterEvent.itemRefID = id
+			break
+		}
+	}
+	if s.winterEvent.monsterRefID == 0 || s.winterEvent.itemRefID == 0 {
+		return fmt.Errorf("configure Winter Event 2009 drop: monster %q=%d item %q=%d", winterEventMonsterCode, s.winterEvent.monsterRefID, winterEventItemCode, s.winterEvent.itemRefID)
+	}
+	s.winterEvent.enabled = true
+	return nil
+}
+
+// ConfigureBattleArenaTicketDropRate applies the Media
+// BATTLE_ARENA_TICKET_DROP_RATE value. The supplied vSRO catalog authors zero;
+// operators may select 0..100 without changing ordinary monster loot.
+func (s *MonsterDropService) ConfigureBattleArenaTicketDropRate(rate int) error {
+	if s == nil {
+		return ErrMonsterDropCatalogUnavailable
+	}
+	if rate < 0 || rate > 100 {
+		return fmt.Errorf("configure Battle Arena ticket drop rate: %d is outside 0..100", rate)
+	}
+	s.battleArena = battleArenaTicketDrop{rate: rate, accumulator: make(map[uint32]int)}
+	for id, ref := range model.RefItems {
+		if ref.CodeName == battleArenaTicketCode {
+			s.battleArena.itemRefID = id
+			break
+		}
+	}
+	if s.battleArena.itemRefID == 0 {
+		if rate == 0 {
+			return nil
+		}
+		return fmt.Errorf("configure Battle Arena ticket drop: item %q is missing", battleArenaTicketCode)
+	}
+	return nil
 }
 
 func NewMonsterDropService(catalog *MonsterDropCatalog, random DropRandom, groundItems *GroundItemService, materializer model.GroundItemMaterializer) *MonsterDropService {
@@ -529,25 +645,114 @@ func (s *MonsterDropService) SpawnForKill(ctx context.Context, killer *model.Pla
 	}
 	level, _, _, _ := target.AIProfile()
 	ratePercent := uint32(100)
+	goldAmountRatePercent := uint32(100)
 	if s.gameplayRates != nil {
-		if configured := s.gameplayRates.Current().LootDropRatePercent; configured != 0 {
+		rates := s.gameplayRates.Current()
+		if configured := rates.LootDropRatePercent; configured != 0 {
 			ratePercent = configured
 		}
+		if configured := rates.GoldDropAmountRatePercent; configured != 0 {
+			goldAmountRatePercent = configured
+		}
 	}
+	dropClass := target.Rarity()
 	country := 0
 	if ref, ok := model.RefChars[target.GetRefObjectID()]; ok {
 		country = ref.Country
-		specs, err := s.catalog.rollForMonsterIdentityAtRate(target.GetRefObjectID(), level, country, NativeDropExceptionContext{MonsterCode: ref.CodeName, MonsterTypeID4: ref.TypeID4}, s.random, ratePercent)
+		specs, err := s.catalog.rollForMonsterIdentityAtRuntimeRates(target.GetRefObjectID(), level, country, NativeDropExceptionContext{MonsterCode: ref.CodeName, MonsterTypeID4: ref.TypeID4}, s.random, ratePercent, goldAmountRatePercent, &dropClass)
 		if err != nil {
 			return nil, err
 		}
+		specs = s.appendBinaryEventDrops(specs, target)
 		return s.spawnDropSpecs(ctx, killer, target, specs)
 	}
-	specs, err := s.catalog.rollForMonsterIdentityAtRate(target.GetRefObjectID(), level, country, NativeDropExceptionContext{}, s.random, ratePercent)
+	specs, err := s.catalog.rollForMonsterIdentityAtRuntimeRates(target.GetRefObjectID(), level, country, NativeDropExceptionContext{}, s.random, ratePercent, goldAmountRatePercent, &dropClass)
 	if err != nil {
 		return nil, err
 	}
+	specs = s.appendBinaryEventDrops(specs, target)
 	return s.spawnDropSpecs(ctx, killer, target, specs)
+}
+
+func (s *MonsterDropService) appendBinaryEventDrops(specs []model.GroundItemSpec, target *model.NPC) []model.GroundItemSpec {
+	specs = s.appendWinterEventDrop(specs, target)
+	return s.appendBattleArenaTicket(specs, target)
+}
+
+func (s *MonsterDropService) appendWinterEventDrop(specs []model.GroundItemSpec, target *model.NPC) []model.GroundItemSpec {
+	if s == nil || target == nil || !s.winterEvent.enabled || target.GetRefObjectID() != s.winterEvent.monsterRefID {
+		return specs
+	}
+	// The native event controller receives 50.0 at 0x00877870. A roll below
+	// that percentage appends exactly one snowflake through the same monster
+	// ground-drop virtual used by the ordinary materializer.
+	chanceBP := model.RuntimeWinterDropChanceBP()
+	if s.random.Float64()*10000 >= float64(chanceBP) {
+		return specs
+	}
+	return append(specs, model.GroundItemSpec{ReferenceItemID: s.winterEvent.itemRefID, StackCount: uint16(model.RuntimeWinterDropItemCount())})
+}
+
+func (s *MonsterDropService) appendBattleArenaTicket(specs []model.GroundItemSpec, target *model.NPC) []model.GroundItemSpec {
+	if s == nil || target == nil || s.battleArena.itemRefID == 0 || runtimeBattleArenaRate(s) == 0 {
+		return specs
+	}
+	scope := model.GameWorldScope(target.GetGameWorldID())
+	if !runtimeBattleArenaWorld(scope.WorldID()) || !scope.ValidInstance() {
+		return specs
+	}
+	if !s.rollBattleArenaTicket(uint32(scope)) {
+		return specs
+	}
+	return append(specs, model.GroundItemSpec{ReferenceItemID: s.battleArena.itemRefID, StackCount: 1})
+}
+
+func (s *MonsterDropService) rollBattleArenaTicket(scope uint32) bool {
+	rate := runtimeBattleArenaRate(s)
+	if rate <= 0 {
+		return false
+	}
+	if rate >= 100 {
+		return true
+	}
+	roll := s.random.Intn(101)
+	s.battleArena.mu.Lock()
+	defer s.battleArena.mu.Unlock()
+	accumulator, exists := s.battleArena.accumulator[scope]
+	if !exists {
+		if roll <= rate {
+			s.battleArena.accumulator[scope] = 2*rate - 100
+			return true
+		}
+		s.battleArena.accumulator[scope] = 2 * rate
+		return false
+	}
+	if roll > accumulator {
+		s.battleArena.accumulator[scope] = accumulator + rate
+		return false
+	}
+	s.battleArena.accumulator[scope] = accumulator + rate - 100
+	return true
+}
+
+func runtimeBattleArenaWorld(worldID uint16) bool {
+	for _, raw := range strings.Split(model.RuntimeBattleArenaWorldIDs(), ",") {
+		value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 16)
+		if err == nil && uint16(value) == worldID {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeBattleArenaRate(s *MonsterDropService) int {
+	if model.RuntimeGameplayPolicyLoaded() {
+		return model.RuntimeBattleArenaTicketRate()
+	}
+	if s == nil {
+		return 0
+	}
+	return s.battleArena.rate
 }
 
 func (s *MonsterDropService) spawnDropSpecs(ctx context.Context, killer *model.Player, target *model.NPC, specs []model.GroundItemSpec) ([]*model.Item, error) {

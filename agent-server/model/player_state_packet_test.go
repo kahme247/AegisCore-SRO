@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -25,6 +26,25 @@ func TestJoiningPlayerBodyStateUpdateIsNormal(t *testing.T) {
 	}
 	if got := payload[5]; got != 0 {
 		t.Fatalf("body state = %d, want normal state 0; value 2 is untouchable", got)
+	}
+}
+
+func TestMotionStateUpdateMatchesStockEntityStateLayout(t *testing.T) {
+	packet := BuildMotionStateUpdatePacket(0x11223344, Sitting)
+	if packet.MessageID != opcode.EntityUpdateMovementState {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntityUpdateMovementState)
+	}
+	want := []byte{0x44, 0x33, 0x22, 0x11, 1, 4}
+	if !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("motion-state payload = % X, want % X", packet.Payload(), want)
+	}
+}
+
+func TestStandingMotionStateUsesStockResetValueZero(t *testing.T) {
+	packet := BuildMotionStateUpdatePacket(0x11223344, Stand)
+	want := []byte{0x44, 0x33, 0x22, 0x11, 1, 0}
+	if !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("stand payload = % X, want % X", packet.Payload(), want)
 	}
 }
 

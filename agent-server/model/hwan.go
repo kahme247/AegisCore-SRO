@@ -43,24 +43,25 @@ type HwanKillReward struct {
 // five-level grace window, floored at 25 (0.25%). Rarity 4 is fivefold,
 // rarity 6 is twofold, and unique/special-unique classes fill all five points.
 func HwanRewardForMonsterKill(playerLevel, monsterLevel int, rarity MonsterRarity) HwanKillReward {
-	reward := HwanKillReward{ChanceBasisPoints: 800, Points: 1}
-	if difference := playerLevel - monsterLevel; difference > 5 {
-		reward.ChanceBasisPoints = max(25, reward.ChanceBasisPoints-(difference-5)*25)
+	reward := HwanKillReward{ChanceBasisPoints: RuntimeHwanBaseChanceBP(), Points: 1}
+	grace := RuntimeHwanOverlevelGrace()
+	if difference := playerLevel - monsterLevel; difference > grace {
+		reward.ChanceBasisPoints = max(RuntimeHwanMinimumChanceBP(), reward.ChanceBasisPoints-(difference-grace)*RuntimeHwanPenaltyPerLevelBP())
 	}
 	switch rarity.BaseClass() {
 	case MonsterUnique, MonsterRarity(8):
 		reward.ChanceBasisPoints = 10000
 		reward.Points = MaxHwanPoints
 	case MonsterGiant:
-		reward.ChanceBasisPoints = min(10000, reward.ChanceBasisPoints*5)
+		reward.ChanceBasisPoints = min(10000, reward.ChanceBasisPoints*RuntimeHwanGiantMultiplier())
 	case MonsterElite:
-		reward.ChanceBasisPoints = min(10000, reward.ChanceBasisPoints*2)
+		reward.ChanceBasisPoints = min(10000, reward.ChanceBasisPoints*RuntimeHwanEliteMultiplier())
 	}
 	return reward
 }
 
 func BerserkDurationForPoints(points byte) time.Duration {
-	return time.Duration(min(points, MaxHwanPoints)) * BerserkDurationPerPoint
+	return time.Duration(min(points, MaxHwanPoints)) * RuntimeBerserkDurationPerPoint()
 }
 
 // BerserkEffectVariant is the boolean effect selector consumed after a

@@ -63,14 +63,20 @@ func TestQuestAbandonUsesSelectedCharacterAndReturnsStockSuccess(t *testing.T) {
 	if repository.characterID != 77 || repository.questID != 123 {
 		t.Fatalf("abandon identity = (%d,%d)", repository.characterID, repository.questID)
 	}
-	if len(responses) != 1 {
-		t.Fatalf("responses = %#v, want only the abandon acknowledgement", responses)
+	if len(responses) != 2 {
+		t.Fatalf("responses = %#v, want acknowledgement and quest-list removal", responses)
 	}
 	if responses[0].MessageID != opcode.QuestAbandonResponse {
 		t.Fatalf("response opcode = 0x%04X", responses[0].MessageID)
 	}
 	if got, want := responses[0].Payload(), []byte{1, 123, 0, 0, 0}; string(got) != string(want) {
 		t.Fatalf("response = %v, want %v", got, want)
+	}
+	if responses[1].MessageID != opcode.QuestUpdate {
+		t.Fatalf("quest removal opcode = 0x%04X", responses[1].MessageID)
+	}
+	if got, want := responses[1].Payload(), []byte{vsro188.QuestUpdateAbort, 123, 0, 0, 0}; string(got) != string(want) {
+		t.Fatalf("quest removal = % X, want % X", got, want)
 	}
 }
 
@@ -112,19 +118,23 @@ func TestQuestAbandonPublishesAcknowledgementBeforeEventEightItemCleanup(t *test
 	if err := handler.handleAbandon(context.Background(), session, request); err != nil {
 		t.Fatal(err)
 	}
-	if len(responses) != 4 || responses[0].MessageID != opcode.QuestAbandonResponse ||
+	if len(responses) != 5 || responses[0].MessageID != opcode.QuestAbandonResponse ||
 		responses[1].MessageID != opcode.QuestUpdate ||
-		responses[2].MessageID != opcode.ItemOperationResponse ||
-		responses[3].MessageID != opcode.ItemOperationResponse {
+		responses[2].MessageID != opcode.QuestUpdate ||
+		responses[3].MessageID != opcode.ItemOperationResponse ||
+		responses[4].MessageID != opcode.ItemOperationResponse {
 		t.Fatalf("event-8 cleanup responses = %#v", responses)
 	}
-	if got, want := responses[1].Payload(), []byte{vsro188.QuestUpdateAbort, 0x33, 0x01, 0, 0}; string(got) != string(want) {
+	if got, want := responses[1].Payload(), []byte{vsro188.QuestUpdateAbort, 123, 0, 0, 0}; string(got) != string(want) {
+		t.Fatalf("abandoned quest removal = % X, want % X", got, want)
+	}
+	if got, want := responses[2].Payload(), []byte{vsro188.QuestUpdateAbort, 0x33, 0x01, 0, 0}; string(got) != string(want) {
 		t.Fatalf("related quest abort = % X, want % X", got, want)
 	}
-	if got, want := responses[2].Payload(), []byte{1, 0x0F, 14}; string(got) != string(want) {
+	if got, want := responses[3].Payload(), []byte{1, 0x0F, 14, 0}; string(got) != string(want) {
 		t.Fatalf("first removal = % X, want % X", got, want)
 	}
-	if got, want := responses[3].Payload(), []byte{1, 0x0F, 19}; string(got) != string(want) {
+	if got, want := responses[4].Payload(), []byte{1, 0x0F, 19, 0}; string(got) != string(want) {
 		t.Fatalf("second removal = % X, want % X", got, want)
 	}
 }

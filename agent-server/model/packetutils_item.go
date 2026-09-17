@@ -111,7 +111,10 @@ func WriteContainerItem(p *network.Packet, item Item) {
 		p.WriteUInt32(item.Data)
 	} else if item.TypeID3 == 3 {
 		// MAGIC_CUBE
-		p.WriteUInt32(0) // TODO Amount of elixirs inside the cube
+		// The stock SOItem reader consumes the cube's current stored-elixir
+		// quantity as a u32. ITEM.DATA is the persisted polymorphic value used
+		// for the other container-item payloads as well.
+		p.WriteUInt32(item.Data)
 	}
 }
 
@@ -154,7 +157,7 @@ func WriteExpendableItem(p *network.Packet, item Item) {
 			}
 			p.WriteByte(byte(assimilation))
 		}
-	} else if item.TypeID3 == 14 && (item.TypeID4 == 1 || item.TypeID4 == 2) {
+	} else if item.TypeID3 == 14 && item.TypeID4 == 2 {
 		// ITEM_MALL_GACHA_CARD_WIN
 		// ITEM_MALL_GACHA_CARD_LOSE
 		magicOptions := boundedMagicOptions(item.MagicOptions)

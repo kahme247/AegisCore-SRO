@@ -45,6 +45,12 @@ func buildPartyOperationResponse(messageID uint16, success bool) network.Packet 
 	return packet
 }
 
+func buildPartyCreateSuccess(playerUID uint32) network.Packet {
+	packet := buildPartyOperationResponse(opcode.PartyCreateResponse, true)
+	packet.WriteUInt32(playerUID)
+	return packet
+}
+
 func buildMatchingJoinResult(success bool, answer byte) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.PartyMatchingJoinResponse
@@ -90,8 +96,13 @@ func buildPartySnapshot(snapshot service.PartySnapshot, matching bool) network.P
 	} else {
 		packet.MessageID = opcode.PartyCreate
 	}
-	packet.WriteByte(0xFF)
 	if matching {
+		packet.WriteByte(0xFF)
+		packet.WriteUInt32(snapshot.Number)
+	} else {
+		// The stock 0x3865 parser treats this byte as a field mask and always
+		// consumes the party number before the masked header/member sections.
+		packet.WriteByte(0x03)
 		packet.WriteUInt32(snapshot.Number)
 	}
 	packet.WriteUInt32(snapshot.MasterUniqueID)

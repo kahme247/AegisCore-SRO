@@ -57,7 +57,22 @@ func RegisterLifecycleHandlers(target *server.Server, repository model.COSReposi
 	target.RegisterHandler(opcode.COSCommandRequest, h.handleCommand)
 	target.RegisterHandler(opcode.COSNameRequest, h.handleName)
 	target.RegisterHandler(opcode.COSSettingsRequest, h.handleSettings)
+	target.RegisterHandler(opcode.COSUnknownRequest, h.handleUnknown)
 	return h
+}
+
+func (h *LifecycleHandler) handleUnknown(_ context.Context, session *server.Session, packet network.Packet) error {
+	if err := vsro188.DecodeCOSUnknownRequest(&packet); err != nil {
+		return err
+	}
+	// The request's business operation is not present in the recovered Agent
+	// authority. Use the client's native failure envelope instead of silently
+	// accepting or inventing a COS mutation.
+	response := vsro188.BuildCOSUnknownResponseFailure(1)
+	if h != nil && h.send != nil {
+		return h.send(session, response)
+	}
+	return session.Send(response)
 }
 
 func (h *LifecycleHandler) handleCommand(_ context.Context, session *server.Session, packet network.Packet) error {

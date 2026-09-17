@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -181,6 +182,19 @@ func (r *SQLCharacterCreationRepository) CreateCharacterWithProgress(ctx context
 	if err := enforceCharacterCreationLimit(ctx, tx, character.User, character.Shard); err != nil {
 		return 0, err
 	}
+	command, err := beginCharacterRosterCommand(ctx, tx, uint32(character.User), uint16(character.Shard))
+	if err != nil {
+		return 0, newCharacterCreationError("begin durable character command", err)
+	}
+	if command.duplicate {
+		var replay struct {
+			CharacterID int64 `json:"character_id"`
+		}
+		if err = json.Unmarshal(command.result, &replay); err != nil || replay.CharacterID <= 0 {
+			return 0, newCharacterCreationError("replay durable character command", ErrCharacterCreationDuplicate)
+		}
+		return replay.CharacterID, nil
+	}
 
 	characterID, err := insertCharacterInTransaction(ctx, tx, character)
 	if err != nil {
@@ -220,6 +234,10 @@ func (r *SQLCharacterCreationRepository) CreateCharacterWithProgress(ctx context
 	}
 	if err := insertReferenceQuestsInTransaction(ctx, tx, characterID); err != nil {
 		return 0, err
+	}
+	payload := []byte(fmt.Sprintf(`{"character_id":%d,"name":%q}`, characterID, character.Name))
+	if err := completeCharacterRosterCommand(ctx, tx, uint32(character.User), uint16(character.Shard), command, "character.created", payload); err != nil {
+		return 0, newCharacterCreationError("complete durable character command", err)
 	}
 
 	if err := tx.Commit(); err != nil {

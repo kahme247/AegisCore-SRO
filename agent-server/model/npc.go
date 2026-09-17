@@ -796,9 +796,10 @@ func (n *NPC) GetUniqueID() uint32 {
 }
 
 func (n *NPC) SetUniqueID(uniqueId uint32) {
-	n.Mutex.Lock()
-	defer n.Mutex.Unlock()
-	n.UniqueID = uniqueId
+	if n == nil {
+		return
+	}
+	n.SRObject.SetUniqueID(uniqueId)
 }
 
 func (n *NPC) GetBodyState() BodyState {

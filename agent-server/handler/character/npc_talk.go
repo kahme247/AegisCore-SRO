@@ -465,6 +465,15 @@ func (h *NPCTalkHandler) handleQuestTalkPacket(ctx context.Context, session *ser
 		return nil
 	}
 	logrus.Infof("quest trace selection characterID=%d playerUID=%d selector=%d pendingQuestID=%d", session.UserContext.CharacterID, session.UserContext.UniqueID, selector, interaction.PendingQuestID)
+	if interaction.PendingNoticeClose {
+		if selector != questListSelectorBase {
+			return nil
+		}
+		npcInteractions.Clear(session.UserContext.UniqueID)
+		session.UserContext.SelectedNPCUniqueID = 0
+		session.UserContext.SelectedNPCRefObjID = 0
+		return h.sendPacket(session, buildEntityDeselectResponse())
+	}
 	if interaction.PendingInstanceQuestID != 0 {
 		if selector != questListSelectorBase || h.instanceEntries == nil || h.instanceTeleport == nil {
 			npcInteractions.Clear(session.UserContext.UniqueID)
@@ -710,18 +719,36 @@ func (h *NPCTalkHandler) handleOfferSelection(ctx context.Context, session *serv
 	}
 	var objectiveKeys [4]string
 	copy(objectiveKeys[:], offer.ObjectiveKeys)
+	activationResult := model.QuestActivationResult{}
+	if offer.DeliveryItems {
+		if h.runtime == nil {
+			return model.ErrQuestRuntimeUnavailable
+		}
+		player.LockEconomy()
+		defer player.UnlockEconomy()
+	}
 	activate := func() (model.CharacterQuest, error) {
 		status := model.QuestActive
 		if offer.InstantReady {
 			status = model.QuestRewardReady
 		}
-		return h.repository.Activate(ctx, session.UserContext.CharacterID, model.CharacterQuest{
+		questState := model.CharacterQuest{
 			QuestID: quest.questID, Status: status, AchievementCount: achievementCount,
 			QuestCodeName: offer.CodeName, ObjectiveKey: offer.ObjectiveKey, ObjectiveKeys: objectiveKeys, TaskCount: offer.TaskCount,
 			TimerDuration: offer.TimerDuration, SharedProgress: offer.SharedProgress,
-		})
+		}
+		if offer.DeliveryItems {
+			var activateErr error
+			activationResult, activateErr = h.runtime.ActivateDeliveryQuest(ctx, session.UserContext.CharacterID, questState)
+			return activationResult.Quest, activateErr
+		}
+		return h.repository.Activate(ctx, session.UserContext.CharacterID, questState)
 	}
 	activated, err := h.dayLimits.WithActivation(offer, activate)
+	if errors.Is(err, model.ErrQuestInventoryFull) {
+		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
+		return h.sendQuestNotice(session, quest.fullKey)
+	}
 	if errors.Is(err, model.ErrCharacterQuestNotAvailable) {
 		logrus.Infof("quest trace activation unavailable characterID=%d questID=%d", session.UserContext.CharacterID, quest.questID)
 		npcInteractions.ClearSelectedQuest(session.UserContext.UniqueID)
@@ -732,13 +759,22 @@ func (h *NPCTalkHandler) handleOfferSelection(ctx context.Context, session *serv
 		return err
 	}
 	logrus.Infof("quest trace activated characterID=%d questID=%d status=%d", session.UserContext.CharacterID, activated.QuestID, activated.Status)
-	player.CommitQuestActivation(activated)
+	if offer.DeliveryItems {
+		player.CommitQuestActivationWithItems(activationResult)
+	} else {
+		player.CommitQuestActivation(activated)
+	}
 	added, err := buildQuestAddPacket(activated)
 	if err != nil {
 		return err
 	}
 	if err := h.sendPacket(session, added); err != nil {
 		return err
+	}
+	for _, item := range activationResult.AddedItems {
+		if err := h.sendPacket(session, buildQuestItemAdded(item)); err != nil {
+			return err
+		}
 	}
 	if h.countdowns != nil && activated.TimerDuration != 0 {
 		if err := h.countdowns.Start(ctx, session, player, activated); err != nil {
@@ -794,10 +830,13 @@ func questDefinitionForOffer(offer model.QuestOffer) chulsanQuestDefinition {
 	if quest, ok := chulsanQuestByID(offer.QuestID); ok {
 		return quest
 	}
+	talkKey := func(step int) string {
+		return fmt.Sprintf("SN_TALK_%s_%02d", strings.ToUpper(strings.TrimSpace(offer.CodeName)), step)
+	}
 	return chulsanQuestDefinition{
-		questID: offer.QuestID, nameKey: offer.NameKey, talkKey: offer.PayKey,
-		acceptedKey: offer.PayContentsKey, deniedKey: offer.PayContentsKey,
-		progressKey: offer.ObjectiveKey, completedKey: offer.PayContentsKey,
+		questID: offer.QuestID, nameKey: offer.NameKey, talkKey: talkKey(1),
+		acceptedKey: talkKey(2), deniedKey: talkKey(3),
+		progressKey: talkKey(4), fullKey: talkKey(5), completedKey: talkKey(6),
 	}
 }
 
@@ -979,7 +1018,7 @@ func (h *NPCTalkHandler) sendQuestNotice(session *server.Session, value string) 
 		return err
 	}
 	if session != nil {
-		npcInteractions.Clear(session.UserContext.UniqueID)
+		npcInteractions.SetNoticeClose(session.UserContext.UniqueID)
 	}
 	return h.sendPacket(session, packet)
 }
@@ -1023,13 +1062,19 @@ func buildQuestRemovePacket(questID int) network.Packet {
 }
 
 func buildQuestItemAdded(mutation model.QuestItemMutation) network.Packet {
-	// The vSRO client consumes only the two scalar bytes for operation 0x0E;
-	// rent/reference/variable-item bytes would desynchronize the next packet.
-	return vsro188.BuildItemOperationTwoByteSuccess(vsro188.ItemOperationServerAdd, mutation.Slot, 0x3C)
+	// The operation record is followed by the mode-1 item serialization. The
+	// stock client first consumes the slot/0x3C scalars, then constructs the
+	// new inventory item from rent info, reference ID, and its TypeID-driven
+	// body. Omitting that body makes the client read beyond the packet.
+	packet := vsro188.BuildItemOperationTwoByteSuccess(vsro188.ItemOperationServerAdd, mutation.Slot, 0x3C)
+	model.WriteRentInfo(&packet, mutation.Item)
+	packet.WriteUInt32(mutation.Item.GetRefObjectID())
+	model.WriteInventoryItem(&packet, mutation.Item)
+	return packet
 }
 
 func buildQuestItemRemoved(slot byte) network.Packet {
-	return vsro188.BuildItemOperationSlotSuccess(vsro188.ItemOperationServerDelete, slot)
+	return vsro188.BuildItemOperationServerDeleteSuccess(slot)
 }
 
 func buildQuestGoldUpdate(gold uint64) network.Packet {

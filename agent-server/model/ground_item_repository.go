@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -136,6 +137,29 @@ func (r *SQLGroundItemPickupRepository) PickupTransient(ctx context.Context, cha
 	if err = tx.QueryRowContext(ctx, lockGroundPickupCharacter, characterID).Scan(&lockedCharacter, &capacity); err != nil || lockedCharacter != characterID || slot >= capacity {
 		return result, ErrGroundItemInventoryFull
 	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrGroundItemPickupConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return result, err
+		}
+		committed = true
+		inventoryRepository, repoErr := NewInventoryRepository(r.shard)
+		if repoErr != nil {
+			return result, repoErr
+		}
+		inventory, loadErr := inventoryRepository.GetCharacterInventory(ctx, characterID)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		return GroundItemPickupResult{Inventory: inventory, Slot: replay.SourceSlot}, nil
+	}
 	var occupied int
 	if scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? FOR UPDATE", characterID, slot).Scan(&occupied); scanErr == nil || !errors.Is(scanErr, sql.ErrNoRows) {
 		return result, ErrGroundItemPickupConflict
@@ -153,6 +177,9 @@ func (r *SQLGroundItemPickupRepository) PickupTransient(ctx context.Context, cha
 		return result, err
 	}
 	result.Slot = slot
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.transient-item.picked-up", economyReplayResult{SourceSlot: slot}); err != nil {
+		return GroundItemPickupResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return GroundItemPickupResult{}, errors.Join(ErrGroundItemPickupOutcomeUnknown, err)
 	}
@@ -174,6 +201,17 @@ func (r *SQLGroundItemPickupRepository) PickupTransientToJobCOS(ctx context.Cont
 			_ = tx.Rollback()
 		}
 	}()
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrGroundItemPickupConflict
+		}
+		return GroundItemCOSPickupResult{Item: replay.Item, Slot: replay.SourceSlot, Scale: replay.TradeScale, SafeTradeReset: replay.SafeTradeReset}, nil
+	}
 	var jobType byte
 	var alias string
 	if err = tx.QueryRowContext(ctx, "SELECT `JOB_TYPE`,COALESCE(`ALIAS`,'') FROM `CHARACTER_JOB` WHERE `FK_CHAR`=? FOR UPDATE", characterID).Scan(&jobType, &alias); err != nil || !SpecialtyPickupAllowed(jobType, alias, item.CreatorName) {
@@ -227,6 +265,9 @@ func (r *SQLGroundItemPickupRepository) PickupTransientToJobCOS(ctx context.Cont
 			return result, ErrGroundItemPickupConflict
 		}
 		result.SafeTradeReset = true
+	}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.cos-transient-item.picked-up", economyReplayResult{Item: result.Item, SourceSlot: result.Slot, TradeScale: result.Scale, SafeTradeReset: result.SafeTradeReset}); err != nil {
+		return GroundItemCOSPickupResult{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return GroundItemCOSPickupResult{}, errors.Join(ErrGroundItemPickupOutcomeUnknown, err)
@@ -289,6 +330,30 @@ func (r *SQLGroundItemPickupRepository) Drop(ctx context.Context, characterID in
 	if lockedCharacterID != characterID {
 		return result, ErrGroundItemDropConflict
 	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrGroundItemDropConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return result, err
+		}
+		committed = true
+		inventoryRepository, repoErr := NewInventoryRepository(r.shard)
+		if repoErr != nil {
+			return result, repoErr
+		}
+		inventory, loadErr := inventoryRepository.GetCharacterInventory(ctx, characterID)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		item := replay.Item
+		return GroundItemDropResult{Item: &item, Inventory: inventory, Slot: replay.SourceSlot}, nil
+	}
 	if capacity == 0 || capacity > MaxInventoryWireSize {
 		capacity = MaxInventoryWireSize
 	}
@@ -328,6 +393,9 @@ func (r *SQLGroundItemPickupRepository) Drop(ctx context.Context, characterID in
 	}
 	result.Item = &item
 	result.Slot = slot
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.dropped", economyReplayResult{Item: item, SourceSlot: slot}); err != nil {
+		return GroundItemDropResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return GroundItemDropResult{}, errors.Join(ErrGroundItemDropOutcomeUnknown, err)
 	}
@@ -347,6 +415,17 @@ func (r *SQLGroundItemPickupRepository) Restore(ctx context.Context, characterID
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if identity, ok := inventoryCommand(ctx); ok {
+		if len(identity.Key) > 120 {
+			identity.Key = identity.Key[:120]
+		}
+		if len(identity.Name) > 120 {
+			identity.Name = identity.Name[:120]
+		}
+		identity.Key += ":restore"
+		identity.Name += ".restore"
+		ctx = WithInventoryCommand(ctx, identity)
 	}
 	tx, err := r.shard.BeginTx(ctx, nil)
 	if err != nil {
@@ -370,6 +449,13 @@ func (r *SQLGroundItemPickupRepository) Restore(ctx context.Context, characterID
 	if lockedCharacterID != characterID {
 		return ErrGroundItemDropConflict
 	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return err
+	}
+	if command.duplicate {
+		return nil
+	}
 	if capacity != 0 && capacity <= MaxInventoryWireSize && slot >= capacity {
 		return ErrGroundItemDropConflict
 	}
@@ -391,6 +477,9 @@ func (r *SQLGroundItemPickupRepository) Restore(ctx context.Context, characterID
 	}
 	if _, err = tx.ExecContext(ctx, insertGroundDropInventory, characterID, slot, itemID); err != nil {
 		return fmt.Errorf("restore ground-item inventory link: %w", err)
+	}
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.drop-restored", economyReplayResult{SourceSlot: slot}); err != nil {
+		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return errors.Join(ErrGroundItemDropOutcomeUnknown, err)
@@ -437,6 +526,29 @@ func (r *SQLGroundItemPickupRepository) Pickup(ctx context.Context, characterID,
 	}
 	if lockedCharacterID != characterID {
 		return result, ErrGroundItemPickupConflict
+	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrGroundItemPickupConflict
+		}
+		if err = tx.Rollback(); err != nil {
+			return result, err
+		}
+		committed = true
+		inventoryRepository, repoErr := NewInventoryRepository(r.shard)
+		if repoErr != nil {
+			return result, repoErr
+		}
+		inventory, loadErr := inventoryRepository.GetCharacterInventory(ctx, characterID)
+		if loadErr != nil {
+			return result, loadErr
+		}
+		return GroundItemPickupResult{Inventory: inventory, Slot: replay.SourceSlot}, nil
 	}
 	if capacity == 0 || capacity > MaxInventoryWireSize {
 		capacity = MaxInventoryWireSize
@@ -499,6 +611,9 @@ func (r *SQLGroundItemPickupRepository) Pickup(ctx context.Context, characterID,
 		return result, err
 	}
 	result.Slot = slot
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.item.picked-up", economyReplayResult{SourceSlot: slot}); err != nil {
+		return GroundItemPickupResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return GroundItemPickupResult{}, errors.Join(ErrGroundItemPickupOutcomeUnknown, err)
 	}
@@ -540,6 +655,17 @@ func (r *SQLGroundItemPickupRepository) PickupGold(ctx context.Context, characte
 	}
 	if lockedCharacterID != characterID {
 		return result, ErrGroundItemPickupConflict
+	}
+	command, err := beginEconomyCommand(ctx, tx, characterID)
+	if err != nil {
+		return result, err
+	}
+	if command.duplicate {
+		var replay economyReplayResult
+		if err = json.Unmarshal(command.result, &replay); err != nil {
+			return result, ErrGroundItemPickupConflict
+		}
+		return GroundGoldPickupResult{Gold: replay.Gold, Amount: replay.TriJobReward}, nil
 	}
 
 	var lockedItemID, referenceItemID int64
@@ -586,6 +712,9 @@ func (r *SQLGroundItemPickupRepository) PickupGold(ctx context.Context, characte
 		return result, ErrGroundItemPickupConflict
 	}
 	result.Gold, result.Amount = newGold, amount
+	if err = completeEconomyCommand(ctx, tx, characterID, command, "inventory.gold.picked-up", economyReplayResult{Gold: newGold, TriJobReward: amount}); err != nil {
+		return GroundGoldPickupResult{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return GroundGoldPickupResult{}, errors.Join(ErrGroundItemPickupOutcomeUnknown, err)
 	}

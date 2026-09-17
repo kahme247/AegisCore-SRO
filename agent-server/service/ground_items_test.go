@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -15,6 +16,15 @@ import (
 type groundItemWorldFake struct{ object model.ISRObject }
 
 func (f *groundItemWorldFake) AddVisibleObject(object model.ISRObject) { f.object = object }
+
+type groundItemLifecycleWorldFake struct {
+	groundItemWorldFake
+	removed chan model.ISRObject
+}
+
+func (f *groundItemLifecycleWorldFake) RemoveVisibleObject(object model.ISRObject) {
+	f.removed <- object
+}
 
 type groundPartyLookup struct{ player *model.Player }
 
@@ -81,6 +91,28 @@ func TestGroundItemServiceAcceptsTransientCargoWithoutPersistedIdentity(t *testi
 	}
 }
 
+func TestGroundItemServiceUsesReferenceDecayTimeForDespawn(t *testing.T) {
+	previous := model.RefItems
+	model.RefItems = map[uint32]model.RefItem{900: {RefObject: model.RefObject{DecayTime: 10}}}
+	t.Cleanup(func() { model.RefItems = previous })
+
+	world := &groundItemLifecycleWorldFake{removed: make(chan model.ISRObject, 1)}
+	service := NewGroundItemService(world, nil)
+	service.ConfigureLifecycle(NewGroundItemLifecycle(world), 0, 0)
+	item := &model.Item{ID: 55, SRObject: model.SRObject{UniqueID: 77, RefObjectID: 900}}
+	if err := service.Spawn(item, 0); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case removed := <-world.removed:
+		if removed != item {
+			t.Fatalf("removed object = %v, want item", removed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reference decay time did not despawn ground item")
+	}
+}
+
 func TestGroundItemServiceMaterializesBeforePartyWorldHandoff(t *testing.T) {
 	player := &model.Player{ID: 7, LifeState: model.Alive, Session: &server.Session{}, SRObject: model.SRObject{UniqueID: 88}}
 	party := NewPartyService(groundPartyLookup{player: player})
@@ -116,15 +148,17 @@ func TestBuildPartyDistributionPacketBranches(t *testing.T) {
 		typeInfo model.TypeInfo
 		opt      byte
 		stack    int
+		data     uint32
 		suffix   []byte
 	}{
 		{name: "equipment", typeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1}, opt: 7, suffix: []byte{7}},
 		{name: "cos", typeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 2}, suffix: nil},
 		{name: "etc", typeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3}, stack: 321, suffix: []byte{0x41, 0x01}},
+		{name: "gold", typeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5, TypeID4: 0}, data: 0x11223344, suffix: []byte{0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			item := &model.Item{SRObject: model.SRObject{RefObjectID: 0x55667788, TypeInfo: test.typeInfo}, OptLevel: test.opt, StackSize: test.stack}
+			item := &model.Item{SRObject: model.SRObject{RefObjectID: 0x55667788, TypeInfo: test.typeInfo}, OptLevel: test.opt, StackSize: test.stack, Data: test.data}
 			packet, err := BuildPartyDistributionPacket(0x11223344, item)
 			if err != nil {
 				t.Fatal(err)

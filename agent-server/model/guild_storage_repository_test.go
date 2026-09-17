@@ -13,7 +13,7 @@ func TestValidateGuildStorageAccessRequiresLevelAndPermission(t *testing.T) {
 		want   error
 	}{
 		{"allowed", true, 2, nil},
-		{"guild too low", true, 1, ErrGuildStorageAccessDenied},
+		{"guild too low", true, 1, ErrGuildStorageLevelTooLow},
 		{"member permission denied", false, 5, ErrGuildStorageAccessDenied},
 	} {
 		t.Run(test.name, func(t *testing.T) {

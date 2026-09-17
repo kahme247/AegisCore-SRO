@@ -12,18 +12,23 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 )
 
 type combatWorldFake struct {
-	player   *model.Player
-	objects  map[uint32]model.ISRObject
-	distance float32
-	stops    int
-	blocked  bool
+	player        *model.Player
+	objects       map[uint32]model.ISRObject
+	distance      float32
+	playerLookups int
+	objectLookups int
+	removes       int
+	stops         int
+	blocked       bool
 }
 
 func TestBuildServerInventoryItemAddedMatchesStockB034Layout(t *testing.T) {
@@ -57,6 +62,19 @@ type growthPetCombatFake struct {
 type rangedAmmoCombatFake struct {
 	remaining []uint16
 	calls     [][2]int64
+}
+
+type dimensionHoleCombatEntryFake struct {
+	portalUID uint32
+	player    *model.Player
+	calls     int
+	err       error
+}
+
+func (f *dimensionHoleCombatEntryFake) Enter(_ context.Context, portalUID uint32, player *model.Player) (service.DimensionHoleAdmission, error) {
+	f.portalUID, f.player = portalUID, player
+	f.calls++
+	return service.DimensionHoleAdmission{PortalUID: portalUID, PlayerUID: player.GetUniqueID()}, f.err
 }
 
 func (f *rangedAmmoCombatFake) ConsumeEquippedRangedAmmo(_ context.Context, characterID, itemID int64) (uint16, error) {
@@ -104,10 +122,12 @@ func (f *combatVitalsFake) CastResurrection(_ context.Context, casterID, targetI
 }
 
 func (f *combatWorldFake) GetPlayerByUniqueId(uint32) (*model.Player, error) {
+	f.playerLookups++
 	return f.player, nil
 }
 
 func (f *combatWorldFake) GetObjectByUniqueId(uid uint32) (model.ISRObject, error) {
+	f.objectLookups++
 	object, exists := f.objects[uid]
 	if !exists {
 		return nil, fmt.Errorf("object %d not found", uid)
@@ -119,7 +139,7 @@ func (f *combatWorldFake) DistanceTo(navmeshv2.RtNavmeshPosition, navmeshv2.RtNa
 	return f.distance
 }
 
-func (*combatWorldFake) RemoveVisibleObject(model.ISRObject) {}
+func (f *combatWorldFake) RemoveVisibleObject(model.ISRObject) { f.removes++ }
 
 func (f *combatWorldFake) StopMovingCharacter(character model.ICharacter, position navmeshv2.RtNavmeshPosition, reason string, _ bool) bool {
 	f.stops++
@@ -152,6 +172,329 @@ func TestCombatCancelAcceptsSinglePhaseByte(t *testing.T) {
 	packet.WriteByte(2)
 	if err := (&CombatHandler{}).handlePacket(context.Background(), nil, packet); err != nil {
 		t.Fatalf("single-byte cancel returned error: %v", err)
+	}
+}
+
+func TestCombatDimensionHoleInteractionValidatesKnownPortalAndFailsClosed(t *testing.T) {
+	session, player, portal, world := combatDimensionHoleFixture(t)
+	world.distance = float32(model.RegionHeight)
+	const delayedToken = uint64(77)
+	const pendingTarget = uint32(901)
+	handler := &CombatHandler{
+		world:        world,
+		pending:      map[uint32]*pendingAttack{player.GetUniqueID(): {targetUID: pendingTarget}},
+		repeating:    map[uint32]*pendingAttack{player.GetUniqueID(): {targetUID: pendingTarget}},
+		delayedCasts: map[uint32]delayedCast{player.GetUniqueID(): {token: delayedToken}},
+	}
+	resolvedPlayer, resolvedPortal, err := handler.resolveDimensionHolePortalInteraction(session, portal.GetUniqueID())
+	if err != nil || resolvedPlayer != player || resolvedPortal != portal {
+		t.Fatalf("resolved Dimension Hole boundary = player:%p portal:%p err:%v, want %p/%p", resolvedPlayer, resolvedPortal, err, player, portal)
+	}
+	world.playerLookups, world.objectLookups = 0, 0
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatDimensionHoleInteractionPacket(portal.GetUniqueID())); err != nil {
+		t.Fatalf("Dimension Hole interaction: %v", err)
+	}
+	assertInactiveCombatActionResponse(t, sent)
+	if world.playerLookups != 1 || world.objectLookups != 1 {
+		t.Fatalf("validated interaction lookups = player:%d object:%d, want 1/1", world.playerLookups, world.objectLookups)
+	}
+	if world.removes != 0 || world.stops != 0 || world.objects[portal.GetUniqueID()] != portal {
+		t.Fatalf("validated interaction mutated world: removes=%d stops=%d object=%p", world.removes, world.stops, world.objects[portal.GetUniqueID()])
+	}
+	if got := handler.delayedCasts[player.GetUniqueID()].token; got != delayedToken {
+		t.Fatalf("validated interaction changed delayed cast token = %d, want %d", got, delayedToken)
+	}
+	if got := handler.pending[player.GetUniqueID()]; got == nil || got.targetUID != pendingTarget {
+		t.Fatalf("validated interaction changed pending attack = %#v", got)
+	}
+	if got := handler.repeating[player.GetUniqueID()]; got == nil || got.targetUID != pendingTarget {
+		t.Fatalf("validated interaction changed repeating attack = %#v", got)
+	}
+}
+
+func TestCombatDimensionHoleInteractionSubmitsConfiguredEntry(t *testing.T) {
+	session, player, portal, world := combatDimensionHoleFixture(t)
+	entry := &dimensionHoleCombatEntryFake{}
+	handler := &CombatHandler{world: world}
+	handler.ConfigureDimensionHoleEntry(entry)
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatDimensionHoleInteractionPacket(portal.GetUniqueID())); err != nil {
+		t.Fatalf("Dimension Hole interaction: %v", err)
+	}
+	if entry.calls != 1 || entry.portalUID != portal.GetUniqueID() || entry.player != player {
+		t.Fatalf("entry calls=%d portal=%d player=%p, want 1/%d/%p", entry.calls, entry.portalUID, entry.player, portal.GetUniqueID(), player)
+	}
+	assertInactiveCombatActionResponse(t, sent)
+}
+
+func TestCombatDimensionHoleInteractionRejectsUntrustedTargets(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *server.Session, *model.Player, *model.DimensionHolePortal, *combatWorldFake)
+	}{
+		{
+			name: "session does not own player",
+			mutate: func(_ *testing.T, _ *server.Session, player *model.Player, _ *model.DimensionHolePortal, _ *combatWorldFake) {
+				player.Session = &server.Session{}
+			},
+		},
+		{
+			name: "session character identity mismatch",
+			mutate: func(_ *testing.T, session *server.Session, _ *model.Player, _ *model.DimensionHolePortal, _ *combatWorldFake) {
+				session.UserContext.CharacterID++
+			},
+		},
+		{
+			name: "different game world scope",
+			mutate: func(_ *testing.T, _ *server.Session, _ *model.Player, portal *model.DimensionHolePortal, _ *combatWorldFake) {
+				portal.SetGameWorldID(1)
+			},
+		},
+		{
+			name: "stale known pointer",
+			mutate: func(t *testing.T, _ *server.Session, player *model.Player, portal *model.DimensionHolePortal, _ *combatWorldFake) {
+				stale := *portal
+				player.GetKnownObjectList().RemoveObject(portal)
+				if !player.GetKnownObjectList().AddObject(&stale) {
+					t.Fatal("could not add stale portal pointer")
+				}
+			},
+		},
+		{
+			name: "not in known list",
+			mutate: func(_ *testing.T, _ *server.Session, player *model.Player, portal *model.DimensionHolePortal, _ *combatWorldFake) {
+				player.GetKnownObjectList().RemoveObject(portal)
+			},
+		},
+		{
+			name: "missing from world",
+			mutate: func(_ *testing.T, _ *server.Session, _ *model.Player, portal *model.DimensionHolePortal, world *combatWorldFake) {
+				delete(world.objects, portal.GetUniqueID())
+			},
+		},
+		{
+			name: "invalid portal shape",
+			mutate: func(_ *testing.T, _ *server.Session, _ *model.Player, portal *model.DimensionHolePortal, _ *combatWorldFake) {
+				portal.OwnerUniqueID = 0
+			},
+		},
+		{
+			name: "out of extended range",
+			mutate: func(_ *testing.T, _ *server.Session, _ *model.Player, _ *model.DimensionHolePortal, world *combatWorldFake) {
+				world.distance = float32(model.RegionHeight) + 1
+			},
+		},
+		{
+			name: "non portal object",
+			mutate: func(t *testing.T, _ *server.Session, player *model.Player, portal *model.DimensionHolePortal, world *combatWorldFake) {
+				npc := &model.NPC{SRObject: model.SRObject{
+					UniqueID: portal.GetUniqueID(), TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1},
+					RtNavmeshPosition: portal.GetNavmeshPosition(),
+				}, Type: "NPC", Mutex: &sync.Mutex{}}
+				player.GetKnownObjectList().RemoveObject(portal)
+				if !player.GetKnownObjectList().AddObject(npc) {
+					t.Fatal("could not add non-portal target")
+				}
+				world.objects[portal.GetUniqueID()] = npc
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session, player, portal, world := combatDimensionHoleFixture(t)
+			test.mutate(t, session, player, portal, world)
+			handler := &CombatHandler{
+				world:        world,
+				delayedCasts: map[uint32]delayedCast{player.GetUniqueID(): {token: 77}},
+			}
+			if _, _, err := handler.resolveDimensionHolePortalInteraction(session, portal.GetUniqueID()); err == nil {
+				t.Fatal("untrusted portal interaction passed validation")
+			}
+			world.playerLookups, world.objectLookups = 0, 0
+			var sent []network.Packet
+			handler.send = func(_ *server.Session, packet network.Packet) error {
+				sent = append(sent, packet)
+				return nil
+			}
+
+			if err := handler.handlePacket(context.Background(), session, combatDimensionHoleInteractionPacket(portal.GetUniqueID())); err != nil {
+				t.Fatalf("reject Dimension Hole interaction: %v", err)
+			}
+			assertInactiveCombatActionResponse(t, sent)
+			if world.removes != 0 || world.stops != 0 || handler.delayedCasts[player.GetUniqueID()].token != 77 {
+				t.Fatalf("rejected interaction mutated state: removes=%d stops=%d delayed=%d", world.removes, world.stops, handler.delayedCasts[player.GetUniqueID()].token)
+			}
+		})
+	}
+}
+
+func TestCombatDimensionHoleInteractionRejectsMalformedPacketsBeforeWorldLookup(t *testing.T) {
+	trailing := combatDimensionHoleInteractionPacket(200)
+	trailing.WriteByte(0xFF)
+	short := network.EmptyClientPacket()
+	short.WriteBytes([]byte{actionPhaseStart, vsro188.EntityActionKindInteraction, vsro188.EntityActionTargetModeEntity, 200, 0, 0})
+	wrongMode := network.EmptyClientPacket()
+	wrongMode.WriteByte(actionPhaseStart)
+	wrongMode.WriteByte(vsro188.EntityActionKindInteraction)
+	wrongMode.WriteByte(vsro188.EntityActionTargetModePosition)
+	wrongMode.WriteUInt32(200)
+	zeroUID := combatDimensionHoleInteractionPacket(0)
+
+	for name, packet := range map[string]network.Packet{
+		"short":             short,
+		"trailing":          trailing,
+		"wrong target mode": wrongMode,
+		"zero UID":          zeroUID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			session, player, _, world := combatDimensionHoleFixture(t)
+			var sent []network.Packet
+			handler := &CombatHandler{
+				world:        world,
+				delayedCasts: map[uint32]delayedCast{player.GetUniqueID(): {token: 77}},
+				send: func(_ *server.Session, packet network.Packet) error {
+					sent = append(sent, packet)
+					return nil
+				},
+			}
+			if err := handler.handlePacket(context.Background(), session, packet); err != nil {
+				t.Fatalf("malformed Dimension Hole interaction: %v", err)
+			}
+			assertInactiveCombatActionResponse(t, sent)
+			if world.playerLookups != 0 || world.objectLookups != 0 {
+				t.Fatalf("malformed interaction reached world: player=%d object=%d", world.playerLookups, world.objectLookups)
+			}
+		})
+	}
+}
+
+func TestCombatDimensionHoleInteractionDoesNotCaptureTargetOrRemoveKinds(t *testing.T) {
+	t.Run("kind 4 target", func(t *testing.T) {
+		session, player, portal, world := combatDimensionHoleFixture(t)
+		player.BaseStats = model.BaseStats{Str: 20, Int: 20}
+		player.GetKnownObjectList().RemoveObject(portal)
+		mob := &model.NPC{SRObject: model.SRObject{
+			UniqueID: portal.GetUniqueID(), RefObjectID: 1933,
+			TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+			RtNavmeshPosition: combatTestPosition(30000, 14, 0, 10),
+		}, Type: "NPC", Mutex: &sync.Mutex{}}
+		mob.ConfigureCombat(100, 0)
+		mob.SetLifeState(model.Alive)
+		if !player.GetKnownObjectList().AddObject(mob) {
+			t.Fatal("could not add kind-4 combat target")
+		}
+		world.objects = map[uint32]model.ISRObject{mob.GetUniqueID(): mob}
+		handler := &CombatHandler{
+			world: world,
+			referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+				1: {ID: 1, ActionDuration: 600, ReuseDelay: 1000},
+			}}),
+			nextAttack: make(map[uint32]time.Time),
+			now:        func() time.Time { return time.Unix(100, 0) },
+			send:       func(*server.Session, network.Packet) error { return nil },
+			broadcast:  func(*model.Player, *network.Packet) {},
+		}
+		if err := handler.handlePacket(context.Background(), session, combatAttackPacket(mob.GetUniqueID())); err != nil {
+			t.Fatalf("kind-4 target action: %v", err)
+		}
+		if got := mob.CurrentHitPoints(); got >= 100 {
+			t.Fatalf("kind-4 target action was captured by interaction path: HP=%d", got)
+		}
+	})
+
+	t.Run("kind 5 remove", func(t *testing.T) {
+		const skillID = uint32(1377)
+		session, player, _, world := combatDimensionHoleFixture(t)
+		player.Skills = map[uint32]byte{skillID: 1}
+		if _, ok := player.CommitActiveBuff(skillID, 900, time.Minute, model.BuffModifiers{DamagePercent: 5}); !ok {
+			t.Fatal("could not arrange active buff")
+		}
+		handler := &CombatHandler{
+			world:     world,
+			send:      func(*server.Session, network.Packet) error { return nil },
+			broadcast: func(*model.Player, *network.Packet) {},
+		}
+		if err := handler.handlePacket(context.Background(), session, combatCancelBuffPacket(skillID)); err != nil {
+			t.Fatalf("kind-5 remove action: %v", err)
+		}
+		if len(player.ActiveBuffs) != 0 || world.objectLookups != 0 {
+			t.Fatalf("kind-5 remove action collided with interaction path: buffs=%d object-lookups=%d", len(player.ActiveBuffs), world.objectLookups)
+		}
+	})
+}
+
+func TestCombatKindFourGroundItemRoutesToInventoryPickup(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session}
+	item := &model.Item{SRObject: model.SRObject{UniqueID: 200, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6}}}
+	world := &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{item.GetUniqueID(): item}}
+	var pickedUID uint32
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world:        world,
+		delayedCasts: map[uint32]delayedCast{player.GetUniqueID(): {token: 77}},
+		groundItemPickup: func(_ context.Context, gotSession *server.Session, uid uint32) error {
+			if gotSession != session {
+				t.Fatal("ground pickup received wrong session")
+			}
+			pickedUID = uid
+			return nil
+		},
+		send: func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+	}
+
+	if err := handler.handlePacket(context.Background(), session, combatAttackPacket(item.GetUniqueID())); err != nil {
+		t.Fatalf("ground-item action: %v", err)
+	}
+	if pickedUID != item.GetUniqueID() {
+		t.Fatalf("picked UID = %d, want %d", pickedUID, item.GetUniqueID())
+	}
+	if len(sent) != 0 {
+		t.Fatalf("successful ground pickup emitted contradictory combat response: %#v", sent)
+	}
+}
+
+func TestCombatKindTwoInteractionGroundItemRoutesToInventoryPickup(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 42, Session: session}
+	item := &model.Item{SRObject: model.SRObject{UniqueID: 0xD93B, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 6}}}
+	world := &combatWorldFake{player: player, objects: map[uint32]model.ISRObject{item.GetUniqueID(): item}}
+	var pickedUID uint32
+	var sent []network.Packet
+	handler := &CombatHandler{
+		world: world,
+		groundItemPickup: func(_ context.Context, _ *server.Session, uid uint32) error {
+			pickedUID = uid
+			return nil
+		},
+		send: func(_ *server.Session, packet network.Packet) error { sent = append(sent, packet); return nil },
+	}
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(actionPhaseStart)
+	packet.WriteByte(vsro188.EntityActionKindInteraction)
+	packet.WriteByte(vsro188.EntityActionTargetModeEntity)
+	packet.WriteUInt32(item.GetUniqueID())
+
+	if err := handler.handlePacket(context.Background(), session, packet); err != nil {
+		t.Fatalf("ground-item interaction: %v", err)
+	}
+	if pickedUID != item.GetUniqueID() {
+		t.Fatalf("picked UID = %d, want %d", pickedUID, item.GetUniqueID())
+	}
+	if len(sent) != 0 {
+		t.Fatalf("successful ground interaction pickup emitted contradictory combat response: %#v", sent)
 	}
 }
 
@@ -680,6 +1023,36 @@ func TestCombatTargetedLearnedSkillCastUsesElevenByteStockLayout(t *testing.T) {
 	}
 }
 
+func TestSkillComboImpactDurationIncludesEveryChainPhase(t *testing.T) {
+	const skillID = uint32(7854)
+	handler := &CombatHandler{referenceData: model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Skills: map[uint32]model.RefSkill{
+		skillID: {ID: skillID, BasicChainCode: 20477, ActionCastingTime: 518, ActionDuration: 562},
+		20477:   {ID: 20477, BasicChainCode: 29685, ActionDuration: 967},
+		29685:   {ID: 29685, ActionDuration: 453},
+	}})}
+
+	if got := handler.skillComboImpactDuration(nil, model.RefSkill{ID: skillID, BasicChainCode: 20477, ActionCastingTime: 518, ActionDuration: 562}); got != 2500*time.Millisecond {
+		t.Fatalf("6 Arrow Combo lifecycle duration = %v, want 2.5s", got)
+	}
+	if got := (model.RefSkill{ActionCastingTime: 518}).RuntimeCastingDurationAt(100); got != 518*time.Millisecond {
+		t.Fatalf("6 Arrow Combo impact boundary = %v, want 518ms", got)
+	}
+}
+
+func TestRapidSkillStartDoesNotReplaceDelayedImpact(t *testing.T) {
+	const playerUID = uint32(101)
+	handler := &CombatHandler{delayedCasts: map[uint32]delayedCast{playerUID: {token: 77}}}
+	session := &server.Session{}
+	session.UserContext.UniqueID = playerUID
+
+	if err := handler.handlePacket(context.Background(), session, combatSkillPacket(7002, 201)); err != nil {
+		t.Fatal(err)
+	}
+	if got := handler.delayedCasts[playerUID].token; got != 77 {
+		t.Fatalf("rapid skill replaced delayed impact token: got %d, want 77", got)
+	}
+}
+
 func TestCombatSkillDamageConnectsEquipmentBuffsDefenseAndWireResult(t *testing.T) {
 	const (
 		physicalSkillID = uint32(7001)
@@ -927,7 +1300,7 @@ func TestCombatCastTimeSkillAppliesDamageAtAuthoredImpact(t *testing.T) {
 	}
 }
 
-func TestCombatPhysicalSkillWaitsForActionAnimationBeforeDamage(t *testing.T) {
+func TestCombatPhysicalSkillWithoutCastingTimeImpactsImmediately(t *testing.T) {
 	const skillID = uint32(7899)
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
 	player := &model.Player{
@@ -938,11 +1311,9 @@ func TestCombatPhysicalSkillWaitsForActionAnimationBeforeDamage(t *testing.T) {
 	mob := &model.NPC{SRObject: model.SRObject{UniqueID: 200}, Mutex: &sync.Mutex{}}
 	mob.ConfigureCombat(10000, 10)
 	mob.SetLifeState(model.Alive)
-	var callback func()
-	var delay time.Duration
 	handler := &CombatHandler{
 		nextSkill: make(map[skillCooldownKey]time.Time),
-		schedule:  func(got time.Duration, fn func()) { delay, callback = got, fn },
+		schedule:  func(time.Duration, func()) {},
 		send:      func(*server.Session, network.Packet) error { return nil },
 		broadcast: func(*model.Player, *network.Packet) {},
 	}
@@ -950,15 +1321,8 @@ func TestCombatPhysicalSkillWaitsForActionAnimationBeforeDamage(t *testing.T) {
 	if err := handler.executeSkillAttack(context.Background(), session, player, mob, skill); err != nil {
 		t.Fatal(err)
 	}
-	if callback == nil || delay != 600*time.Millisecond {
-		t.Fatalf("physical-skill impact schedule = callback:%t delay:%s, want 600ms", callback != nil, delay)
-	}
-	if got := mob.CurrentHitPoints(); got != 10000 {
-		t.Fatalf("mob HP before animation impact = %d, want 10000", got)
-	}
-	callback()
 	if got := mob.CurrentHitPoints(); got >= 10000 {
-		t.Fatalf("mob HP after animation impact = %d, want damage", got)
+		t.Fatalf("zero-cast physical skill HP = %d, want immediate damage", got)
 	}
 }
 
@@ -1606,7 +1970,7 @@ func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T)
 	if len(ammo.calls) != 1 || ammo.calls[0] != [2]int64{42, 77} {
 		t.Fatalf("ammunition persistence calls = %#v, want character 42 item 77", ammo.calls)
 	}
-	if len(sent) != 1 || sent[0].MessageID != opcode.InventoryItemUpdate || !bytes.Equal(sent[0].Payload(), []byte{model.SlotSecondaryWeapon, 0x08, 0x01, 0x00}) {
+	if len(sent) != 2 || sent[0].MessageID != opcode.InventoryItemUpdate || !bytes.Equal(sent[0].Payload(), []byte{model.SlotSecondaryWeapon, 0x08, 0x01, 0x00}) || sent[1].MessageID != opcode.InventoryUpdateAmmo || !bytes.Equal(sent[1].Payload(), []byte{1, 0}) {
 		t.Fatalf("first arrow update = %#v, want 3040 quantity slot 7 count 1", sent)
 	}
 
@@ -1616,7 +1980,7 @@ func TestCombatConsumesEquippedBowArrowsAndPublishesInventoryState(t *testing.T)
 	if _, exists := player.GetInventory().Items[model.SlotSecondaryWeapon]; exists {
 		t.Fatal("exhausted arrow stack remained equipped")
 	}
-	if len(sent) != 2 || sent[1].MessageID != opcode.ItemOperationResponse || !bytes.Equal(sent[1].Payload(), []byte{1, 0x0F, model.SlotSecondaryWeapon}) {
+	if len(sent) != 4 || sent[2].MessageID != opcode.ItemOperationResponse || !bytes.Equal(sent[2].Payload(), []byte{1, 0x0F, model.SlotSecondaryWeapon, 0}) || sent[3].MessageID != opcode.InventoryUpdateAmmo || !bytes.Equal(sent[3].Payload(), []byte{0, 0}) {
 		t.Fatalf("last arrow update = %#v, want B034 server delete slot 7", sent)
 	}
 }
@@ -2047,6 +2411,52 @@ func combatAttackPacket(targetUID uint32) network.Packet {
 	packet.WriteUInt32(targetUID)
 	packet.WriteByte(0)
 	return packet
+}
+
+func combatDimensionHoleInteractionPacket(targetUID uint32) network.Packet {
+	packet := network.EmptyClientPacket()
+	packet.WriteByte(actionPhaseStart)
+	packet.WriteByte(vsro188.EntityActionKindInteraction)
+	packet.WriteByte(vsro188.EntityActionTargetModeEntity)
+	packet.WriteUInt32(targetUID)
+	return packet
+}
+
+func combatDimensionHoleFixture(t *testing.T) (*server.Session, *model.Player, *model.DimensionHolePortal, *combatWorldFake) {
+	t.Helper()
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 42}}
+	player := &model.Player{
+		SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(30000, 10, 0, 10)},
+		ID:       42,
+		CharName: "PortalOwner",
+		Session:  session,
+	}
+	player.SetLifeState(model.Alive)
+	player.KnownObjectList = model.NewKnownObjectList(player)
+	definition, ok := model.DimensionHoleDefinitionForItem(35883)
+	if !ok {
+		t.Fatal("Dimension Hole fixture definition is missing")
+	}
+	portal, err := model.NewDimensionHolePortal(definition, player, combatTestPosition(30000, 20, 0, 20))
+	if err != nil {
+		t.Fatalf("create Dimension Hole portal fixture: %v", err)
+	}
+	portal.UniqueID = 200
+	if !player.GetKnownObjectList().AddObject(portal) {
+		t.Fatal("could not add Dimension Hole portal to known-object list")
+	}
+	world := &combatWorldFake{
+		player:  player,
+		objects: map[uint32]model.ISRObject{portal.GetUniqueID(): portal},
+	}
+	return session, player, portal, world
+}
+
+func assertInactiveCombatActionResponse(t *testing.T, sent []network.Packet) {
+	t.Helper()
+	if len(sent) != 1 || sent[0].MessageID != opcode.EntityActionResponse || !bytes.Equal(sent[0].Payload(), []byte{2, 0}) {
+		t.Fatalf("action response = %#v, want one inactive B074 payload 02 00", sent)
+	}
 }
 
 func combatSkillPacket(skillID, targetUID uint32) network.Packet {

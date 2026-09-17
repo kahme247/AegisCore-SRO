@@ -39,33 +39,25 @@ func RegisterGuildStorageHandler(target *server.Server, repo model.GuildStorageR
 }
 
 func (h *GuildStorageHandler) handleOpen(ctx context.Context, session *server.Session, packet network.Packet) error {
-	_, npcUID, err := h.validateRequest(session, &packet)
+	_, err := h.validateOpenRequest(session, &packet)
 	if err != nil {
 		return h.sendPacket(session, buildGuildStorageOpenFailure(0x4A))
 	}
-	if !character.HasRecentNPCInteraction(session.UserContext.UniqueID, npcUID, guildStorageTalkAction, 5*time.Minute) {
-		return h.sendPacket(session, buildGuildStorageOpenFailure(0x4A))
-	}
 	if err = h.repo.OpenGuildStorage(ctx, int64(session.UserContext.CharacterID)); err != nil {
-		code := byte(0x4A)
-		if errors.Is(err, model.ErrGuildStorageInUse) {
-			code = 0x48
-		}
 		logrus.WithError(err).Debug("rejected guild storage open")
-		return h.sendPacket(session, buildGuildStorageOpenFailure(code))
+		return h.sendPacket(session, buildGuildStorageOpenFailure(byte(guildStorageErrorCode(err))))
 	}
 	return h.sendPacket(session, buildGuildStorageOpenSuccess())
 }
 
 func (h *GuildStorageHandler) handleInfo(ctx context.Context, session *server.Session, packet network.Packet) error {
-	_, _, err := h.validateRequest(session, &packet)
-	if err != nil {
-		return nil
+	if packet.Remaining() != 0 || session == nil || session.UserContext.CharacterID <= 0 {
+		return h.sendPacket(session, vsro188.BuildGuildStorageListFailure(3))
 	}
 	snapshot, err := h.repo.LoadGuildStorage(ctx, int64(session.UserContext.CharacterID))
 	if err != nil {
 		logrus.WithError(err).Debug("rejected guild storage info")
-		return nil
+		return h.sendPacket(session, vsro188.BuildGuildStorageListFailure(guildStorageErrorCode(err)))
 	}
 	for _, response := range buildGuildStorageResponses(snapshot) {
 		if err = h.sendPacket(session, response); err != nil {
@@ -75,51 +67,57 @@ func (h *GuildStorageHandler) handleInfo(ctx context.Context, session *server.Se
 	return nil
 }
 
+func guildStorageErrorCode(err error) uint16 {
+	switch {
+	case errors.Is(err, model.ErrGuildStorageInUse):
+		return 0x4C48
+	case errors.Is(err, model.ErrGuildStorageLevelTooLow):
+		return 0x4C4A
+	default:
+		return 0x4C49
+	}
+}
+
 func (h *GuildStorageHandler) handleClose(ctx context.Context, session *server.Session, packet network.Packet) error {
-	if packet.Remaining() != 4 {
-		return fmt.Errorf("guild storage close payload length %d, want 4", packet.Remaining())
-	}
-	if _, err := packet.ReadUInt32(); err != nil {
-		return err
-	}
-	if session == nil || session.UserContext.CharacterID <= 0 {
-		return nil
+	if packet.Remaining() != 0 || session == nil || session.UserContext.CharacterID <= 0 {
+		return h.sendPacket(session, vsro188.BuildGuildStorageCloseFailure(3))
 	}
 	if err := h.repo.CloseGuildStorage(ctx, int64(session.UserContext.CharacterID)); err != nil {
 		logrus.WithError(err).Debug("guild storage close cleanup")
+		return h.sendPacket(session, vsro188.BuildGuildStorageCloseFailure(0x4C49))
 	}
 	return h.sendPacket(session, buildGuildStorageCloseSuccess())
 }
 
-func (h *GuildStorageHandler) validateRequest(session *server.Session, packet *network.Packet) (*model.Player, uint32, error) {
-	if h == nil || h.world == nil || packet == nil || packet.Remaining() != 4 || session == nil {
-		return nil, 0, ErrInventoryHandlerSessionIdentityInvalid
-	}
-	npcUID, err := packet.ReadUInt32()
-	if err != nil {
-		return nil, 0, err
+func (h *GuildStorageHandler) validateOpenRequest(session *server.Session, packet *network.Packet) (*model.Player, error) {
+	if h == nil || h.world == nil || packet == nil || packet.Remaining() != 0 || session == nil {
+		return nil, ErrInventoryHandlerSessionIdentityInvalid
 	}
 	player, err := h.world.GetPlayerByUniqueId(session.UserContext.UniqueID)
 	if err != nil || player == nil || player.Session != session || player.ID != session.UserContext.CharacterID {
-		return nil, 0, ErrInventoryHandlerSessionPlayerMismatch
+		return nil, ErrInventoryHandlerSessionPlayerMismatch
+	}
+	interaction, ok := character.RecentNPCInteraction(session.UserContext.UniqueID, guildStorageTalkAction, 5*time.Minute)
+	if !ok {
+		return nil, ErrInventoryHandlerPlayerLookupUnavailable
 	}
 	known := player.GetKnownObjectList()
 	if known == nil {
-		return nil, 0, ErrInventoryHandlerPlayerLookupUnavailable
+		return nil, ErrInventoryHandlerPlayerLookupUnavailable
 	}
-	knownObject, ok := known.GetKnownObjects()[npcUID]
+	knownObject, ok := known.GetKnownObjects()[interaction.NPCUniqueID]
 	if !ok || knownObject == nil {
-		return nil, 0, ErrInventoryHandlerPlayerLookupUnavailable
+		return nil, ErrInventoryHandlerPlayerLookupUnavailable
 	}
-	object, err := h.world.GetObjectByUniqueId(npcUID)
+	object, err := h.world.GetObjectByUniqueId(interaction.NPCUniqueID)
 	if err != nil || object == nil || object != knownObject {
-		return nil, 0, ErrInventoryHandlerPlayerLookupUnavailable
+		return nil, ErrInventoryHandlerPlayerLookupUnavailable
 	}
 	npc, ok := object.(*model.NPC)
 	if !ok || npc == nil || !npc.GetTypeInfo().IsNPCNpc() || !strings.Contains(strings.ToUpper(npc.GetName()), "GUILD") {
-		return nil, 0, fmt.Errorf("object %d is not a guild NPC", npcUID)
+		return nil, fmt.Errorf("object %d is not a guild NPC", interaction.NPCUniqueID)
 	}
-	return player, npcUID, nil
+	return player, nil
 }
 
 func (h *GuildStorageHandler) sendPacket(session *server.Session, packet network.Packet) error {

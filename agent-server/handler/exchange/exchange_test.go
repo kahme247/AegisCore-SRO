@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -63,6 +64,12 @@ func TestExchangeControlPacketsMatchProtocol(t *testing.T) {
 	if start.MessageID != opcode.ExchangeStartResponse || !bytes.Equal(start.Payload(), want) {
 		t.Fatalf("start packet = (0x%04X, % X), want (0x%04X, % X)", start.MessageID, start.Payload(), opcode.ExchangeStartResponse, want)
 	}
+
+	invitation := exchangeInvitation(0x12345678)
+	want = []byte{1, 0x78, 0x56, 0x34, 0x12}
+	if invitation.MessageID != opcode.ExchangeInvitationResponse || !bytes.Equal(invitation.Payload(), want) {
+		t.Fatalf("invitation packet = (0x%04X, % X), want (0x%04X, % X)", invitation.MessageID, invitation.Payload(), opcode.ExchangeInvitationResponse, want)
+	}
 }
 
 func TestBuildItemSnapshotCountsOnlyExistingOfferedItems(t *testing.T) {
@@ -77,6 +84,43 @@ func TestBuildItemSnapshotCountsOnlyExistingOfferedItems(t *testing.T) {
 	}
 	if uid := binary.LittleEndian.Uint32(payload[:4]); uid != 77 || payload[4] != 0 {
 		t.Fatalf("snapshot header = uid %d count %d, want uid 77 count 0", uid, payload[4])
+	}
+}
+
+func TestInvitationAcceptanceStartsExchangeForBothPlayers(t *testing.T) {
+	requesterSession := &server.Session{UserContext: server.UserContext{UserID: 10, CharacterID: 1, UniqueID: 101}}
+	responderSession := &server.Session{UserContext: server.UserContext{UserID: 20, CharacterID: 2, UniqueID: 202}}
+	requester := &model.Player{ID: 1, Session: requesterSession, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 101}}
+	responder := &model.Player{ID: 2, Session: responderSession, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 202}}
+	manager := NewManager(exchangeTestPlayers{101: requester, 202: responder}, &countingExchangeRepository{})
+	state := &exchangeSession{
+		a: &participant{player: requester, items: make(map[byte]model.ExchangeOfferedItem)},
+		b: &participant{player: responder, items: make(map[byte]model.ExchangeOfferedItem)},
+	}
+	manager.byChar[requester.ID], manager.byChar[responder.ID] = state, state
+
+	type sentPacket struct {
+		session *server.Session
+		packet  network.Packet
+	}
+	var sent []sentPacket
+	manager.send = func(session *server.Session, packet network.Packet) error {
+		sent = append(sent, sentPacket{session: session, packet: packet})
+		return nil
+	}
+	accept := network.EmptyPacket()
+	accept.WriteByte(1)
+	if err := manager.handleInvitation(context.Background(), responderSession, accept); err != nil {
+		t.Fatalf("handleInvitation() error = %v", err)
+	}
+	if !state.started || len(sent) != 2 {
+		t.Fatalf("started = %v, packets = %d; want true, 2", state.started, len(sent))
+	}
+	if sent[0].session != requesterSession || sent[0].packet.MessageID != opcode.ExchangeStartResponse || !bytes.Equal(sent[0].packet.Payload(), []byte{1, 202, 0, 0, 0}) {
+		t.Fatalf("requester packet = (0x%04X, % X)", sent[0].packet.MessageID, sent[0].packet.Payload())
+	}
+	if sent[1].session != responderSession || sent[1].packet.MessageID != opcode.ExchangeStartedResponse || !bytes.Equal(sent[1].packet.Payload(), []byte{101, 0, 0, 0}) {
+		t.Fatalf("responder packet = (0x%04X, % X)", sent[1].packet.MessageID, sent[1].packet.Payload())
 	}
 }
 
@@ -103,8 +147,9 @@ func TestConcurrentApprovalsCommitExactlyOnce(t *testing.T) {
 	manager := NewManager(exchangeTestPlayers{101: first, 202: second}, repository)
 	manager.send = func(*server.Session, network.Packet) error { return nil }
 	state := &exchangeSession{
-		a: &participant{player: first, items: make(map[byte]model.ExchangeOfferedItem), confirmed: true},
-		b: &participant{player: second, items: make(map[byte]model.ExchangeOfferedItem), confirmed: true},
+		a:       &participant{player: first, items: make(map[byte]model.ExchangeOfferedItem), confirmed: true},
+		b:       &participant{player: second, items: make(map[byte]model.ExchangeOfferedItem), confirmed: true},
+		started: true,
 	}
 	manager.byChar[first.ID], manager.byChar[second.ID] = state, state
 
@@ -125,5 +170,8 @@ func TestConcurrentApprovalsCommitExactlyOnce(t *testing.T) {
 	}
 	if manager.Busy(first.ID) || manager.Busy(second.ID) {
 		t.Fatal("completed exchange remains busy")
+	}
+	if until := manager.cooldowns[orderedPair(first.ID, second.ID)]; time.Until(until) <= 0 {
+		t.Fatal("completed exchange did not start same-player cooldown")
 	}
 }

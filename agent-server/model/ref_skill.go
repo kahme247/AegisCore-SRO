@@ -38,6 +38,7 @@ const (
 
 const (
 	skillParameterAttack         = 6386804
+	skillParameterSystemBuff     = 1667396966
 	skillParameterDuration       = 1685418593
 	skillParameterHeal           = 1751474540
 	skillParameterResurrection   = 1919251317
@@ -392,6 +393,41 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 		return SkillExecutionBuff
 	default:
 		return SkillExecutionUnsupported
+	}
+}
+
+// SupportsItemUseBuff reports whether a linked consumable can safely use the
+// existing persisted character-buff path. Ordinary gameplay buffs retain their
+// established behavior. Mall-owned system skills are admitted only for the
+// exact self-buff descriptor and modifier families already represented by
+// BuffModifiers; unresolved system effects such as `rado` remain fail-closed.
+func (s RefSkill) SupportsItemUseBuff() bool {
+	if s.BuffDuration <= 0 || s.BuffModifiers == (BuffModifiers{}) {
+		return false
+	}
+	if s.ExecutionKind() == SkillExecutionBuff {
+		return true
+	}
+	if s.ExecutionKind() != SkillExecutionSystem || s.SystemOwner() != SkillSystemMall {
+		return false
+	}
+	if s.Params[0] != 3 || s.Params[1] != skillParameterSystemBuff ||
+		s.Params[2] != skillParameterDuration || s.Params[3] != s.BuffDuration {
+		return false
+	}
+	switch s.Params[4] {
+	case skillParameterHP:
+		return s.Params[5] > 0 || s.Params[6] > 0
+	case skillParameterMP:
+		return s.Params[5] > 0 || s.Params[6] > 0
+	case skillParameterStrength:
+		return s.Params[5] > 0
+	case skillParameterIntellect:
+		return s.Params[5] > 0
+	case skillParameterDamage:
+		return s.Params[6] > 0
+	default:
+		return false
 	}
 }
 

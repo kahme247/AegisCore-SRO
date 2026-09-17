@@ -3,6 +3,7 @@ package party
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
@@ -25,10 +26,23 @@ type PartyHandler struct {
 	instanceExit interface {
 		SubmitPartyQuestInstanceExit(context.Context, *model.Player) error
 	}
+	forgottenWorldRecall interface {
+		SubmitForgottenWorldRecall(context.Context, *model.Player, *model.Player) error
+	}
+	recallCounter uint32
+	pendingRecall map[uint32]forgottenWorldRecallInvitation
+	world         interface {
+		GetPlayerByUniqueId(uint32) (*model.Player, error)
+	}
+	pendingChallenges map[uint32]recallChallengeState
+	now               func() time.Time
 }
 
 func RegisterPartyHandlers(target *server.Server, dependencies ...any) {
-	handler := &PartyHandler{service: service.GetPartyServiceInstance()}
+	handler := &PartyHandler{
+		service: service.GetPartyServiceInstance(), pendingRecall: make(map[uint32]forgottenWorldRecallInvitation),
+		world: service.GetWorldServiceInstance(), pendingChallenges: make(map[uint32]recallChallengeState), now: time.Now,
+	}
 	for _, dependency := range dependencies {
 		if fallback, ok := dependency.(interface {
 			AnswerGuildInvitation(context.Context, *server.Session, bool) (bool, error)
@@ -39,6 +53,11 @@ func RegisterPartyHandlers(target *server.Server, dependencies ...any) {
 			SubmitPartyQuestInstanceExit(context.Context, *model.Player) error
 		}); ok {
 			handler.instanceExit = exit
+		}
+		if recall, ok := dependency.(interface {
+			SubmitForgottenWorldRecall(context.Context, *model.Player, *model.Player) error
+		}); ok {
+			handler.forgottenWorldRecall = recall
 		}
 	}
 	target.RegisterHandler(opcode.PartyCreateRequest, handler.handleCreateInvite)
@@ -53,6 +72,11 @@ func RegisterPartyHandlers(target *server.Server, dependencies ...any) {
 	target.RegisterHandler(opcode.PartyMatchingJoinRequest, handler.handleMatchingJoin)
 	target.RegisterHandler(opcode.PartyMatchingPlayerJoinRequest, handler.handleMatchingPlayerJoin)
 	target.RegisterHandler(opcode.PartyMatchingCompletionRequest, handler.handleMatchingPlayerJoin)
+	target.RegisterHandler(opcode.FGWRecallListRequest, handler.handleForgottenWorldRecallList)
+	target.RegisterHandler(opcode.FGWRecallRequest, handler.handleForgottenWorldRecallMember)
+	target.RegisterHandler(opcode.FGWRecallResponse, handler.handleForgottenWorldRecallResponse)
+	target.RegisterHandler(opcode.FGWExitRequest, handler.handleForgottenWorldExit)
+	target.RegisterHandler(opcode.RecallSolveRequest, handler.handleRecallSolve)
 }
 
 func (h *PartyHandler) sendPacket(session *server.Session, packet network.Packet) error {

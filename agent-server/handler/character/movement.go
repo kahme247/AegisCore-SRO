@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -22,6 +23,14 @@ type MovementHandler struct {
 	// command order within each session.
 	mu           sync.Mutex
 	cancelCombat func(*server.Session, uint32)
+	send         func(*server.Session, network.Packet) error
+	eventZone    func(*model.Player, navmeshv2.RtNavmeshPosition) (bool, error)
+}
+
+func (mh *MovementHandler) ConfigureDungeonEventZones(callback func(*model.Player, navmeshv2.RtNavmeshPosition) (bool, error)) {
+	if mh != nil {
+		mh.eventZone = callback
+	}
 }
 
 func RegisterMovementHandler(target *server.Server) *MovementHandler {
@@ -29,7 +38,77 @@ func RegisterMovementHandler(target *server.Server) *MovementHandler {
 	target.RegisterHandler(opcode.EntityMovementRequest, handler.handleMovementPacket)
 	target.RegisterHandler(opcode.EntityMovementForwardRequest, handler.handleForwardPacket)
 	target.RegisterHandler(opcode.EntityMovementTurnRequest, handler.handleTurnPacket)
+	target.RegisterHandler(opcode.CharacterUpdateMoveStateRequest, handler.handleMoveStatePacket)
 	return handler
+}
+
+func (mh *MovementHandler) handleMoveStatePacket(_ context.Context, session *server.Session, packet network.Packet) error {
+	state, err := vsro188.DecodeCharacterMoveStateRequest(&packet)
+	if err != nil || session == nil || session.UserContext.UniqueID == 0 {
+		return mh.sendMoveStateResult(session, false)
+	}
+	player, err := service.GetWorldServiceInstance().GetPlayerByUniqueId(session.UserContext.UniqueID)
+	if err != nil || player == nil || player.Session != session || player.GetLifeState() != model.Alive {
+		return mh.sendMoveStateResult(session, false)
+	}
+	before := player.GetMotionState()
+	wasSitting := before == model.Sitting
+	if wasSitting && state != vsro188.CharacterMoveStateSit {
+		player.SetMotionState(model.Stand)
+		if err := mh.publishPlayerMotionState(player); err != nil {
+			return err
+		}
+	}
+	if !applyCharacterMoveState(player, state) {
+		return mh.sendMoveStateResult(session, false)
+	}
+	if state == vsro188.CharacterMoveStateSit && player.GetMotionState() == model.Sitting {
+		service.GetMovementServiceInstance().Stop(player, "character-sit")
+		player.SetMotionState(model.Sitting)
+	}
+	logrus.WithFields(logrus.Fields{
+		"uid": player.GetUniqueID(), "request": state, "before": before,
+		"after": player.GetMotionState(), "stand_transition": wasSitting && state != vsro188.CharacterMoveStateSit,
+	}).Info("character move-state transition")
+	if err := mh.sendMoveStateResult(session, true); err != nil {
+		return err
+	}
+	return mh.publishPlayerMotionState(player)
+}
+
+func applyCharacterMoveState(player *model.Player, state byte) bool {
+	if player == nil {
+		return false
+	}
+	switch state {
+	case vsro188.CharacterMoveStateWalk:
+		player.SetMotionState(model.Walking)
+	case vsro188.CharacterMoveStateRun:
+		player.SetMotionState(model.Running)
+	case vsro188.CharacterMoveStateSit:
+		if player.GetMotionState() == model.Sitting {
+			player.SetMotionState(model.Stand)
+		} else {
+			player.SetMotionState(model.Sitting)
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+func (mh *MovementHandler) sendMoveStateResult(session *server.Session, success bool) error {
+	if session == nil {
+		return fmt.Errorf("character move-state session is nil")
+	}
+	packet := vsro188.BuildCharacterMoveStateSuccess()
+	if !success {
+		packet = vsro188.BuildCharacterMoveStateFailure(3)
+	}
+	if mh != nil && mh.send != nil {
+		return mh.send(session, packet)
+	}
+	return session.Send(packet)
 }
 
 func (mh *MovementHandler) ConfigureCombatCancellation(cancel func(*server.Session, uint32)) {
@@ -92,18 +171,13 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 				return
 			}
 			mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
+			mh.resumePlayerFromSit(player)
 			movementService.WalkToDirection(player, float32(request.Directional.Heading))
 		}
 		return
 	}
 
 	destination := request.Destination
-	if destination.Extended {
-		// The stock wire form is decoded so the packet boundary stays exact, but
-		// the current world partition deliberately owns no dungeon planes.
-		mh.rejectMalformed(player, "dungeon destination", fmt.Errorf("region %d is not owned by this world", destination.RegionID))
-		return
-	}
 	if player.CombatMovementRestricted(time.Now()) {
 		movementService.Stop(player, "combat-status-control")
 		return
@@ -116,12 +190,33 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 		return
 	}
 	mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
+	mh.resumePlayerFromSit(player)
+	if mh.eventZone != nil && navmeshv2.IsDungeonRegion(targetPosition.Region.ID) {
+		handled, eventErr := mh.eventZone(player, targetPosition)
+		if eventErr != nil {
+			logrus.WithError(eventErr).Warn("dungeon event-zone activation failed")
+			return
+		}
+		if handled {
+			return
+		}
+	}
 	movementService.MoveToPosition(player, targetPosition)
+	if navmeshv2.IsDungeonRegion(targetPosition.Region.ID) {
+		logrus.WithFields(logrus.Fields{
+			"uid": player.GetUniqueID(), "region": targetPosition.Region.ID,
+			"x": targetPosition.Offset.X, "y": targetPosition.Offset.Y, "z": targetPosition.Offset.Z,
+		}).Info("accepted dungeon movement")
+	}
 	logrus.Tracef("moving %s to position %d (%g|%g|%g)", player.CharName, targetPosition.Region.ID, targetPosition.Offset.X, targetPosition.Offset.Y, targetPosition.Offset.Z)
 }
 
 type destinationPositionResolver interface {
 	NewPosFromGlobalCoordinates(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
+}
+
+type dungeonDestinationPositionResolver interface {
+	GetRegion(int16) (navmeshv2.RtNavmeshTerrain, error)
 }
 
 // resolveDestinationPosition normalizes the coordinates carried by the stock
@@ -137,12 +232,28 @@ func resolveDestinationPosition(world destinationPositionResolver, regionID int1
 		Region: navmeshv2.NewRegionFromInt16(regionID),
 		Offset: offset,
 	}
+	if navmeshv2.IsDungeonRegion(regionID) {
+		resolver, ok := world.(dungeonDestinationPositionResolver)
+		if !ok {
+			return navmeshv2.RtNavmeshPosition{}, fmt.Errorf("dungeon destination resolver is unavailable")
+		}
+		region, err := resolver.GetRegion(regionID)
+		if err != nil {
+			return navmeshv2.RtNavmeshPosition{}, err
+		}
+		cell, err := region.ResolveCell(offset)
+		if err != nil {
+			return navmeshv2.RtNavmeshPosition{}, err
+		}
+		packetPosition.Region = region.Region
+		packetPosition.Cell = &cell
+		return packetPosition, nil
+	}
 	return world.NewPosFromGlobalCoordinates(packetPosition.GetGlobalCoordinates())
 }
 
-// parseDestinationMovementPacket reads the binary-confirmed normal-world
-// payload after the leading true destination flag of 0x7021. Dungeon regions
-// remain unsupported until their navmesh and movement authority are loaded.
+// parseDestinationMovementPacket reads both the normal and negative-region
+// dungeon payloads after the leading true destination flag of 0x7021.
 func parseDestinationMovementPacket(packet *network.Packet) (int16, *math32.Vector3, error) {
 	if packet == nil {
 		return 0, nil, fmt.Errorf("missing destination packet")
@@ -196,8 +307,29 @@ func (mh *MovementHandler) handleForward(data server.PacketChannelData) {
 			return
 		}
 		mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
+		mh.resumePlayerFromSit(player)
 		movementService.WalkToDirection(player, float32(heading))
 	}
+}
+
+func (mh *MovementHandler) resumePlayerFromSit(player *model.Player) bool {
+	if player == nil || player.GetMotionState() != model.Sitting {
+		return false
+	}
+	player.SetMotionState(model.Stand)
+	_ = mh.publishPlayerMotionState(player)
+	player.SetMotionState(model.Running)
+	logrus.WithFields(logrus.Fields{"uid": player.GetUniqueID(), "after": player.GetMotionState()}).Info("character resumed from sit for movement")
+	return true
+}
+
+func (mh *MovementHandler) publishPlayerMotionState(player *model.Player) error {
+	if player == nil || player.Session == nil {
+		return fmt.Errorf("character motion-state player session is nil")
+	}
+	update := model.BuildMotionStateUpdatePacket(player.GetUniqueID(), player.GetMotionState())
+	player.SendToSelfAndKnown(&update)
+	return nil
 }
 
 func (mh *MovementHandler) handleTurn(data server.PacketChannelData) {

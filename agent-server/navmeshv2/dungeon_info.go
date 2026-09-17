@@ -11,7 +11,7 @@ import (
 
 const (
 	DungeonInfoEntryPattern    = `^(0|1)\t([0-9]+)\t\"([^\"]+)\"$`
-	DungeonInfoFilePathDataPk2 = "Data" + string(os.PathSeparator) + "dungeon" + string(os.PathSeparator) + "dungeoninfo.txt"
+	DungeonInfoFilePathDataPk2 = "Data" + string(os.PathSeparator) + "dungeon" + string(os.PathSeparator) + "Dungeoninfo.txt"
 )
 
 type DungeonInfo struct {

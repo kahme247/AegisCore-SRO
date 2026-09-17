@@ -45,7 +45,7 @@ const (
 )
 
 func objectVisibilityRange(object model.ISRObject, known bool) float32 {
-	if model.IsTeleportGateObject(object) {
+	if model.IsTeleportGateObject(object) || model.IsDimensionHolePortalObject(object) {
 		if known {
 			return portalVisibilityExitRange
 		}

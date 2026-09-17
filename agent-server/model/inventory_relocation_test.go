@@ -36,6 +36,118 @@ func TestPlanInventoryRelocationIsPureAndApplySwapsExactItems(t *testing.T) {
 	}
 }
 
+func TestInventoryStackMergeMovesRequestedQuantity(t *testing.T) {
+	previous := RefItems
+	RefItems = map[uint32]RefItem{1001: {StackSize: 100}}
+	t.Cleanup(func() { RefItems = previous })
+
+	items := map[byte]Item{
+		14: relocationTestItem(101, 1001, TypeInfo{}),
+		15: relocationTestItem(202, 1001, TypeInfo{}),
+	}
+	source, target := items[14], items[15]
+	source.StackSize, target.StackSize = 40, 50
+	items[14], items[15] = source, target
+
+	plan, err := PlanInventoryRelocationAmount(items, 14, 15, 10, relocationTestPlayer())
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocationAmount() error = %v", err)
+	}
+	if plan.Action != InventoryRelocationMerge || plan.TransferQuantity != 10 {
+		t.Fatalf("merge plan = %+v", plan)
+	}
+	if err = ApplyInventoryRelocation(items, plan); err != nil {
+		t.Fatalf("ApplyInventoryRelocation() error = %v", err)
+	}
+	if items[14].StackSize != 30 || items[15].StackSize != 60 {
+		t.Fatalf("merged stacks = %d/%d, want 30/60", items[14].StackSize, items[15].StackSize)
+	}
+}
+
+func TestInventoryStackMergeRemovesConsumedSourceAndRejectsOverflow(t *testing.T) {
+	previous := RefItems
+	RefItems = map[uint32]RefItem{1001: {StackSize: 100}}
+	t.Cleanup(func() { RefItems = previous })
+
+	items := map[byte]Item{
+		14: relocationTestItem(101, 1001, TypeInfo{}),
+		15: relocationTestItem(202, 1001, TypeInfo{}),
+	}
+	source, target := items[14], items[15]
+	source.StackSize, target.StackSize = 10, 90
+	items[14], items[15] = source, target
+
+	plan, err := PlanInventoryRelocationAmount(items, 14, 15, 10, relocationTestPlayer())
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocationAmount() error = %v", err)
+	}
+	if err = ApplyInventoryRelocation(items, plan); err != nil {
+		t.Fatalf("ApplyInventoryRelocation() error = %v", err)
+	}
+	if _, exists := items[14]; exists || items[15].StackSize != 100 {
+		t.Fatalf("full merge left source=%v target=%d", exists, items[15].StackSize)
+	}
+
+	items[14], items[15] = source, target
+	if _, err = PlanInventoryRelocationAmount(items, 14, 15, 11, relocationTestPlayer()); !errors.Is(err, ErrInventoryRelocationNotAllowed) {
+		t.Fatalf("overflow merge error = %v, want %v", err, ErrInventoryRelocationNotAllowed)
+	}
+}
+
+func TestInventoryStackSplitPlansRequestedQuantityIntoEmptySlot(t *testing.T) {
+	previous := RefItems
+	RefItems = map[uint32]RefItem{1001: {StackSize: 100}}
+	t.Cleanup(func() { RefItems = previous })
+
+	item := relocationTestItem(101, 1001, TypeInfo{})
+	item.StackSize = 40
+	items := map[byte]Item{14: item}
+	plan, err := PlanInventoryRelocationAmount(items, 14, 15, 10, relocationTestPlayer())
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocationAmount() error = %v", err)
+	}
+	if plan.Action != InventoryRelocationSplit || plan.TransferQuantity != 10 || plan.SourceStackBefore != 40 || plan.TargetItemID != 0 {
+		t.Fatalf("split plan = %+v", plan)
+	}
+	if items[14].StackSize != 40 {
+		t.Fatalf("planning mutated source stack to %d", items[14].StackSize)
+	}
+}
+
+func TestInventoryEquipmentMoveIgnoresStockQuantityOne(t *testing.T) {
+	previous := RefItems
+	RefItems = map[uint32]RefItem{1001: {StackSize: 1}}
+	t.Cleanup(func() { RefItems = previous })
+
+	weapon := relocationTestItem(101, 1001, TypeInfo{
+		TypeID1: TypeID1Item,
+		TypeID2: TypeID2Wearable,
+		TypeID3: TypeID3Weapon,
+		TypeID4: 2,
+	})
+	items := map[byte]Item{SlotPrimaryWeapon: weapon}
+	plan, err := PlanInventoryRelocationAmount(items, SlotPrimaryWeapon, 19, 1, relocationTestPlayer())
+	if err != nil {
+		t.Fatalf("PlanInventoryRelocationAmount() error = %v", err)
+	}
+	if plan.Action != InventoryRelocationUnequip || plan.SourceSlot != SlotPrimaryWeapon || plan.TargetSlot != 19 {
+		t.Fatalf("equipment move plan = %+v, want unequip 6 -> 19", plan)
+	}
+}
+
+func TestInventoryWholeStackQuantityStillPlansOrdinaryMove(t *testing.T) {
+	previous := RefItems
+	RefItems = map[uint32]RefItem{1001: {StackSize: 100}}
+	t.Cleanup(func() { RefItems = previous })
+
+	item := relocationTestItem(101, 1001, TypeInfo{})
+	item.StackSize = 40
+	plan, err := PlanInventoryRelocationAmount(map[byte]Item{14: item}, 14, 15, 40, relocationTestPlayer())
+	if err != nil || plan.Action != InventoryRelocationMove {
+		t.Fatalf("whole-stack plan = %+v, error = %v", plan, err)
+	}
+}
+
 func TestCommitRelocationKeepsRuntimeInventoryUntouchedWhenPersistenceFails(t *testing.T) {
 	inventory := Inventory{Items: map[byte]Item{
 		14: relocationTestItem(101, 1001, TypeInfo{}),

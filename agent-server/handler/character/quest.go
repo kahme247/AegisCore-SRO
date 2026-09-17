@@ -65,7 +65,24 @@ func (h *QuestHandler) handleAbandon(ctx context.Context, session *server.Sessio
 		return sendErr
 	}
 	if success {
+		questUpdate, buildErr := vsro188.BuildQuestUpdate(vsro188.QuestUpdateMessage{
+			Subtype: vsro188.QuestUpdateAbort,
+			QuestID: questID,
+		})
+		if buildErr != nil {
+			return buildErr
+		}
+		if h.send != nil {
+			if sendErr := h.send(session, questUpdate); sendErr != nil {
+				return sendErr
+			}
+		} else if sendErr := session.Send(questUpdate); sendErr != nil {
+			return sendErr
+		}
 		for _, relatedQuestID := range cleanup.ResetQuestIDs {
+			if relatedQuestID == int(questID) {
+				continue
+			}
 			questUpdate, buildErr := vsro188.BuildQuestUpdate(vsro188.QuestUpdateMessage{
 				Subtype: vsro188.QuestUpdateAbort,
 				QuestID: uint32(relatedQuestID),

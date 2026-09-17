@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/config"
 	"github.com/Harvi8/AegisCore/agent-server/database"
+	"github.com/Harvi8/AegisCore/agent-server/engine/environment"
 	"github.com/Harvi8/AegisCore/agent-server/feature"
 	"github.com/Harvi8/AegisCore/agent-server/handler/character"
 	"github.com/Harvi8/AegisCore/agent-server/handler/chat"
@@ -21,6 +23,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/handler/inventory"
 	"github.com/Harvi8/AegisCore/agent-server/handler/lobby"
 	"github.com/Harvi8/AegisCore/agent-server/handler/logout"
+	"github.com/Harvi8/AegisCore/agent-server/handler/market"
 	"github.com/Harvi8/AegisCore/agent-server/handler/party"
 	"github.com/Harvi8/AegisCore/agent-server/handler/ping"
 	"github.com/Harvi8/AegisCore/agent-server/handler/social"
@@ -28,6 +31,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/management"
 	"github.com/Harvi8/AegisCore/agent-server/manager"
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	agentruntime "github.com/Harvi8/AegisCore/agent-server/runtime"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/aggregate"
@@ -36,6 +40,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/logging"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	"github.com/Harvi8/AegisCore/framework/security/auth"
 	"github.com/Harvi8/AegisCore/framework/security/mtls"
 	"github.com/Harvi8/AegisCore/framework/server"
@@ -91,6 +96,7 @@ type AgentServer struct {
 	Combat                 *character.CombatHandler
 	QuestInstances         *model.QuestInstanceRegistry
 	QuestInstanceLifecycle *model.QuestInstanceLifecycle
+	DimensionHoles         *service.DimensionHoleRuntime
 	Hwan                   *character.HwanHandler
 	Skill                  *character.SkillHandler
 	SkillRestoration       *character.SkillRestorationHandler
@@ -102,12 +108,25 @@ type AgentServer struct {
 	COS                    *service.COSService
 	DisconnectSaver        *service.DisconnectSaver
 	ChatFilter             model.ChatFilterRepository
+	Scheduler              *scheduler.Runtime
+	MarketExpiry           *service.OpenMarketExpiryService
+	DependencyMonitor      *dependencyMonitor
+	ServerEvents           *service.ServerEventEngine
+	ServerEventRewards     *service.ServerEventRewardRuntime
+	Competitive            *service.CompetitiveRuntime
+	Social                 *social.Handler
+	dependencyDrainMu      *sync.Mutex
 	//SpawnEngine             *spawn.SpawnEngine
 }
 
 type agentDatabaseHealthSource struct {
-	pools  *frameworkdb.Pools
-	engine *server.Server
+	pools       *frameworkdb.Pools
+	engine      *server.Server
+	competitive *service.CompetitiveRuntime
+}
+
+func (source agentDatabaseHealthSource) CompetitiveStatus() service.CompetitiveStatus {
+	return source.competitive.Status()
 }
 
 func (s agentDatabaseHealthSource) DatabaseQueryCount() int {
@@ -166,6 +185,14 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("get Agent shard pool: %w", err)
 	}
+	var schedulerStore *scheduler.SQLStore
+	if viper.GetBool(config.AgentSchedulerEnabled) {
+		var schedulerErr error
+		schedulerStore, schedulerErr = scheduler.NewSQLStore(shardPool)
+		if schedulerErr != nil {
+			return AgentServer{}, fmt.Errorf("configure Agent scheduler store: %w", schedulerErr)
+		}
+	}
 	levelRepository, err := model.NewLevelTableRepository(shardPool)
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent level-data repository: %w", err)
@@ -179,6 +206,24 @@ func NewAgentServer() (AgentServer, error) {
 	aggregateCoordinator, err := aggregate.NewSQLCoordinator(shardPool)
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent aggregate coordinator: %w", err)
+	}
+	serverEvents, err := service.NewServerEventEngine(aggregateCoordinator)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure server event engine: %w", err)
+	}
+	competitiveRewards, err := service.NewCompetitiveRewardRepository(aggregateCoordinator)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure competitive rewards: %w", err)
+	}
+	competitiveRuntime, err := service.NewCompetitiveRuntime(service.CompetitiveConfig{
+		MinimumPlayers: viper.GetInt(config.AgentCompetitiveMinimumPlayers),
+		MaximumPlayers: viper.GetInt(config.AgentCompetitiveMaximumPlayers),
+		MatchDuration:  time.Duration(viper.GetInt(config.AgentCompetitiveMatchSeconds)) * time.Second,
+		WinnerGold:     viper.GetUint64(config.AgentCompetitiveWinnerGold),
+		LoserGold:      viper.GetUint64(config.AgentCompetitiveLoserGold),
+	}, competitiveRewards)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure competitive runtime: %w", err)
 	}
 	disconnectSaver, err := service.NewDisconnectSaver(aggregateCoordinator, service.DefaultDisconnectSaveTimeout)
 	if err != nil {
@@ -290,6 +335,12 @@ func NewAgentServer() (AgentServer, error) {
 	if err != nil {
 		return AgentServer{}, fmt.Errorf("compose Agent runtime: %w", err)
 	}
+	agentServer.Competitive = competitiveRuntime
+	agentServer.ServerEvents = serverEvents
+	agentServer.DependencyMonitor, err = newDependencyMonitor(accountPool, shardPool, agentServer.DrainForDependencyLoss)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Agent dependency monitor: %w", err)
+	}
 	var groundItemLifecycle *service.GroundItemLifecycle
 	if agentServer.GroundItems != nil {
 		agentServer.GroundItems.ConfigureMaterializer(repositories.GroundItemMaterializer)
@@ -356,6 +407,8 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.ChatFilter = repositories.ChatFilter
 	lobby.RegisterCharSelectionRenameRequestHandler(&serv, repositories.CharacterRename)
 	gameReadyHandler := character.RegisterGameReadyHandler(&serv, repositories.ItemMall)
+	gameReadyHandler.ConfigurePKRepository(repositories.CharacterPK)
+	gameReadyHandler.ConfigurePremiumDecoration(repositories.PremiumDecoration)
 	questCountdowns := character.NewQuestCountdownService(repositories.CharacterQuests)
 	gameReadyHandler.ConfigureQuestCountdowns(questCountdowns)
 	character.RegisterGuideHandler(&serv)
@@ -364,6 +417,25 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent HWAN handler: %w", err)
 	}
 	character.RegisterPremiumDailyHandler(&serv, repositories.ItemServices)
+	character.RegisterPremiumSilkHandler(&serv, repositories.ItemMall, repositories.PremiumDecoration)
+	character.RegisterFreePVPHandler(&serv, competitiveRuntime)
+	if _, err = character.RegisterGachaHandler(&serv, repositories.Gacha, service.GetWorldServiceInstance()); err != nil {
+		return AgentServer{}, err
+	}
+	if _, err = character.RegisterTAPHandler(&serv, repositories.TAP, service.GetWorldServiceInstance()); err != nil {
+		return AgentServer{}, err
+	}
+	if fortress, ok := repositories.Social.(model.FortressSiegeRepository); ok {
+		if _, err = character.RegisterFortressSiegeHandler(&serv, fortress, service.GetWorldServiceInstance()); err != nil {
+			return AgentServer{}, err
+		}
+	}
+	if _, err = character.RegisterSeasonalEventHandler(&serv, repositories.SeasonalEvents, service.GetWorldServiceInstance(), features.Enabled(feature.ChristmasEvent2007)); err != nil {
+		return AgentServer{}, err
+	}
+	if _, err = character.RegisterOperatorHandler(&serv, service.GetWorldServiceInstance(), repositories.OperatorPunishments); err != nil {
+		return AgentServer{}, err
+	}
 	ping.RegisterHandler(&serv)
 	movementHandler := character.RegisterMovementHandler(&serv)
 	character.RegisterSelectEntityHandler(&serv)
@@ -406,6 +478,36 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent quest reward selection: %w", err)
 	}
 	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
+	agentServer.DimensionHoles, err = service.LoadDimensionHoleRuntime(
+		context.Background(), repositories.DimensionHoleWorlds, repositories.DimensionHoleRegions, repositories.DimensionHoleStarts,
+		service.GetWorldServiceInstance(), service.GetWorldServiceInstance(), model.NextActionUID,
+	)
+	if err != nil {
+		return AgentServer{}, fmt.Errorf("configure Dimension Hole runtime: %w", err)
+	}
+	if err = agentServer.DimensionHoles.ConfigureEntry(agentServer.DimensionHoles.Destinations, teleportHandler); err != nil {
+		return AgentServer{}, fmt.Errorf("configure Dimension Hole entry: %w", err)
+	}
+	if dungeonTeleportPath := viper.GetString(config.AgentDungeonTeleportDataPath); dungeonTeleportPath != "" {
+		dungeonEventZones, dungeonEventErr := character.LoadDungeonEventZoneCatalog(dungeonTeleportPath, viper.GetString(config.AgentDataPath))
+		if dungeonEventErr != nil {
+			return AgentServer{}, fmt.Errorf("configure dungeon event zones: %w", dungeonEventErr)
+		}
+		log.WithFields(log.Fields{
+			"level_2": dungeonEventZones.ZoneCount(-32762),
+			"level_3": dungeonEventZones.ZoneCount(-32763),
+			"level_4": dungeonEventZones.ZoneCount(-32764),
+		}).Info("loaded authoritative Tomb event zones")
+		dungeonEventZoneLatch := character.NewDungeonEventZoneLatch(dungeonEventZones)
+		movementHandler.ConfigureDungeonEventZones(func(player *model.Player, target navmeshv2.RtNavmeshPosition) (bool, error) {
+			destination, zoneName, ok := dungeonEventZoneLatch.DestinationAt(player.GetUniqueID(), target)
+			if !ok {
+				return false, nil
+			}
+			log.WithFields(log.Fields{"uid": player.GetUniqueID(), "zone": zoneName, "region": destination.Region}).Info("activated dungeon event zone")
+			return true, teleportHandler.SubmitDungeonEventZoneTeleport(player, destination)
+		})
+	}
 	agentServer.QuestInstances = model.NewQuestInstanceRegistry()
 	questInstanceMembers, err := model.NewQuestInstanceMemberRepository(shardPool)
 	if err != nil {
@@ -427,9 +529,12 @@ func NewAgentServer() (AgentServer, error) {
 	manager.GetRespawnManagerInstance().ConfigureGameplayRates(gameplayRates)
 	manager.GetRespawnManagerInstance().ConfigureGiantSpawnRatio(viper.GetInt(config.AgentGiantMonsterSpawnRatio))
 	agentServer.Combat = character.RegisterCombatHandler(&serv, repositories.CharacterProgress, levelTable, gameplayRates, questRuntime)
+	agentServer.Combat.ConfigureDimensionHoleEntry(agentServer.DimensionHoles.Entries)
+	agentServer.Combat.ConfigurePKPenalties(repositories.CharacterPK)
 	agentServer.Combat.ConfigureNativeQuestInstanceDeaths(agentServer.QuestInstances, teleportHandler)
 	agentServer.Combat.ConfigureJobProgression(repositories.Social)
 	agentServer.Combat.ConfigureMobAttackInterrupter(manager.GetMobAIManagerInstance().InterruptAttack)
+	agentServer.Combat.ConfigureMobActionTiming(manager.GetMobAIManagerInstance().ReconcileAttackTiming)
 	manager.GetMobAIManagerInstance().ConfigurePlayerAttackInterrupter(agentServer.Combat.InterruptPlayerAction)
 	if agentServer.MonsterDrops != nil {
 		agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
@@ -463,6 +568,26 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent character quick-slot handler: %w", err)
 	}
 	socialHandler := social.RegisterHandlers(&serv, repositories.Social)
+	socialHandler.ConfigureCOS(cosLifecycle.Service())
+	agentServer.Social = socialHandler
+	agentServer.Combat.ConfigureAcademyProgression(repositories.Social, socialHandler.PublishAcademyBuffs)
+	agentServer.Combat.ConfigureGuildWarScoring(socialHandler.RecordGuildWarKill)
+	agentServer.Combat.ConfigureCompetitiveScoring(competitiveRuntime.RecordPlayerKill)
+	if fortress, ok := any(repositories.Social).(model.FortressSiegeRepository); ok {
+		agentServer.Combat.ConfigureFortressDamage(func(ctx context.Context, uniqueID uint32, actor int, damage uint32, at time.Time) (model.FortressDamageResult, error) {
+			return fortress.DamageFortressStructure(ctx, 0, uniqueID, actor, damage, at)
+		})
+		agentServer.Combat.ConfigureFortressKillScoring(func(ctx context.Context, killer, victim int, at time.Time) error {
+			return fortress.RecordFortressBattleKill(ctx, 0, killer, victim, at)
+		})
+	}
+	agentServer.Combat.ConfigurePVPAdmissionProvider(func(source, target *model.Player, _ model.RefSkill) bool {
+		if source == nil || target == nil {
+			return false
+		}
+		participating, allowed := competitiveRuntime.CombatAdmission(source.ID, target.ID)
+		return !participating || allowed
+	})
 	if err := characterSelection.ConfigurePlayerPreparer(socialHandler); err != nil {
 		return AgentServer{}, fmt.Errorf("configure character-selection social state: %w", err)
 	}
@@ -471,13 +596,32 @@ func NewAgentServer() (AgentServer, error) {
 	}
 	gameReadyHandler.ConfigureSocial(socialHandler)
 	chat.RegisterChatHandler(&serv, repositories.Social, repositories.ChatFilter)
-	logout.RegisterLogoutHandler(&serv)
+	logoutHandler := logout.RegisterLogoutHandler(&serv)
+	logoutHandler.ConfigureCommunity(socialHandler)
 	stall.RegisterStallCreateHandler(&serv)
 	stall.RegisterStallDestroyHandler(&serv)
 	stall.RegisterStallLeaveHandler(&serv)
 	stall.RegisterStallUpdateHandler(&serv)
 	world := service.GetWorldServiceInstance()
+	competitiveRewards.ConfigureOnlinePlayers(world)
 	world.ConfigureGameplayRates(gameplayRates)
+	service.GetPartyServiceInstance().ConfigureGameplayRates(gameplayRates)
+	manager.GetMobAIManagerInstance().ConfigureGameplayRates(gameplayRates)
+	if features.Enabled(feature.OpenMarket) {
+		if _, err := market.RegisterHandlers(&serv, repositories.OpenMarket, repositories.Inventory, world); err != nil {
+			return AgentServer{}, fmt.Errorf("configure Agent open-market handlers: %w", err)
+		}
+		agentServer.MarketExpiry, err = service.NewOpenMarketExpiryService(repositories.OpenMarket, repositories.Inventory, world)
+		if err != nil {
+			return AgentServer{}, fmt.Errorf("configure Agent open-market expiry: %w", err)
+		}
+	}
+	if features.Enabled(feature.ServerEventSystem) {
+		agentServer.ServerEventRewards, err = service.NewServerEventRewardRuntime(shardPool, gameplayRates, manager.GetRespawnManagerInstance(), world)
+		if err != nil {
+			return AgentServer{}, fmt.Errorf("configure server event reward runtime: %w", err)
+		}
+	}
 	exchangeManager := exchange.NewManager(world, repositories.Exchange)
 	if err := exchange.RegisterHandlers(&serv, exchangeManager); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent exchange handlers: %w", err)
@@ -486,10 +630,13 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.GuildStorage = repositories.GuildStorage
 	agentServer.Vitals = repositories.Vitals
 	agentServer.Inventory = inventory.RegisterInventoryHandlerWithGuildStorage(&serv, repositories.InventoryRelocator, exchangeManager, repositories.Economy, repositories.GuildStorage, repositories.AvatarInventory, repositories.ItemMall)
+	agentServer.Inventory.ConfigureGameplayRates(gameplayRates)
+	agentServer.Inventory.ConfigureMagicCube(repositories.MagicCube)
 	agentServer.Inventory.ConfigureGroundItemPickupRepository(repositories.GroundItemPickup)
 	agentServer.Inventory.ConfigureGroundGoldPickupRepository(repositories.GroundGoldPickup)
 	agentServer.Inventory.ConfigureGroundItemDropRepository(repositories.GroundItemDrop)
 	agentServer.Inventory.ConfigureGroundItemService(agentServer.GroundItems)
+	agentServer.Combat.ConfigureGroundItemPickup(agentServer.Inventory.HandleGroundItemAction)
 	if groundItemLifecycle != nil {
 		agentServer.Inventory.ConfigureGroundItemLifecycle(groundItemLifecycle)
 	}
@@ -505,6 +652,7 @@ func NewAgentServer() (AgentServer, error) {
 	agentServer.Inventory.ConfigureSafeTrade(repositories.SafeTrade, cosLifecycle.Service(), world)
 	agentServer.Inventory.ConfigurePackageItems(repositories.PackageItems)
 	itemUseHandler := inventory.RegisterItemUseHandler(&serv, repositories.ItemUse, teleportHandler)
+	itemUseHandler.ConfigureDimensionHolePortals(agentServer.DimensionHoles.Lifecycle)
 	itemUseHandler.ConfigureQuestInstanceEntry(agentServer.QuestInstanceLifecycle, teleportHandler)
 	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
 	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
@@ -517,6 +665,10 @@ func NewAgentServer() (AgentServer, error) {
 		// player pickup; the persistence transaction has already committed
 		// before the service removes the visible object.
 		agentServer.COS.ConfigureGroundItemLifecycle(groundItemLifecycle)
+	}
+	if agentServer.COS != nil {
+		agentServer.COS.ConfigureGroundGoldPickup(repositories.GroundGoldPickup)
+		agentServer.COS.ConfigureQuestProgress(questRuntime)
 	}
 	gameReadyHandler.ConfigureCOS(cosLifecycle.Service())
 	manager.GetGameTimeManagerInstance().ConfigureCOS(cosLifecycle.Service())
@@ -537,6 +689,25 @@ func NewAgentServer() (AgentServer, error) {
 		return AgentServer{}, fmt.Errorf("configure Agent world repositories: %w", err)
 	}
 	agentServer.World = world
+	fortressScheduler, _ := repositories.Social.(scheduledFortressController)
+	if schedulerStore != nil {
+		agentServer.Scheduler, err = scheduler.NewRuntime(schedulerStore, scheduler.RuntimeOptions{
+			Worker:        viper.GetString(config.AgentModuleId),
+			PollInterval:  time.Duration(viper.GetInt(config.AgentSchedulerPollMS)) * time.Millisecond,
+			LeaseDuration: time.Duration(viper.GetInt(config.AgentSchedulerLeaseSeconds)) * time.Second,
+			BatchSize:     viper.GetInt(config.AgentSchedulerBatchSize),
+			RetryPolicy: scheduler.RetryPolicy{
+				MaxAttempts: 5,
+				BaseDelay:   time.Second,
+				MaxDelay:    time.Minute,
+			},
+			OnError: func(err error) { log.WithError(err).Error("Agent scheduler cycle failed") },
+		}, agentSchedulerHandlersWithCompetitive(world, manager.GetRespawnManagerInstance(), gameplayRates, serverEvents, competitiveRuntime, fortressScheduler))
+		if err != nil {
+			return AgentServer{}, fmt.Errorf("configure Agent scheduler runtime: %w", err)
+		}
+	}
+	serv.SetSessionClosingHandler(agentServer.playerSessionClosing)
 	serv.SetSessionClosedHandler(agentServer.playerSessionClosed)
 	if viper.GetBool(config.AgentManagementEnabled) {
 		managementTLS, managementTLSErr := mtls.LoadServerConfig(mtls.Files{
@@ -547,11 +718,16 @@ func NewAgentServer() (AgentServer, error) {
 		if managementTLSErr != nil {
 			return AgentServer{}, fmt.Errorf("configure SMC-to-Agent management mTLS server: %w", managementTLSErr)
 		}
-		agentServer.ManagementServer, err = management.NewServer(
+		var scheduleAdministration management.SchedulerSource
+		if schedulerStore != nil && agentServer.Scheduler != nil {
+			scheduleAdministration = agentSchedulerAdministration{store: schedulerStore, runtime: agentServer.Scheduler}
+		}
+		agentServer.ManagementServer, err = management.NewServerWithScheduler(
 			net.JoinHostPort(viper.GetString(config.AgentManagementHost), fmt.Sprintf("%d", viper.GetInt(config.AgentManagementPort))),
 			managementTLS,
 			world,
-			agentDatabaseHealthSource{pools: pools, engine: &serv},
+			scheduleAdministration,
+			agentDatabaseHealthSource{pools: pools, engine: &serv, competitive: competitiveRuntime},
 		)
 		if err != nil {
 			return AgentServer{}, fmt.Errorf("configure Agent management listener: %w", err)
@@ -596,24 +772,61 @@ func (a *AgentServer) Start() error {
 			return fmt.Errorf("start Agent management listener: %w", err)
 		}
 	}
+	if a.Scheduler != nil {
+		if err := a.Scheduler.Start(a.packetContext); err != nil {
+			rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Second)
+			if a.ManagementServer != nil {
+				_ = a.ManagementServer.Close(rollbackCtx)
+			}
+			_ = a.AdmissionTicketServer.Close(rollbackCtx)
+			cancelRollback()
+			_ = a.Server.CloseListener()
+			a.markDegraded("scheduler startup failed")
+			return fmt.Errorf("start Agent scheduler: %w", err)
+		}
+	}
 	if a.GameplayRates != nil {
 		a.GameplayRates.Start(a.packetContext)
 	}
 	if a.COSPolicy != nil {
 		a.COSPolicy.Start(a.packetContext)
 	}
+	environment.StartWeatherSystem(a.packetContext, service.GetWorldServiceInstance())
 	if a.ChatFilter != nil {
 		go a.refreshChatFilter(a.packetContext)
 	}
+	if a.MarketExpiry != nil {
+		a.MarketExpiry.Start(a.packetContext)
+	}
+	if a.Competitive != nil {
+		if err := a.Competitive.Run(a.packetContext); err != nil {
+			return fmt.Errorf("start competitive runtime: %w", err)
+		}
+	}
 	if err := a.Lifecycle.Transition(agentruntime.Ready, ""); err != nil {
+		if a.cancelPacketHandling != nil {
+			a.cancelPacketHandling()
+		}
 		rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Second)
 		if a.ManagementServer != nil {
 			_ = a.ManagementServer.Close(rollbackCtx)
 		}
 		_ = a.AdmissionTicketServer.Close(rollbackCtx)
+		if a.Scheduler != nil {
+			_ = a.Scheduler.Wait(rollbackCtx)
+		}
 		cancelRollback()
 		_ = a.Server.CloseListener()
 		return fmt.Errorf("enter Agent ready lifecycle: %w", err)
+	}
+	if a.DependencyMonitor != nil {
+		a.DependencyMonitor.Start(a.packetContext)
+	}
+	if a.ServerEventRewards != nil {
+		a.ServerEventRewards.Start(a.packetContext)
+	}
+	if a.Social != nil {
+		a.Social.Start(a.packetContext)
 	}
 	go func() {
 		if err := a.Server.Serve(publicListener); err != nil {
@@ -706,6 +919,11 @@ func (a *AgentServer) Close(ctx context.Context) error {
 	if a.GroundItemLifecycle != nil {
 		a.GroundItemLifecycle.Close()
 	}
+	if a.DimensionHoles != nil && a.DimensionHoles.Lifecycle != nil {
+		if err := a.DimensionHoles.Lifecycle.Close(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close Dimension Hole runtime: %w", err))
+		}
+	}
 	if a.GameplayRates != nil {
 		if err := a.GameplayRates.Wait(ctx); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("stop gameplay rate refresher: %w", err))
@@ -714,6 +932,31 @@ func (a *AgentServer) Close(ctx context.Context) error {
 	if a.COSPolicy != nil {
 		if err := a.COSPolicy.Wait(ctx); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("stop COS policy refresher: %w", err))
+		}
+	}
+	if a.Scheduler != nil {
+		if err := a.Scheduler.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop Agent scheduler: %w", err))
+		}
+	}
+	if a.Competitive != nil {
+		if err := a.Competitive.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop competitive runtime: %w", err))
+		}
+	}
+	if a.MarketExpiry != nil {
+		if err := a.MarketExpiry.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop open-market expiry: %w", err))
+		}
+	}
+	if a.DependencyMonitor != nil {
+		if err := a.DependencyMonitor.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop dependency monitor: %w", err))
+		}
+	}
+	if a.ServerEventRewards != nil {
+		if err := a.ServerEventRewards.Wait(ctx); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("stop server event rewards: %w", err))
 		}
 	}
 	if err := a.closePools(); err != nil {
@@ -730,6 +973,52 @@ func (a *AgentServer) Degrade(reason string) error {
 		return fmt.Errorf("Agent lifecycle is not configured")
 	}
 	return a.Lifecycle.Transition(agentruntime.Degraded, reason)
+}
+
+// DrainForDependencyLoss implements the binary-confirmed ShardManager-loss
+// policy without terminating the consolidated Agent process. Readiness fails
+// closed first, then the current session snapshot runs through the ordinary
+// terminal save hooks, and finally queued position checkpoints are flushed.
+// The management listener and database pools remain available for diagnosis
+// and an orchestrated restart.
+func (a *AgentServer) DrainForDependencyLoss(ctx context.Context, reason string) error {
+	if a == nil || a.Lifecycle == nil {
+		return fmt.Errorf("Agent lifecycle is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	drainMu := a.dependencyDrainMu
+	if drainMu == nil {
+		// Preserve zero-value AgentServer fixtures while production composition
+		// always installs the mutex before the server is published.
+		drainMu = &sync.Mutex{}
+		a.dependencyDrainMu = drainMu
+	}
+	drainMu.Lock()
+	defer drainMu.Unlock()
+
+	snapshot := a.Lifecycle.Snapshot()
+	if snapshot.State == agentruntime.Draining || snapshot.State == agentruntime.Stopped {
+		return nil
+	}
+	if snapshot.State != agentruntime.Degraded {
+		if err := a.Degrade(reason); err != nil {
+			return fmt.Errorf("degrade Agent after dependency loss: %w", err)
+		}
+	}
+	var drainErrors []error
+	if a.Server != nil {
+		if err := a.Server.DrainSessions(ctx); err != nil {
+			drainErrors = append(drainErrors, fmt.Errorf("drain sessions after dependency loss: %w", err))
+		}
+	}
+	if a.World != nil {
+		if err := a.World.DrainPositionPersistence(ctx); err != nil {
+			drainErrors = append(drainErrors, fmt.Errorf("flush positions after dependency loss: %w", err))
+		}
+	}
+	return errors.Join(drainErrors...)
 }
 
 func (a *AgentServer) markDegraded(reason string) {
@@ -770,6 +1059,16 @@ func (a *AgentServer) handlePackets(ctx context.Context) {
 	}
 }
 
+// playerSessionClosing releases admission at transport shutdown. It must not
+// wait for packet workers or persistence; a stalled handler cannot retain the
+// account reservation indefinitely.
+func (a *AgentServer) playerSessionClosing(closedSession *server.Session) {
+	if a == nil || closedSession == nil || a.AdmissionTickets == nil {
+		return
+	}
+	a.AdmissionTickets.ReleaseAccount(closedSession.AdmissionAccountID())
+}
+
 // playerSessionClosed runs through Server's drained terminal hook. It must not
 // remove the session itself: Server already removed it before worker and sender
 // drain began.
@@ -792,6 +1091,9 @@ func (a *AgentServer) playerSessionClosed(closedSession *server.Session) {
 	}
 	if a.Exchange != nil {
 		a.Exchange.CancelPlayer(closedSession.UserContext.CharacterID)
+	}
+	if a.Competitive != nil {
+		a.Competitive.RemoveCharacter(closedSession.UserContext.CharacterID)
 	}
 	character.ClearNPCInteraction(closedSession.UserContext.UniqueID)
 	party.HandleDisconnect(closedSession.UserContext.UniqueID)
@@ -943,6 +1245,12 @@ func main() {
 				agentServer.GroundItems.Materializer(),
 			)
 			agentServer.MonsterDrops.ConfigureGameplayRates(agentServer.GameplayRates)
+			if arenaErr := agentServer.MonsterDrops.ConfigureBattleArenaTicketDropRate(viper.GetInt(config.AgentBattleArenaTicketDropRate)); arenaErr != nil {
+				log.Fatalf("Agent Battle Arena ticket bootstrap failed: %v", arenaErr)
+			}
+			if winterErr := agentServer.MonsterDrops.ConfigureWinterEvent(agentServer.Features.Enabled(feature.WinterEvent2009)); winterErr != nil {
+				log.Fatalf("Agent Winter Event 2009 bootstrap failed: %v", winterErr)
+			}
 			if agentServer.Combat != nil {
 				agentServer.Combat.ConfigureMonsterDrops(agentServer.MonsterDrops)
 			}

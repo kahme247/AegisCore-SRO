@@ -13,8 +13,13 @@ import (
 // database package knows which concrete SQL implementation satisfies each one.
 type GameplayRepositories struct {
 	ReferenceData           model.ReferenceDataRepository
+	DimensionHoleWorlds     model.DimensionHoleWorldRepository
+	DimensionHoleRegions    model.DimensionHoleWorldRegionRepository
+	DimensionHoleStarts     model.DimensionHoleStartPositionRepository
 	Characters              model.CharacterRepository
 	CharacterRename         model.CharacterRenameRepository
+	CharacterPK             model.CharacterPKRepository
+	PremiumDecoration       model.PremiumDecorationRepository
 	Inventory               model.InventoryRepository
 	RangedAmmo              model.RangedAmmoRepository
 	GroundItemPickup        model.GroundItemPickupRepository
@@ -37,6 +42,7 @@ type GameplayRepositories struct {
 	ItemServices            model.ItemServiceRepository
 	ItemBuffs               model.ItemBuffRepository
 	Alchemy                 model.AlchemyRepository
+	MagicCube               model.MagicCubeRepository
 	Teleport                model.TeleportRepository
 	CharacterCreator        model.CharacterCreator
 	CharacterCreationPolicy model.CharacterCreationPolicyRepository
@@ -60,6 +66,11 @@ type GameplayRepositories struct {
 	COS                     model.COSRepository
 	COSPolicy               model.COSPolicyRepository
 	ChatFilter              model.ChatFilterRepository
+	OpenMarket              model.OpenMarketRepository
+	Gacha                   model.GachaRepository
+	TAP                     model.TAPRepository
+	SeasonalEvents          model.SeasonalEventRepository
+	OperatorPunishments     model.OperatorPunishmentRepository
 }
 
 func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, error) {
@@ -68,11 +79,26 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.ReferenceData, err = model.NewReferenceDataRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent reference-data repository: %w", err)
 	}
+	if repositories.DimensionHoleWorlds, err = model.NewDimensionHoleWorldRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent Dimension Hole world repository: %w", err)
+	}
+	if repositories.DimensionHoleRegions, err = model.NewDimensionHoleWorldRegionRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent Dimension Hole world-region repository: %w", err)
+	}
+	if repositories.DimensionHoleStarts, err = model.NewDimensionHoleStartPositionRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent Dimension Hole start-position repository: %w", err)
+	}
 	if repositories.Characters, err = model.NewCharacterRepository(shard, account); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character repository: %w", err)
 	}
 	if repositories.CharacterRename, err = model.NewCharacterRenameRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character-rename repository: %w", err)
+	}
+	if repositories.CharacterPK, err = model.NewCharacterPKRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent character PK repository: %w", err)
+	}
+	if repositories.PremiumDecoration, err = model.NewPremiumDecorationRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent premium decoration repository: %w", err)
 	}
 	if repositories.Inventory, err = model.NewInventoryRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent inventory repository: %w", err)
@@ -120,6 +146,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.Social, err = model.NewSocialRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent social repository: %w", err)
 	}
+	if repositories.OperatorPunishments, err = model.NewOperatorPunishmentRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent operator punishment repository: %w", err)
+	}
 	if repositories.Exchange, err = model.NewExchangeRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent exchange repository: %w", err)
 	}
@@ -133,6 +162,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	repositories.ItemBuffs = itemUse
 	if repositories.Alchemy, err = model.NewAlchemyRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent alchemy repository: %w", err)
+	}
+	if repositories.MagicCube, err = model.NewMagicCubeRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent magic-cube repository: %w", err)
 	}
 	if repositories.Teleport, err = model.NewTeleportRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent teleport repository: %w", err)
@@ -200,6 +232,18 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	}
 	if repositories.ChatFilter, err = model.NewChatFilterRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent chat filter: %w", err)
+	}
+	if repositories.OpenMarket, err = model.NewOpenMarketRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent open-market repository: %w", err)
+	}
+	if repositories.Gacha, err = model.NewGachaRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent Gacha repository: %w", err)
+	}
+	if repositories.TAP, err = model.NewTAPRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent TAP repository: %w", err)
+	}
+	if repositories.SeasonalEvents, err = model.NewSeasonalEventRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent seasonal-event repository: %w", err)
 	}
 	return repositories, nil
 }

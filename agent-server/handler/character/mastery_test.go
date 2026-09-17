@@ -65,7 +65,7 @@ func TestMasteryHandlerPersistsThenEmitsStockPackets(t *testing.T) {
 	if err := handler.handlePacket(context.Background(), session, request); err != nil {
 		t.Fatalf("handlePacket: %v", err)
 	}
-	if repository.calls != 1 || repository.expectedLevel != 3 || repository.nextLevel != 4 || repository.totalLimit != 330 || repository.cost != 2 {
+	if repository.calls != 1 || repository.expectedLevel != 3 || repository.nextLevel != 4 || repository.totalLimit != 30 || repository.cost != 2 {
 		t.Fatalf("repository call = %+v", repository)
 	}
 	if len(sent) != 2 {

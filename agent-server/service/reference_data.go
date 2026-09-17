@@ -242,6 +242,7 @@ func loadReferenceItems() map[uint32]model.RefItem {
 			&refItem.ChildItemCount,
 		)
 		counter++
+		model.ApplyClientSafeStackLimit(&refItem)
 		refItems[refItem.ID] = refItem
 	}
 	logrus.Infoln("finished loading ref items")

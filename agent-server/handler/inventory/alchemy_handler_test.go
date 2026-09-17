@@ -146,7 +146,8 @@ func TestAlchemyResponsesMatchVSRO188Layout(t *testing.T) {
 	ok, _ := removed.ReadByte()
 	operation, _ := removed.ReadByte()
 	rSlot, _ := removed.ReadByte()
-	if removed.MessageID != opcode.ItemOperationResponse || ok != 1 || operation != 15 || rSlot != 15 || removed.Remaining() != 0 {
+	reserved, _ := removed.ReadByte()
+	if removed.MessageID != opcode.ItemOperationResponse || ok != 1 || operation != 15 || rSlot != 15 || reserved != 0 || removed.Remaining() != 0 {
 		t.Fatalf("remove update = opcode %#x result %d operation %d slot %d", removed.MessageID, ok, operation, rSlot)
 	}
 }
@@ -175,6 +176,45 @@ func TestAlchemyResultPayloadsMatchVSRO188Layouts(t *testing.T) {
 			matches := bytes.HasPrefix(tt.packet.Payload(), want) && (!exact || bytes.Equal(tt.packet.Payload(), want))
 			if tt.packet.MessageID != tt.opcode || !matches {
 				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, want)
+			}
+		})
+	}
+}
+
+func TestAlchemyEquipmentTargetCarriesCompleteStockItemBody(t *testing.T) {
+	item := model.Item{
+		OptLevel: 12, Variance: 9, Data: 100,
+		MagicOptions:    []model.MagicOption{{Type: 212, Value: 3}},
+		SocketOptions:   []model.BindingOption{{Slot: 1, ID: 1000, Value: 2}},
+		AdvancedElixirs: []model.BindingOption{{Slot: 0, ID: 25874, Value: 1}},
+	}
+	item.RefObjectID = 0x11223344
+	item.SetTypeInfo(model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2})
+	wantTarget := []byte{
+		0, 0, 0, 0, // no rent
+		0x44, 0x33, 0x22, 0x11,
+		12,
+		9, 0, 0, 0, 0, 0, 0, 0,
+		100, 0, 0, 0,
+		1, 212, 0, 0, 0, 3, 0, 0, 0,
+		1, 1, 1, 0xE8, 3, 0, 0, 2, 0, 0, 0,
+		2, 1, 0, 0x12, 0x65, 0, 0, 1, 0, 0, 0,
+	}
+	tests := []struct {
+		name   string
+		packet network.Packet
+		prefix []byte
+	}{
+		{name: "elixir", packet: buildElixirAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), prefix: []byte{1, 2, 1, 13}},
+		{name: "stone", packet: buildStoneAlchemyResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), prefix: []byte{1, 2, 1, 13}},
+		{name: "socket", packet: buildSocketAlchemyActionResult(2, model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), prefix: []byte{1, 2, 13}},
+		{name: "avatar grant", packet: buildAlchemyAvatarGrantResult(model.AlchemyResult{Success: true, TargetSlot: 13, Target: item}), prefix: []byte{1, 1, 13}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			want := append(append([]byte(nil), test.prefix...), wantTarget...)
+			if got := test.packet.Payload(); !bytes.Equal(got, want) {
+				t.Fatalf("payload = % X, want % X", got, want)
 			}
 		})
 	}

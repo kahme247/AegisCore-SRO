@@ -37,6 +37,30 @@ type inventoryHandlerRelocatorFake struct {
 	err         error
 }
 
+type magicCubeRepositoryFake struct {
+	pushes, pops int
+	characterID  int
+	userID       uint32
+	cubeID       int
+	source       byte
+	destination  byte
+	amount       uint16
+	result       model.MagicCubeMoveResult
+	err          error
+}
+
+func (f *magicCubeRepositoryFake) Push(_ context.Context, characterID int, userID uint32, cubeID int, source, destination byte, amount uint16) (model.MagicCubeMoveResult, error) {
+	f.pushes++
+	f.characterID, f.userID, f.cubeID, f.source, f.destination, f.amount = characterID, userID, cubeID, source, destination, amount
+	return f.result, f.err
+}
+
+func (f *magicCubeRepositoryFake) Pop(_ context.Context, characterID int, userID uint32, cubeID int, source, destination byte, amount uint16) (model.MagicCubeMoveResult, error) {
+	f.pops++
+	f.characterID, f.userID, f.cubeID, f.source, f.destination, f.amount = characterID, userID, cubeID, source, destination, amount
+	return f.result, f.err
+}
+
 type petInventoryWorldFake struct {
 	player *model.Player
 	pet    *model.COS
@@ -390,7 +414,7 @@ func TestInventoryMoveWithTrailingPayloadIsRejectedBeforeLookupOrDatabase(t *tes
 	}
 }
 
-func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
+func TestStockActionZeroGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	player := &model.Player{
 		SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}},
@@ -413,7 +437,7 @@ func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 		return nil
 	}
 	request := network.EmptyClientPacket()
-	request.WriteByte(byte(PickupItemOperation))
+	request.WriteByte(byte(MoveItemOperation))
 	request.WriteUInt32(item.GetUniqueID())
 
 	if err := handler.handlePacket(context.Background(), session, request); err != nil {
@@ -431,13 +455,13 @@ func TestGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 	if got := player.Inventory.Items[13].ID; got != 91 {
 		t.Fatalf("runtime inventory item = %d, want 91", got)
 	}
-	if len(packets) != 2 || packets[0].MessageID != 0x3036 || packets[1].MessageID != opcode.ItemOperationResponse {
-		t.Fatalf("pickup packets = %#v, want 0x3036 followed by 0xB034", packets)
+	if len(packets) != 2 || packets[0].MessageID != opcode.ItemOperationResponse || packets[1].MessageID != 0x3036 {
+		t.Fatalf("pickup packets = %#v, want 0xB034 followed by 0x3036", packets)
 	}
-	if got, want := packets[1].Payload(), []byte{1, 0x06, 0x0D}; !bytes.Equal(got, want) {
-		t.Fatalf("pickup response payload = % X, want % X", got, want)
+	if got, want := packets[0].Payload(), []byte{1, 0x06, 0x0D, 0, 0, 0, 0, 0xBC, 0x02, 0, 0, 1, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("pickup inventory payload = % X, want hydrated action-6 body % X", got, want)
 	}
-	if got := packets[0].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
+	if got := packets[1].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
 		t.Fatalf("pickup animation payload = % X, want collector UID 77 and one heading byte", got)
 	}
 }
@@ -844,6 +868,61 @@ func TestParseAvatarTransferRequestUsesTwoSlotPayload(t *testing.T) {
 	}
 }
 
+func TestActiveCOSItemsCannotEnterStorage(t *testing.T) {
+	for _, state := range []model.COSItemState{model.COSItemSummoned, model.COSItemActive} {
+		item := model.Item{COS: model.COSItemInfo{Present: true, State: state}}
+		if !isActiveCOSItem(item) {
+			t.Fatalf("COS state %d was not protected", state)
+		}
+	}
+	for _, state := range []model.COSItemState{model.COSItemInactive, model.COSItemDead} {
+		item := model.Item{COS: model.COSItemInfo{Present: true, State: state}}
+		if isActiveCOSItem(item) {
+			t.Fatalf("COS state %d was incorrectly protected", state)
+		}
+	}
+}
+
+type storageResyncEconomyFake struct {
+	model.EconomyRepository
+	snapshot model.StorageSnapshot
+	userID   uint32
+}
+
+func (f *storageResyncEconomyFake) LoadStorage(_ context.Context, userID uint32) (model.StorageSnapshot, error) {
+	f.userID = userID
+	return f.snapshot, nil
+}
+
+func TestRejectedStorageMutationResendsAuthoritativeSnapshot(t *testing.T) {
+	repository := &storageResyncEconomyFake{snapshot: model.StorageSnapshot{Capacity: 30, Items: map[byte]model.Item{}}}
+	handler := &InventoryHandler{economy: repository}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	session := &server.Session{UserContext: server.UserContext{UserID: 99}}
+	if err := handler.rejectStorageMutation(context.Background(), session, model.ErrEconomyConflict); err != nil {
+		t.Fatal(err)
+	}
+	if repository.userID != 99 {
+		t.Fatalf("storage reload user = %d, want 99", repository.userID)
+	}
+	wantOpcodes := []uint16{opcode.ItemOperationResponse, opcode.StorageDataBegin, opcode.StorageData, opcode.StorageDataEnd}
+	if len(sent) != len(wantOpcodes) {
+		t.Fatalf("sent %d packets, want %d", len(sent), len(wantOpcodes))
+	}
+	for index, want := range wantOpcodes {
+		if sent[index].MessageID != want {
+			t.Fatalf("packet %d opcode = 0x%04X, want 0x%04X", index, sent[index].MessageID, want)
+		}
+	}
+	if got := sent[2].Payload(); !bytes.Equal(got, []byte{30, 0}) {
+		t.Fatalf("storage snapshot payload = % X, want 1E 00", got)
+	}
+}
+
 func TestPlayerItemMovesIntoAbilityPetInventory(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(map[byte]model.Item{14: {ID: 100}})}
@@ -1087,6 +1166,56 @@ func Test7034Operation22FailsClosedBecauseBuybackUsesDedicatedOpcode(t *testing.
 	}
 }
 
+func TestMagicCubePushCommitsRepositorySnapshotAndStockSuccess(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UserID: 9, UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(nil)}
+	if !player.ActivateMagicCube(555) {
+		t.Fatal("activate cube")
+	}
+	repository := &magicCubeRepositoryFake{result: model.MagicCubeMoveResult{Inventory: model.NewInventory(map[byte]model.Item{14: {ID: 700}}), ItemID: 700}}
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, nil)
+	handler.ConfigureMagicCube(repository)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request, err := vsro188.BuildMagicCubeMoveRequest(vsro188.ItemOperationMagicCubePush, vsro188.MagicCubeMoveRequest{Source: 14, Destination: 2, Amount: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.pushes != 1 || repository.pops != 0 || repository.characterID != 44 || repository.userID != 9 || repository.cubeID != 555 || repository.source != 14 || repository.destination != 2 || repository.amount != 3 {
+		t.Fatalf("repository call = %+v", repository)
+	}
+	if player.Inventory.Items[14].ID != 700 {
+		t.Fatalf("runtime inventory = %+v", player.Inventory.Items)
+	}
+	if got, want := response.Payload(), []byte{1, 0x27, 14, 2, 3, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("response = % X, want % X", got, want)
+	}
+}
+
+func TestMagicCubePopRejectsMismatchedLinkedContext(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UserID: 9, UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session, Inventory: model.NewInventory(nil)}
+	player.ActivateMagicCube(555)
+	repository := &magicCubeRepositoryFake{}
+	handler := NewInventoryHandler(&inventoryHandlerPlayerLookupFake{player: player}, nil)
+	handler.ConfigureMagicCube(repository)
+	var response network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error { response = packet; return nil }
+	request, err := vsro188.BuildMagicCubeMoveRequest(vsro188.ItemOperationMagicCubePop, vsro188.MagicCubeMoveRequest{Context: 556, Source: 2, Destination: 14, Amount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.pops != 0 || !bytes.Equal(response.Payload(), []byte{2, 0, 0}) {
+		t.Fatalf("mismatched context reached repository or wrong response: calls=%d payload=% X", repository.pops, response.Payload())
+	}
+}
+
 func inventoryHandlerMovePacket(t *testing.T, sourceSlot, targetSlot byte, amount uint16, trailing []byte) network.Packet {
 	t.Helper()
 	packet := network.EmptyClientPacket()
@@ -1110,4 +1239,30 @@ func inventoryHandlerMovePacket(t *testing.T, sourceSlot, targetSlot byte, amoun
 
 func inventoryHandlerTestItem(id int) model.Item {
 	return model.Item{ID: id}
+}
+
+func TestWholeStackMoveSuccessPreservesQuantity(t *testing.T) {
+	request := moveItemRequest{sourceSlot: 64, targetSlot: 63, amount: 49351}
+	packet := vsro188.BuildItemOperationRelocationSuccess(request.sourceSlot, request.targetSlot, request.amount)
+	if got, want := packet.Payload(), []byte{1, 0, 64, 63, 0xC7, 0xC0, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("whole-stack response = % X, want % X", got, want)
+	}
+}
+
+func TestInventoryUnknownRequestFailsWithoutMutation(t *testing.T) {
+	var response network.Packet
+	handler := &InventoryHandler{send: func(_ *server.Session, packet network.Packet) error {
+		response = packet
+		return nil
+	}}
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(0x11223344)
+	request.WriteByte(7)
+
+	if err := handler.handleUnknownPacket(context.Background(), &server.Session{}, request); err != nil {
+		t.Fatalf("handleUnknownPacket() error = %v", err)
+	}
+	if response.MessageID != opcode.InventoryUnknownResponse || !bytes.Equal(response.Payload(), []byte{2, 5, 0}) {
+		t.Fatalf("response = %04x/%x, want B03F native failure", response.MessageID, response.Payload())
+	}
 }

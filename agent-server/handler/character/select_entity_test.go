@@ -160,6 +160,14 @@ func TestBuildNPCSelectionResponseUsesCountedMerchantActions(t *testing.T) {
 	}
 }
 
+func TestBuildNPCSelectionResponseUsesGachaTaskBody(t *testing.T) {
+	packet := buildNPCSelectionResponse(0x12345678, model.NPCSelectionTalkData("NPC_CH_GACHA_MACHINE"))
+	want := []byte{1, 0x78, 0x56, 0x34, 0x12, 0, 1, 0x11, 0}
+	if got := packet.Payload(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want %x", got, want)
+	}
+}
+
 func TestBuildEntitySelectionFailureClearsClientSelectionWait(t *testing.T) {
 	packet := buildEntitySelectionFailure()
 	if packet.MessageID != opcode.EntitySelectResponse {
@@ -208,6 +216,30 @@ func TestTeleportGateIsSelectableOnlyWhenKnownAndInRange(t *testing.T) {
 	session.UserContext.UniqueID = player.GetUniqueID()
 }
 
+func TestSelectEntityRecordsNumberedCatalogTeleportGateInteraction(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	gate := &model.TeleportGate{SRObject: model.SRObject{
+		UniqueID: 222, RefObjectID: 27754, Name: "STORE_SD_GATE2",
+		TypeInfo:          model.TypeInfo{TypeID1: 4, TypeID2: 1, TypeID3: 1},
+		RtNavmeshPosition: selectEntityPosition(30000, 20, 0, 20),
+	}}
+	if !player.GetKnownObjectList().AddObject(gate) {
+		t.Fatal("fixture could not add numbered teleport gate")
+	}
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+	world := &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{gate.GetUniqueID(): gate}, distance: selectionKnownRange,
+	}
+
+	if err := NewSelectEntityHandler(world).handlePacket(context.Background(), session, selectEntityPacket(t, gate.GetUniqueID())); err != nil {
+		t.Fatalf("select numbered teleport gate: %v", err)
+	}
+	interaction, ok := npcInteractions.Get(player.GetUniqueID())
+	if !ok || interaction.NPCUniqueID != gate.GetUniqueID() || interaction.NPCRefObjectID != gate.GetRefObjectID() || interaction.Action != teleportTaskUse {
+		t.Fatalf("numbered teleport gate interaction = %+v/%v", interaction, ok)
+	}
+}
+
 func TestTeleportGateUsesExtendedSelectionRange(t *testing.T) {
 	_, player, _ := selectEntityFixture(t)
 	gate := &model.TeleportGate{SRObject: model.SRObject{
@@ -223,6 +255,83 @@ func TestTeleportGateUsesExtendedSelectionRange(t *testing.T) {
 	}
 	if err := validateEntitySelection(world, player, gate.GetUniqueID()); err != nil {
 		t.Fatalf("teleport gate inside extended range rejected: %v", err)
+	}
+}
+
+func TestSelectEntityAdmitsDimensionHolePortalWithEmptyActionList(t *testing.T) {
+	session, player, _ := selectEntityFixture(t)
+	portal := selectEntityDimensionHolePortal(t, player, 0x12345678, selectEntityPosition(30000, 20, 0, 20))
+	if !player.GetKnownObjectList().AddObject(portal) {
+		t.Fatal("fixture could not add Dimension Hole portal")
+	}
+	npcInteractions.Clear(player.GetUniqueID())
+	t.Cleanup(func() { npcInteractions.Clear(player.GetUniqueID()) })
+	world := &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{portal.GetUniqueID(): portal}, distance: selectionKnownRange + 500,
+	}
+	var sent network.Packet
+	handler := NewSelectEntityHandler(world)
+	handler.send = func(_ *server.Session, packet network.Packet) error { sent = packet; return nil }
+
+	if err := handler.handlePacket(context.Background(), session, selectEntityPacket(t, portal.GetUniqueID())); err != nil {
+		t.Fatalf("select Dimension Hole portal: %v", err)
+	}
+	if sent.MessageID != opcode.EntitySelectResponse {
+		t.Fatalf("message id = 0x%04X, want 0x%04X", sent.MessageID, opcode.EntitySelectResponse)
+	}
+	if got, want := sent.Payload(), []byte{1, 0x78, 0x56, 0x34, 0x12, 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %x, want portal selection with empty action list %x", got, want)
+	}
+	if interaction, ok := npcInteractions.Get(player.GetUniqueID()); ok {
+		t.Fatalf("portal selection entered normal teleport interaction path: %+v", interaction)
+	}
+	if session.UserContext.SelectedNPCUniqueID != 0 || session.UserContext.SelectedNPCRefObjID != 0 {
+		t.Fatalf("portal selection entered normal NPC state uid=%d ref=%d", session.UserContext.SelectedNPCUniqueID, session.UserContext.SelectedNPCRefObjID)
+	}
+}
+
+func TestDimensionHolePortalSelectionRequiresExactKnownIdentity(t *testing.T) {
+	_, player, _ := selectEntityFixture(t)
+	position := selectEntityPosition(30000, 20, 0, 20)
+	portal := selectEntityDimensionHolePortal(t, player, 224, position)
+	stalePortal := selectEntityDimensionHolePortal(t, player, portal.GetUniqueID(), position)
+	if !player.GetKnownObjectList().AddObject(stalePortal) {
+		t.Fatal("fixture could not add stale Dimension Hole portal")
+	}
+	world := &selectEntityWorldFake{
+		player: player, objects: map[uint32]model.ISRObject{portal.GetUniqueID(): portal}, distance: selectionKnownRange,
+	}
+
+	err := validateEntitySelection(world, player, portal.GetUniqueID())
+	if !errors.Is(err, ErrSelectEntityTargetNotKnown) {
+		t.Fatalf("validateEntitySelection() error = %v, want %v", err, ErrSelectEntityTargetNotKnown)
+	}
+}
+
+func TestDimensionHolePortalUsesBoundedExtendedSelectionRange(t *testing.T) {
+	_, player, _ := selectEntityFixture(t)
+	portal := selectEntityDimensionHolePortal(t, player, 225, selectEntityPosition(30000, 20, 0, 20))
+	if !player.GetKnownObjectList().AddObject(portal) {
+		t.Fatal("fixture could not add Dimension Hole portal")
+	}
+
+	for _, test := range []struct {
+		name     string
+		distance float32
+		want     error
+	}{
+		{name: "at extended boundary", distance: float32(model.RegionHeight)},
+		{name: "past extended boundary", distance: float32(model.RegionHeight) + 1, want: ErrSelectEntityTargetOutOfRange},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			world := &selectEntityWorldFake{
+				player: player, objects: map[uint32]model.ISRObject{portal.GetUniqueID(): portal}, distance: test.distance,
+			}
+			err := validateEntitySelection(world, player, portal.GetUniqueID())
+			if !errors.Is(err, test.want) {
+				t.Fatalf("validateEntitySelection() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
@@ -405,6 +514,21 @@ func selectEntityNPC(uid uint32, typeInfo model.TypeInfo, position navmeshv2.RtN
 		Type:     "NPC",
 		Mutex:    &sync.Mutex{},
 	}
+}
+
+func selectEntityDimensionHolePortal(t *testing.T, owner *model.Player, uid uint32, position navmeshv2.RtNavmeshPosition) *model.DimensionHolePortal {
+	t.Helper()
+	owner.CharName = "PortalOwner"
+	definition, ok := model.DimensionHoleDefinitionForItem(35883)
+	if !ok {
+		t.Fatal("Dimension Hole fixture definition is missing")
+	}
+	portal, err := model.NewDimensionHolePortal(definition, owner, position)
+	if err != nil {
+		t.Fatalf("create Dimension Hole portal fixture: %v", err)
+	}
+	portal.UniqueID = uid
+	return portal
 }
 
 func selectEntityPosition(regionID int16, x, y, z float32) navmeshv2.RtNavmeshPosition {

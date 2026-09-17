@@ -15,6 +15,7 @@ var (
 	ErrGuildStorageRepositoryUnavailable = errors.New("guild storage repository is unavailable")
 	ErrGuildStorageConflict              = errors.New("guild storage state conflicts with the request")
 	ErrGuildStorageAccessDenied          = errors.New("guild storage access denied")
+	ErrGuildStorageLevelTooLow           = errors.New("guild level is too low for storage")
 	ErrGuildStorageInUse                 = errors.New("guild storage is in use")
 	ErrGuildStorageLeaseRequired         = errors.New("guild storage lease is required")
 	ErrGuildStorageInsufficientGold      = errors.New("insufficient gold")
@@ -54,7 +55,10 @@ type lockedGuildStorage struct {
 }
 
 func validateGuildStorageAccess(rights bool, level byte) error {
-	if !rights || level < minimumGuildStorageLevel {
+	if level < minimumGuildStorageLevel {
+		return ErrGuildStorageLevelTooLow
+	}
+	if !rights {
 		return ErrGuildStorageAccessDenied
 	}
 	return nil
@@ -280,33 +284,55 @@ func (r *SQLGuildStorageRepository) MoveGuildStorage(ctx context.Context, charac
 		return err
 	}
 	var itemID int64
-	var stack uint16
-	if err = tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`STACK_COUNT` FROM `GUILD_STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` WHERE s.`FK_GUILD`=? AND s.`SLOT`=? FOR UPDATE", state.guildID, source).Scan(&itemID, &stack); err != nil {
-		return ErrGuildStorageConflict
-	}
-	if amount == 0 {
-		amount = stack
-	}
-	// Splitting and merging require an authoritative per-item maximum stack,
-	// which the current runtime reference catalog does not expose. Reject such
-	// requests rather than creating an illegal or lossy item stack.
-	if amount != stack {
+	var refID uint32
+	var stack, maxStack int
+	if err = tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`FK_REF_ITEM`,i.`STACK_COUNT`,COALESCE(NULLIF(d.`Stack_Size`,0),1) FROM `GUILD_STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` JOIN `ITEMDATA` d ON d.`ItemID`=i.`FK_REF_ITEM` WHERE s.`FK_GUILD`=? AND s.`SLOT`=? FOR UPDATE", state.guildID, source).Scan(&itemID, &refID, &stack, &maxStack); err != nil {
 		return ErrGuildStorageConflict
 	}
 	var occupied int64
-	scanErr := tx.QueryRowContext(ctx, "SELECT `FK_ITEM` FROM `GUILD_STORAGE` WHERE `FK_GUILD`=? AND `SLOT`=? FOR UPDATE", state.guildID, destination).Scan(&occupied)
-	if scanErr == nil {
+	var occupiedRef uint32
+	var occupiedStack int
+	scanErr := tx.QueryRowContext(ctx, "SELECT s.`FK_ITEM`,i.`FK_REF_ITEM`,i.`STACK_COUNT` FROM `GUILD_STORAGE` s JOIN `ITEM` i ON i.`id`=s.`FK_ITEM` WHERE s.`FK_GUILD`=? AND s.`SLOT`=? FOR UPDATE", state.guildID, destination).Scan(&occupied, &occupiedRef, &occupiedStack)
+	if resolved, valid := resolveStorageMoveAmount(stack, maxStack, amount, scanErr == nil, occupiedRef == refID, occupiedStack); valid {
+		amount = uint16(resolved)
+	} else {
 		return ErrGuildStorageConflict
 	}
-	if !errors.Is(scanErr, sql.ErrNoRows) {
+	if scanErr == nil {
+		if occupiedRef != refID {
+			return ErrGuildStorageConflict
+		}
+		if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", occupiedStack+int(amount), occupied, occupiedStack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrGuildStorageConflict
+		}
+		if int(amount) == stack {
+			if result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `GUILD_STORAGE` WHERE `FK_GUILD`=? AND `SLOT`=? AND `FK_ITEM`=?", state.guildID, source, itemID); deleteErr != nil || !singleAffectedRow(result) {
+				return ErrGuildStorageConflict
+			}
+			if result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `ITEM` WHERE `id`=? AND `STACK_COUNT`=?", itemID, stack); deleteErr != nil || !singleAffectedRow(result) {
+				return ErrGuildStorageConflict
+			}
+		} else if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", stack-int(amount), itemID, stack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrGuildStorageConflict
+		}
+	} else if !errors.Is(scanErr, sql.ErrNoRows) {
 		return scanErr
-	}
-	result, err := tx.ExecContext(ctx, "UPDATE `GUILD_STORAGE` SET `SLOT`=? WHERE `FK_GUILD`=? AND `SLOT`=? AND `FK_ITEM`=?", destination, state.guildID, source, itemID)
-	if err != nil {
-		return err
-	}
-	if err = requireOneGuildStorageRow(result); err != nil {
-		return err
+	} else if int(amount) == stack {
+		result, moveErr := tx.ExecContext(ctx, "UPDATE `GUILD_STORAGE` SET `SLOT`=? WHERE `FK_GUILD`=? AND `SLOT`=? AND `FK_ITEM`=?", destination, state.guildID, source, itemID)
+		if moveErr != nil || !singleAffectedRow(result) {
+			return ErrGuildStorageConflict
+		}
+	} else {
+		newItemID, splitErr := cloneStorageItemStack(ctx, tx, itemID, amount)
+		if splitErr != nil {
+			return splitErr
+		}
+		if result, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM` SET `STACK_COUNT`=? WHERE `id`=? AND `STACK_COUNT`=?", stack-int(amount), itemID, stack); updateErr != nil || !singleAffectedRow(result) {
+			return ErrGuildStorageConflict
+		}
+		if _, insertErr := tx.ExecContext(ctx, "INSERT INTO `GUILD_STORAGE` (`FK_GUILD`,`SLOT`,`FK_ITEM`) VALUES (?,?,?)", state.guildID, destination, newItemID); insertErr != nil {
+			return insertErr
+		}
 	}
 	return commitGuildStorageTransaction(tx, &committed)
 }

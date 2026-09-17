@@ -46,6 +46,28 @@ func TestValidateWorldPartitionRejectsUnsupportedDungeon(t *testing.T) {
 	}
 }
 
+func TestExtendWorldPartitionPublishesDecodedDungeonRegions(t *testing.T) {
+	terrain := &navmeshv2.RtNavmeshTerrain{RtNavmeshBase: navmeshv2.RtNavmeshBase{Filename: "jinsi_floor02.dof"}}
+	loader := &navmeshv2.Loader{
+		DungeonData: map[int16]navmeshv2.DungeonMeshMetadata{-32762: {Region: navmeshv2.NewRegionFromInt16(-32762)}},
+		RegionData:  map[int16]*navmeshv2.RtNavmeshTerrain{-32762: terrain, 7: {}},
+	}
+	partition, err := extendWorldPartitionWithDungeonRegions(worldPartition{regions: []worldPartitionRegion{{id: 7, owner: "West"}}}, loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partition.regions) != 2 || partition.regions[0].id != -32762 || partition.regions[0].owner != "dungeon" || partition.regions[1].id != 7 {
+		t.Fatalf("extended partition = %#v", partition.regions)
+	}
+	loaded, err := stageWorldPartitionFromLoader(loader, partition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded[-32762] != terrain {
+		t.Fatal("decoded dungeon terrain was not staged")
+	}
+}
+
 func TestAddRegionsMissingTerrainDoesNotPartiallyMutateWorld(t *testing.T) {
 	world := &WorldService{
 		mutex: &sync.Mutex{},

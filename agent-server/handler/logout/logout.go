@@ -22,6 +22,9 @@ type LogoutHandler struct {
 	world     interface {
 		GetPlayerByUniqueId(uint32) (*model.Player, error)
 	}
+	community interface {
+		CommunityOffline(context.Context, int) error
+	}
 }
 
 type logoutCountdown struct {
@@ -29,10 +32,19 @@ type logoutCountdown struct {
 	done  chan struct{}
 }
 
-func RegisterLogoutHandler(target *server.Server) {
+func RegisterLogoutHandler(target *server.Server) *LogoutHandler {
 	handler := newLogoutHandler()
 	target.RegisterHandler(opcode.AgentLogoutRequest, handler.handleLogoutPacket)
 	target.RegisterHandler(opcode.AgentLogoutCancelRequest, handler.handleCancelPacket)
+	return handler
+}
+
+func (h *LogoutHandler) ConfigureCommunity(community interface {
+	CommunityOffline(context.Context, int) error
+}) {
+	if h != nil {
+		h.community = community
+	}
 }
 
 func newLogoutHandler() *LogoutHandler {
@@ -176,6 +188,11 @@ func (h *LogoutHandler) doCancelLogout(session *server.Session, _ network.Packet
 func (h *LogoutHandler) cancelOnSessionClose(session *server.Session, countdown *logoutCountdown) {
 	select {
 	case <-session.Done():
+		if h.community != nil && session.UserContext.CharacterID > 0 {
+			if err := h.community.CommunityOffline(context.Background(), session.UserContext.CharacterID); err != nil {
+				logrus.Warnf("publish community offline state: %v", err)
+			}
+		}
 		h.mu.Lock()
 		if h.pending[session.ID] == countdown {
 			h.cancelLocked(session.ID)

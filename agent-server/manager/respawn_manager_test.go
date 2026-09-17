@@ -145,6 +145,19 @@ func TestRespawnManagerRejectsNilReferenceCatalog(t *testing.T) {
 	}
 }
 
+func TestScheduledUniqueSpawnRejectsNonUniqueReference(t *testing.T) {
+	respawn := &RespawnManager{}
+	catalog := model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{
+		4001: {RefObject: model.RefObject{ID: 4001, CodeName: "MOB_TEST_NORMAL", Rarity: int(model.MonsterNormal)}},
+	}})
+	if err := respawn.ConfigureReferenceData(catalog); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := respawn.SpawnScheduledUnique("MOB_TEST_NORMAL", 25000, 0); !errors.Is(err, ErrScheduledUniqueSpawnUnavailable) {
+		t.Fatalf("SpawnScheduledUnique() error = %v, want unique-only rejection", err)
+	}
+}
+
 func TestRespawnManagerSelectsAndScalesRuntimeMonsterClasses(t *testing.T) {
 	base := model.RefChar{
 		RefObject: model.RefObject{ID: 4001, CodeName: "MOB_TEST", TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1}},

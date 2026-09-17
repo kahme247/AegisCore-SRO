@@ -26,7 +26,32 @@ type PartyService struct {
 	itemCursors        map[uint32]int
 	players            PartyPlayerLookup
 	now                func() time.Time
+	gameplayRates      interface{ Current() model.GameplayRates }
 	mutex              sync.Mutex
+}
+
+func (p *PartyService) ConfigureGameplayRates(rates interface{ Current() model.GameplayRates }) {
+	if p != nil {
+		p.gameplayRates = rates
+	}
+}
+
+func (p *PartyService) invitationTTL() time.Duration {
+	if p != nil && p.gameplayRates != nil {
+		if value := p.gameplayRates.Current().PartyInvitationTTLMS; value > 0 {
+			return time.Duration(value) * time.Millisecond
+		}
+	}
+	return partyInvitationTTL
+}
+
+func (p *PartyService) experienceRange() float32 {
+	if p != nil && p.gameplayRates != nil {
+		if value := p.gameplayRates.Current().PartyExperienceRange; value > 0 {
+			return float32(value)
+		}
+	}
+	return PartyExperienceRange
 }
 
 type PartyPlayerLookup interface {

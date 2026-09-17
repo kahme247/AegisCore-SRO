@@ -53,6 +53,8 @@ func TestNPCSelectionTalkDataUsesCountedActionsAndInfoSuffix(t *testing.T) {
 		{codeName: "NPC_SD_T_AREA_THIEF", want: []byte{0, 2, 1, 0x15, 0}},
 		{codeName: "NPC_CH_HUNTER", want: []byte{0, 2, 1, 0x16, 0}},
 		{codeName: "NPC_CH_MERCHANT", want: []byte{0, 2, 1, 0x14, 0}},
+		{codeName: "NPC_CH_GACHA_MACHINE", want: []byte{0, 1, 0x11, 0}},
+		{codeName: "NPC_CH_GACHA_OPERATOR", want: []byte{0, 1, 0x12, 0}},
 		{codeName: "NPC_TEST", want: []byte{0, 1, 2, 0}},
 	}
 

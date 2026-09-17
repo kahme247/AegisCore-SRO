@@ -24,8 +24,8 @@ func TestPlayerJobStateNormalizesInactiveState(t *testing.T) {
 func TestWritePlayerJobStateUsesConditionalLevel(t *testing.T) {
 	inactive := network.EmptyPacket()
 	writePlayerJobState(&inactive, PlayerJob{})
-	if got := inactive.Payload(); len(got) != 1 || got[0] != PlayerJobNone {
-		t.Fatalf("inactive payload = %x", got)
+	if got := inactive.Payload(); len(got) != 2 || got[0] != PlayerJobNone || got[1] != 0 {
+		t.Fatalf("inactive spawn payload = %x, want type/level %x", got, []byte{PlayerJobNone, 0})
 	}
 	active := network.EmptyPacket()
 	writePlayerJobState(&active, PlayerJob{Type: PlayerJobThief, Level: 7})

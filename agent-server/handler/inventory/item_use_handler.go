@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
@@ -37,12 +38,15 @@ type ItemUseHandler struct {
 	send              func(*server.Session, network.Packet) error
 	publish           func(*model.Player, *network.Packet)
 	schedule          func(time.Duration, func())
+	now               func() time.Time
+	randomIntn        func(int) int
 	timedBuffDuration bool
 	returnTeleport    ReturnTeleportCoordinator
 	devilSpirit       model.AvatarInventoryRepository
 	questInstances    *model.QuestInstanceLifecycle
 	instanceEntries   *service.QuestInstanceEntryService
 	instanceTeleport  QuestInstanceEntryCoordinator
+	dimensionHoles    *service.DimensionHolePortalLifecycle
 	party             *service.PartyService
 	nextDungeonKey    func() uint32
 	cos               interface {
@@ -67,7 +71,22 @@ func (h *ItemUseHandler) ConfigureCOS(runtime interface {
 }
 
 func NewItemUseHandler(players PlayerLookup, items model.ItemUseRepository) *ItemUseHandler {
-	return &ItemUseHandler{players: players, useCase: service.NewItemUseService(items), party: service.GetPartyServiceInstance(), nextDungeonKey: model.NextActionUID}
+	h := &ItemUseHandler{
+		players: players, party: service.GetPartyServiceInstance(), nextDungeonKey: model.NextActionUID,
+		now: time.Now, randomIntn: rand.Intn,
+	}
+	itemUse := service.NewItemUseService(items)
+	itemUse.ConfigureItemCureRuntime(
+		func() time.Time { return h.itemUseNow() },
+		func(limit int) int {
+			if h.randomIntn != nil {
+				return h.randomIntn(limit)
+			}
+			return rand.Intn(limit)
+		},
+	)
+	h.useCase = itemUse
+	return h
 }
 
 func (h *ItemUseHandler) ConfigureQuestInstanceEntry(lifecycle *model.QuestInstanceLifecycle, teleport QuestInstanceEntryCoordinator) {
@@ -75,6 +94,12 @@ func (h *ItemUseHandler) ConfigureQuestInstanceEntry(lifecycle *model.QuestInsta
 		h.questInstances = lifecycle
 		h.instanceEntries = service.NewQuestInstanceEntryService(lifecycle, h.party, h.nextDungeonKey)
 		h.instanceTeleport = teleport
+	}
+}
+
+func (h *ItemUseHandler) ConfigureDimensionHolePortals(lifecycle *service.DimensionHolePortalLifecycle) {
+	if h != nil {
+		h.dimensionHoles = lifecycle
 	}
 }
 
@@ -95,6 +120,27 @@ func (h *ItemUseHandler) prepareQuestInstance(ctx context.Context, player *model
 
 func questInstanceEligible(player *model.Player, questID int) bool {
 	return service.QuestInstanceEligible(player, questID)
+}
+
+func dimensionHoleOpenerEligible(player *model.Player, definition model.DimensionHoleDefinition) bool {
+	if player == nil || player.GetUniqueID() == 0 {
+		return false
+	}
+	player.Mutex.Lock()
+	level := player.Level
+	player.Mutex.Unlock()
+	cos := player.COSState.Snapshot()
+	if level < int(definition.MinLevel) || level > int(definition.MaxLevel) || model.HasActiveJobSuit(player) || cos.Mounted || player.GetPVPCape() != model.PvpCapeNone {
+		return false
+	}
+	// The authored Dimension Hole description permits creating its gate only in
+	// a town. Use the maintained vSRO 1.188 region catalog instead of accepting
+	// an arbitrary safe-looking world position.
+	if !model.IsTownRegionV188(player.GetNavmeshPosition().Region.ID) {
+		return false
+	}
+	party := player.GetParty()
+	return party != nil && party.MasterUniqueID == player.GetUniqueID()
 }
 
 func RegisterItemUseHandler(target *server.Server, items model.ItemUseRepository, returnTeleport ...ReturnTeleportCoordinator) *ItemUseHandler {
@@ -147,6 +193,16 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	inventory := player.GetInventory()
 	item, itemExists := inventory.Items[slot]
 	ref, refExists := model.RefItems[item.GetRefObjectID()]
+	if itemExists && refExists && ref.IsUseable && ref.TypeID1 == model.TypeID1Item && ref.TypeID2 == 2 && ref.TypeID3 == 3 {
+		if wireRequest.HasOption || wireRequest.HasCOSTarget || len(wireRequest.ItemData) != 0 ||
+			itemType != model.InventoryItemType(ref) || item.ID <= 0 || !player.ActivateMagicCube(item.ID) {
+			return h.sendFailure(session)
+		}
+		// Magic-cube activation selects linked storage without consuming the
+		// container. The common stock B04C success therefore reports zero
+		// consumed quantity while preserving the request's item type.
+		return h.sendPacket(session, buildItemUseSuccess(slot, itemType, 0))
+	}
 	isReverse := itemExists && refExists && model.IsReverseReturnScroll(ref)
 	if isReverse {
 		if !wireRequest.HasOption {
@@ -202,9 +258,36 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		}
 		preparedInstance = &preparedQuestInstanceEntry{instance: prepared.Instance, members: prepared.Members}
 	}
+	var preparedDimensionHole *service.PreparedDimensionHolePortal
+	dimensionHoleDefinition, isDimensionHole := model.DimensionHoleDefinitionForReference(ref)
+	if refExists && isDimensionHole {
+		if wireRequest.HasCOSTarget || len(wireRequest.ItemData) != 0 || itemType != model.InventoryItemType(ref) ||
+			h.dimensionHoles == nil || !dimensionHoleOpenerEligible(player, dimensionHoleDefinition) {
+			return h.sendFailure(session)
+		}
+		preparedDimensionHole, err = h.dimensionHoles.Prepare(ctx, dimensionHoleDefinition, player, player.GetNavmeshPosition())
+		if err != nil {
+			logrus.WithError(err).Debug("rejected Dimension Hole preparation")
+			return h.sendFailure(session)
+		}
+	}
 	var result model.ItemUseResult
+	var publishedDimensionHole *service.DimensionHolePortalInstance
 	usesCOSSlotSelector := refExists && (model.IsCOSExtension(ref) || model.IsCOSPetTimedService(ref) || model.IsCOSRevival(ref))
-	if usesCOSSlotSelector || wireRequest.HasCOSTarget {
+	if preparedDimensionHole != nil {
+		dimensionHoleUse, ok := h.useCase.(service.DimensionHoleItemUseCase)
+		if !ok {
+			_ = h.dimensionHoles.Abort(ctx, preparedDimensionHole)
+			return h.sendFailure(session)
+		}
+		instance, publishErr := h.dimensionHoles.Publish(ctx, preparedDimensionHole)
+		if publishErr != nil {
+			logrus.WithError(publishErr).Debug("rejected Dimension Hole portal publication before item commit")
+			return h.sendFailure(session)
+		}
+		publishedDimensionHole = &instance
+		result, err = dimensionHoleUse.UseDimensionHoleItem(ctx, player, slot, itemType, dimensionHoleDefinition.ItemRefID)
+	} else if usesCOSSlotSelector || wireRequest.HasCOSTarget {
 		targeted, ok := h.useCase.(service.TargetedItemUseCase)
 		if !ok {
 			return h.sendFailure(session)
@@ -282,6 +365,13 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		result, err = h.useCase.UseItem(ctx, player, slot, itemType, reverseOption, reverseMapID)
 	}
 	if err != nil {
+		if publishedDimensionHole != nil && !errors.Is(err, model.ErrItemUseOutcomeUnknown) {
+			if destroyErr := h.dimensionHoles.Destroy(context.WithoutCancel(ctx), publishedDimensionHole.Portal.GetUniqueID()); destroyErr != nil {
+				return errors.Join(model.ErrItemUseOutcomeUnknown, err, destroyErr)
+			}
+		} else if preparedDimensionHole != nil && publishedDimensionHole == nil {
+			_ = h.dimensionHoles.Abort(ctx, preparedDimensionHole)
+		}
 		if preparedInstance != nil {
 			_ = h.questInstances.Destroy(ctx, preparedInstance.instance.Scope, preparedInstance.members)
 		}
@@ -293,6 +383,21 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		}
 		logrus.WithError(err).Debug("rejected inventory item use")
 		return h.sendFailure(session)
+	}
+	if preparedDimensionHole != nil {
+		if result.DimensionHolePortal == nil || *result.DimensionHolePortal != preparedDimensionHole.Definition {
+			return fmt.Errorf("%w: committed Dimension Hole item does not match its prepared portal", model.ErrItemUseOutcomeUnknown)
+		}
+	} else if result.DimensionHolePortal != nil {
+		return fmt.Errorf("%w: committed Dimension Hole item has no prepared portal", model.ErrItemUseOutcomeUnknown)
+	}
+	if result.ItemCure != nil && result.ItemCureApplication.Changed {
+		appliedAt := result.ItemCureAppliedAt
+		if appliedAt.IsZero() {
+			appliedAt = h.itemUseNow()
+		}
+		h.publishPlayerBadEffectState(player, appliedAt)
+		h.scheduleItemCureRefreshes(player, appliedAt, result.ItemCureApplication.RefreshAt)
 	}
 	if result.COSTemporaryRideRefObjectID != 0 {
 		activator, ok := h.cos.(interface {
@@ -546,12 +651,47 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 				player.SendToSelf(&stats)
 			}
 		})
+	} else if result.ItemCure != nil {
+		// Cure status publication is completed immediately after the committed
+		// consume result, before the stock B04C success response.
 	} else if result.ItemService != nil {
 		h.publishItemService(player, *result.ItemService, result.ItemServiceToken, result.ReplacedItemServiceToken)
 	} else {
 		player.SendVitalsUpdate()
 	}
 	return nil
+}
+
+func (h *ItemUseHandler) itemUseNow() time.Time {
+	if h != nil && h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+func (h *ItemUseHandler) publishPlayerBadEffectState(player *model.Player, now time.Time) {
+	mask, levels := player.CombatBadEffectState(now)
+	packet := model.BuildBadEffectUpdate(player.GetUniqueID(), mask, levels)
+	h.publishPacket(player, &packet)
+}
+
+func (h *ItemUseHandler) scheduleItemCureRefreshes(player *model.Player, now time.Time, refreshAt []time.Time) {
+	if len(refreshAt) == 0 {
+		return
+	}
+	schedule := h.schedule
+	if schedule == nil {
+		schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
+	}
+	for _, expiration := range refreshAt {
+		delay := expiration.Sub(now)
+		if delay < 0 {
+			delay = 0
+		}
+		schedule(delay, func() {
+			h.publishPlayerBadEffectState(player, h.itemUseNow())
+		})
+	}
 }
 
 func (h *ItemUseHandler) activateDevilSpirit(ctx context.Context, session *server.Session, player *model.Player, slot byte) error {

@@ -93,6 +93,26 @@ func TestEntitySpawnSerializesPersistedInventorySizeEquippedSlotsAndOptLevels(t 
 	}
 }
 
+func TestEntitySpawnSerializesAvatarAppearanceInSlotOrder(t *testing.T) {
+	player := deterministicInventorySerializationPlayer(NewInventory(nil))
+	player.AvatarInventory = NewInventory(map[byte]Item{
+		2: {SRObject: SRObject{RefObjectID: 0x3000, TypeInfo: TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable}}, OptLevel: 5},
+		0: {SRObject: SRObject{RefObjectID: 0x1000, TypeInfo: TypeInfo{TypeID1: TypeID1Item, TypeID2: TypeID2Wearable}}, OptLevel: 3},
+	})
+
+	for _, serialize := range []func(*network.Packet, *Player){
+		func(packet *network.Packet, player *Player) { WriteEntitySpawn(packet, player) },
+		func(packet *network.Packet, player *Player) { WriteEntitySpawnData(packet, player) },
+	} {
+		packet := network.EmptyPacket()
+		serialize(&packet, player)
+		payload := packet.Payload()
+		if got := payload[10:22]; !bytes.Equal(got, []byte{5, 2, 0x00, 0x10, 0x00, 0x00, 3, 0x00, 0x30, 0x00, 0x00, 5}) {
+			t.Fatalf("avatar appearance = %x, want size/count and slot-ordered ref/opt pairs", got)
+		}
+	}
+}
+
 func deterministicInventoryForSerialization(order []byte) Inventory {
 	itemsBySlot := map[byte]Item{
 		SlotHelmet: {

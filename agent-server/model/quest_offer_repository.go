@@ -27,6 +27,7 @@ type QuestOffer struct {
 	DayOrNight     uint32
 	SharedProgress bool
 	InstantReady   bool
+	DeliveryItems  bool
 }
 
 type QuestOfferRepository interface {
@@ -63,7 +64,7 @@ const selectAvailableQuestOffers = `SELECT quest.ID,quest.CODE_NAME,quest.NAME_S
 	          AND script_reward.ITEM_COUNT>1 THEN 1 ELSE reward.SELECTION_COUNT END,
 	COALESCE(policy.LIMIT_TIME,0),COALESCE(policy.DAY_LIMIT,0),COALESCE(policy.DAY_OR_NIGHT,0),
 	CASE WHEN kill_objective.QUEST_ID IS NOT NULL AND (SELECT COUNT(*) FROM SRO_SHARD.REF_QUEST_KILL_OBJECTIVE kill_all WHERE kill_all.QUEST_ID=quest.ID AND kill_all.VARIANT_INDEX=0 AND kill_all.RUNTIME_ENABLED=1)>1 THEN 1 ELSE 0 END,
-	quest.CODE_NAME='QNO_WC_FERRY4_1'
+	quest.CODE_NAME='QNO_WC_FERRY4_1',standard_deliver.QUEST_ID IS NOT NULL
 FROM SRO_SHARD.REF_QUEST quest
 JOIN SRO_SHARD.REF_QUEST_START_CONDITION start_condition
   ON start_condition.QUEST_ID=quest.ID AND start_condition.VARIANT_INDEX=0
@@ -99,8 +100,9 @@ LEFT JOIN SRO_SHARD.REF_QUEST_TALISMAN_OBJECTIVE talisman
   ON talisman.QUEST_ID=quest.ID AND talisman.VARIANT_INDEX=0 AND talisman.MISSION_INDEX=0 AND talisman.RUNTIME_ENABLED=1
 WHERE quest.SERVICE=1 AND start_npc.NPC_REF_OBJECT_ID=?
 	AND (dialog.QUEST_ID IS NULL OR current_quest.QUEST_ID IS NOT NULL OR dialog.TARGET_NPC_REF_OBJECT_ID<>start_npc.NPC_REF_OBJECT_ID)
-  AND (current_quest.STATUS IN (1,6,7,8) OR
-       character_state.CURRENT_LEVEL BETWEEN start_condition.LEVEL_LOWER AND start_condition.LEVEL_UPPER)
+	AND (standard_deliver.QUEST_ID IS NULL OR current_quest.STATUS IN (1,7,8) OR standard_deliver.TARGET_NPC_REF_OBJECT_ID<>start_npc.NPC_REF_OBJECT_ID)
+	AND (current_quest.STATUS IN (1,6,7,8) OR
+       character_state.CURRENT_LEVEL >= start_condition.LEVEL_LOWER)
 	AND ((start_condition.SYSTEM_REQUIRED=0 AND NOT EXISTS (
 	       SELECT 1 FROM SRO_SHARD.REF_QUEST_JOB_START_CONDITION job_condition
 	       WHERE job_condition.QUEST_ID=quest.ID AND job_condition.VARIANT_INDEX=0))
@@ -190,7 +192,7 @@ func (r *SQLQuestOfferRepository) ListAvailable(ctx context.Context, characterID
 		var offer QuestOffer
 		if err = rows.Scan(&offer.QuestID, &offer.CodeName, &offer.NameKey, &offer.PayKey, &offer.PayContentsKey,
 			&offer.ObjectiveKey, &offer.RequiredCount, &offer.TaskCount, &offer.SelectionCount, &offer.TimerDuration,
-			&offer.DayLimit, &offer.DayOrNight, &offer.SharedProgress, &offer.InstantReady); err != nil {
+			&offer.DayLimit, &offer.DayOrNight, &offer.SharedProgress, &offer.InstantReady, &offer.DeliveryItems); err != nil {
 			return nil, fmt.Errorf("scan available quest offer: %w", err)
 		}
 		if offer.TaskCount > 1 {

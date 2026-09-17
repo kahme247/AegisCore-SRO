@@ -33,6 +33,10 @@ type respawnPositionWorld interface {
 	CanMoveDirectly(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) bool
 }
 
+type dungeonRespawnPositionWorld interface {
+	GetRegion(int16) (navmeshv2.RtNavmeshTerrain, error)
+}
+
 var respawnManagerInstance *RespawnManager
 var respawnManagerOnce sync.Once
 
@@ -43,6 +47,8 @@ var ErrRespawnReferenceCatalogUnavailable = errors.New("respawn reference catalo
 // ErrRespawnReferenceCharacterUnavailable identifies a spawn row whose NPC
 // reference does not exist in the configured snapshot.
 var ErrRespawnReferenceCharacterUnavailable = errors.New("respawn reference character is not configured")
+
+var ErrScheduledUniqueSpawnUnavailable = errors.New("scheduled unique spawn is unavailable")
 
 func GetRespawnManagerInstance() *RespawnManager {
 	respawnManagerOnce.Do(func() {
@@ -225,6 +231,55 @@ func (s *RespawnManager) SpawnQuestNPC(codeName string, center navmeshv2.RtNavme
 	return npc, nil
 }
 
+// SpawnServerEventMonster materializes the binary-authored class-3 reward at
+// its exact region/local coordinates. SR_GameServer 0x0066FF00 reads the
+// reward subtype as RefObjID + RegionID + XYZ and does not use a nest radius.
+func (s *RespawnManager) SpawnServerEventMonster(refObjectID uint32, regionID int16, x, y, z float32) (*model.NPC, error) {
+	if s == nil || refObjectID == 0 || regionID == 0 {
+		return nil, ErrRespawnReferenceCharacterUnavailable
+	}
+	catalog := s.configuredReferenceData()
+	if catalog == nil {
+		return nil, ErrRespawnReferenceCatalogUnavailable
+	}
+	refChar, exists := catalog.Character(refObjectID)
+	if !exists {
+		return nil, fmt.Errorf("%w: %d", ErrRespawnReferenceCharacterUnavailable, refObjectID)
+	}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(regionID), Offset: math32.NewVector3(x, y, z)}
+	return s.SpawnQuestNPC(refChar.CodeName, position, 0)
+}
+
+// SpawnScheduledUnique creates one transient unique at an authored spawn nest.
+// It deliberately does not bind the NPC to the area's ordinary population, so
+// an event execution cannot permanently increase automatic respawn counts.
+func (s *RespawnManager) SpawnScheduledUnique(codeName string, regionID int16, radius float32) (*model.NPC, error) {
+	if s == nil || codeName == "" || regionID == 0 || radius < 0 || radius > 1000 {
+		return nil, fmt.Errorf("%w: invalid request", ErrScheduledUniqueSpawnUnavailable)
+	}
+	catalog := s.configuredReferenceData()
+	if catalog == nil {
+		return nil, ErrRespawnReferenceCatalogUnavailable
+	}
+	refChar, exists := catalog.CharacterByCodeName(codeName)
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", ErrRespawnReferenceCharacterUnavailable, codeName)
+	}
+	if !model.MonsterRarity(refChar.Rarity).IsUniqueBoss() {
+		return nil, fmt.Errorf("%w: %s is not a unique monster", ErrScheduledUniqueSpawnUnavailable, codeName)
+	}
+	world := service.GetWorldServiceInstance()
+	for _, area := range world.GetSpawnsForRegion(regionID) {
+		if area != nil && area.NpcCodeName == codeName {
+			if radius == 0 {
+				radius = float32(area.GenerateRadius)
+			}
+			return s.SpawnQuestNPC(codeName, area.Position, radius)
+		}
+	}
+	return nil, fmt.Errorf("%w: no authored nest for %s in region %d", ErrScheduledUniqueSpawnUnavailable, codeName, regionID)
+}
+
 func questSpawnOffset(radius float32, angleUnit, distanceUnit float64) (float32, float32) {
 	if radius <= 0 {
 		return 0, 0
@@ -303,9 +358,27 @@ func generateRandomPositionInRadius(
 	}
 
 	authoredGlobal := s.Position.GetGlobalCoordinates()
-	authored, err := world.NewPosFromGlobalCoordinates(authoredGlobal)
-	if err != nil {
-		return navmeshv2.RtNavmeshPosition{}, errors.Wrap(err, "authored respawn position is unavailable")
+	var authored navmeshv2.RtNavmeshPosition
+	var err error
+	if navmeshv2.IsDungeonRegion(s.Position.Region.ID) {
+		resolver, ok := world.(dungeonRespawnPositionWorld)
+		if !ok {
+			return navmeshv2.RtNavmeshPosition{}, errors.New("dungeon respawn position resolver is unavailable")
+		}
+		region, regionErr := resolver.GetRegion(s.Position.Region.ID)
+		if regionErr != nil {
+			return navmeshv2.RtNavmeshPosition{}, errors.Wrap(regionErr, "authored dungeon respawn region is unavailable")
+		}
+		cell, cellErr := region.ResolveCell(s.Position.Offset)
+		if cellErr != nil {
+			return navmeshv2.RtNavmeshPosition{}, errors.Wrap(cellErr, "authored dungeon respawn position is unavailable")
+		}
+		authored = navmeshv2.RtNavmeshPosition{Region: region.Region, Offset: s.Position.Offset.Clone(), Cell: &cell}
+	} else {
+		authored, err = world.NewPosFromGlobalCoordinates(authoredGlobal)
+		if err != nil {
+			return navmeshv2.RtNavmeshPosition{}, errors.Wrap(err, "authored respawn position is unavailable")
+		}
 	}
 	authored.Offset.Y = s.Position.Offset.Y
 	authored.Heading = s.Position.Heading
@@ -316,6 +389,27 @@ func generateRandomPositionInRadius(
 
 	radius := float32(s.GenerateRadius)
 	for attempt := 0; attempt < maxRespawnPositionAttempts; attempt++ {
+		if navmeshv2.IsDungeonRegion(authored.Region.ID) {
+			resolver := world.(dungeonRespawnPositionWorld)
+			region, regionErr := resolver.GetRegion(authored.Region.ID)
+			if regionErr != nil {
+				continue
+			}
+			offset := math32.NewVector3(
+				authored.Offset.X+randomOffset(radius),
+				authored.Offset.Y,
+				authored.Offset.Z+randomOffset(radius),
+			)
+			cell, cellErr := region.ResolveCell(offset)
+			if cellErr != nil {
+				continue
+			}
+			candidate := navmeshv2.RtNavmeshPosition{Region: region.Region, Offset: offset, Cell: &cell, Heading: s.Position.Heading}
+			if world.CanMoveDirectly(authored, candidate) {
+				return candidate, nil
+			}
+			continue
+		}
 		candidateGlobal := math32.NewVector3(
 			authoredGlobal.X+randomOffset(radius),
 			authoredGlobal.Y,

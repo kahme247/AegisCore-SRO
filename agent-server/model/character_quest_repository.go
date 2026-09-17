@@ -142,13 +142,20 @@ func (r *SQLCharacterQuestRepository) Activate(ctx context.Context, characterID 
 	if r == nil || r.shard == nil {
 		return CharacterQuest{}, ErrCharacterQuestRepositoryUnavailable
 	}
+	return activateCharacterQuestRecord(ctx, r.shard, characterID, quest)
+}
+
+func activateCharacterQuestRecord(ctx context.Context, executor frameworkdb.Execer, characterID int, quest CharacterQuest) (CharacterQuest, error) {
+	if executor == nil {
+		return CharacterQuest{}, ErrCharacterQuestRepositoryUnavailable
+	}
 	instantFerry := quest.QuestCodeName == "QNO_WC_FERRY4_1" && quest.Status == QuestRewardReady && quest.TaskCount == 0 && quest.ObjectiveKey == ""
 	if characterID <= 0 || quest.QuestID <= 0 || (quest.Status != QuestActive && !instantFerry) {
 		return CharacterQuest{}, fmt.Errorf("invalid character quest activation")
 	}
 	quest.CompletedAt = nil
 	activateSources := QuestTransitionSources(QuestTransitionActivate)
-	result, err := r.shard.ExecContext(ctx, activateCharacterQuest,
+	result, err := executor.ExecContext(ctx, activateCharacterQuest,
 		characterID, quest.QuestID, quest.Status, quest.AchievementCount, quest.Data1, quest.Data2, quest.TimerDuration,
 		activateSources[0], activateSources[1], activateSources[0], activateSources[1], activateSources[0], activateSources[1],
 		activateSources[0], activateSources[1], activateSources[0], activateSources[1], activateSources[0], activateSources[1],
