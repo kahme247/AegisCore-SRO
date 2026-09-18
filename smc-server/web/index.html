@@ -56,6 +56,68 @@
 
       <section id="summary-grid" class="summary-grid" aria-label="Catalog totals"></section>
 
+      <section class="panel">
+        <div class="panel-heading"><div><p class="eyebrow">LIVE CONFIGURATION</p><h2>Effective gameplay rates</h2></div><span class="muted">Includes active scheduled overrides</span></div>
+        <div id="gameplay-rate-grid" class="summary-grid"></div>
+        <form id="runtime-gameplay-form" class="schedule-field-grid">
+          <div><label>Party EXP range</label><input name="partyExpRange" type="number" min="1" required></div>
+          <div><label>Ground pickup range</label><input name="groundPickupRange" type="number" min="1" required></div>
+          <div><label>Job-suit delay (ms)</label><input name="jobSuitEquipDelayMs" type="number" min="1000" max="255000" required></div>
+          <div><label>Party invite TTL (ms)</label><input name="partyInvitationTtlMs" type="number" min="1" required></div>
+          <fieldset><legend>Advanced Monster AI</legend>
+            <div><label>Attack cooldown (ms)</label><input name="mobAttackCooldownMs" type="number" min="1" required></div>
+            <div><label>Wander delay (ms)</label><input name="mobWanderDelayMs" type="number" min="1" required></div>
+            <div><label>Aggro minimum (ms)</label><input name="mobAggroReactionMinMs" type="number" min="1" required></div>
+            <div><label>Aggro maximum (ms)</label><input name="mobAggroReactionMaxMs" type="number" min="1" required></div>
+            <div><label>Pursuit refresh (ms)</label><input name="mobPursuitRefreshMs" type="number" min="1" required></div>
+          </fieldset>
+          <fieldset><legend>Economy</legend>
+            <div><label>Guild creation cost</label><input name="guildCreationCost" type="number" min="1" required></div>
+            <div><label>Academy creation cost</label><input name="academyCreationCost" type="number" min="1" required></div>
+            <div><label>Academy minimum level</label><input name="academyMinimumLevel" type="number" min="1" max="255" required></div>
+            <div><label>Guild-war maximum wager</label><input name="guildWarMaximumWager" type="number" min="1" max="4294967295" required></div>
+            <div><label>Market lifetime (minutes)</label><input name="marketLifetimeMinutes" type="number" min="1" required></div>
+          </fieldset>
+          <fieldset><legend>Lifecycle</legend>
+            <div><label>Character deletion retention (hours)</label><input name="characterDeletionHours" type="number" min="1" required></div>
+            <div><label>Recall confirmation TTL (ms)</label><input name="recallConfirmationTtlMs" type="number" min="1" required></div>
+            <div><label>Guild election duration (minutes)</label><input name="guildElectionDurationMin" type="number" min="1" required></div>
+            <div><label>Guild-master absence (days)</label><input name="guildMasterAbsenceDays" type="number" min="1" required></div>
+            <div><label>Recent-member window (days)</label><input name="guildRecentMemberDays" type="number" min="1" required></div>
+          </fieldset>
+          <fieldset><legend>Social &amp; PvP</legend>
+            <div><label>Friend limit</label><input name="friendLimit" type="number" min="1" max="255" required></div>
+            <div><label>Block limit</label><input name="blockLimit" type="number" min="1" max="255" required></div>
+            <div><label>Memo limit</label><input name="memoLimit" type="number" min="1" max="255" required></div>
+            <div><label>PK penalty per kill</label><input name="pkPenaltyPerKill" type="number" min="1" max="2147483647" required></div>
+            <div><label>Berserk duration per point (ms)</label><input name="berserkDurationPerPointMs" type="number" min="1" required></div>
+          </fieldset>
+          <fieldset><legend>Events</legend>
+            <div><label>Winter drop chance (basis points)</label><input name="winterDropChanceBp" type="number" min="0" max="10000" required></div>
+            <div><label>Winter item count</label><input name="winterDropItemCount" type="number" min="1" required></div>
+            <div><label>Battle Arena ticket rate (%)</label><input name="battleArenaTicketRate" type="number" min="0" max="100" required></div>
+            <div><label>Battle Arena world IDs</label><input name="battleArenaWorldIds" maxlength="255" placeholder="42,43,44" required></div>
+          </fieldset>
+          <fieldset><legend>HWAN balance</legend>
+            <div><label>Base chance (basis points)</label><input name="hwanBaseChanceBp" type="number" min="0" max="10000" required></div>
+            <div><label>Over-level grace</label><input name="hwanOverlevelGrace" type="number" min="0" required></div>
+            <div><label>Penalty per level (basis points)</label><input name="hwanPenaltyPerLevelBp" type="number" min="0" max="10000" required></div>
+            <div><label>Minimum chance (basis points)</label><input name="hwanMinimumChanceBp" type="number" min="0" max="10000" required></div>
+            <div><label>Giant multiplier</label><input name="hwanGiantMultiplier" type="number" min="1" required></div>
+            <div><label>Elite multiplier</label><input name="hwanEliteMultiplier" type="number" min="1" required></div>
+          </fieldset>
+          <fieldset><legend>Progression &amp; mastery</legend>
+            <div><label>Server maximum level</label><input name="serverMaxLevel" type="number" min="1" max="255" required></div>
+            <div><label>EU mastery maximum total</label><input name="euMasteryMaxTotal" type="number" min="1" required></div>
+            <div><label>EU mastery points per level</label><input name="euMasteryPointsPerLevel" type="number" min="1" required></div>
+            <div><label>CH mastery maximum total</label><input name="chMasteryMaxTotal" type="number" min="1" required></div>
+            <div><label>CH mastery points per level</label><input name="chMasteryPointsPerLevel" type="number" min="1" required></div>
+            <div><label>Maximum speed-effect stack (minutes)</label><input name="maxSpeedEffectMinutes" type="number" min="1" required></div>
+          </fieldset>
+          <button type="submit">Save runtime controls</button><p id="runtime-gameplay-status" class="muted"></p>
+        </form>
+      </section>
+
       <section class="content-grid">
         <article class="panel">
           <div class="panel-heading"><div><p class="eyebrow">RUNTIME</p><h2>Service topology</h2></div><span class="muted">TCP reachability</span></div>
@@ -119,6 +181,83 @@
         </article>
       </section>
 
+      <section id="notices-view" class="directory-view" hidden>
+        <article class="directory-hero game-control-hero">
+          <div>
+            <p class="eyebrow">DURABLE SCHEDULER</p>
+            <h2>Notices &amp; events</h2>
+            <p>Create restart-safe server notices and inspect their next execution time.</p>
+          </div>
+          <span class="data-badge live-command-badge">PERSISTED Â· AUDITED</span>
+        </article>
+        <article class="panel broadcast-panel">
+          <div class="panel-heading"><div><p class="eyebrow">NEW SCHEDULE</p><h2>Schedule one-time notice</h2></div><span class="muted">UTC execution</span></div>
+          <form id="schedule-form">
+            <label for="schedule-id">Schedule ID</label>
+            <input id="schedule-id" maxlength="128" pattern="[A-Za-z0-9._-]+" required placeholder="maintenance-warning-1">
+            <label for="schedule-name">Display name</label>
+            <input id="schedule-name" maxlength="128" required placeholder="Maintenance warning">
+            <label for="schedule-handler">Action</label>
+            <select id="schedule-handler"><option value="server.notice">Server notice</option><option value="unique.spawn">Unique monster spawn</option><option value="rates.experience.start">Start EXP/SP rate event</option><option value="rates.experience.finish">Finish EXP/SP rate event</option><option value="rates.mob.start">Start mob/drop rate event</option><option value="rates.mob.finish">Finish mob/drop rate event</option></select>
+            <label for="schedule-recurrence">Recurrence</label>
+            <select id="schedule-recurrence"><option value="one_time">One time</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select>
+            <div id="schedule-one-time-fields">
+              <label for="schedule-run-at">Run at</label>
+              <input id="schedule-run-at" type="datetime-local" required>
+            </div>
+            <div id="schedule-recurring-fields" hidden>
+              <div class="schedule-field-grid">
+                <div><label for="schedule-active-from">First date</label><input id="schedule-active-from" type="date"></div>
+                <div><label for="schedule-active-until">Last date</label><input id="schedule-active-until" type="date"></div>
+                <div><label for="schedule-time">Local time</label><input id="schedule-time" type="time" step="1"></div>
+                <div><label for="schedule-interval">Every</label><input id="schedule-interval" type="number" min="1" max="365" value="1"></div>
+              </div>
+              <label for="schedule-timezone">IANA timezone</label>
+              <input id="schedule-timezone" maxlength="64" placeholder="Africa/Cairo">
+              <fieldset id="schedule-weekdays" hidden>
+                <legend>Weekdays</legend>
+                <label><input type="checkbox" data-bit="0">Mon</label><label><input type="checkbox" data-bit="1">Tue</label><label><input type="checkbox" data-bit="2">Wed</label><label><input type="checkbox" data-bit="3">Thu</label><label><input type="checkbox" data-bit="4">Fri</label><label><input type="checkbox" data-bit="5">Sat</label><label><input type="checkbox" data-bit="6">Sun</label>
+              </fieldset>
+            </div>
+            <div id="schedule-notice-fields"><label for="schedule-message">Message</label><textarea id="schedule-message" minlength="1" maxlength="200" required placeholder="Maintenance starts in 10 minutes"></textarea></div>
+            <div id="schedule-unique-fields" hidden>
+              <label for="schedule-unique-code">Unique code name</label><input id="schedule-unique-code" maxlength="128" placeholder="MOB_CH_TIGERWOMAN">
+              <div class="schedule-field-grid">
+                <div><label for="schedule-unique-region">Authored region ID</label><input id="schedule-unique-region" type="number" min="-32768" max="32767"></div>
+                <div><label for="schedule-unique-radius">Spawn radius</label><input id="schedule-unique-radius" type="number" min="0" max="1000" step="0.1" value="0"></div>
+              </div>
+            </div>
+            <div id="schedule-rate-fields" hidden>
+              <label for="schedule-rate-event">Rate event ID</label><input id="schedule-rate-event" maxlength="128" placeholder="double-exp-weekend">
+              <div id="schedule-rate-values" class="schedule-field-grid">
+                <div><label for="schedule-exp-rate">EXP %</label><input id="schedule-exp-rate" type="number" min="1" max="1000000" value="200"></div>
+                <div><label for="schedule-party-exp-rate">Party EXP %</label><input id="schedule-party-exp-rate" type="number" min="1" max="1000000" value="200"></div>
+                <div><label for="schedule-sp-rate">SP %</label><input id="schedule-sp-rate" type="number" min="1" max="1000000" value="200"></div>
+              </div>
+            </div>
+            <div id="schedule-mob-rate-fields" hidden>
+              <label for="schedule-mob-rate-event">Mob/drop event ID</label><input id="schedule-mob-rate-event" maxlength="128" placeholder="double-drops-weekend">
+              <div id="schedule-mob-rate-values" class="schedule-field-grid">
+                <div><label for="schedule-mob-count-rate">Monster count %</label><input id="schedule-mob-count-rate" type="number" min="1" max="1000000" value="100"></div>
+                <div><label for="schedule-mob-respawn-rate">Respawn %</label><input id="schedule-mob-respawn-rate" type="number" min="1" max="1000000" value="100"></div>
+                <div><label for="schedule-loot-drop-rate">Loot drop %</label><input id="schedule-loot-drop-rate" type="number" min="1" max="1000000" value="200"></div>
+              </div>
+            </div>
+            <div class="broadcast-footer"><span>Creation is written to the audit log</span><button type="submit">Create schedule</button></div>
+          </form>
+          <p id="schedule-status" class="command-status" role="status"></p>
+        </article>
+        <article class="panel audit-panel">
+          <div class="panel-heading"><div><p class="eyebrow">DEFINITIONS</p><h2>Scheduled work</h2></div><button id="schedule-refresh" type="button">Refresh</button></div>
+          <div id="schedule-results" class="audit-results"><p class="empty-state">Loading schedules.</p></div>
+          <p id="schedule-error" class="dashboard-error" role="alert"></p>
+        </article>
+        <article class="panel audit-panel">
+          <div class="panel-heading"><div><p class="eyebrow">EXECUTIONS</p><h2 id="schedule-history-title">Run history</h2></div><span class="muted">Select a schedule</span></div>
+          <div id="schedule-history" class="audit-results"><p class="empty-state">Choose History beside a schedule.</p></div>
+        </article>
+      </section>
+
       <section id="administration-view" class="directory-view" hidden>
         <article class="directory-hero administration-hero">
           <div>
@@ -138,6 +277,8 @@
               <option value="operator.logout">Operator logout</option>
               <option value="player.disconnect">Player disconnect</option>
               <option value="world.broadcast">World broadcast</option>
+              <option value="schedule.create">Schedule creation</option>
+              <option value="schedule.enable">Schedule enable/disable</option>
             </select>
             <label for="audit-limit">Records</label>
             <select id="audit-limit"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>

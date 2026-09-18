@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	"github.com/Harvi8/AegisCore/framework/security/mtls"
 	smcconfig "github.com/Harvi8/AegisCore/smc-server/config"
 )
@@ -18,6 +20,7 @@ import (
 const agentOnlinePlayersPath = "/v1/management/players"
 const agentPlayerDisconnectsPath = "/v1/management/player-disconnects"
 const agentBroadcastsPath = "/v1/management/broadcasts"
+const agentSchedulesPath = "/v1/management/schedules"
 
 var (
 	ErrAgentPlayerNotOnline       = errors.New("player is not online in Agent")
@@ -77,6 +80,74 @@ type BroadcastResult struct {
 
 type BroadcastSource interface {
 	Broadcast(context.Context, BroadcastCommand) (BroadcastResult, error)
+}
+
+type ScheduleSource interface {
+	ListSchedules(context.Context) ([]scheduler.Definition, error)
+	GetSchedule(context.Context, string) (scheduler.Definition, error)
+	CreateSchedule(context.Context, scheduler.Definition) (scheduler.Definition, error)
+	SetScheduleEnabled(context.Context, string, uint64, bool) (scheduler.Definition, error)
+	ScheduleRuns(context.Context, string, int) ([]scheduler.RunRecord, error)
+}
+
+func (c *AgentManagementClient) SetScheduleEnabled(ctx context.Context, id string, expectedVersion uint64, enabled bool) (scheduler.Definition, error) {
+	endpoint, err := c.managementEndpoint(agentSchedulesPath + "/" + url.PathEscape(id))
+	if err != nil {
+		return scheduler.Definition{}, err
+	}
+	payload, _ := json.Marshal(struct {
+		ExpectedVersion uint64 `json:"expectedVersion"`
+		Enabled         bool   `json:"enabled"`
+	}{expectedVersion, enabled})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("build Agent schedule-update request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("request Agent schedule update: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return scheduler.Definition{}, fmt.Errorf("Agent schedule update returned status %d", response.StatusCode)
+	}
+	var definition scheduler.Definition
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&definition); err != nil {
+		return scheduler.Definition{}, fmt.Errorf("decode Agent schedule update: %w", err)
+	}
+	return definition, nil
+}
+
+func (c *AgentManagementClient) ScheduleRuns(ctx context.Context, id string, limit int) ([]scheduler.RunRecord, error) {
+	endpoint, err := c.managementEndpoint(agentSchedulesPath + "/" + url.PathEscape(id) + "/runs?limit=" + fmt.Sprintf("%d", limit))
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Agent schedule-history request: %w", err)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("request Agent schedule history: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("Agent schedule history returned status %d", response.StatusCode)
+	}
+	var result struct {
+		Runs []scheduler.RunRecord `json:"runs"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode Agent schedule history: %w", err)
+	}
+	if result.Runs == nil {
+		result.Runs = []scheduler.RunRecord{}
+	}
+	return result.Runs, nil
 }
 
 type AgentManagementClient struct {
@@ -203,4 +274,96 @@ func (c *AgentManagementClient) Broadcast(ctx context.Context, command Broadcast
 		return BroadcastResult{}, errors.New("Agent broadcast acknowledgement was invalid")
 	}
 	return result, nil
+}
+
+func (c *AgentManagementClient) ListSchedules(ctx context.Context) ([]scheduler.Definition, error) {
+	endpoint, err := c.managementEndpoint(agentSchedulesPath)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Agent schedule-list request: %w", err)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("request Agent schedule list: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("Agent schedule list returned status %d", response.StatusCode)
+	}
+	var result struct {
+		Schedules []scheduler.Definition `json:"schedules"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode Agent schedule list: %w", err)
+	}
+	if result.Schedules == nil {
+		result.Schedules = []scheduler.Definition{}
+	}
+	return result.Schedules, nil
+}
+
+func (c *AgentManagementClient) GetSchedule(ctx context.Context, id string) (scheduler.Definition, error) {
+	endpoint, err := c.managementEndpoint(agentSchedulesPath + "/" + url.PathEscape(id))
+	if err != nil {
+		return scheduler.Definition{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("build Agent schedule request: %w", err)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("request Agent schedule: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return scheduler.Definition{}, fmt.Errorf("Agent schedule returned status %d", response.StatusCode)
+	}
+	var definition scheduler.Definition
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&definition); err != nil {
+		return scheduler.Definition{}, fmt.Errorf("decode Agent schedule: %w", err)
+	}
+	return definition, nil
+}
+
+func (c *AgentManagementClient) CreateSchedule(ctx context.Context, definition scheduler.Definition) (scheduler.Definition, error) {
+	endpoint, err := c.managementEndpoint(agentSchedulesPath)
+	if err != nil {
+		return scheduler.Definition{}, err
+	}
+	payload, err := json.Marshal(definition)
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("encode Agent schedule: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("build Agent schedule-create request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return scheduler.Definition{}, fmt.Errorf("request Agent schedule creation: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return scheduler.Definition{}, fmt.Errorf("Agent schedule creation returned status %d", response.StatusCode)
+	}
+	var created scheduler.Definition
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&created); err != nil {
+		return scheduler.Definition{}, fmt.Errorf("decode Agent schedule creation: %w", err)
+	}
+	return created, nil
+}
+
+func (c *AgentManagementClient) managementEndpoint(path string) (string, error) {
+	if c == nil || c.client == nil || c.endpoint == "" {
+		return "", errors.New("Agent management client is unavailable")
+	}
+	return strings.TrimSuffix(c.endpoint, agentOnlinePlayersPath) + path, nil
 }

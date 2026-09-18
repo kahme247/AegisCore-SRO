@@ -56,6 +56,7 @@ func NewSMCServer(settings smcconfig.Settings) (*SMCServer, error) {
 	var livePlayers LivePlayerSource
 	var disconnects PlayerDisconnectSource
 	var broadcasts BroadcastSource
+	var schedules ScheduleSource
 	if settings.AgentManagementEnabled {
 		managementClient, clientErr := NewAgentManagementClient(settings)
 		err = clientErr
@@ -65,6 +66,7 @@ func NewSMCServer(settings smcconfig.Settings) (*SMCServer, error) {
 		livePlayers = managementClient
 		disconnects = managementClient
 		broadcasts = managementClient
+		schedules = managementClient
 	}
 	audit, err := OpenJSONLAuditRecorder(settings.AuditPath)
 	if err != nil {
@@ -80,6 +82,7 @@ func NewSMCServer(settings smcconfig.Settings) (*SMCServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	app.schedules = schedules
 	listener, err := net.Listen("tcp", net.JoinHostPort(settings.Host, fmt.Sprintf("%d", settings.Port)))
 	if err != nil {
 		return nil, fmt.Errorf("bind SMC Server listener: %w", err)

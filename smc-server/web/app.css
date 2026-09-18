@@ -66,6 +66,16 @@ main { min-width: 0; padding: 2rem clamp(1.25rem, 3vw, 3.5rem) 4rem; background:
 .command-copy { max-width: 680px; color: var(--muted); font-size: .82rem; line-height: 1.6; }
 #broadcast-form label { display: block; margin: 1.3rem 0 .5rem; color: #aab5c4; font-size: .68rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 #broadcast-form textarea { width: 100%; min-height: 130px; resize: vertical; padding: .9rem; color: var(--ink); background: #0b1118; border: 1px solid var(--line); border-radius: 5px; outline: none; }
+#schedule-form label { display: block; margin: 1rem 0 .4rem; color: #aab5c4; font-size: .68rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+#schedule-form input, #schedule-form textarea, #schedule-form select { width: 100%; padding: .8rem; color: var(--ink); background: #0b1118; border: 1px solid var(--line); border-radius: 5px; outline: none; }
+#schedule-form textarea { min-height: 100px; resize: vertical; }
+.schedule-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1rem; }
+#schedule-weekdays { margin: 1rem 0 0; padding: .7rem; border: 1px solid var(--line); border-radius: 5px; }
+#schedule-weekdays legend { color: var(--muted); font-size: .7rem; }
+#schedule-weekdays label { display: inline-flex; align-items: center; gap: .3rem; margin: .35rem .75rem .35rem 0; }
+#schedule-weekdays input { width: auto; }
+.schedule-controls { display: flex; align-items: center; justify-content: flex-end; gap: .5rem; flex-wrap: wrap; }
+.schedule-controls button { padding: .45rem .65rem; color: var(--ink); background: #17212d; border: 1px solid var(--line); border-radius: 4px; }
 #broadcast-form textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #59d9a414; }
 .broadcast-footer { display: flex; align-items: center; justify-content: space-between; margin-top: .65rem; color: var(--muted); font-size: .67rem; }
 .broadcast-footer button, .broadcast-button { padding: .7rem .95rem; color: #07110e !important; background: var(--accent) !important; border: 0 !important; border-radius: 5px; font-weight: 800; }

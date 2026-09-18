@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Harvi8/AegisCore/framework/scheduler"
 	smcconfig "github.com/Harvi8/AegisCore/smc-server/config"
 )
 
@@ -309,6 +311,114 @@ func TestBroadcastIsValidatedAndAudited(t *testing.T) {
 	}
 	if _, mutated := audit.events[0].Details["recipientCount"]; mutated {
 		t.Fatalf("attempt audit was mutated: %#v", audit.events[0])
+	}
+}
+
+type fixedSchedules struct {
+	definitions []scheduler.Definition
+	created     scheduler.Definition
+}
+
+func (source *fixedSchedules) ListSchedules(context.Context) ([]scheduler.Definition, error) {
+	return append([]scheduler.Definition(nil), source.definitions...), nil
+}
+
+func (source *fixedSchedules) GetSchedule(_ context.Context, id string) (scheduler.Definition, error) {
+	for _, definition := range source.definitions {
+		if definition.ID == id {
+			return definition, nil
+		}
+	}
+	return scheduler.Definition{}, errors.New("not found")
+}
+
+func (source *fixedSchedules) CreateSchedule(_ context.Context, definition scheduler.Definition) (scheduler.Definition, error) {
+	source.created = definition
+	definition.Version = 1
+	definition.NextRunAt = definition.RunAt
+	source.definitions = append(source.definitions, definition)
+	return definition, nil
+}
+
+func (source *fixedSchedules) SetScheduleEnabled(_ context.Context, id string, expectedVersion uint64, enabled bool) (scheduler.Definition, error) {
+	for index := range source.definitions {
+		if source.definitions[index].ID == id && source.definitions[index].Version == expectedVersion {
+			source.definitions[index].Enabled = enabled
+			source.definitions[index].Version++
+			return source.definitions[index], nil
+		}
+	}
+	return scheduler.Definition{}, errors.New("changed")
+}
+
+func (*fixedSchedules) ScheduleRuns(context.Context, string, int) ([]scheduler.RunRecord, error) {
+	return []scheduler.RunRecord{}, nil
+}
+
+func TestScheduleCreationIsValidatedAuditedAndListed(t *testing.T) {
+	app, audit := newTestApp(t)
+	schedules := &fixedSchedules{}
+	app.schedules = schedules
+	runAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	definition := scheduler.Definition{ID: "notice-1", Name: "Notice", Handler: "server.notice", Recurrence: scheduler.OneTime, Phase: scheduler.Warning, Scope: scheduler.AllShards, Timezone: "UTC", RunAt: runAt, MisfirePolicy: scheduler.RunOnce, Enabled: true, Payload: []byte(`{"message":"hello"}`)}
+	body, _ := json.Marshal(definition)
+	request := authenticatedRequest(t, app, http.MethodPost, "/api/v1/schedules")
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	app.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || schedules.created.ID != "notice-1" {
+		t.Fatalf("response=%d %s created=%+v", response.Code, response.Body.String(), schedules.created)
+	}
+	if len(audit.events) != 2 || audit.events[0].Action != "schedule.create" || audit.events[0].Outcome != "attempt" || audit.events[1].Outcome != "success" {
+		t.Fatalf("audit events = %#v", audit.events)
+	}
+	listRequest := authenticatedRequest(t, app, http.MethodGet, "/api/v1/schedules")
+	listResponse := httptest.NewRecorder()
+	app.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK || !bytes.Contains(listResponse.Body.Bytes(), []byte(`"id":"notice-1"`)) {
+		t.Fatalf("list response=%d %s", listResponse.Code, listResponse.Body.String())
+	}
+	updateRequest := authenticatedRequest(t, app, http.MethodPatch, "/api/v1/schedules/notice-1")
+	updateRequest.Body = io.NopCloser(bytes.NewBufferString(`{"expectedVersion":1,"enabled":false}`))
+	updateResponse := httptest.NewRecorder()
+	app.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusOK || !bytes.Contains(updateResponse.Body.Bytes(), []byte(`"enabled":false`)) {
+		t.Fatalf("update response=%d %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	if len(audit.events) != 4 || audit.events[2].Action != "schedule.enable" || audit.events[3].Outcome != "success" {
+		t.Fatalf("audit events after update = %#v", audit.events)
+	}
+	runsRequest := authenticatedRequest(t, app, http.MethodGet, "/api/v1/schedules/notice-1/runs")
+	runsResponse := httptest.NewRecorder()
+	app.ServeHTTP(runsResponse, runsRequest)
+	if runsResponse.Code != http.StatusOK || !bytes.Contains(runsResponse.Body.Bytes(), []byte(`"runs":[]`)) {
+		t.Fatalf("runs response=%d %s", runsResponse.Code, runsResponse.Body.String())
+	}
+}
+
+func TestScheduleCreationAcceptsDailyAndWeeklyDefinitions(t *testing.T) {
+	app, _ := newTestApp(t)
+	schedules := &fixedSchedules{}
+	app.schedules = schedules
+	from := scheduler.Date{Year: 2026, Month: time.July, Day: 25}
+	until := scheduler.Date{Year: 2026, Month: time.August, Day: 25}
+	definitions := []scheduler.Definition{
+		{ID: "daily-notice", Name: "Daily notice", Handler: "server.notice", Recurrence: scheduler.Daily, Phase: scheduler.Warning, Scope: scheduler.AllShards, Timezone: "Africa/Cairo", ActiveFrom: &from, ActiveUntil: &until, SecondOfDay: 20 * 3600, Interval: 1, MisfirePolicy: scheduler.RunOnce, Enabled: true, Payload: []byte(`{"message":"Daily event"}`)},
+		{ID: "weekly-notice", Name: "Weekly notice", Handler: "server.notice", Recurrence: scheduler.Weekly, Phase: scheduler.Warning, Scope: scheduler.AllShards, Timezone: "Africa/Cairo", ActiveFrom: &from, ActiveUntil: &until, SecondOfDay: 21 * 3600, Interval: 1, WeekdayMask: 1<<0 | 1<<4, MisfirePolicy: scheduler.RunOnce, Enabled: true, Payload: []byte(`{"message":"Weekly event"}`)},
+		{ID: "unique-event", Name: "Tiger Woman", Handler: "unique.spawn", Recurrence: scheduler.OneTime, Phase: scheduler.Start, Scope: scheduler.AllShards, Timezone: "UTC", RunAt: time.Now().UTC().Add(time.Hour), MisfirePolicy: scheduler.RunOnce, Enabled: true, Payload: []byte(`{"codeName":"MOB_CH_TIGERWOMAN","regionId":25000,"radius":25}`)},
+	}
+	for _, definition := range definitions {
+		body, _ := json.Marshal(definition)
+		request := authenticatedRequest(t, app, http.MethodPost, "/api/v1/schedules")
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		app.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s response=%d %s", definition.ID, response.Code, response.Body.String())
+		}
+	}
+	if len(schedules.definitions) != 3 || schedules.definitions[1].WeekdayMask != 0x11 || schedules.definitions[2].Handler != "unique.spawn" {
+		t.Fatalf("definitions = %+v", schedules.definitions)
 	}
 }
 
