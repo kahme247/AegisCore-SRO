@@ -1,4 +1,6 @@
 #include "client_trace.h"
+#include "core/runtime.h"
+#include "diagnostics/crash_integration.h"
 
 #include <windows.h>
 
@@ -204,10 +206,10 @@ void WriteLoadMarker() {
     _snwprintf_s(dumpDirectory, sizeof(dumpDirectory) / sizeof(dumpDirectory[0]), _TRUNCATE, L"%s\\Dump", directory);
     CreateDirectoryW(dumpDirectory, nullptr);
     wchar_t markerPath[MAX_PATH]{};
-    _snwprintf_s(markerPath, sizeof(markerPath) / sizeof(markerPath[0]), _TRUNCATE, L"%s\\AegisClientDiagnostics.loaded", dumpDirectory);
+    _snwprintf_s(markerPath, sizeof(markerPath) / sizeof(markerPath[0]), _TRUNCATE, L"%s\\Aegis.loaded", dumpDirectory);
     HANDLE marker = CreateFileW(markerPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (marker != INVALID_HANDLE_VALUE) {
-        static constexpr char message[] = "Aegis client diagnostics loaded\r\n";
+        static constexpr char message[] = "Aegis client runtime loaded\r\n";
         DWORD written = 0;
         WriteFile(marker, message, sizeof(message) - 1, &written, nullptr);
         CloseHandle(marker);
@@ -225,7 +227,7 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI RegisterClientExceptionFilter(LPTOP_LEVEL_EX
     return g_realSetUnhandledExceptionFilter(DiagnosticExceptionFilter);
 }
 
-void InstallCrashIntegration() {
+void InstallCrashIntegrationImpl() {
     // The pinned client calls this import slot at 0x008328F0 during startup.
     // The launcher injects this DLL before resume, so patch the IAT now and
     // retain the client filter when it registers a moment later.
@@ -252,6 +254,14 @@ void InstallCrashIntegration() {
 
 } // namespace
 
+namespace aegis::diagnostics {
+
+void InstallCrashIntegration() {
+    InstallCrashIntegrationImpl();
+}
+
+} // namespace aegis::diagnostics
+
 extern "C" __declspec(dllexport) void __stdcall AegisTraceRecordPacket(
     std::uint8_t direction,
     std::uint8_t phase,
@@ -272,8 +282,7 @@ extern "C" __declspec(dllexport) BOOL __stdcall AegisTraceFlush(const wchar_t* o
 
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(module);
-        InstallCrashIntegration();
+        return aegis::core::Initialize(module) ? TRUE : FALSE;
     }
     return TRUE;
 }

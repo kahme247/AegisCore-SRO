@@ -5,7 +5,7 @@
 
 int wmain(int argc, wchar_t* argv[]) {
     if (argc != 3) {
-        std::fwprintf(stderr, L"Usage: AegisClientDiagnosticsInjector.exe <process-id> <absolute-dll-path>\n");
+        std::fwprintf(stderr, L"Usage: AegisInjector.exe <process-id> <absolute-dll-path>\n");
         return 2;
     }
 
