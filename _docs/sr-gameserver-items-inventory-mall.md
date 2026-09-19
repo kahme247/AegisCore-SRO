@@ -391,9 +391,10 @@ The complete client-side TypeID2/TypeID3 width table, including equipment,
 stone/assimilation, gacha, quantity, container/COS, and rent branches, is
 cross-indexed in [`vsro188-client-decoder-layouts.md`](vsro188-client-decoder-layouts.md#alchemy-result-prefixes-0xb150-0xb151-and-0xb16a).
 
-The maintained serializer maps the confirmed gacha tail to the existing
-`Item.MagicOptions` collection: it writes a bounded count (`0..12`) followed
-by each option's two `u32` fields. This supplies the confirmed wire shape
+The maintained serializer maps the confirmed TypeID4 `2` gacha coupon tail to
+the existing `Item.MagicOptions` collection: it writes a bounded count (`0..12`)
+followed by each option's two `u32` fields. TypeID4 `1` normal POP cards carry
+only the common `u16` quantity. This supplies the confirmed wire shape
 without inventing gacha-specific SQL columns or meanings; an item with no
 hydrated options correctly emits count zero.
 
@@ -1675,6 +1676,71 @@ common `+0x230` consumption boundary. The confirmed dispatch matrix is:
 | `0x0C` | `7` | `0x004A08E0` |
 | `0x0D` | `12` | item virtual `+0x520` |
 | `0x0D` | other | item virtual `+0x4D4` |
+
+The Dimension Hole item family is the TypeID3=`0x0C`, TypeID4=`7` branch at
+`0x004A08E0`. The callback validates the authored level range, region/service
+state, and party-master identity, then builds an internal service/action record
+with observed discriminator bytes `9` and `5` and submits it through
+`0x005F7440`. In `SR_GameServer.exe` (image base `0x00401000`), the resulting
+`trs_sm_gameworldjob` response handler at `0x005F83D0` reads the selected world
+ID from job offset `+52`, combines it with the returned layer, and calls the
+player virtual at `+0x144` (`0x00485F60`) with the response event byte at
+offset `+108`. That callback continues through the registered quest/event
+boundary; it still supplies no local destination coordinate or client entry
+opcode. The public common object `19556`
+(`INS_QUEST_TELEPORT`) carries private `Link=7`; it must be joined to
+`REF_OBJ_STRUCT_VSRO.ID=7`, not to a struct row with public ID `19556`. The
+struct row's preserved payload is only `Dummy_Data=0` in the current import, so
+entry behavior remains fail-closed until the dynamic service/task context is
+recovered. The matching `gameworldconfigdata.txt` groups author level bounds,
+job-clothes removal, unmounted ride/trade COS, and no free-PVP voucher; the
+runtime revalidates those known restrictions. Each group also contains the
+three disappearance values `3600000`, `600000`, and `300000`, but their phase
+mapping is not yet proven and is not treated as a portal lifetime.
+
+The untouched `gosro-sql-reference` `_RefGame_World` rows add a separate
+server-side lifecycle contract for worlds `63..84`: `WorldEntryType=0`,
+`WorldEntranceType=0`, `WorldLeaveType=0`, `WorldDurationTime=7200000`, and
+`WorldEmptyRemainTime=600000`. `_RefGameWorldGroup_Config` also records
+`GROUP_CONFIG_INS_GOD.ENTER_WORLD_GROUP_COOL_TIME=300`; stock
+`SR_GameServer.exe` reads that key at `0x0060B640`, while the Normalize-A
+configuration loader at `0x00608630` installs the level, job-clothes, COS, and
+free-PVP entry restrictions. The exact point that starts the 300-second group
+timer is still unproven, so it is catalog evidence rather than an enforced
+cooldown.
+
+#### TypeID3 `2`: direct player-cure semantics
+
+For TypeID3 `2` outside the separate TypeID4 `7` COS branch,
+`0x0049ACA0` calls primary item virtual `+0x4D0`. The
+`CGItemExpendable` vtable at `0x00AEB2B4` resolves that slot to
+`0x0049B710`. The active vSRO catalog supplies two direct player families:
+
+| Full TypeID | Catalog rows | Native parameter/effect contract |
+| --- | --- | --- |
+| `3/3/2/1` | `ITEM_ETC_CURE_RANDOM_01..04`, `ITEM_QNO_TQ_MAGICPOWDER_3_02` | Param1 is the eligible abnormal mask (`0x017FAFC0`), Param2 is cure grade, Param3 is base chance, and the maximum selected count is one |
+| `3/3/2/6` | `ITEM_ETC_CURE_ALL_01..05` | Param1..Param6 independently shorten Freeze, Frostbite, Shock, Burn, Poison, and Zombie |
+
+The TypeID4 `1` path passes `{ mask, chance, grade }` to `0x004A56C0`
+with count one. That helper gathers active matching abnormal records and
+randomizes their order through `0x004A6560`. For the selected record, a grade
+difference above zero changes the effective chance to
+`baseChance / (statusGrade - cureGrade)`; `0x005A1A20 -> 0x00599CC0` then
+performs the chance decision. Success removes that one status.
+
+The TypeID4 `6` path loads all six values at `0x0049AC50`. For active low
+abnormal buckets `0..5`, `0x004A56C0` calls `0x00410B40`, whose exact
+milliseconds-per-authored-unit multipliers are `97, 250, 750, 500, 1000,
+750`. The resulting duration is subtracted from the status clock; the status
+is removed only when that makes it expire. High-bit curse records are not
+changed by this branch.
+
+Both branches return item-use status `1` from `0x0049B710` even when no
+eligible abnormal exists, a random roll fails, or a duration reduction does
+not fully expire a status. The common `0x0049ACA0 -> 0x00510980` path therefore
+still consumes one item. A changed status causes the aggregate abnormal state
+to be republished; a true no-effect use does not. TypeID4 `7` Grass of Life
+items and TypeID4 `8` mall bags remain separate, unresolved families.
 
 #### TypeID3 `0x0C`, TypeID4 `5`: recovered callback and consumption edge
 
@@ -3416,3 +3482,37 @@ and [`004883E0_FUN_004883e0.c`](../../analysis/decompiled/alchemy-shardmanager/i
     `_STRG_ADD_PACKAGEITEM_CORE` slot/count/creator rules. Operation `0x2B` is
     the separate token-payment variant and must debit token stacks rather than
     being labeled as specialty purchase.
+
+The restored `SRO_VT_SHARD` reference database closes the storage naming gap
+for this build: its implementation uses `_InventoryForLinkedStorage` with
+`LinkedItemID bigint, Slot tinyint, ItemID bigint`. `_STRG_MOVE_ITEM` names
+operation `39` as PC inventory to magic cube and `40` as magic cube to PC
+inventory; the `@GuildID` argument is repurposed as the linked cube item ID.
+`_STRG_DEL_ITEM` names operation `41` as deletion from the magic cube and
+passes linked-storage mode `2` to `_STRG_DEL_ITEM_NoTX`. Cube activation through
+`_STRG_ADD_LINKED_STORAGE` allocates the reference-defined capacity and writes
+item data `255`. This establishes persistence roles but not the runtime
+active-cube selector used by the context-free `0x27` request, so the maintained
+Agent still fails these mutations closed.
+
+The active selector is now bounded to the player-owned `CGStorage` object.
+`0x004B9150`, `0x004B91D0`, and `0x004B92B0` identify themselves through
+diagnostics as `CGStorage::PushItem`, `CGStorage::PopItem`, and
+`CGStorage::CanPushItem`. Their operation factory `0x004A6A50` selects storage
+type `6` as vtable `0x00AECBF4`, whose RTTI owner is
+`CGMagicCubeStorageOP`; the concrete push/pop/capacity methods are
+`0x004BC150`, `0x004BC370`, and `0x004BC4F0`. Thus operation `0x27` is
+context-free only on the wire: it acts on the already-active type-6 storage
+object. The maintained Agent now mirrors this authority boundary: selecting a
+persistent TypeID1=`3`, TypeID2=`2`, TypeID3=`3` item through `0x704C` records
+that ITEM identity as the player's active cube without consuming it. Cube
+mutations are composed through an atomic linked-storage transaction that
+validates ownership and capacity before split, merge, or relink publication.
+
+The request-dispatch initializer at `0x0050CE80` further narrows the wire
+lifecycle. It installs operation `0x27` at table address `0x00CD3C90`
+(`0x00526F20`) and `0x28` at `0x00CD3C98` (`0x00527090`), while the `0x29`
+entry at `0x00CD3CA0` remains null after the table is zeroed at `0x00ACBBF0`.
+Thus `0x29` is not a client deletion request in this build. It is server
+completion vocabulary for an internally resolved linked-storage deletion;
+only `0x27` and `0x28` may be accepted from client `0x7034` traffic.

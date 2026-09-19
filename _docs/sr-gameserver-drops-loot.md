@@ -826,7 +826,11 @@ recovered item-family vtable, virtual `+0xF8` is `0x00485EE0` (the byte at
 the item state object `+0x30`) and virtual `+0x368` is `0x00484CF0`.
 `0x00484D10` accumulates the delta at item `+0x3C`, compares it with the
 float at `item->data(+0x34)->ref(+0x18)+0x84`, and on reaching that separate
-reference-controlled threshold calls `+0x368`. That implementation calls
+reference-controlled threshold calls `+0x368`. The maintained reference
+catalog maps this field to `_RefObjCommon.DecayTime`/`ITEMDATA.Decay_Time`;
+ordinary gold and consumable rows carry `180000`. AegisCore now uses that
+per-reference millisecond duration for final ground-item despawn. That
+implementation calls
 virtual `+0x1F0` with action byte `3`; the common item implementation
 `0x00484A20` stores that byte in the state object.
 
@@ -838,8 +842,8 @@ route, separate from the 30.0 ownership-clear event and from successful
 pickup removal. The expiry virtuals themselves do not invoke `+0x364`,
 `0x00485150`, or the CMsgBlockObject `0x3016` writer; any client visibility
 removal would have to be an indirect subscriber/removal edge after
-`0x00417090`. The field at reference `+0x84`, the unit of its threshold, and
-that later client visibility-removal delivery remain unrecovered. See
+`0x00417090`. The later client visibility-removal delivery edge remains
+unrecovered. See
 `analysis/decompiled/pickup-transfer/expiry-vs-3016-boundary.txt`.
 
 ### Ground-item runtime structure (recovered subset)
@@ -1023,7 +1027,12 @@ roll = ((rand2 << 15) | rand1) % 1,000,000
 success when roll <= record.chance * globalItemDropFactor
 ```
 
-Both comparisons and the multiplication are floating-point in the recovered routine. `globalItemDropFactor` is the process-global at `0x00B45BC0` in this binary; its configuration loader logs it as `Item Drop Ratio`.
+Both comparisons and the multiplication are floating-point in the recovered
+routine. The kill coordinator `0x004C12B0` reads process-global
+`0x00C82520`, loaded from `DropItemRatio`, and passes it to `0x007245C0`.
+The native loader clamps this item probability factor to `1.0..3.0`;
+AegisCore deliberately permits higher positive administrator values while
+preserving the same probability multiplication.
 
 On success, the routine allocates an item data object, installs the record's reference item ID, count/stack data, drop-type byte, up to twelve magic-option ID/value pairs, and optional rent-item data, then links it into the caller's output list. The confirmed record-relative fields are:
 
@@ -1221,12 +1230,13 @@ attempts in that coordinator invocation.
 ### Configured gold factor boundary
 
 The executable's configuration loader independently logs `Gold Drop Amount
-Factor` and stores its parsed value at `0x00C82524`. The recovered
-`0x00724330 -> 0x00726900` gold generation chain does not read that address;
-its only directly observed constant multiplier is the mode-specific `9.0`
-described above. The point at which, or whether, the configured factor is
-consumed by another gold path remains unrecovered. It must not be substituted
-for any part of the confirmed formula.
+Factor` and stores its parsed value at `0x00C82524`. The post-generation mob
+drop materializer `0x004C3F60` reads that value, subtracts the neutral `1.0`,
+combines it with the eligible owner modifier, and updates the generated gold
+item's amount through `0x0049A090`. It does not change the `_RefDropGold`
+probability comparison. AegisCore therefore exposes a separate
+`GOLD_DROP_AMOUNT_RATE_PERCENT` control and applies it only after a successful
+gold roll.
 
 ### Pickup credit for generated gold
 
@@ -1821,7 +1831,59 @@ The catalog also proves inventory/item hydration queries joining `_Inventory` an
   large player amount-credit pickup separately enqueues the `_ADDLOGITEM` audit job, but that is not proof of
   synchronous SQL completion.
 
-## 7. Evidence matrix and remaining boundaries
+## 7. Binary-specific event loot boundaries
+
+These paths are not part of the ordinary monster-drop coordinator and must
+not be enabled merely because an ordinary drop-rate multiplier is configured.
+
+### Battle Arena ticket
+
+`CBattleArenaInfoPoint` initialization (`0x00663530`) reads
+`BATTLE_ARENA_TICKET_DROP_RATE` into its byte at `+0x40`. Its monster-death
+handlers (`0x00663CA0` and `0x00663DC0`) call `0x00662840` only inside the
+Arena runtime. That helper rolls through `0x00599CC0(rate, accumulator, 1111)`
+and, on success, invokes the dead monster's `+0x254` drop virtual with
+`ITEM_ETC_BATTLE_ARENA_TICKET`, count `1`, and the drop-context owner value.
+The probability helper clamps the configured rate to `0..100`, uses
+`rand() % 101 <= rate`, and maintains its native adaptive accumulator under
+key `1111`. This is Arena-event state, not a global monster ticket drop.
+The supplied Media catalog identifies the nine Arena instance worlds as
+`INS_ARENA_{OCCUPY,FLAG,SCORE}_{8,16,32}` (world IDs `42..50`). Every matching
+config group authors `BATTLE_ARENA_TICKET_DROP_RATE=0`. The maintained Agent
+therefore defaults `BATTLE_ARENA_TICKET_DROP_RATE` to zero, accepts only
+`0..100`, requires one of those world IDs plus a nonzero instance layer, and
+keeps the recovered adaptive accumulator isolated per packed match scope.
+Changing this control does not multiply ordinary loot or affect quest worlds.
+
+### Winter Event 2009
+
+The event constructor at `0x00876DF0` supplies the catalog constants used by
+`0x00877870`: monster `MOB_EV_WINTER_SNOWMAN`, drop item
+`ITEM_ETC_E091216_SNOWFLAKE`, count `1`, and event probability value `50`.
+The value at event `+0x8E4` is the resolved snowman reference ID (not a world
+ID). The handler requires a monster-class object whose reference matches that
+ID, requires the global event controller to accept the configured probability,
+then invokes the monster's `+0x254` drop virtual with the drop-context owner.
+`ITEM_ETC_E091216_PINE` is also present in the quest catalog, but this handler
+does not drop it. The event enable/timing gate remains mandatory; these
+constants do not authorize an unconditional snowman or ordinary-monster hook.
+The maintained Agent implements this handler behind
+`AGENT_FEATURE_WINTER_EVENT_2009_ENABLED`. Startup resolves both authored code
+names from the published reference snapshot and fails when either is missing.
+The 50-percent event roll is applied after ordinary selection and is not
+scaled by the ordinary loot-rate control.
+
+### Customizing-reserved assignments
+
+`_REFCUSTOMIZINGRESERVEDITEMDROPFORMONSTER` is a global profile-customization
+catalog, not a direct per-monster event hook. Its six payload fields are
+`CountryMask`, `RefItemID`, `ProbRelative`, `ProbAbsolute`, `AssignedGroup`,
+and `DropCount`; the low two country-mask bits expand to country profiles 0
+and 1, negative groups use the item's native class/default group, and authored
+positive groups are converted to zero-based internal groups. The maintained
+loader preserves this distinction in migration `000108`.
+
+## 8. Evidence matrix and remaining boundaries
 
 ### Maintained Agent pickup handoff
 

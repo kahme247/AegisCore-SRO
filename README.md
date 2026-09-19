@@ -30,6 +30,10 @@ for a basic server.
 - Validate packets against sanitized vSRO 1.188 captures.
 - Remove remaining provisional packet fields.
 - Prevent malformed data from crashing the client or server.
+- Keep the automated two-client spawn/despawn matrix green for players, mobs,
+  ground drops, growth pets, ride transports, service NPCs, and verified
+  specialized structures. This protects packet boundaries but does not replace
+  stock-client capture validation.
 
 ### 2. Playable core
 

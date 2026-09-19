@@ -14,6 +14,7 @@
 /VSRO_TestIn(EPVP)/
 /Script/
 /.gocache/
+/.gotmp/
 /.cache/
 /.env
 /VSRO_Client/
@@ -25,11 +26,20 @@
 /main.obj
 /tmp_read_minidump.go
 /nul
+/VSROMAX V4.4 - PUBLIC/
+
 
 # Local nested working repositories (preserved, never stage from root)
 /.local/deploy-cos-login/
 /.local/SilkroadLauncher-source/
 /.tools/clean-agent-build/
+
+# Generated local analysis, scratch, and artifact outputs
+/.codex-tmp/
+/**/graphify-out/
+/outputs/
+*.inspect.ndjson
+/agent-server/Dockerfile.dungeon-temp
 
 # Test binary, build with `go test -c`
 *.test

@@ -109,15 +109,18 @@ services:
       DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
       AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/aegiscore/Data/Data.pk2}
+      AGENT_DUNGEON_TELEPORT_DATA_PATH: /etc/aegiscore/media-textdata/teleportdata.txt
       AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/aegiscore/Data/prelinked_navdata.gob}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
       AGENT_GIANT_MONSTER_SPAWN_RATIO: ${AGENT_GIANT_MONSTER_SPAWN_RATIO:-1000}
       AGENT_TRADE_SAFETY_OPTION: ${AGENT_TRADE_SAFETY_OPTION:-0}
       AGENT_TRADE_SAFETY_NUM: ${AGENT_TRADE_SAFETY_NUM:-8}
+      AGENT_FEATURE_WINTER_EVENT_2009_ENABLED: ${AGENT_FEATURE_WINTER_EVENT_2009_ENABLED:-0}
+      BATTLE_ARENA_TICKET_DROP_RATE: ${BATTLE_ARENA_TICKET_DROP_RATE:-0}
       AGENT_DIAGNOSTICS_ENABLED: ${AGENT_DIAGNOSTICS_ENABLED:-0}
       AGENT_DIAGNOSTICS_PORT: ${AGENT_DIAGNOSTICS_PORT:-6060}
-      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-0}
+      SRO_SESSION_TRACE: ${SRO_SESSION_TRACE:-1}
       SRO_COMBAT_TRACE: ${SRO_COMBAT_TRACE:-0}
       SRO_SESSION_TRACE_DIR: /var/log/aegis/session-traces
       SRO_SESSION_TRACE_CAPACITY: ${SRO_SESSION_TRACE_CAPACITY:-256}
@@ -140,6 +143,7 @@ services:
       AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore-management/smc-ca.pem
     volumes:
     - ./Data:/etc/aegiscore/Data:ro
+    - ./Media/Media/server_dep/silkroad/textdata/teleportdata.txt:/etc/aegiscore/media-textdata/teleportdata.txt:ro
     - ./.local/session-traces/agent:/var/log/aegis/session-traces
     - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
     - "${SRO_AGENT_MANAGEMENT_TLS_DIR:-./.local/smc-agent-tls}:/run/secrets/aegiscore-management:ro"

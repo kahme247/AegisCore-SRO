@@ -589,7 +589,8 @@ The remaining `0x008BE4F0` TypeID2 branches have these direct reads:
 | TypeID2 `2` (container/COS family) | state- and subtype-gated container record; the initial state is `u8`, and active subtypes add `u32` reference/name/lifetime/buff data selected by the client predicates |
 | TypeID2 `3`, TypeID3 `5`, TypeID4 other than `1` | `u32` amount branch (gold-like item) |
 | TypeID2 `3`, TypeID3 `11`, TypeID4 `1` or `2` | `u16` quantity, then `u8` assimilation |
-| TypeID2 `3`, TypeID3 `14`, TypeID4 `1` or `2` | `u16` quantity, then `u8 magicCount` and `magicCount * u64` entries (maximum `12`) |
+| TypeID2 `3`, TypeID3 `14`, TypeID4 `1` | `u16` quantity only |
+| TypeID2 `3`, TypeID3 `14`, TypeID4 `2` | `u16` quantity, then `u8 magicCount` and `magicCount * u64` entries (maximum `12`) |
 | other TypeID2 `3` expendables | `u16` quantity |
 
 The masks are directly tested by `0x00538410`, `0x00871DE0`,

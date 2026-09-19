@@ -91,6 +91,10 @@ Other existing target-specific bodies remain separate:
 - mob: accepted, UID, health-present flag, current HP, then `01 05` selection metadata;
 - service NPC: accepted, UID, object-specific counted task data;
 - teleport building: accepted, UID, task count/tasks and conditional fortress tax.
+- Dimension Hole `INS_QUEST_TELEPORT`: accepted, UID, then an empty counted
+  action list (`00`). A live stock-client dump proved that omitting this byte
+  asserts in `CMsgStreamBuffer` at `0x004F7220`, from `OnB045` at
+  `0x0088B5FC`, after the five-byte packet is exhausted.
 
 They must not be decoded or serialized as one universal selection structure.
 
@@ -120,11 +124,18 @@ Therefore GO-SRO correctly performs no repository/database write when a player i
 
 - `protocol/vsro188/inworld_codec.go` now owns the byte-exact player `0xB045` encoder, including the conditional job-level tail.
 - `agent-server/handler/character/select_entity.go` admits only another live `*model.Player` whose exact object identity is in the selector's known-object list and whose global position is inside the established selection range.
-- Self, unknown, stale, mismatched, malformed and out-of-range targets remain rejected without inventing persistence.
-- Existing NPC, mob and teleport response forms are unchanged.
+- The same handler admits only a valid, exact `*model.DimensionHolePortal`
+  identity already present in the selector's known-object list, applies the
+  established extended structure range, and emits exactly
+  `01 <UID:u32le> 00`.
+- Self, unknown, stale, mismatched, malformed and out-of-range targets remain rejected without inventing persistence or portal-entry state.
+- Existing NPC, mob and teleport-building response forms are unchanged.
 
 ## Remaining uncertainty
 
 - The exact Windows input function that distinguishes right from left mouse button has not been assigned a stable semantic name; the shared UID sender and complete network lifecycle are confirmed.
 - The human-readable names of the two constant player metadata bytes `1,5` remain unresolved. Their order and values are fixed by the recovered player response family and stock-client parser behavior.
 - Active job state is not implemented until GO-SRO has a binary-backed runtime job model; only the confirmed non-jobging branch is emitted.
+- Dimension Hole selection does not itself teleport the player. The exact
+  post-selection entry opcode, owner-party admission path and destination
+  authority remain unresolved and must be implemented separately.

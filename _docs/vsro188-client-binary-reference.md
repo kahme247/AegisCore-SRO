@@ -439,7 +439,8 @@ Within the shared `0x008BE4F0` record parser, TypeID2 `3` expendables are
 not one shape: the client reads a `u32` amount for the TypeID3 `5` money
 branch, `u16 quantity + u8 assimilation` for TypeID3 `11` magic/attribute
 stones with TypeID4 `1/2`, `u16 quantity + counted u64 metadata` for the
-TypeID3 `14` gacha branches, and only `u16 quantity` for ordinary
+TypeID3 `14`, TypeID4 `2` gacha coupon branch, and only `u16 quantity` for
+the TypeID3 `14`, TypeID4 `1` normal card and ordinary
 expendables. These exact predicates are at `0x00538410`, `0x00871DE0`,
 `0x0056FCE0`, `0x0056FCA0`, and `0x00666FC0`; AegisCore's item serializer
 matches the branch widths.
