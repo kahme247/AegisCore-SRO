@@ -1,0 +1,107 @@
+No,Issue,States
+1,"when moving item to storage from the inv it feels lagy 
+items like active pet should not move out of inv !! ",done
+2,"active item should not move out of storage 
+in case the 1 page of the storage is full it should add to the next page up untill the limit of the pages !! (
+it seems something wierd after the teleport most of the items are back to inv ",partily done
+3,"trying to teleport to certen (slat desert)  places stuck on loading ! disconnect and reconnect loads normaly 
+game crashed ",need to check 
+4,"2 chers on the same area crashed the game 
+the ch cher (khaled crashed !!) the eu cher stayed still !",done
+5,cher loot pickup does not work ,done
+6,Fix character deletion and effects,done
+7,sit/walk/run ,done
+8,Fix frozen monster hit animation,need test 
+9,Fix pet inventory pickup sync,done
+10,Diagnose Magic Pop crash,done
+11,Fix party invite crash,done
+12,right click menu missing,done
+13,party inv works but crashed the game once accepted !!,
+14,so first one gone smooth but after first one the game kinda freeze and i cant close or change or move but the world is live but i am stuck/locked !,done
+15,the game when playing the card i need to re select the item before adding the card other wise it wont put the card .... can we make it atomic ?,working on 
+16,Magic POP NPC exchanged coupons one by one instead of exchanging every valid coupon in one click; some gifts remained. Previous opening crash was traced separately.,fixed - need test
+17,"exachange between players needs to have confimarion before starting
+cooldown after the exc on the same player
+game crashed when the game entered the exchange menu
+use ide on the client and sr_gameserver for the correct handling",
+18,other chers does not see the avater equiped !!,
+19,trace option does not work,
+20,when the cher attacked an mob while in a party it crashed the game,done
+21,EXP/GOLD/loot distrupution is not correct ,
+22,,
+23,,
+24,,
+25,,
+26,,
+27,,
+28,,
+29,,
+30,,
+31,,
+32,,
+33,,
+34,,
+35,,
+36,,
+37,,
+38,,
+39,,
+40,,
+41,,
+42,,
+43,,
+44,,
+45,,
+46,,
+47,,
+48,,
+49,,
+50,,
+51,,
+52,,
+53,,
+54,,
+55,,
+56,,
+57,,
+58,,
+59,,
+60,,
+61,,
+62,,
+63,,
+64,,
+65,,
+66,,
+67,,
+68,,
+69,,
+70,,
+71,,
+72,,
+73,,
+74,,
+75,,
+76,,
+77,,
+78,,
+79,,
+80,,
+81,,
+82,,
+83,,
+84,,
+85,,
+86,,
+87,,
+88,,
+89,,
+90,,
+91,,
+92,,
+93,,
+94,,
+95,,
+96,,
+97,,
+98,,
