@@ -25,8 +25,23 @@ func TestTwoClientSpawnDespawnCoverage(t *testing.T) {
 			Mutex:    &sync.Mutex{}, LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
 		}
 	}
-	petNPC := character(104, 5004, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(model.COSGrowthPet)})
-	transportNPC := character(105, 5005, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(model.COSRideTransport)})
+	cos := func(uid, ref uint32, kind model.COSKind) *model.COS {
+		level, health := byte(10), int32(100)
+		if kind == model.COSRideTransport {
+			level, health = 1, 200
+		}
+		return &model.COS{
+			NPC: model.NPC{
+				SRObject: model.SRObject{
+					UniqueID: uid, RefObjectID: ref,
+					TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(kind)},
+					RtNavmeshPosition: position,
+				},
+				Mutex: &sync.Mutex{}, LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
+			},
+			OwnerUniqueID: 900, OwnerName: "Owner", Kind: kind, Level: level, Health: health, MaxHealth: health,
+		}
+	}
 
 	scenarios := []struct {
 		name   string
@@ -44,8 +59,8 @@ func TestTwoClientSpawnDespawnCoverage(t *testing.T) {
 		{name: "drop", object: &model.Item{SRObject: model.SRObject{
 			UniqueID: 103, RefObjectID: 1, TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 5}, RtNavmeshPosition: position,
 		}, Data: 777}},
-		{name: "pet", object: &model.COS{NPC: petNPC, OwnerUniqueID: 900, OwnerName: "Owner", Kind: model.COSGrowthPet, Level: 10, Health: 100, MaxHealth: 100}},
-		{name: "transport", object: &model.COS{NPC: transportNPC, OwnerUniqueID: 900, OwnerName: "Owner", Kind: model.COSRideTransport, Level: 1, Health: 200, MaxHealth: 200}},
+		{name: "pet", object: cos(104, 5004, model.COSGrowthPet)},
+		{name: "transport", object: cos(105, 5005, model.COSRideTransport)},
 		{name: "npc", object: func() model.ISRObject {
 			npc := character(106, 5006, model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 2})
 			return &npc
