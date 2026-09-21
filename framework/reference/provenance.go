@@ -178,10 +178,6 @@ func (m ProvenanceManifest) CanonicalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sources == nil {
-		sources = make([]Source, 0)
-	}
-
 	canonical := m
 	canonical.Archive.SHA256 = checksum
 	canonical.Archive.ArchiveFormat = canonicalArchiveFormat(format)

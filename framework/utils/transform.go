@@ -37,14 +37,8 @@ func ByteArrayToUint64(bytes []byte) uint64 {
 
 func ConcatTwoUint32ToByteArray(secret1 uint32, secret2 uint32) []byte {
 	newKey := make([]byte, 8)
-	secret1Bytes := make([]byte, 4)
-	secret2Bytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(secret1Bytes, secret1)
-	binary.LittleEndian.PutUint32(secret2Bytes, secret2)
-	for i := 0; i < 4; i++ {
-		newKey[i] = secret1Bytes[i]
-		newKey[i+4] = secret2Bytes[i]
-	}
+	binary.LittleEndian.PutUint32(newKey, secret1)
+	binary.LittleEndian.PutUint32(newKey[4:], secret2)
 	return newKey
 }
 

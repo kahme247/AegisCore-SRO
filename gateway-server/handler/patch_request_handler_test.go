@@ -243,9 +243,9 @@ func TestBuildPatchResponseFollowsBinaryConfirmedVersionBranches(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			response, _, err := buildPatchResponse(test.request, profile)
+			response, _, err := buildPatchResponseForProfiles(test.request, []config.ProtocolProfile{profile})
 			if err != nil {
-				t.Fatalf("buildPatchResponse() error = %v", err)
+				t.Fatalf("buildPatchResponseForProfiles() error = %v", err)
 			}
 			if response.MessageID != opcode.PatchResponse {
 				t.Fatalf("opcode = 0x%04X, want 0x%04X", response.MessageID, opcode.PatchResponse)

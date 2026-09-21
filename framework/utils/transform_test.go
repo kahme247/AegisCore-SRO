@@ -23,6 +23,14 @@ func TestConcatTwoUint32ToByteArray(t *testing.T) {
 			},
 			want: []byte{216, 41, 166, 3, 120, 193, 76, 5},
 		},
+		{
+			name: "zero and maximum values preserve both little-endian words",
+			args: args{
+				secret1: 0,
+				secret2: ^uint32(0),
+			},
+			want: []byte{0, 0, 0, 0, 255, 255, 255, 255},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

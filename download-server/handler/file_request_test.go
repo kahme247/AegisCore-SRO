@@ -34,11 +34,14 @@ type sentPacket struct {
 	payload []byte
 }
 
-type recordingSender struct{ packets []sentPacket }
+type recordingSender struct {
+	packets []sentPacket
+	sendErr error
+}
 
 func (s *recordingSender) Send(packet network.Packet) error {
 	s.packets = append(s.packets, sentPacket{opcode: packet.MessageID, payload: append([]byte(nil), packet.Payload()...)})
-	return nil
+	return s.sendErr
 }
 
 func requestPacket(t *testing.T, id, offset uint32, trailing ...byte) network.Packet {
@@ -98,6 +101,24 @@ func TestFileRequestReturnsProtocolFailureForUnknownIDAndBadOffset(t *testing.T)
 		if len(sender.packets) != 1 || sender.packets[0].opcode != opcode.DownloadFileCompleted || !bytes.Equal(sender.packets[0].payload, []byte{0}) {
 			t.Fatalf("failure packets = %#v", sender.packets)
 		}
+	}
+}
+
+func TestFileRequestJoinsCatalogAndCompletionFailures(t *testing.T) {
+	catalogErr := errors.New("catalog unavailable")
+	completionErr := errors.New("completion unavailable")
+	handler := FileRequestHandler{Catalog: testCatalog{err: catalogErr}}
+	sender := &recordingSender{sendErr: completionErr}
+
+	err := handler.Transfer(context.Background(), sender, requestPacket(t, 7, 0))
+	if !errors.Is(err, catalogErr) || !errors.Is(err, completionErr) {
+		t.Fatalf("Transfer() error = %v, want both catalog and completion failures", err)
+	}
+	if got, want := err.Error(), catalogErr.Error()+"\n"+completionErr.Error(); got != want {
+		t.Fatalf("Transfer() error order = %q, want %q", got, want)
+	}
+	if len(sender.packets) != 1 || sender.packets[0].opcode != opcode.DownloadFileCompleted || !bytes.Equal(sender.packets[0].payload, []byte{0}) {
+		t.Fatalf("failure packets = %#v", sender.packets)
 	}
 }
 

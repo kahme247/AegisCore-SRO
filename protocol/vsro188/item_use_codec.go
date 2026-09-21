@@ -29,18 +29,18 @@ type ItemUseRequest struct {
 }
 
 type ItemUseSuccess struct {
-	SourceSlot byte
-	NewAmount  uint16
-	ItemType   uint16
+	EncodedSlot  byte
+	NewAmount    uint16
+	PackedTypeID uint16
 }
 
 func BuildItemUseSuccess(success ItemUseSuccess) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.InventoryItemUseResponse
 	packet.WriteByte(1)
-	packet.WriteByte(success.SourceSlot)
+	packet.WriteByte(success.EncodedSlot)
 	packet.WriteUInt16(success.NewAmount)
-	packet.WriteUInt16(success.ItemType)
+	packet.WriteUInt16(success.PackedTypeID)
 	return packet
 }
 
@@ -74,23 +74,17 @@ func DecodeItemUseRequest(packet *network.Packet) (ItemUseRequest, error) {
 			return ItemUseRequest{}, fmt.Errorf("read 0x704C item data: %w", err)
 		}
 	}
-	// Reverse-scroll selectors are the only currently confirmed one- and
-	// five-byte forms. Other lengths are item-family payloads and must remain
-	// opaque until the authoritative inventory reference is available.
-	if remaining == 1 && (request.ItemData[0] == 2 || request.ItemData[0] == 3) {
-		request.HasOption = true
-		request.Option = request.ItemData[0]
-		request.ItemData = nil
-	} else if remaining == 5 && request.ItemData[0] == 7 {
+	// Five-byte reverse-map selectors have a unique wire signature. A one-byte
+	// suffix is not self-describing: ordinary item families use it as their
+	// target/action selector, and reverse-return uses values 2/3. Preserve that
+	// byte until the handler has the authoritative item reference.
+	if remaining == 5 && request.ItemData[0] == 7 {
 		request.HasOption = true
 		request.Option = 7
 		request.MapID = uint32(request.ItemData[1]) | uint32(request.ItemData[2])<<8 |
 			uint32(request.ItemData[3])<<16 | uint32(request.ItemData[4])<<24
 		request.ItemData = nil
 	} else if remaining == 1 {
-		// TypeID4 12 and 15 COS service items carry one inventory-slot selector.
-		// The codec cannot classify that byte without the authoritative item
-		// reference, so preserve it for the item-use handler.
 		return request, nil
 	} else if remaining == 4 || remaining == 18 {
 		request.HasCOSTarget = true

@@ -153,21 +153,6 @@ func (EntityMovementRequestCodec) Encode(request EntityMovementRequest) (network
 	return packet, nil
 }
 
-func prependMovementRegion(packet network.Packet, region uint16) (network.Packet, error) {
-	body := network.EmptyClientPacket()
-	body.MessageID = opcode.EntityMovementRequest
-	if err := body.WriteByte(1); err != nil {
-		return network.Packet{}, err
-	}
-	if err := body.WriteUInt16(region); err != nil {
-		return network.Packet{}, err
-	}
-	if err := body.WriteBytes(packet.Payload()[1:]); err != nil {
-		return network.Packet{}, err
-	}
-	return body, nil
-}
-
 // Decode accepts the pinned stock `heading:uint16` tail and the explicitly
 // retained emulator compatibility `source:byte | heading:uint16` tail.
 func (EntityDirectionalMovementCodec) Decode(packet network.Packet) (EntityDirectionalMovement, error) {

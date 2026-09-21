@@ -28,10 +28,7 @@ func AvailabilityAdmissionPolicy(isReady func() bool, next PacketAdmissionPolicy
 // Gateway's documented pre-login surface, where no player session becomes
 // authenticated on this listener.
 func AllowListedAdmissionPolicy(opcodes ...uint16) PacketAdmissionPolicy {
-	allowed := make(map[uint16]struct{}, len(opcodes))
-	for _, opcode := range opcodes {
-		allowed[opcode] = struct{}{}
-	}
+	allowed := opcodeSet(opcodes)
 	return func(session *Session, opcode uint16) error {
 		if !session.ModuleIdentified() {
 			return fmt.Errorf("application opcode 0x%04X arrived before module identification", opcode)
@@ -66,8 +63,8 @@ func AgentAdmissionPolicy(authenticationOpcode uint16) PacketAdmissionPolicy {
 // one-time Agent authentication gate. Before authentication it preserves the
 // exact AgentAdmissionPolicy behaviour. Afterwards it exposes only the lobby
 // surface until a character selection begins, then only the documented
-// GameReady confirmation while bootstrap is pending. Once the session reaches
-// InWorld, normal Agent application traffic resumes.
+// bootstrap requests while character loading is pending. Once the session
+// reaches InWorld, normal Agent application traffic resumes.
 //
 // The caller supplies the profile-specific opcode sets so this framework
 // package never guesses vSRO wire values.

@@ -91,20 +91,14 @@ func (h *FileRequestHandler) transfer(ctx context.Context, sender PacketSender, 
 	release, err := h.Limiter.Acquire(client)
 	if err != nil {
 		audit.Reason = "concurrency-limit"
-		if sendErr := sendCompletion(sender, false); sendErr != nil {
-			return errors.Join(err, sendErr)
-		}
-		return nil
+		return sendFailureWithCause(sender, err)
 	}
 	defer release()
 
 	file, size, err := h.Catalog.Open(fileID)
 	if err != nil {
 		audit.Reason = "catalog"
-		if sendErr := sendCompletion(sender, false); sendErr != nil {
-			return errors.Join(err, sendErr)
-		}
-		return nil
+		return sendFailureWithCause(sender, err)
 	}
 	defer file.Close()
 	if uint64(offset) > size {
@@ -165,19 +159,6 @@ func LogTransferAudit(audit TransferAudit) {
 		"bytes": audit.BytesSent, "success": audit.Success, "reason": audit.Reason,
 		"duration_ms": audit.Duration.Milliseconds(),
 	}).Info("patch transfer completed")
-}
-
-func sendCompletion(sender PacketSender, success bool) error {
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.DownloadFileCompleted
-	result := byte(0)
-	if success {
-		result = 1
-	}
-	if err := packet.WriteByte(result); err != nil {
-		return err
-	}
-	return sender.Send(packet)
 }
 
 // Keep the concrete catalog contract checked at compile time while retaining

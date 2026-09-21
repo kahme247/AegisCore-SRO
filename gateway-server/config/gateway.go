@@ -166,8 +166,19 @@ func setDefaultValues() {
 func LoadProtocolProfiles() ([]ProtocolProfile, error) {
 	raw := strings.TrimSpace(viper.GetString(GatewayProtocolProfiles))
 	if raw == "" {
-		profile, err := loadProtocolProfile()
-		if err != nil {
+		contentID := viper.GetInt64(GatewayProtocolContentID)
+		version := viper.GetInt64(GatewayProtocolVersion)
+		profile := ProtocolProfile{
+			Name:       viper.GetString(GatewayProtocolProfileName),
+			ModuleName: viper.GetString(GatewayProtocolModuleName),
+		}
+		if contentID > 0 && contentID <= math.MaxUint8 {
+			profile.ContentID = byte(contentID)
+		}
+		if version > 0 && version <= math.MaxUint32 {
+			profile.Version = uint32(version)
+		}
+		if err := ValidateProtocolProfile(profile); err != nil {
 			return nil, err
 		}
 		return []ProtocolProfile{profile}, nil
@@ -212,25 +223,6 @@ func LoadProtocolProfile() (ProtocolProfile, error) {
 	return profiles[0], nil
 }
 
-func loadProtocolProfile() (ProtocolProfile, error) {
-	contentID := viper.GetInt64(GatewayProtocolContentID)
-	version := viper.GetInt64(GatewayProtocolVersion)
-	profile := ProtocolProfile{
-		Name:       viper.GetString(GatewayProtocolProfileName),
-		ModuleName: viper.GetString(GatewayProtocolModuleName),
-	}
-	if contentID > 0 && contentID <= math.MaxUint8 {
-		profile.ContentID = byte(contentID)
-	}
-	if version > 0 && version <= math.MaxUint32 {
-		profile.Version = uint32(version)
-	}
-	if err := ValidateProtocolProfile(profile); err != nil {
-		return ProtocolProfile{}, err
-	}
-	return profile, nil
-}
-
 // ValidateProtocolProfile performs the pure validation shared by startup and
 // request handlers. Keeping it independent from Viper makes the capture-bound
 // contract straightforward to test.
@@ -241,11 +233,8 @@ func ValidateProtocolProfile(profile ProtocolProfile) error {
 	if profile.ContentID == 0 {
 		return fmt.Errorf("gateway protocol content ID must be configured from an approved capture")
 	}
-	if profile.ModuleName == "" || strings.TrimSpace(profile.ModuleName) != profile.ModuleName || strings.IndexByte(profile.ModuleName, 0) >= 0 {
-		return fmt.Errorf("gateway protocol module name must be a non-blank, NUL-free exact value")
-	}
-	if !utf8.ValidString(profile.ModuleName) || len(profile.ModuleName) > math.MaxUint16 {
-		return fmt.Errorf("gateway protocol module name is not serializable")
+	if err := validateGatewayWireText(profile.ModuleName, "protocol module name", "exact value"); err != nil {
+		return err
 	}
 	if profile.Version == 0 {
 		return fmt.Errorf("gateway protocol version must be configured from an approved capture")
@@ -270,11 +259,18 @@ func ValidateFarm(farm Farm) error {
 	if farm.ID == 0 {
 		return fmt.Errorf("gateway farm ID must be 1..255")
 	}
-	if farm.Name == "" || strings.TrimSpace(farm.Name) != farm.Name || strings.IndexByte(farm.Name, 0) >= 0 {
-		return fmt.Errorf("gateway farm name must be a non-blank, NUL-free value")
+	if err := validateGatewayWireText(farm.Name, "farm name", "value"); err != nil {
+		return err
 	}
-	if !utf8.ValidString(farm.Name) || len(farm.Name) > math.MaxUint16 {
-		return fmt.Errorf("gateway farm name is not serializable")
+	return nil
+}
+
+func validateGatewayWireText(value, field, qualifier string) error {
+	if value == "" || strings.TrimSpace(value) != value || strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("gateway %s must be a non-blank, NUL-free %s", field, qualifier)
+	}
+	if !utf8.ValidString(value) || len(value) > math.MaxUint16 {
+		return fmt.Errorf("gateway %s is not serializable", field)
 	}
 	return nil
 }

@@ -7,10 +7,14 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
-// ItemOperationPickupSuccess is the stock completion form for a successful
-// ground-item pickup. The B034 operation serializer writes only the operation
-// discriminator and the destination inventory slot for operation 0x06.
+// ItemOperationPickup is the stock character ground-item pickup completion.
+// Its fixed B034 prefix is the operation discriminator and destination slot.
 const ItemOperationPickup byte = 0x06
+
+// ItemOperationCOSPickup is the stock ability-pet ground-item pickup
+// completion. Client mapper 0x00871940 assigns operation 0x11 source category
+// 0 and COS-inventory destination category 0x7A, enabling the activity entry.
+const ItemOperationCOSPickup byte = 0x11
 
 const ItemOperationCOSTransfer byte = 0x17
 
@@ -418,6 +422,14 @@ func BuildItemOperationObjectSlotSuccess(operation byte, objectID uint32, slot b
 func BuildItemOperationObjectSlotPairSuccess(operation byte, objectID uint32, source, destination byte) network.Packet {
 	packet := BuildItemOperationObjectSlotSuccess(operation, objectID, source)
 	packet.WriteByte(destination)
+	return packet
+}
+
+// BuildItemOperationObjectSlotPairQuantitySuccess writes the stock operation-0x10
+// COS-inventory move completion: COS UID, source slot, destination slot, and quantity.
+func BuildItemOperationObjectSlotPairQuantitySuccess(operation byte, objectID uint32, source, destination byte, quantity uint16) network.Packet {
+	packet := BuildItemOperationObjectSlotPairSuccess(operation, objectID, source, destination)
+	packet.WriteUInt16(quantity)
 	return packet
 }
 

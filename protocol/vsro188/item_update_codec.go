@@ -22,8 +22,8 @@ type InventoryItemUpdate struct {
 	Flag10U32    *uint32
 	MagicOptions []uint64
 
-	// These fields are read only when ItemKind >= 0x0D, even if the flag is
-	// present. This matches the two explicit client-side kind gates.
+	// The patched client accepts flag 0x80 for equipped slots too. Flag 0x40
+	// remains a high-kind-only field; flag 0x80 is an independent u32 epoch.
 	Flag40U8  *byte
 	Flag80U32 *uint32
 }
@@ -129,7 +129,7 @@ func DecodeInventoryItemUpdate(packet network.Packet) (InventoryItemUpdate, erro
 		}
 		update.Flag40U8 = &value
 	}
-	if update.ItemKind >= 0x0D && update.Flags&0x80 != 0 {
+	if update.Flags&0x80 != 0 {
 		value, readErr := packet.ReadUInt32()
 		if readErr != nil {
 			return InventoryItemUpdate{}, fmt.Errorf("read 0x3040 flag 0x80 value: %w", readErr)
@@ -180,25 +180,23 @@ func BuildInventoryItemUpdate(update InventoryItemUpdate) (network.Packet, error
 	} else if len(update.MagicOptions) != 0 {
 		return network.Packet{}, fmt.Errorf("0x3040 magic options supplied while flag 0x20 is clear")
 	}
-	if update.ItemKind < 0x0D && (update.Flag40U8 != nil || update.Flag80U32 != nil) {
-		return network.Packet{}, fmt.Errorf("0x3040 high-kind fields supplied for item kind 0x%02X", update.ItemKind)
+	if update.ItemKind < 0x0D && update.Flag40U8 != nil {
+		return network.Packet{}, fmt.Errorf("0x3040 high-kind field supplied for item kind 0x%02X", update.ItemKind)
 	}
 	if update.ItemKind >= 0x0D && update.Flags&0x40 != 0 {
 		if update.Flag40U8 == nil {
 			return network.Packet{}, fmt.Errorf("0x3040 flag 0x40 is set without a value")
 		}
 		packet.WriteByte(*update.Flag40U8)
+	} else if update.Flag40U8 != nil {
+		return network.Packet{}, fmt.Errorf("0x3040 flag 0x40 value supplied while flag is clear")
 	}
-	if update.ItemKind >= 0x0D && update.Flags&0x80 != 0 {
+	if update.Flags&0x80 != 0 {
 		if update.Flag80U32 == nil {
 			return network.Packet{}, fmt.Errorf("0x3040 flag 0x80 is set without a value")
 		}
 		packet.WriteUInt32(*update.Flag80U32)
-	}
-	if update.ItemKind >= 0x0D && update.Flags&0x40 == 0 && update.Flag40U8 != nil {
-		return network.Packet{}, fmt.Errorf("0x3040 flag 0x40 value supplied while flag is clear")
-	}
-	if update.ItemKind >= 0x0D && update.Flags&0x80 == 0 && update.Flag80U32 != nil {
+	} else if update.Flag80U32 != nil {
 		return network.Packet{}, fmt.Errorf("0x3040 flag 0x80 value supplied while flag is clear")
 	}
 	if packet.WriteError() != nil {

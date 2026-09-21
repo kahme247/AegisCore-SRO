@@ -20,8 +20,12 @@ func DecodeGuildMercenaryTerminateRequest(packet *network.Packet) error {
 }
 
 func BuildGuildMercenaryTerminateFailure(errorCode uint16) network.Packet {
+	return buildGuildMercenaryFailure(opcode.GuildMercenaryTerminateResponse, errorCode)
+}
+
+func buildGuildMercenaryFailure(responseOpcode, errorCode uint16) network.Packet {
 	p := network.EmptyPacket()
-	p.MessageID = opcode.GuildMercenaryTerminateResponse
+	p.MessageID = responseOpcode
 	p.WriteByte(2)
 	p.WriteUInt16(errorCode)
 	return p
@@ -43,11 +47,7 @@ func DecodeGuildMercenaryAttributeRequest(packet *network.Packet) (GuildMercenar
 }
 
 func BuildGuildMercenaryAttributeFailure(errorCode uint16) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.GuildMercenaryAttrResponse
-	p.WriteByte(2)
-	p.WriteUInt16(errorCode)
-	return p
+	return buildGuildMercenaryFailure(opcode.GuildMercenaryAttrResponse, errorCode)
 }
 
 // BuildGuildMercenaryAttributeUpdate matches GameServer 0x5C5600:

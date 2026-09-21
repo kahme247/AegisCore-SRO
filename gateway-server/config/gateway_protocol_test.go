@@ -1,7 +1,9 @@
 package config
 
 import (
+	"math"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -62,6 +64,59 @@ func TestValidateFarmRejectsEmptyOrZeroFields(t *testing.T) {
 		if err := ValidateFarm(farm); err == nil {
 			t.Fatalf("ValidateFarm(%+v) error = nil, want rejection", farm)
 		}
+	}
+}
+
+func TestGatewayWireTextValidationPreservesCallerErrors(t *testing.T) {
+	tooLong := strings.Repeat("a", math.MaxUint16+1)
+	tests := []struct {
+		name         string
+		value        string
+		profileError string
+		farmError    string
+	}{
+		{
+			name:         "blank",
+			profileError: "gateway protocol module name must be a non-blank, NUL-free exact value",
+			farmError:    "gateway farm name must be a non-blank, NUL-free value",
+		},
+		{
+			name:         "whitespace",
+			value:        " module",
+			profileError: "gateway protocol module name must be a non-blank, NUL-free exact value",
+			farmError:    "gateway farm name must be a non-blank, NUL-free value",
+		},
+		{
+			name:         "NUL",
+			value:        "module\x00name",
+			profileError: "gateway protocol module name must be a non-blank, NUL-free exact value",
+			farmError:    "gateway farm name must be a non-blank, NUL-free value",
+		},
+		{
+			name:         "invalid UTF-8",
+			value:        string([]byte{0xff}),
+			profileError: "gateway protocol module name is not serializable",
+			farmError:    "gateway farm name is not serializable",
+		},
+		{
+			name:         "too long",
+			value:        tooLong,
+			profileError: "gateway protocol module name is not serializable",
+			farmError:    "gateway farm name is not serializable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := ProtocolProfile{Name: VSRO188Profile, ContentID: 122, ModuleName: test.value, Version: 188}
+			if err := ValidateProtocolProfile(profile); err == nil || err.Error() != test.profileError {
+				t.Errorf("ValidateProtocolProfile() error = %v, want %q", err, test.profileError)
+			}
+
+			if err := ValidateFarm(Farm{ID: 1, Name: test.value}); err == nil || err.Error() != test.farmError {
+				t.Errorf("ValidateFarm() error = %v, want %q", err, test.farmError)
+			}
+		})
 	}
 }
 

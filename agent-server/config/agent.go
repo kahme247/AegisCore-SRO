@@ -12,7 +12,6 @@ const (
 	AgentPort                      = "agent.port"
 	AgentModuleId                  = "agent.module_id"
 	AgentDataPath                  = "agent.data_path"
-	AgentDungeonTeleportDataPath   = "agent.dungeon.teleport_data_path"
 	AgentPrelinkedNavdataFile      = "agent.prelinked_navdata_file"
 	AgentTrafficPacketLimit        = "agent.traffic_filter.packet_limit"
 	AgentTrafficWindowMS           = "agent.traffic_filter.window_ms"
@@ -67,7 +66,6 @@ func bindEnvAliases() {
 	viper.BindEnv(AgentPort, "AGENT_PORT")
 	viper.BindEnv(AgentModuleId, "AGENT_MODULE_ID")
 	viper.BindEnv(AgentDataPath, "AGENT_DATA_PATH")
-	viper.BindEnv(AgentDungeonTeleportDataPath, "AGENT_DUNGEON_TELEPORT_DATA_PATH")
 	viper.BindEnv(AgentPrelinkedNavdataFile, "AGENT_PRELINKED_NAVDATA_FILE")
 	viper.BindEnv(AgentTrafficPacketLimit, "AGENT_TRAFFIC_FILTER_PACKET_LIMIT")
 	viper.BindEnv(AgentTrafficWindowMS, "AGENT_TRAFFIC_FILTER_WINDOW_MS")

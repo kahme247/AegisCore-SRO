@@ -82,7 +82,7 @@ func TestItemUseRequestPreservesOneByteCOSSlotSelector(t *testing.T) {
 }
 
 func TestItemUseResponsesMatchStockB04CLayouts(t *testing.T) {
-	success := BuildItemUseSuccess(ItemUseSuccess{SourceSlot: 14, NewAmount: 3, ItemType: 0x08EC})
+	success := BuildItemUseSuccess(ItemUseSuccess{EncodedSlot: 14, NewAmount: 3, PackedTypeID: 0x08EC})
 	if got, want := hex.EncodeToString(success.Payload()), "010e0300ec08"; got != want {
 		t.Fatalf("success payload = %s, want %s", got, want)
 	}
@@ -90,7 +90,7 @@ func TestItemUseResponsesMatchStockB04CLayouts(t *testing.T) {
 	if got, want := hex.EncodeToString(failure.Payload()), "023e18"; got != want {
 		t.Fatalf("failure payload = %s, want %s", got, want)
 	}
-	dimensionHole := BuildItemUseSuccess(ItemUseSuccess{SourceSlot: 13, NewAmount: 0, ItemType: 0x3E6C})
+	dimensionHole := BuildItemUseSuccess(ItemUseSuccess{EncodedSlot: 13, PackedTypeID: 0x3E6C})
 	if got, want := hex.EncodeToString(dimensionHole.Payload()), "010d00006c3e"; got != want {
 		t.Fatalf("Dimension Hole success payload = %s, want %s", got, want)
 	}

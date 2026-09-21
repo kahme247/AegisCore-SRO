@@ -78,7 +78,7 @@ func TestAgentLifecycleAdmissionPolicyRejectsGameplayDuringCharacterLoading(t *t
 	policy := AgentLifecycleAdmissionPolicy(
 		0x6103,
 		[]uint16{0x7001, 0x7007, 0x7450},
-		[]uint16{0x34B6, 0x3012},
+		[]uint16{0x34B6, 0x3012, 0x7007},
 	)
 	if err := policy(session, 0x6103); err != nil {
 		t.Fatalf("authentication opcode rejected before admission: %v", err)
@@ -100,8 +100,8 @@ func TestAgentLifecycleAdmissionPolicyRejectsGameplayDuringCharacterLoading(t *t
 	if err := policy(session, 0x7021); err == nil {
 		t.Fatal("gameplay opcode accepted while character bootstrap is pending")
 	}
-	if err := policy(session, 0x7007); err == nil {
-		t.Fatal("lobby mutation accepted while character bootstrap is pending")
+	if err := policy(session, 0x7007); err != nil {
+		t.Fatalf("read-only character-list opcode rejected while character bootstrap is pending: %v", err)
 	}
 	if err := policy(session, 0x3012); err != nil {
 		t.Fatalf("GameReady opcode rejected while character bootstrap is pending: %v", err)

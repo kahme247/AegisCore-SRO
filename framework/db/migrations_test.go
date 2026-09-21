@@ -429,13 +429,79 @@ func TestLoadMigrationCatalogReadsSortedChecksumProtectedSQL(t *testing.T) {
 	if shardCatalog.Target() != MigrationTargetShard {
 		t.Fatalf("shard catalog target = %q, want %q", shardCatalog.Target(), MigrationTargetShard)
 	}
-	if len(shardMigrations) != 130 {
-		t.Fatalf("shard migration count = %d, want 130", len(shardMigrations))
+	if len(shardMigrations) != 144 {
+		t.Fatalf("shard migration count = %d, want 144", len(shardMigrations))
 	}
 	shardMigrationByVersion := make(map[uint64]Migration, len(shardMigrations))
 	for _, migration := range shardMigrations {
 		shardMigrationByVersion[migration.Version] = migration
 	}
+	mediaRegistryMigration := shardMigrationByVersion[136]
+	if mediaRegistryMigration.Version != 136 || mediaRegistryMigration.Name != "media_catalog_registry" ||
+		!strings.Contains(mediaRegistryMigration.UpSQL, "MEDIA_CATALOG_MAPPING") ||
+		!strings.Contains(mediaRegistryMigration.UpSQL, "MEDIA_TELEPORTDATA_DUNGEON") ||
+		!strings.Contains(mediaRegistryMigration.DownSQL, "DROP TABLE IF EXISTS `SRO_SHARD`.`MEDIA_CATALOG_MAPPING`") {
+		t.Fatalf("Media registry migration = %#v, want reversible version 136 registry and views", mediaRegistryMigration)
+	}
+	soOkMigration := shardMigrationByVersion[137]
+	if soOkMigration.Version != 137 || soOkMigration.Name != "so_ok_event_npc_spawn" ||
+		!strings.Contains(soOkMigration.UpSQL, "`RefObjID`=3861") ||
+		!strings.Contains(soOkMigration.UpSQL, "9000006") ||
+		!strings.Contains(soOkMigration.DownSQL, "9000001 AND 9000006") {
+		t.Fatalf("So-Ok migration = %#v, want reversible fallback event-NPC spawns", soOkMigration)
+	}
+	expendableMigration := shardMigrationByVersion[138]
+	if expendableMigration.Version != 138 || expendableMigration.Name != "expendable_effect_config" ||
+		!strings.Contains(expendableMigration.UpSQL, "EXPENDABLE_EFFECT_CONFIG") ||
+		!strings.Contains(expendableMigration.UpSQL, "36771") ||
+		!strings.Contains(expendableMigration.UpSQL, "39366") ||
+		!strings.Contains(expendableMigration.DownSQL, "DROP TABLE IF EXISTS `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG`") {
+		t.Fatalf("expendable migration = %#v, want reversible configured custom progression effects", expendableMigration)
+	}
+	summonMigration := shardMigrationByVersion[139]
+	if summonMigration.Version != 139 || summonMigration.Name != "item_summon_monster_catalog" ||
+		!strings.Contains(summonMigration.UpSQL, "REF_ITEM_SUMMON_MONSTER") ||
+		!strings.Contains(summonMigration.UpSQL, "(9318,1954,10,24") ||
+		!strings.Contains(summonMigration.UpSQL, "(9319,38214,100,120") ||
+		!strings.Contains(summonMigration.DownSQL, "DROP TABLE IF EXISTS `SRO_SHARD`.`REF_ITEM_SUMMON_MONSTER`") {
+		t.Fatalf("summon migration = %#v, want reversible level-banded random monster catalog", summonMigration)
+	}
+	nonUniqueSummonMigration := shardMigrationByVersion[140]
+	if nonUniqueSummonMigration.Version != 140 || nonUniqueSummonMigration.Name != "non_unique_item_summons" ||
+		!strings.Contains(nonUniqueSummonMigration.UpSQL, "RUNTIME_RARITY") ||
+		!strings.Contains(nonUniqueSummonMigration.UpSQL, "(9318,3921,0,10,24") ||
+		!strings.Contains(nonUniqueSummonMigration.UpSQL, "(9319,38191,20,100,120") ||
+		!strings.Contains(nonUniqueSummonMigration.DownSQL, "DROP COLUMN `RUNTIME_RARITY`") {
+		t.Fatalf("non-unique summon migration = %#v, want reversible strong/giant/party monster catalog", nonUniqueSummonMigration)
+	}
+	specialReturnMigration := shardMigrationByVersion[141]
+	if specialReturnMigration.Version != 141 || specialReturnMigration.Name != "special_return_teleport_point" ||
+		!strings.Contains(specialReturnMigration.UpSQL, "'STORE_TD_GATE',2197,24758,641,-3,728") ||
+		!strings.Contains(specialReturnMigration.DownSQL, "`ID`=2197") {
+		t.Fatalf("special-return migration = %#v, want reversible Bandit Den destination", specialReturnMigration)
+	}
+	expendableTargetMigration := shardMigrationByVersion[142]
+	if expendableTargetMigration.Version != 142 || expendableTargetMigration.Name != "expendable_target_and_cooldown" ||
+		!strings.Contains(expendableTargetMigration.UpSQL, "COOLDOWN_SECONDS") ||
+		!strings.Contains(expendableTargetMigration.UpSQL, "`TypeID_3`=13,`TypeID_4`=11") ||
+		!strings.Contains(expendableTargetMigration.DownSQL, "DROP COLUMN `COOLDOWN_SECONDS`") {
+		t.Fatalf("expendable target migration = %#v", expendableTargetMigration)
+	}
+	alchemyStacksMigration := shardMigrationByVersion[144]
+	if alchemyStacksMigration.Version != 144 || alchemyStacksMigration.Name != "alchemy_material_stacks" ||
+		!strings.Contains(alchemyStacksMigration.UpSQL, "SET `Stack_Size` = 50") ||
+		!strings.Contains(alchemyStacksMigration.UpSQL, "`TypeID_4` IN (1, 2, 7, 8)") ||
+		!strings.Contains(alchemyStacksMigration.DownSQL, "SET `Stack_Size` = 1") {
+		t.Fatalf("alchemy stack migration = %#v, want reversible normal material stack limits", alchemyStacksMigration)
+	}
+	alchemyStacks5000Migration := shardMigrationByVersion[145]
+	if alchemyStacks5000Migration.Version != 145 || alchemyStacks5000Migration.Name != "alchemy_material_stack_5000" ||
+		!strings.Contains(alchemyStacks5000Migration.UpSQL, "SET `Stack_Size` = 5000") ||
+		!strings.Contains(alchemyStacks5000Migration.UpSQL, "`TypeID_4` IN (1, 2, 7, 8)") ||
+		!strings.Contains(alchemyStacks5000Migration.DownSQL, "SET `Stack_Size` = 50") {
+		t.Fatalf("5000 alchemy stack migration = %#v", alchemyStacks5000Migration)
+	}
+
 	magicCubeMigration := shardMigrationByVersion[121]
 	if magicCubeMigration.Version != 121 || magicCubeMigration.Name != "magic_cube_storage" ||
 		!strings.Contains(magicCubeMigration.UpSQL, "MAGIC_CUBE_INVENTORY") ||

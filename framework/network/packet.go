@@ -680,9 +680,3 @@ func dumpByte(value byte) string {
 	}
 	return string(value)
 }
-
-func (p *Packet) extendBuffer() {
-	newBuffer := make([]byte, cap(p.Data)*2)
-	copy(newBuffer, p.Data)
-	p.Data = newBuffer
-}

@@ -51,6 +51,28 @@ func TestVerifyArchiveProducesDeterministicProvenance(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONUsesEmptyArrayForNilSources(t *testing.T) {
+	manifest := ProvenanceManifest{
+		ManifestSchemaVersion: ManifestSchemaVersion,
+		Profile:               profiles.VSRO188,
+		ProfileStatus:         profiles.StatusEvidencePending,
+		Archive: ArchiveProvenance{
+			Path:          "Data/Data.pk2",
+			SHA256:        strings.Repeat("a", 64),
+			ArchiveFormat: "0x01000002",
+			Encrypted:     true,
+		},
+	}
+
+	encoded, err := manifest.CanonicalJSON()
+	if err != nil {
+		t.Fatalf("CanonicalJSON() error = %v", err)
+	}
+	if !strings.Contains(string(encoded), `"sources":[]`) {
+		t.Fatalf("CanonicalJSON() = %s, want an empty sources array", encoded)
+	}
+}
+
 func TestVerifyArchiveRejectsProfileSchemaAndNameMismatch(t *testing.T) {
 	t.Parallel()
 

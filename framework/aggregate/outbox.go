@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"github.com/Harvi8/AegisCore/framework/internal/textutil"
 )
 
 var ErrOutboxLeaseLost = errors.New("outbox lease is no longer owned")
@@ -190,7 +191,7 @@ func (store *SQLOutboxStore) MarkFailed(ctx context.Context, message LeasedMessa
 	}
 	result, err := store.database.ExecContext(ctx,
 		"UPDATE `AEGIS_OUTBOX_MESSAGE` SET `STATUS`=?,`NEXT_ATTEMPT_AT`=?,`LAST_ERROR`=?,`LEASE_OWNER`=NULL,`LEASE_UNTIL`=NULL WHERE `MESSAGE_ID`=? AND `STATUS`='processing' AND `LEASE_OWNER`=? AND `LEASE_UNTIL`>=?",
-		status, nextAttempt, truncateUTF8(publishErr.Error(), 1024), message.ID, message.LeaseOwner, failedAt,
+		status, nextAttempt, textutil.TruncateUTF8(publishErr.Error(), 1024), message.ID, message.LeaseOwner, failedAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record outbox failure %q: %w", message.ID, err)
@@ -307,7 +308,7 @@ func (processor OutboxProcessor) RunBatch(ctx context.Context) (BatchResult, err
 	result := BatchResult{Claimed: len(messages)}
 	var processingErrors []error
 	for _, message := range messages {
-		if err := ctxErr(ctx); err != nil {
+		if err := ctx.Err(); err != nil {
 			processingErrors = append(processingErrors, err)
 			break
 		}
@@ -368,22 +369,4 @@ func normalizeContext(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
-}
-
-func ctxErr(ctx context.Context) error {
-	if ctx == nil {
-		return nil
-	}
-	return ctx.Err()
-}
-
-func truncateUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
 }

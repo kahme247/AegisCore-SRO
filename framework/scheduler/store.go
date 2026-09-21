@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"github.com/Harvi8/AegisCore/framework/internal/textutil"
 )
 
 var (
@@ -438,7 +439,7 @@ func (store *SQLStore) MarkFailed(ctx context.Context, run Run, runErr error, po
 	}
 	result, err := store.database.ExecContext(normalizeContext(ctx),
 		"UPDATE `AEGIS_SCHEDULE_RUN` SET `STATUS`=?,`NEXT_ATTEMPT_AT`=?,`LAST_ERROR`=?,`FINISHED_AT`=?,`LEASE_OWNER`=NULL,`LEASE_UNTIL`=NULL WHERE `RUN_ID`=? AND `STATUS`='processing' AND `LEASE_OWNER`=? AND `LEASE_UNTIL`>=?",
-		status, failedAt.Add(delay), truncateUTF8(runErr.Error(), 1024), finishedAt, run.ID, run.LeaseOwner, failedAt,
+		status, failedAt.Add(delay), textutil.TruncateUTF8(runErr.Error(), 1024), finishedAt, run.ID, run.LeaseOwner, failedAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record scheduler run %d failure: %w", run.ID, err)
@@ -647,15 +648,4 @@ func normalizeContext(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
-}
-
-func truncateUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
 }

@@ -30,7 +30,7 @@ func TestProtocolRegistryDrivesAgentLifecycleSurfaces(t *testing.T) {
 	}{
 		{"authentication", protocolregistry.AgentAuthentication, []uint16{opcode.AuthRequest}},
 		{"lobby", protocolregistry.AgentLobby, []uint16{opcode.JoinLobbyRequest, opcode.LobbyActionRequest, opcode.LobbyRenameRequest, opcode.AgentPingRequest}},
-		{"loading", protocolregistry.AgentCharacterLoading, []uint16{opcode.GameReadyRequest, opcode.TeleportReadyResponse, opcode.TeleportCancelRequest, opcode.AgentPingRequest}},
+		{"loading", protocolregistry.AgentCharacterLoading, []uint16{opcode.GameReadyRequest, opcode.TeleportReadyResponse, opcode.LobbyActionRequest, opcode.TeleportCancelRequest, opcode.GuideRequest, opcode.AgentPingRequest}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

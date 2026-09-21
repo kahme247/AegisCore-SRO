@@ -17,6 +17,28 @@ func TestRegistryUsesCompletePacketIdentity(t *testing.T) {
 	}
 }
 
+func TestRegistryOpcodesPreserveConstructorOpcodeOrder(t *testing.T) {
+	entries := []Entry{
+		testEntry(Key{Service: ServiceGateway, Direction: ClientToServer, Phase: GatewayPreLogin, Opcode: 0x6102}, "Second"),
+		testEntry(Key{Service: ServiceGateway, Direction: ClientToServer, Phase: GatewayPreLogin, Opcode: 0x6100}, "First"),
+	}
+	registry, err := New(entries)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got := registry.Opcodes(ServiceGateway, ClientToServer, GatewayPreLogin)
+	want := []uint16{0x6100, 0x6102}
+	if len(got) != len(want) {
+		t.Fatalf("Opcodes() = %v, want %v", got, want)
+	}
+	for index, opcode := range want {
+		if got[index] != opcode {
+			t.Fatalf("Opcodes()[%d] = 0x%04X, want 0x%04X", index, got[index], opcode)
+		}
+	}
+}
+
 func TestRegistryRejectsDuplicateIdentity(t *testing.T) {
 	entry := testEntry(Key{Service: ServiceGateway, Direction: ClientToServer, Phase: GatewayPreLogin, Opcode: 0x6100}, "PatchRequest")
 	if _, err := New([]Entry{entry, entry}); err == nil {

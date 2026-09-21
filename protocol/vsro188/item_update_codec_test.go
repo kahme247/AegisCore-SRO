@@ -47,7 +47,7 @@ func TestInventoryItemUpdateGoldenMatchesClient3040ReadOrder(t *testing.T) {
 	}
 }
 
-func TestInventoryItemUpdateKindGateSuppressesHighFlags(t *testing.T) {
+func TestInventoryItemUpdateAllowsEquippedTimerField(t *testing.T) {
 	packet := network.EmptyClientPacket()
 	packet.WriteByte(0x0C)
 	packet.WriteByte(0xFF)
@@ -57,9 +57,10 @@ func TestInventoryItemUpdateKindGateSuppressesHighFlags(t *testing.T) {
 	packet.WriteUInt16(4)
 	packet.WriteUInt32(5)
 	packet.WriteByte(0)
+	packet.WriteUInt32(0)
 	decoded, err := DecodeInventoryItemUpdate(packet)
-	if err != nil || decoded.Flag40U8 != nil || decoded.Flag80U32 != nil {
-		t.Fatalf("kind gate decode = %+v, %v", decoded, err)
+	if err != nil || decoded.Flag40U8 != nil || decoded.Flag80U32 == nil || *decoded.Flag80U32 != 0 {
+		t.Fatalf("equipped timer decode = %+v, %v", decoded, err)
 	}
 	if _, err := BuildInventoryItemUpdate(decoded); err != nil {
 		t.Fatal(err)

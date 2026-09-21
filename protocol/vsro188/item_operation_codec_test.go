@@ -77,6 +77,14 @@ func TestItemOperationPlayerCOSTransferSuccessMatchesStockB034Layout(t *testing.
 	}
 }
 
+func TestItemOperationCOSMoveSuccessMatchesStockB034Layout(t *testing.T) {
+	packet := BuildItemOperationObjectSlotPairQuantitySuccess(0x10, 0x11223344, 0x03, 0x04, 0x1234)
+	want := []byte{1, 0x10, 0x44, 0x33, 0x22, 0x11, 0x03, 0x04, 0x34, 0x12}
+	if got := packet.Payload(); !bytes.Equal(got, want) {
+		t.Fatalf("COS move success payload = % X, want % X", got, want)
+	}
+}
+
 func TestItemOperationStorageSuccessFormsMatchMaintainedB034Layouts(t *testing.T) {
 	tests := []struct {
 		name   string

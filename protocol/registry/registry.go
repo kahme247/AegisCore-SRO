@@ -189,7 +189,6 @@ func (r *Registry) Opcodes(service Service, direction Direction, phase Phase) []
 			opcodes = append(opcodes, entry.Key.Opcode)
 		}
 	}
-	sort.Slice(opcodes, func(i, j int) bool { return opcodes[i] < opcodes[j] })
 	return opcodes
 }
 

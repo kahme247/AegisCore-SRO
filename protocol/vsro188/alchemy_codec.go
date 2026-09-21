@@ -95,7 +95,7 @@ func BuildAlchemyDismantleSuccess() network.Packet {
 // domain model and creating an import cycle.
 type AlchemyTargetPayload []byte
 
-// BuildAlchemyElixirResult writes the confirmed 0x7150 response envelope.
+// BuildAlchemyElixirResult writes the confirmed 0xB150 response envelope.
 // The target body is omitted for a destroyed result and otherwise appended
 // unchanged after the fixed prefix.
 func BuildAlchemyElixirResult(success bool, targetSlot byte, destroyed bool, target AlchemyTargetPayload) network.Packet {
@@ -114,7 +114,7 @@ func BuildAlchemyElixirResult(success bool, targetSlot byte, destroyed bool, tar
 	return packet
 }
 
-// BuildAlchemyStoneResult writes the confirmed 0x7151 stone-result envelope.
+// BuildAlchemyStoneResult writes the confirmed 0xB151 stone-result envelope.
 func BuildAlchemyStoneResult(success bool, targetSlot byte, target AlchemyTargetPayload) network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.AlchemyStoneResponse

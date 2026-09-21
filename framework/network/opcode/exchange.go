@@ -1,8 +1,6 @@
 package opcode
 
 const (
-	ExchangeInvitationRequest uint16 = 0x7080
-
 	ExchangeStartRequest  uint16 = 0x7081
 	ExchangeStartResponse uint16 = 0xB081
 
@@ -15,7 +13,6 @@ const (
 	ExchangeCancelRequest  uint16 = 0x7084
 	ExchangeCancelResponse uint16 = 0xB084
 
-	ExchangeInvitationResponse  uint16 = 0x3080
 	ExchangeStartedResponse     uint16 = 0x3085
 	ExchangeConfirmedResponse   uint16 = 0x3086
 	ExchangeApprovedResponse    uint16 = 0x3087
