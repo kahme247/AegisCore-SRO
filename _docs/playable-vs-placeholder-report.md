@@ -1,7 +1,7 @@
 # Playable vs Placeholder Report
 
-**Snapshot:** 2026-07-25  
-**Scope:** Maintained AegisCore stack in `go-sro/`, targeting the original vSRO 1.188 client.  
+**Snapshot:** 2026-07-25
+**Scope:** Maintained AegisCore stack in `go-sro/`, targeting the original vSRO 1.188 client.
 **Verdict:** AegisCore has a playable core loop, but it is not yet a complete or production-proven Silkroad server. Login through ordinary world play is represented by integrated runtime paths; several advanced systems are partial, capture-provisional, or intentionally unavailable.
 
 ## How to read this report

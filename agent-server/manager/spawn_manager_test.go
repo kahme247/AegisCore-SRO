@@ -34,7 +34,7 @@ func TestTwoClientSpawnDespawnCoverage(t *testing.T) {
 			NPC: model.NPC{
 				SRObject: model.SRObject{
 					UniqueID: uid, RefObjectID: ref,
-					TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(kind)},
+					TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: int(kind)},
 					RtNavmeshPosition: position,
 				},
 				Mutex: &sync.Mutex{}, LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,

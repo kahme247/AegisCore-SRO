@@ -1,24 +1,24 @@
 No,Issue,States
-1,"when moving item to storage from the inv it feels lagy 
+1,"when moving item to storage from the inv it feels lagy
 items like active pet should not move out of inv !! ",done
-2,"active item should not move out of storage 
+2,"active item should not move out of storage
 in case the 1 page of the storage is full it should add to the next page up untill the limit of the pages !! (
 it seems something wierd after the teleport most of the items are back to inv ",partily done
-3,"trying to teleport to certen (slat desert)  places stuck on loading ! disconnect and reconnect loads normaly 
-game crashed ",need to check 
-4,"2 chers on the same area crashed the game 
+3,"trying to teleport to certen (slat desert)  places stuck on loading ! disconnect and reconnect loads normaly
+game crashed ",need to check
+4,"2 chers on the same area crashed the game
 the ch cher (khaled crashed !!) the eu cher stayed still !",done
 5,cher loot pickup does not work ,done
 6,Fix character deletion and effects,done
 7,sit/walk/run ,done
-8,Fix frozen monster hit animation,need test 
+8,Fix frozen monster hit animation,need test
 9,Fix pet inventory pickup sync,done
 10,Diagnose Magic Pop crash,done
 11,Fix party invite crash,done
 12,right click menu missing,done
 13,party inv works but crashed the game once accepted !!,
 14,so first one gone smooth but after first one the game kinda freeze and i cant close or change or move but the world is live but i am stuck/locked !,done
-15,the game when playing the card i need to re select the item before adding the card other wise it wont put the card .... can we make it atomic ?,working on 
+15,the game when playing the card i need to re select the item before adding the card other wise it wont put the card .... can we make it atomic ?,working on
 16,Magic POP NPC exchanged coupons one by one instead of exchanging every valid coupon in one click; some gifts remained. Previous opening crash was traced separately.,fixed - need test
 17,"exachange between players needs to have confimarion before starting
 cooldown after the exc on the same player
