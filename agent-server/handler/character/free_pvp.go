@@ -177,7 +177,7 @@ func (h *FreePVPHandler) handleUpdate(_ context.Context, session *server.Session
 	if err != nil || player == nil || player.Session != session {
 		return h.sendPacket(session, vsro188.BuildFRPVPUpdateFailure(freePVPUnavailable))
 	}
-	if player.GetJob().Active() {
+	if model.HasEquippedJobSuit(player) {
 		return h.sendPacket(session, vsro188.BuildFRPVPUpdateFailure(freePVPJobState))
 	}
 	if !player.SetPVPCape(model.PVPCape(mode)) {

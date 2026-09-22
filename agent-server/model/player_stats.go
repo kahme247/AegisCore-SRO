@@ -87,7 +87,7 @@ type equipmentStats struct {
 	MagAbsorb int
 }
 
-func equippedItemStats(inventory Inventory) equipmentStats {
+func equippedItemStats(inventory Inventory, weaponBonus, armorBonus, accessoryBonus byte) equipmentStats {
 	var result equipmentStats
 	for slot, item := range inventory.Items {
 		if slot > SlotRightRing || slot == SlotExtra {
@@ -97,10 +97,12 @@ func equippedItemStats(inventory Inventory) equipmentStats {
 		if !exists {
 			continue
 		}
+		optLevel := item.OptLevel
 		if ref.TypeID3 == 5 || ref.TypeID3 == 12 {
 			variance := AccessoryStatsFromVariance(item.Variance)
-			result.PhyAbsorb += itemStat(ref.PhyAbsRateLower, ref.PhyAbsRateUpper, ref.PhyAbsRateIncrease, variance.PhyAbsorb, item.OptLevel)
-			result.MagAbsorb += itemStat(ref.MagAbsRateLower, ref.MagAbsRateUpper, ref.MagAbsRateIncrease, variance.MagAbsorb, item.OptLevel)
+			optLevel = effectiveEnhancementLevel(optLevel, accessoryBonus)
+			result.PhyAbsorb += itemStat(ref.PhyAbsRateLower, ref.PhyAbsRateUpper, ref.PhyAbsRateIncrease, variance.PhyAbsorb, optLevel)
+			result.MagAbsorb += itemStat(ref.MagAbsRateLower, ref.MagAbsRateUpper, ref.MagAbsRateIncrease, variance.MagAbsorb, optLevel)
 			continue
 		}
 
@@ -109,34 +111,44 @@ func equippedItemStats(inventory Inventory) equipmentStats {
 			if ref.TypeID3 != TypeID3Weapon {
 				continue
 			}
+			optLevel = effectiveEnhancementLevel(optLevel, weaponBonus)
 			variance := WeaponStatsFromVariance(item.Variance)
-			result.PhyAttackMin += itemStat(ref.PhyAttackMinLower, ref.PhyAttackMinUpper, ref.PhyAttackIncrease, variance.PhyAttack, item.OptLevel)
+			result.PhyAttackMin += itemStat(ref.PhyAttackMinLower, ref.PhyAttackMinUpper, ref.PhyAttackIncrease, variance.PhyAttack, optLevel)
 			result.PhyAttackMin += itemStat(ref.PhyAttackReinforceMinLower, ref.PhyAttackReinforceMinUpper, 0, variance.PhyReinforce, 0)
-			result.PhyAttackMax += itemStat(ref.PhyAttackMaxLower, ref.PhyAttackMaxUpper, ref.PhyAttackIncrease, variance.PhyAttack, item.OptLevel)
+			result.PhyAttackMax += itemStat(ref.PhyAttackMaxLower, ref.PhyAttackMaxUpper, ref.PhyAttackIncrease, variance.PhyAttack, optLevel)
 			result.PhyAttackMax += itemStat(ref.PhyAttackReinforceMaxLower, ref.PhyAttackReinforceMaxUpper, 0, variance.PhyReinforce, 0)
-			result.MagAttackMin += itemStat(ref.MagAttackMinLower, ref.MagAttackMinUpper, ref.MagAttackIncrease, variance.MagAttack, item.OptLevel)
+			result.MagAttackMin += itemStat(ref.MagAttackMinLower, ref.MagAttackMinUpper, ref.MagAttackIncrease, variance.MagAttack, optLevel)
 			result.MagAttackMin += itemStat(ref.MagAttackReinforceMinLower, ref.MagAttackReinforceMinUpper, 0, variance.MagReinforce, 0)
-			result.MagAttackMax += itemStat(ref.MagAttackMaxLower, ref.MagAttackMaxUpper, ref.MagAttackIncrease, variance.MagAttack, item.OptLevel)
+			result.MagAttackMax += itemStat(ref.MagAttackMaxLower, ref.MagAttackMaxUpper, ref.MagAttackIncrease, variance.MagAttack, optLevel)
 			result.MagAttackMax += itemStat(ref.MagAttackReinforceMaxLower, ref.MagAttackReinforceMaxUpper, 0, variance.MagReinforce, 0)
-			result.HitRate += itemStat(ref.HitRateLower, ref.HitRateUpper, ref.HitRateIncrease, variance.HitRate, item.OptLevel)
+			result.HitRate += itemStat(ref.HitRateLower, ref.HitRateUpper, ref.HitRateIncrease, variance.HitRate, optLevel)
 			result.CriticalRate += itemStat(ref.CritRateLower, ref.CritRateUpper, 0, variance.CriticalRate, 0)
 		case SlotSecondaryWeapon:
+			optLevel = effectiveEnhancementLevel(optLevel, armorBonus)
 			variance := ShieldStatsFromVariance(item.Variance)
-			result.PhyDef += itemStat(ref.PhyDefLower, ref.PhyDefUpper, ref.PhyDefIncrease, variance.PhyDefense, item.OptLevel)
+			result.PhyDef += itemStat(ref.PhyDefLower, ref.PhyDefUpper, ref.PhyDefIncrease, variance.PhyDefense, optLevel)
 			result.PhyDef += itemStat(ref.PhyDefReinforceLower, ref.PhyDefReinforceUpper, 0, variance.PhyReinforce, 0)
-			result.MagDef += itemStat(ref.MagDefLower, ref.MagDefUpper, ref.MagDefIncrease, variance.MagDefense, item.OptLevel)
+			result.MagDef += itemStat(ref.MagDefLower, ref.MagDefUpper, ref.MagDefIncrease, variance.MagDefense, optLevel)
 			result.MagDef += itemStat(ref.MagDefReinforceLower, ref.MagDefReinforceUpper, 0, variance.MagReinforce, 0)
 			result.BlockRate += itemStat(ref.BlockingRateLower, ref.BlockingRateUpper, 0, variance.BlockRate, 0)
 		case SlotHelmet, SlotChest, SlotShoulder, SlotGlove, SlotPants, SlotBoots:
+			optLevel = effectiveEnhancementLevel(optLevel, armorBonus)
 			variance := ArmorStatsFromVariance(item.Variance)
-			result.PhyDef += itemStat(ref.PhyDefLower, ref.PhyDefUpper, ref.PhyDefIncrease, variance.PhyDefense, item.OptLevel)
+			result.PhyDef += itemStat(ref.PhyDefLower, ref.PhyDefUpper, ref.PhyDefIncrease, variance.PhyDefense, optLevel)
 			result.PhyDef += itemStat(ref.PhyDefReinforceLower, ref.PhyDefReinforceUpper, 0, variance.PhyReinforce, 0)
-			result.MagDef += itemStat(ref.MagDefLower, ref.MagDefUpper, ref.MagDefIncrease, variance.MagDefense, item.OptLevel)
+			result.MagDef += itemStat(ref.MagDefLower, ref.MagDefUpper, ref.MagDefIncrease, variance.MagDefense, optLevel)
 			result.MagDef += itemStat(ref.MagDefReinforceLower, ref.MagDefReinforceUpper, 0, variance.MagReinforce, 0)
-			result.ParryRate += itemStat(ref.EvasionRateLower, ref.EvasionRateUpper, ref.EvasionRateIncrease, variance.ParryRate, item.OptLevel)
+			result.ParryRate += itemStat(ref.EvasionRateLower, ref.EvasionRateUpper, ref.EvasionRateIncrease, variance.ParryRate, optLevel)
 		}
 	}
 	return result
+}
+
+func effectiveEnhancementLevel(level, bonus byte) byte {
+	if int(level)+int(bonus) > int(^uint8(0)) {
+		return ^uint8(0)
+	}
+	return level + bonus
 }
 
 // itemStat decodes the stock five-bit item variance and applies the reference

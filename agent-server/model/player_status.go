@@ -24,6 +24,149 @@ func (p *Player) CombatMovementRestricted(now time.Time) bool {
 	return false
 }
 
+// CombatActionRestricted reports control states whose stock abnormal actors
+// suppress offensive skill/attack admission while leaving cure/item use
+// available.
+func (p *Player) CombatActionRestricted(now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	for _, kind := range []CombatStatusKind{
+		CombatStatusFreeze,
+		CombatStatusStun,
+		CombatStatusSleep,
+		CombatStatusBind,
+		CombatStatusPetrify,
+		CombatStatusFear,
+	} {
+		if _, active := p.CombatStatus(kind, now); active {
+			return true
+		}
+	}
+	return false
+}
+
+// CombatHitRate applies authored absolute Hit Down and Darkness reductions.
+func (p *Player) CombatHitRate(base int, now time.Time) int {
+	for _, kind := range []CombatStatusKind{CombatStatusHitDown, CombatStatusDarkness} {
+		if status, active := p.CombatStatus(kind, now); active {
+			base -= status.Power
+		}
+	}
+	return max(0, base)
+}
+
+// CombatParryRate applies authored Parry Down followed by Shock's stock
+// remaining-parry factor.
+func (p *Player) CombatParryRate(base int, now time.Time) int {
+	if status, active := p.CombatStatus(CombatStatusParryDown, now); active {
+		base -= status.Power
+	}
+	base = max(0, base)
+	if status, active := p.CombatStatus(CombatStatusShock, now); active {
+		magnitude := status.Payload
+		if magnitude <= 0 {
+			magnitude = status.Power
+		}
+		base = base * (100 - min(max(magnitude, 0), 100)) / 100
+	}
+	return base
+}
+
+func CombatDefenseAfterReduction(base, reduction int) int {
+	base = max(0, base)
+	maximumReduction := int(float64(base) - 0.3*float64(base))
+	return base - min(max(reduction, 0), maximumReduction)
+}
+
+func (p *Player) CombatPhysicalDefense(base int, now time.Time) int {
+	if status, active := p.CombatStatus(CombatStatusPhysicalDefenseDown, now); active {
+		base = CombatDefenseAfterReduction(base, status.Power)
+	}
+	if status, active := p.CombatStatus(CombatStatusBleed, now); active {
+		base -= status.Power
+	}
+	return max(0, base)
+}
+
+func (p *Player) CombatMagicalDefense(base int, now time.Time) int {
+	if status, active := p.CombatStatus(CombatStatusMagicalDefenseDown, now); active {
+		base = CombatDefenseAfterReduction(base, status.Power)
+	}
+	if status, active := p.CombatStatus(CombatStatusBleed, now); active {
+		base -= status.Power
+	}
+	return max(0, base)
+}
+
+func CombatStatusRefreshesStats(kind CombatStatusKind) bool {
+	switch kind {
+	case CombatStatusShock, CombatStatusDarkness, CombatStatusHitDown,
+		CombatStatusParryDown, CombatStatusPhysicalDefenseDown,
+		CombatStatusMagicalDefenseDown, CombatStatusBleed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Player) CombatStatsAffected(now time.Time) bool {
+	for _, kind := range []CombatStatusKind{
+		CombatStatusShock, CombatStatusDarkness, CombatStatusHitDown,
+		CombatStatusParryDown, CombatStatusPhysicalDefenseDown,
+		CombatStatusMagicalDefenseDown, CombatStatusBleed,
+	} {
+		if _, active := p.CombatStatus(kind, now); active {
+			return true
+		}
+	}
+	return false
+}
+
+// CombatAttackRange applies Short Sight as an authored percentage reduction.
+func (p *Player) CombatAttackRange(base float32, now time.Time) float32 {
+	if base <= 0 {
+		return 0
+	}
+	if status, active := p.CombatStatus(CombatStatusShortSight, now); active {
+		reduction := min(max(status.Power, 0), 100)
+		return base * float32(100-reduction) / 100
+	}
+	return base
+}
+
+// CombatStatusChance applies Disease's authored susceptibility magnitude to a
+// subsequent abnormal-state admission roll.
+func (p *Player) CombatStatusChance(base int, now time.Time) int {
+	if status, active := p.CombatStatus(CombatStatusDisease, now); active {
+		base += status.Power
+	}
+	return min(max(base, 0), 100)
+}
+
+func (p *Player) HasZombieStatus(now time.Time) bool {
+	_, active := p.CombatStatus(CombatStatusZombie, now)
+	return active
+}
+
+// HasZombieStatusWhileLocked reports Zombie without reacquiring Player.Mutex.
+// The caller must hold Player.Mutex across this query and the associated
+// vitality transaction.
+func (p *Player) HasZombieStatusWhileLocked(now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	status, active := p.combatStatuses[CombatStatusZombie]
+	if !active {
+		return false
+	}
+	if !status.ExpiresAt.After(now) {
+		delete(p.combatStatuses, CombatStatusZombie)
+		return false
+	}
+	return true
+}
+
 func (p *Player) ApplyCombatStatus(status CombatStatus) bool {
 	return p.ApplyCombatStatusAt(status, time.Now())
 }
@@ -36,6 +179,9 @@ func (p *Player) ApplyCombatStatusAt(status CombatStatus, now time.Time) bool {
 	}
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if status.AppliedAt.IsZero() {
+		status.AppliedAt = now
 	}
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
@@ -73,9 +219,21 @@ func (p *Player) CombatStatus(kind CombatStatusKind, now time.Time) (CombatStatu
 	return status, true
 }
 
+type CombatBadEffectDetail struct {
+	DurationCentiseconds uint32
+	ElapsedCentiseconds  uint16
+	Value                uint16
+}
+
 func (p *Player) CombatBadEffectState(now time.Time) (uint32, []byte) {
+	mask, levels, _ := p.CombatBadEffectSnapshot(now)
+	return mask, levels
+}
+
+func (p *Player) CombatBadEffectSnapshot(now time.Time) (uint32, []byte, []CombatBadEffectDetail) {
 	var mask uint32
 	levels := make([]byte, 0)
+	details := make([]CombatBadEffectDetail, 0)
 	for _, kind := range combatBadEffectKinds {
 		status, active := p.CombatStatus(kind, now)
 		if !active {
@@ -83,15 +241,38 @@ func (p *Player) CombatBadEffectState(now time.Time) (uint32, []byte) {
 		}
 		bit := CombatStatusBadEffectBit(kind)
 		mask |= bit
-		if bit > 1<<5 {
-			level := status.Level
-			if level < 1 {
-				level = max(1, status.Power)
-			}
-			levels = append(levels, byte(min(level, 255)))
+		value := status.Level
+		if value < 1 {
+			value = max(1, status.Power)
 		}
+		if bit > 1<<5 {
+			levels = append(levels, byte(min(value, 255)))
+		}
+		duration := status.ExpiresAt.Sub(status.AppliedAt)
+		elapsed := now.Sub(status.AppliedAt)
+		if duration < 0 {
+			duration = 0
+		}
+		if elapsed < 0 {
+			elapsed = 0
+		} else if elapsed > duration {
+			elapsed = duration
+		}
+		durationCentiseconds := uint64(duration / (100 * time.Millisecond))
+		if durationCentiseconds > uint64(^uint32(0)) {
+			durationCentiseconds = uint64(^uint32(0))
+		}
+		elapsedCentiseconds := uint64(elapsed / (100 * time.Millisecond))
+		if elapsedCentiseconds > uint64(^uint16(0)) {
+			elapsedCentiseconds = uint64(^uint16(0))
+		}
+		details = append(details, CombatBadEffectDetail{
+			DurationCentiseconds: uint32(durationCentiseconds),
+			ElapsedCentiseconds:  uint16(elapsedCentiseconds),
+			Value:                uint16(min(value, int(^uint16(0)))),
+		})
 	}
-	return mask, levels
+	return mask, levels, details
 }
 
 func (p *Player) CureCombatStatuses(mask uint32, maxLevel, count int, now time.Time) int {

@@ -258,6 +258,18 @@ func TestBuildBadEffectUpdateCarriesMaskAndHighEffectLevel(t *testing.T) {
 	}
 }
 
+func TestBuildPlayerBadEffectSnapshotCarriesStockTimerUnits(t *testing.T) {
+	packet := BuildPlayerBadEffectSnapshot(0x20, []CombatBadEffectDetail{{
+		DurationCentiseconds: 158,
+		ElapsedCentiseconds:  3,
+		Value:                69,
+	}})
+	want := []byte{0x20, 0, 0, 0, 158, 0, 0, 0, 3, 0, 69, 0}
+	if packet.MessageID != opcode.ActionUnknownUpdate2 || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("bad-effect snapshot = opcode %04X payload % X, want 30D2 % X", packet.MessageID, packet.Payload(), want)
+	}
+}
+
 func TestAttackEndSerializesTwoHitsBeforeOneTarget(t *testing.T) {
 	packet := BuildAttackEndHits(0x55667788, 0x99AABBCC, []uint32{0x008101, 0x008102}, true)
 	want := []byte{

@@ -27,6 +27,21 @@ func TestRecalculatePassiveSkillModifiersReplacesLevelsAndPreservesActiveBuffs(t
 	}
 }
 
+func TestPassiveCriticalModifierReachesDerivedStats(t *testing.T) {
+	const skillID = uint32(9003)
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		skillID: {ID: skillID, BasicActivity: 0, BuffModifiers: BuffModifiers{CriticalRate: 2}},
+	}})
+	player := &Player{
+		Skills:          map[uint32]byte{skillID: 1},
+		BaseAttackStats: AttackStats{CriticalRate: 30},
+	}
+	player.RecalculatePassiveSkillModifiers(catalog)
+	if got := player.DerivedStats().CriticalRate; got != 32 {
+		t.Fatalf("passive critical rate = %d, want 32", got)
+	}
+}
+
 func TestRecalculatePassiveSkillModifiersRequiresAuthoredEquippedItem(t *testing.T) {
 	const skillID = uint32(39)
 	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
@@ -62,5 +77,72 @@ func TestRecalculatePassiveSkillsRegistersRealRecoveryDescriptors(t *testing.T) 
 	got := player.PassiveRecoveryStatusSnapshot()
 	if len(got) != 1 || got[0] != (RecoveryStatusDescriptor{SkillID: 9001, Mask: 0x400, Value: 50, Grade: 11}) {
 		t.Fatalf("passive real registry = %+v", got)
+	}
+}
+
+func TestPassiveCriticalDefenseRequiresEnabledSkill(t *testing.T) {
+	const skillID = uint32(8661)
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		skillID: {ID: skillID, BasicActivity: 0, PassiveCriticalDefense: 14},
+	}})
+	player := &Player{Skills: map[uint32]byte{skillID: 1}}
+	player.RecalculatePassiveSkillModifiers(catalog)
+	if got := player.PassiveCriticalDefense(); got != 14 {
+		t.Fatalf("passive critical defense = %d, want 14", got)
+	}
+	player.Skills[skillID] = 0
+	player.RecalculatePassiveSkillModifiers(catalog)
+	if got := player.PassiveCriticalDefense(); got != 0 {
+		t.Fatalf("disabled passive critical defense = %d, want 0", got)
+	}
+}
+
+func TestPassiveClericPraiseHealingRequiresEnabledSkill(t *testing.T) {
+	const skillID = uint32(11665)
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		skillID: {ID: skillID, BasicActivity: 0, PassiveHealingPercent: 20},
+	}})
+	player := &Player{Skills: map[uint32]byte{skillID: 1}}
+	player.RecalculatePassiveSkillModifiers(catalog)
+	if got := player.PassiveHealingPercent(); got != 20 {
+		t.Fatalf("passive healing percent = %d, want 20", got)
+	}
+}
+
+func TestPassiveClericPraiseBlessingRequiresEnabledSkill(t *testing.T) {
+	const skillID = uint32(11848)
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		skillID: {ID: skillID, BasicActivity: 0, PassiveBlessingPercent: 15},
+	}})
+	player := &Player{Skills: map[uint32]byte{skillID: 1}}
+	player.RecalculatePassiveSkillModifiers(catalog)
+	if got := player.PassiveBlessingPercent(); got != 15 {
+		t.Fatalf("passive blessing percent = %d, want 15", got)
+	}
+}
+
+func TestPassiveAbnormalDurationResistanceUsesIndependentChannels(t *testing.T) {
+	catalog := NewReferenceDataCatalog(ReferenceDataSnapshot{Skills: map[uint32]RefSkill{
+		1: {ID: 1, BasicActivity: 0, PassiveStatusDurationMask: 1, PassiveStatusDurationPercent: 10},
+		2: {ID: 2, BasicActivity: 0, PassiveStatusDurationMask: 8, PassiveStatusDurationPercent: 20},
+		3: {ID: 3, BasicActivity: 0, PassiveStatusDurationMask: 2, PassiveStatusDurationPercent: 150},
+		4: {ID: 4, BasicActivity: 0, PassiveStatusDurationMask: 4 | 16 | 32, PassiveStatusDurationPercent: 30},
+	}})
+	player := &Player{Skills: map[uint32]byte{1: 1, 2: 1, 3: 1, 4: 1}}
+	player.RecalculatePassiveSkillModifiers(catalog)
+	for _, test := range []struct {
+		kind CombatStatusKind
+		want int
+	}{
+		{CombatStatusFreeze, 900},
+		{CombatStatusBurn, 800},
+		{CombatStatusFrostbite, 0},
+		{CombatStatusShock, 700},
+		{CombatStatusPoison, 700},
+		{CombatStatusZombie, 700},
+	} {
+		if got := player.CombatStatusDurationMS(test.kind, 1000); got != test.want {
+			t.Fatalf("status %d duration = %d, want %d", test.kind, got, test.want)
+		}
 	}
 }

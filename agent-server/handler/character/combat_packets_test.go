@@ -21,14 +21,15 @@ import (
 )
 
 type combatWorldFake struct {
-	player        *model.Player
-	objects       map[uint32]model.ISRObject
-	distance      float32
-	playerLookups int
-	objectLookups int
-	removes       int
-	stops         int
-	blocked       bool
+	player            *model.Player
+	objects           map[uint32]model.ISRObject
+	distance          float32
+	playerLookups     int
+	objectLookups     int
+	removes           int
+	stops             int
+	blocked           bool
+	globalResolutions int
 }
 
 func TestBuildServerInventoryItemAddedMatchesStockB034Layout(t *testing.T) {
@@ -151,6 +152,7 @@ func (f *combatWorldFake) StopMovingCharacter(character model.ICharacter, positi
 }
 
 func (f *combatWorldFake) NewPosFromGlobalCoordinates(global *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	f.globalResolutions++
 	if global == nil || f.player == nil {
 		return navmeshv2.RtNavmeshPosition{}, fmt.Errorf("global position unavailable")
 	}
@@ -504,6 +506,7 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 	model.RefItems = map[uint32]model.RefItem{
 		179: {RefObject: model.RefObject{ID: 179}, Range: 18},
 		180: {RefObject: model.RefObject{ID: 180}, Range: 180},
+		181: {RefObject: model.RefObject{ID: 181}},
 	}
 	player := &model.Player{
 		SRObject:  model.SRObject{RefObjectID: 1907},
@@ -518,6 +521,9 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 		Characters: map[uint32]model.RefChar{
 			1907: {RefObject: model.RefObject{ID: 1907, BCRadius: 4}},
 			1933: {RefObject: model.RefObject{ID: 1933, BCRadius: 6}},
+		},
+		Skills: map[uint32]model.RefSkill{
+			9944: {ID: 9944, ActionRange: 150},
 		},
 	})}
 
@@ -536,6 +542,39 @@ func TestCombatBaseAttackReachIncludesCombatantRadii(t *testing.T) {
 	}}
 	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 10}), float32(205); got != want {
 		t.Fatalf("bow skill reach with small authored addition = %g, want %g", got, want)
+	}
+	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{
+		RefObjectID: 181,
+		TypeInfo:    model.TypeInfo{TypeID1: model.TypeID1Item, TypeID2: model.TypeID2Wearable, TypeID3: model.TypeID3Weapon, TypeID4: 11},
+	}}
+	if got, want := handler.baseAttackReach(player, target), float32(160); got != want {
+		t.Fatalf("wizard base attack reach = %g, want authored staff base-skill range plus combatant radii %g", got, want)
+	}
+	player.Inventory.Items[model.SlotPrimaryWeapon] = model.Item{SRObject: model.SRObject{
+		RefObjectID: 180,
+		TypeInfo:    model.TypeInfo{TypeID1: model.TypeID1Item, TypeID2: model.TypeID2Wearable, TypeID3: model.TypeID3Weapon, TypeID4: 6},
+	}}
+	player.ApplyCombatStatus(model.CombatStatus{
+		Kind: model.CombatStatusShortSight, Token: 1, Power: 40, ExpiresAt: time.Now().Add(time.Minute),
+	})
+	if got, want := handler.skillAttackReach(player, target, model.RefSkill{ActionRange: 10}), float32(123); got != want {
+		t.Fatalf("short-sight bow skill reach = %g, want %g", got, want)
+	}
+}
+
+func TestMagicBoundAddsRangeOnlyToWizardSkills(t *testing.T) {
+	player := &model.Player{Skills: map[uint32]byte{9956: 1}}
+	player.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			9956: {ID: 9956, BasicActivity: 0, PassiveSkillRangeBonus: 40},
+		},
+	}))
+	handler := &CombatHandler{}
+	target := &model.NPC{}
+	wizardReach := handler.skillAttackReach(player, target, model.RefSkill{CodeName: "SKILL_EU_WIZARD_FIREA_POINT_A_01", ActionRange: 100})
+	otherReach := handler.skillAttackReach(player, target, model.RefSkill{CodeName: "SKILL_EU_WARLOCK_DOTA_BURN_A_01", ActionRange: 100})
+	if wizardReach != otherReach+40 {
+		t.Fatalf("Magic Bound reach = %g, non-Wizard = %g", wizardReach, otherReach)
 	}
 }
 
@@ -816,7 +855,7 @@ func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
 	outside := newMob(203, 110)
 	imbue := model.RefSkill{
 		ID: imbueID, BasicActivity: 2, BuffDuration: 8000, AttackType: 8, AttackPercent: 100, AttackMin: 964, AttackMax: 1791,
-		ShockPower: 240, ShockChance: 25, ShockDuration: 5000, TransferRange: 50, TransferCount: 2,
+		ShockPower: 50, ShockChance: 25, ShockDuration: 5000, TransferRange: 50, TransferCount: 2,
 	}
 	if _, ok := player.CommitActiveBuff(imbueID, 900, 8*time.Second, model.BuffModifiers{}); !ok {
 		t.Fatal("failed to arrange lightning imbue")
@@ -840,7 +879,7 @@ func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
 			t.Fatalf("secondary %d HP = %d, want %d", mob.GetUniqueID(), got, want)
 		}
 		status, exists := mob.CombatStatus(model.CombatStatusShock, now)
-		if !exists || status.Power != 240 || !status.ExpiresAt.Equal(now.Add(5*time.Second)) {
+		if !exists || status.Power != 50 || status.Payload != 50 || !status.ExpiresAt.Equal(now.Add(5*time.Second)) {
 			t.Fatalf("secondary %d shock = %+v exists=%t", mob.GetUniqueID(), status, exists)
 		}
 	}
@@ -850,7 +889,7 @@ func TestCombatLightningImbueAddsDamageTransfersAndAppliesShock(t *testing.T) {
 	if outside.CurrentHitPoints() != 10000 {
 		t.Fatalf("outside target HP = %d, want untouched", outside.CurrentHitPoints())
 	}
-	if status, exists := primary.CombatStatus(model.CombatStatusShock, now); !exists || status.Power != 240 {
+	if status, exists := primary.CombatStatus(model.CombatStatusShock, now); !exists || status.Power != 50 || status.Payload != 50 {
 		t.Fatalf("primary shock = %+v exists=%t", status, exists)
 	}
 }
@@ -1579,6 +1618,55 @@ func assertSkillCastError(t *testing.T, packet network.Packet, reason byte) {
 	t.Helper()
 	if packet.MessageID != opcode.EntitySkillCastBegin || !bytes.Equal(packet.Payload(), []byte{2, reason, skillCastErrorCategory}) {
 		t.Fatalf("skill cast error = opcode %04X payload % X, want B070 02 %02X 30", packet.MessageID, packet.Payload(), reason)
+	}
+}
+
+func TestBuildSkillCastErrorResponseUsesStockB070Layout(t *testing.T) {
+	packet := buildSkillCastErrorResponse(skillCastErrorInvalidAmmo)
+	if packet.MessageID != opcode.EntitySkillCastBegin {
+		t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntitySkillCastBegin)
+	}
+	if got, want := packet.Payload(), []byte{0x02, 0x0E, 0x30}; !bytes.Equal(got, want) {
+		t.Fatalf("payload = % X, want % X", got, want)
+	}
+}
+
+func TestBuildExperienceUpdateUsesStock3056Layout(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		progress model.ProgressionResult
+		want     []byte
+	}{
+		{
+			name:     "without level gain",
+			progress: model.ProgressionResult{StatPointsGained: 0x1234},
+			want: []byte{
+				0x44, 0x33, 0x22, 0x11,
+				0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+				0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+				0x00,
+			},
+		},
+		{
+			name:     "with level gain",
+			progress: model.ProgressionResult{LevelsGained: 1, StatPointsGained: 0x1234},
+			want: []byte{
+				0x44, 0x33, 0x22, 0x11,
+				0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+				0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+				0x00, 0x34, 0x12,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := buildExperienceUpdate(0x11223344, 0x0102030405060708, 0x1112131415161718, test.progress)
+			if packet.MessageID != opcode.EntityUpdateExperience {
+				t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, opcode.EntityUpdateExperience)
+			}
+			if got := packet.Payload(); !bytes.Equal(got, test.want) {
+				t.Fatalf("payload = % X, want % X", got, test.want)
+			}
+		})
 	}
 }
 
@@ -2585,5 +2673,26 @@ func TestScaleCombatRewardUsesIntegerPercentRates(t *testing.T) {
 		if got := scaleCombatReward(test.base, test.rate); got != test.want {
 			t.Fatalf("scaleCombatReward(%d, %d) = %d, want %d", test.base, test.rate, got, test.want)
 		}
+	}
+}
+
+func TestPassiveCriticalDefenseReducesPVPCriticalChance(t *testing.T) {
+	attacker := &model.Player{BaseAttackStats: model.AttackStats{CriticalRate: 20}}
+	defender := &model.Player{Skills: map[uint32]byte{8661: 1}}
+	defender.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			8661: {ID: 8661, BasicActivity: 0, PassiveCriticalDefense: 14},
+		},
+	}))
+	var chance int
+	handler := &CombatHandler{criticalRoll: func(value int) bool {
+		chance = value
+		return false
+	}}
+	if handler.playerAttackCritical(attacker, defender) {
+		t.Fatal("critical roll unexpectedly succeeded")
+	}
+	if chance != 6 {
+		t.Fatalf("critical chance after passive defense = %d, want 6", chance)
 	}
 }

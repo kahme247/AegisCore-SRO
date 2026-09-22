@@ -49,6 +49,25 @@ func TestCombatPursuitAimsAtTargetSoMovingMonsterDoesNotLeaveAStandOffStop(t *te
 		t.Fatalf("pursuit destination = (%g, %g), want target position (%g, %g)", got.X, got.Z, want.X, want.Z)
 	}
 }
+func TestCombatPursuitKeepsDungeonTargetCoordinates(t *testing.T) {
+	handler, player, mob, _, destinations, _ := newMovingPursuitTest(t)
+	player.SetNavmeshPosition(combatTestPosition(-32767, 800, 0, -900))
+	mob.SetNavmeshPosition(combatTestPosition(-32767, 900, 0, -900))
+
+	if err := handler.handlePacket(context.Background(), player.Session, combatAttackPacket(mob.GetUniqueID())); err != nil {
+		t.Fatal(err)
+	}
+	if len(*destinations) != 1 {
+		t.Fatalf("dungeon pursuit destinations = %d, want 1", len(*destinations))
+	}
+	destination := (*destinations)[0]
+	if destination.Region.ID != -32767 || destination.Offset == nil || *destination.Offset != *mob.GetNavmeshPosition().Offset {
+		t.Fatalf("dungeon pursuit destination = %+v, want target %+v", destination, mob.GetNavmeshPosition())
+	}
+	if calls := handler.world.(*combatWorldFake).globalResolutions; calls != 0 {
+		t.Fatalf("dungeon pursuit used normal-world resolver %d times", calls)
+	}
+}
 
 func TestCombatPursuitStopsAndHitsWhenMovingMonsterEntersReach(t *testing.T) {
 	handler, player, mob, scheduled, _, sent := newMovingPursuitTest(t)

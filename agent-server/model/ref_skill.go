@@ -37,73 +37,82 @@ const (
 )
 
 const (
-	skillParameterAttack         = 6386804
-	skillParameterSystemBuff     = 1667396966
-	skillParameterDuration       = 1685418593
-	skillParameterHeal           = 1751474540
-	skillParameterResurrection   = 1919251317
-	skillParameterBlock          = 25202
-	skillParameterParry          = 25970
-	skillParameterHit            = 26738
-	skillParameterDamage         = 6582901
-	skillParameterHP             = 6844521
-	skillParameterMP             = 7172201
-	skillParameterDefense        = 1684366960
-	skillParameterIntellect      = 1768846441
-	skillParameterStrength       = 1937011305
-	skillParameterShock          = 25971
-	skillParameterTransfer       = 6645362
-	skillParameterBurn           = 25205
-	skillParameterFreeze         = 26234
-	skillParameterFrostbite      = 26210
-	skillParameterPoison         = 28787
-	skillParameterZombie         = 31330
-	skillParameterBleed          = 25196
-	skillParameterConfusion      = 25441
-	skillParameterDarkness       = 25710
-	skillParameterDisease        = 25715
-	skillParameterFear           = 26213
-	skillParameterShortSight     = 28025
-	skillParameterBind           = 29300
-	skillParameterSleep          = 29541
-	skillParameterDull           = 29548
-	skillParameterPanic          = 1668507760
-	skillParameterCombustion     = 1668509040
-	skillParameterHidden         = 84545280
-	skillParameterImpact         = 1952542324
-	skillParameterBarrier        = 1869506150
-	skillParameterTeleport       = 1952803941
-	skillParameterTeleportV1     = 1952803890
-	skillParameterParryDown      = 1952805476
-	skillParameterHitDown        = 1953002084
-	skillParameterPhyDefDown     = 1668509796
-	skillParameterMagDefDown     = 1668509028
-	skillParameterAttackDown     = 1668510578
-	skillParameterDamageTaken    = 1668508020
-	skillParameterStun           = 29556
-	skillParameterAggroBlock     = 1886350433
-	skillParameterRecovery       = 1769105251
-	skillParameterRecoveryStatus = 1919246700 // `real`
-	skillParameterRequiredItem   = 1919250793
-	skillParameterCureStatus     = 1668641396
-	skillParameterCureLevel      = 1668641388
-	skillParameterCureCurse      = 25145280
-	skillParameterCureCount      = 1919120754
-	skillParameterAggroReduce    = 1685352052
-	skillParameterAggroAbsorb    = 1818976615
-	skillParameterAggroIncrease  = 1953395762
-	skillParameterAbsoluteDamage = 1885629799
-	skillParameterDamageToMP     = 1684891508
-	skillParameterTransformMask  = 1835229552
-	skillParameterOverlap2       = 1870031922
-	skillParameterDamageType     = 1685353584
-	skillParameterLinkedSame     = 1818981170
-	skillParameterMatch          = 1836278632
-	skillParameterKnockOver      = 27503
-	skillParameterKnockback      = 27490
-	skillParameterLinkedDamage   = 1818977394
-	skillParameterDetection      = 6583412
-	skillParameterHide           = 1751737445
+	skillParameterAttack                     = 6386804
+	skillParameterSystemBuff                 = 1667396966
+	skillParameterDuration                   = 1685418593
+	skillParameterHeal                       = 1751474540
+	skillParameterResurrection               = 1919251317
+	skillParameterBlock                      = 25202
+	skillParameterParry                      = 25970
+	skillParameterHit                        = 26738
+	skillParameterDamage                     = 6582901
+	skillParameterHP                         = 6844521
+	skillParameterMP                         = 7172201
+	skillParameterDamageAbsorption           = 1868849522
+	skillParameterDefense                    = 1684366960
+	skillParameterIntellect                  = 1768846441
+	skillParameterStrength                   = 1937011305
+	skillParameterGoldDropAmount             = 6775922
+	skillParameterShock                      = 25971
+	skillParameterTransfer                   = 6645362
+	skillParameterBurn                       = 25205
+	skillParameterFreeze                     = 26234
+	skillParameterFrostbite                  = 26210
+	skillParameterPoison                     = 28787
+	skillParameterZombie                     = 31330
+	skillParameterBleed                      = 25196
+	skillParameterConfusion                  = 25441
+	skillParameterDarkness                   = 25710
+	skillParameterDisease                    = 25715
+	skillParameterFear                       = 26213
+	skillParameterShortSight                 = 28025
+	skillParameterBind                       = 29300
+	skillParameterSleep                      = 29541
+	skillParameterDull                       = 29548
+	skillParameterPanic                      = 1668507760
+	skillParameterCombustion                 = 1668509040
+	skillParameterHidden                     = 84545280
+	skillParameterImpact                     = 1952542324
+	skillParameterBarrier                    = 1869506150
+	skillParameterTeleport                   = 1952803941
+	skillParameterTeleportV1                 = 1952803890
+	skillParameterParryDown                  = 1952805476
+	skillParameterHitDown                    = 1953002084
+	skillParameterPhyDefDown                 = 1668509796
+	skillParameterMagDefDown                 = 1668509028
+	skillParameterAttackDown                 = 1668510578
+	skillParameterDamageTaken                = 1668508020
+	skillParameterStun                       = 29556
+	skillParameterAggroBlock                 = 1886350433
+	skillParameterRecovery                   = 1769105251
+	skillParameterRecoveryStatus             = 1919246700 // `real`
+	skillParameterAbnormalDurationResistance = 1919246708 // `taer`
+	skillParameterRequiredItem               = 1919250793
+	skillParameterCureStatus                 = 1668641396
+	skillParameterCureLevel                  = 1668641388
+	skillParameterCureCurse                  = 25145280
+	skillParameterCureCount                  = 1919120754
+	skillParameterAggroReduce                = 1685352052
+	skillParameterAggroAbsorb                = 1818976615
+	skillParameterAggroIncrease              = 1953395762
+	skillParameterAbsoluteDamage             = 1885629799
+	skillParameterDamageToMP                 = 1684891508
+	skillParameterTransformMask              = 1835229552
+	skillParameterOverlap2                   = 1870031922
+	skillParameterDamageType                 = 1685353584
+	skillParameterLinkedSame                 = 1818981170
+	skillParameterMatch                      = 1836278632
+	skillParameterKnockOver                  = 27503
+	skillParameterKnockback                  = 27490
+	skillParameterLinkedDamage               = 1818977394
+	skillParameterDetection                  = 6583412
+	skillParameterAttackPower                = 1634754933 // `uapa`
+	skillParameterMaxHPReduction             = 1886218352 // `pmhp`
+	skillParameterCriticalRate               = 25458      // `rc`
+	skillParameterMovementSpeed              = 1752396901 // `etsh`
+	skillParameterRangePassive               = 1936028790 // `vtes`
+	skillParameterHide                       = 1751737445
+	skillParameterCriticalDefense            = 1684238953 // `ircd`
 )
 
 type SkillRequiredItem struct {
@@ -130,20 +139,28 @@ type RecoveryStatusDescriptor struct {
 }
 
 type BuffModifiers struct {
-	HP               int
-	HPPercent        int
-	MP               int
-	MPPercent        int
-	Strength         int
-	Intellect        int
-	HitRate          int
-	HitRatePercent   int
-	DamagePercent    int
-	PhysicalDefense  int
-	MagicalDefense   int
-	BlockRate        int
-	ParryRate        int
-	ParryRatePercent int
+	HP                              int
+	HPPercent                       int
+	MP                              int
+	MPPercent                       int
+	Strength                        int
+	Intellect                       int
+	HitRate                         int
+	HitRatePercent                  int
+	PhysicalAttack                  int
+	MagicalAttack                   int
+	CriticalRate                    int
+	MovementSpeedPercent            int
+	DamagePercent                   int
+	DamageAbsorptionPercent         int
+	PhysicalDamageAbsorptionPercent int
+	MagicalDamageAbsorptionPercent  int
+	PhysicalDefense                 int
+	MagicalDefense                  int
+	BlockRate                       int
+	ParryRate                       int
+	ParryRatePercent                int
+	GoldDropAmountPercent           int
 }
 
 // RefSkill contains the server-side timing and reach values needed to execute
@@ -194,82 +211,88 @@ type RefSkill struct {
 	// ActionFlyingSpeed and ActionInterruptible are native REF_SKILL
 	// controller fields. They are retained even though the common traced
 	// execution path does not yet prove their runtime semantics.
-	ActionFlyingSpeed      int
-	ActionInterruptible    bool
-	ActionRange            int
-	ActionOverlap          int
-	AttackType             int
-	AttackPercent          int
-	AttackMin              int
-	AttackMax              int
-	BuffDuration           int
-	HealHP                 int
-	HealHPPercent          int
-	HealMP                 int
-	HealMPPercent          int
-	ResurrectLevel         int
-	ShockPower             int
-	ShockChance            int
-	ShockDuration          int
-	TransferRange          int
-	TransferCount          int
-	TransferType           int
-	TransferFalloffPercent int
-	TransferTargetMask     uint32
-	StatusEffects          []SkillStatusEffect
-	ImpactDamage           int
-	BarrierDrainMS         int
-	BarrierMPCost          int
-	UpkeepIntervalMS       int
-	UpkeepMPCost           int
-	BarrierHitPoints       int
-	BarrierAbsorption      int
-	BarrierPhysical        bool
-	MovementDistance       int
-	MovementDurationMS     int
-	AggroSuppression       bool
-	RecoveryHP             int
-	RecoveryMP             int
-	RecoveryStatusMask     uint32
-	RecoveryStatusValue    int
-	RecoveryStatusGrade    int
-	RequiredItems          []SkillRequiredItem
-	CureStatusMask         uint32
-	CureStatusMaxLevel     int
-	CureCurse              bool
-	CureCurseChance        int
-	CureCurseMaxLevel      int
-	CureCount              int
-	AggroReduce            int
-	AggroAbsorbPercent     int
-	AggroIncrease          int
-	AggroIncreasePercent   int
-	AbsoluteDamage         int
-	DamageToHPPercent      int
-	DamageToMPPercent      int
-	TransformMaxLevel      int
-	TransformItemRefID     uint32
-	SecondaryOverlap       int
-	DamageTypeFamily       int
-	DamageTypePrecedence   int
-	LinkedSameGroup        bool
-	ReferenceDescriptors   [4][6]int
-	ReferenceRadius        int
-	MatchMode              int
-	KnockOverKey           int
-	KnockOverChance        int
-	KnockbackChance        int
-	KnockbackDistance      int
-	LinkedDamageMask       uint32
-	LinkedDamagePercent    int
-	LinkedDamageUseLimit   int
-	DetectionType          int
-	DetectionLevel         int
-	HideType               int
-	HideLevel              int
-	HideChance             int
-	BuffModifiers          BuffModifiers
-	Params                 [50]int
+	ActionFlyingSpeed            int
+	ActionInterruptible          bool
+	ActionRange                  int
+	ActionOverlap                int
+	AttackType                   int
+	AttackPercent                int
+	AttackMin                    int
+	AttackMax                    int
+	BuffDuration                 int
+	HealHP                       int
+	HealHPPercent                int
+	HealMP                       int
+	HealMPPercent                int
+	ResurrectLevel               int
+	ShockPower                   int
+	ShockChance                  int
+	ShockDuration                int
+	TransferRange                int
+	TransferCount                int
+	TransferType                 int
+	TransferFalloffPercent       int
+	TransferTargetMask           uint32
+	StatusEffects                []SkillStatusEffect
+	ImpactDamage                 int
+	BarrierDrainMS               int
+	BarrierMPCost                int
+	UpkeepIntervalMS             int
+	UpkeepMPCost                 int
+	BarrierHitPoints             int
+	BarrierAbsorption            int
+	BarrierPhysical              bool
+	MovementDistance             int
+	MovementDurationMS           int
+	AggroSuppression             bool
+	RecoveryHP                   int
+	RecoveryMP                   int
+	RecoveryStatusMask           uint32
+	RecoveryStatusValue          int
+	RecoveryStatusGrade          int
+	RequiredItems                []SkillRequiredItem
+	CureStatusMask               uint32
+	CureStatusMaxLevel           int
+	CureCurse                    bool
+	CureCurseChance              int
+	CureCurseMaxLevel            int
+	CureCount                    int
+	AggroReduce                  int
+	AggroAbsorbPercent           int
+	AggroIncrease                int
+	AggroIncreasePercent         int
+	AbsoluteDamage               int
+	DamageToHPPercent            int
+	DamageToMPPercent            int
+	TransformMaxLevel            int
+	TransformItemRefID           uint32
+	SecondaryOverlap             int
+	DamageTypeFamily             int
+	DamageTypePrecedence         int
+	LinkedSameGroup              bool
+	ReferenceDescriptors         [4][6]int
+	ReferenceRadius              int
+	MatchMode                    int
+	KnockOverKey                 int
+	KnockOverChance              int
+	KnockbackChance              int
+	KnockbackDistance            int
+	LinkedDamageMask             uint32
+	LinkedDamagePercent          int
+	LinkedDamageUseLimit         int
+	DetectionType                int
+	DetectionLevel               int
+	HideType                     int
+	HideLevel                    int
+	HideChance                   int
+	PassiveSkillRangeBonus       int
+	PassiveHealingPercent        int
+	PassiveBlessingPercent       int
+	PassiveStatusDurationMask    uint32
+	PassiveStatusDurationPercent int
+	PassiveCriticalDefense       int
+	BuffModifiers                BuffModifiers
+	Params                       [50]int
 }
 
 func (s RefSkill) IsPassive() bool { return s.BasicActivity == 0 }
@@ -397,12 +420,16 @@ func (s RefSkill) ExecutionKind() SkillExecutionKind {
 }
 
 // SupportsItemUseBuff reports whether a linked consumable can safely use the
-// existing persisted character-buff path. Ordinary gameplay buffs retain their
-// established behavior. Mall-owned system skills are admitted only for the
-// exact self-buff descriptor and modifier families already represented by
-// BuffModifiers; unresolved system effects such as `rado` remain fail-closed.
+// persisted character-buff path. Mall-owned system skills are admitted only
+// for decoded self effects with an implemented runtime consumer.
 func (s RefSkill) SupportsItemUseBuff() bool {
-	if s.BuffDuration <= 0 || s.BuffModifiers == (BuffModifiers{}) {
+	if s.BuffDuration <= 0 {
+		return false
+	}
+	hasRuntimeEffect := s.BuffModifiers != (BuffModifiers{}) ||
+		s.RecoveryHP > 0 || s.RecoveryMP > 0 ||
+		s.DetectionLevel > 0
+	if !hasRuntimeEffect {
 		return false
 	}
 	if s.ExecutionKind() == SkillExecutionBuff {
@@ -424,8 +451,14 @@ func (s RefSkill) SupportsItemUseBuff() bool {
 		return s.Params[5] > 0
 	case skillParameterIntellect:
 		return s.Params[5] > 0
-	case skillParameterDamage:
+	case skillParameterDamage, skillParameterDamageAbsorption:
 		return s.Params[6] > 0
+	case skillParameterHit, skillParameterParry:
+		return s.Params[5] > 0 || s.Params[6] > 0
+	case skillParameterRecovery:
+		return s.RecoveryHP > 0 || s.RecoveryMP > 0
+	case skillParameterDetection:
+		return s.DetectionLevel > 0
 	default:
 		return false
 	}
@@ -469,6 +502,11 @@ func (s *RefSkill) parseParameters() {
 	s.AbsoluteDamage, s.DamageToHPPercent, s.DamageToMPPercent, s.TransformMaxLevel = 0, 0, 0, 0
 	s.TransformItemRefID = 0
 	s.SecondaryOverlap, s.DamageTypeFamily, s.DamageTypePrecedence = 0, 0, 0
+	s.PassiveSkillRangeBonus = 0
+	s.PassiveHealingPercent = 0
+	s.PassiveBlessingPercent = 0
+	s.PassiveStatusDurationMask, s.PassiveStatusDurationPercent = 0, 0
+	s.PassiveCriticalDefense = 0
 	s.LinkedSameGroup = false
 	s.ReferenceRadius, s.MatchMode = 0, 0
 	s.ReferenceDescriptors = [4][6]int{}
@@ -507,6 +545,14 @@ func (s *RefSkill) parseParameters() {
 			if index+2 < len(s.Params) {
 				s.BuffModifiers.MP, s.BuffModifiers.MPPercent = s.Params[index+1], s.Params[index+2]
 			}
+		case skillParameterMaxHPReduction:
+			if index+4 < len(s.Params) {
+				// [INFERENCE] Catalog usage and the authored Life
+				// Control/Turnover descriptions identify `pmhp` as a
+				// max-HP sacrifice. The native consumer confirms mode 2
+				// subtracts payload word 3 through its HP/MP stat channel.
+				s.BuffModifiers.HPPercent = -s.Params[index+3]
+			}
 		case skillParameterStrength:
 			if index+2 < len(s.Params) {
 				s.BuffModifiers.Strength = s.Params[index+1]
@@ -529,6 +575,56 @@ func (s *RefSkill) parseParameters() {
 				// physical/magical attack percentage.
 				s.BuffModifiers.DamagePercent = s.Params[index+2]
 			}
+		case skillParameterAttackPower:
+			if index+2 < len(s.Params) {
+				// [INFERENCE] Native storage preserves both words. Catalog
+				// families corroborate word 1 as Rogue flat physical attack
+				// and word 2 as Wizard flat magical attack; the consumer's
+				// individual physical/magical channel names remain unrecovered.
+				s.BuffModifiers.PhysicalAttack = s.Params[index+1]
+				s.BuffModifiers.MagicalAttack = s.Params[index+2]
+			}
+		case skillParameterCriticalRate:
+			if index+1 < len(s.Params) {
+				s.BuffModifiers.CriticalRate = s.Params[index+1]
+			}
+		case skillParameterMovementSpeed:
+			if index+1 < len(s.Params) {
+				s.BuffModifiers.MovementSpeedPercent = s.Params[index+1]
+			}
+		case skillParameterRangePassive:
+			if index+2 < len(s.Params) {
+				switch s.Params[index+1] {
+				case 1464422997: // `URIW`, Wizard Magic Bound.
+					s.PassiveSkillRangeBonus = s.Params[index+2]
+				case 1212961365: // `URLH`, Cleric Praise Heal.
+					s.PassiveHealingPercent = s.Params[index+2]
+				case 1212958291: // `SFLH`, Cleric Praise Ability.
+					s.PassiveBlessingPercent = s.Params[index+2]
+				}
+			}
+		case skillParameterCriticalDefense:
+			if index+1 < len(s.Params) {
+				s.PassiveCriticalDefense = s.Params[index+1]
+			}
+		case skillParameterDamageAbsorption:
+			if index+2 < len(s.Params) {
+				mask, amount := s.Params[index+1], s.Params[index+2]
+				if mask == 15 {
+					s.BuffModifiers.DamageAbsorptionPercent = amount
+				} else {
+					if mask&4 != 0 {
+						s.BuffModifiers.PhysicalDamageAbsorptionPercent = amount
+					}
+					if mask&8 != 0 {
+						s.BuffModifiers.MagicalDamageAbsorptionPercent = amount
+					}
+				}
+			}
+		case skillParameterGoldDropAmount:
+			if index+1 < len(s.Params) {
+				s.BuffModifiers.GoldDropAmountPercent = s.Params[index+1]
+			}
 		case skillParameterDefense:
 			if index+3 < len(s.Params) {
 				s.BuffModifiers.PhysicalDefense = s.Params[index+1]
@@ -540,10 +636,10 @@ func (s *RefSkill) parseParameters() {
 			}
 		case skillParameterShock:
 			if index+3 < len(s.Params) {
-				s.ShockPower = s.Params[index+1]
+				s.ShockPower = s.Params[index+3]
 				s.ShockChance = s.Params[index+2]
 				s.ShockDuration = s.Params[index+1] * 100
-				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusShock, Power: s.ShockPower, Level: s.abnormalEffectLevel(), Payload: s.Params[index+3], Chance: s.ShockChance, DurationMS: s.ShockDuration})
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusShock, Power: s.ShockPower, Level: s.abnormalEffectLevel(), Payload: s.ShockPower, Chance: s.ShockChance, DurationMS: s.ShockDuration})
 			}
 		case skillParameterBurn:
 			if index+3 < len(s.Params) {
@@ -578,7 +674,7 @@ func (s *RefSkill) parseParameters() {
 			}
 		case skillParameterBleed:
 			if index+5 < len(s.Params) {
-				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusBleed, DurationMS: s.Params[index+1], Level: s.Params[index+3], Power: s.Params[index+4], Chance: s.Params[index+5]})
+				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusBleed, DurationMS: s.Params[index+1], Level: s.Params[index+2], Payload: s.Params[index+3], Power: s.Params[index+4], Chance: s.Params[index+5]})
 			}
 		case skillParameterPanic, skillParameterCombustion:
 			if index+3 < len(s.Params) {
@@ -662,6 +758,11 @@ func (s *RefSkill) parseParameters() {
 		case skillParameterStun:
 			if index+3 < len(s.Params) {
 				s.StatusEffects = append(s.StatusEffects, SkillStatusEffect{Kind: CombatStatusStun, Power: 1, Level: s.Params[index+3], Chance: s.Params[index+2], DurationMS: s.Params[index+1]})
+			}
+		case skillParameterAbnormalDurationResistance:
+			if index+2 < len(s.Params) {
+				s.PassiveStatusDurationMask = uint32(s.Params[index+1])
+				s.PassiveStatusDurationPercent = s.Params[index+2]
 			}
 		case skillParameterAggroBlock:
 			s.AggroSuppression = true

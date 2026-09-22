@@ -129,6 +129,23 @@ func TestFrostbiteScalesPlayerAndEachComboPhaseActionTime(t *testing.T) {
 	}
 }
 
+func TestDullUsesStockMovementAndActionFactors(t *testing.T) {
+	now := time.Now()
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 7}, WalkSpeed: 10, RunSpeed: 20}
+	player.SetLifeState(model.Alive)
+	if !player.ApplyCombatStatusAt(model.CombatStatus{Kind: model.CombatStatusDull, Token: 1, SkillID: 1, ExpiresAt: now.Add(time.Minute)}, now) {
+		t.Fatal("apply player Dull")
+	}
+	handler := &CombatHandler{now: func() time.Time { return now }}
+	if got := handler.skillActionTimePercent(player, model.RefSkill{}); got != 125 {
+		t.Fatalf("Dull action time = %g%%, want 125%%", got)
+	}
+	walk, run := player.MovementSpeeds()
+	if walk != 7.5 || run != 15 {
+		t.Fatalf("Dull movement = %g/%g, want 7.5/15", walk, run)
+	}
+}
+
 func TestLongCooldownSinkReceivesNativeCoordinationBoundary(t *testing.T) {
 	now := time.Unix(100, 0)
 	player := &model.Player{SRObject: model.SRObject{UniqueID: 8}}
@@ -174,7 +191,7 @@ func TestVitalSpotParryDownAndShockChangeAuthoritativeHitChance(t *testing.T) {
 	if !handler.playerAttackLands(player, target, now) {
 		t.Fatal("parry-down hit rejected")
 	}
-	target.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusShock, Token: 2, SkillID: 3406, Power: 206, ExpiresAt: now.Add(time.Minute)})
+	target.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusShock, Token: 2, SkillID: 3406, Power: 50, Payload: 50, ExpiresAt: now.Add(time.Minute)})
 	if !handler.playerAttackLands(player, target, now) {
 		t.Fatal("shocked hit rejected")
 	}
@@ -210,13 +227,13 @@ func TestVitalSpotDefenseAndDamageTakenEffectsUseMonsterDefense(t *testing.T) {
 	player.RemoveActiveBuff(20)
 	physicalDown := combatEffectNPC(202, 9000, 1000)
 	physicalDown.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusPhysicalDefenseDown, Token: 1, SkillID: 8399, Power: 80, ExpiresAt: now.Add(time.Minute)})
-	if applied, _ := handler.applyPlayerDamage(player, physicalDown, 200); applied != 180 {
-		t.Fatalf("physical-defense-down damage = %d, want 180", applied)
+	if applied, _ := handler.applyPlayerDamage(player, physicalDown, 200); applied != 170 {
+		t.Fatalf("physical-defense-down damage = %d, want stock 30%% defense floor result 170", applied)
 	}
 	magicalDown := combatEffectNPC(203, 9000, 1000)
 	magicalDown.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusMagicalDefenseDown, Token: 2, SkillID: 8405, Power: 100, ExpiresAt: now.Add(time.Minute)})
-	if applied, _ := handler.applyPlayerDamage(player, magicalDown, 200, true); applied != 180 {
-		t.Fatalf("magical-defense-down damage = %d, want 180", applied)
+	if applied, _ := handler.applyPlayerDamage(player, magicalDown, 200, true); applied != 164 {
+		t.Fatalf("magical-defense-down damage = %d, want stock 30%% defense floor result 164", applied)
 	}
 	damageUp := combatEffectNPC(204, 9000, 1000)
 	damageUp.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusDamageTakenUp, Token: 3, SkillID: 8414, Power: 35, ExpiresAt: now.Add(time.Minute)})
@@ -437,6 +454,81 @@ func TestPlayerTargetSkillAppliesMitigatedDamage(t *testing.T) {
 	}
 }
 
+func TestShortSightRejectsPVPAttackBeyondReducedRange(t *testing.T) {
+	now := time.Unix(100, 0)
+	attacker := &model.Player{
+		ID: 1, SRObject: model.SRObject{UniqueID: 100, RtNavmeshPosition: combatTestPosition(24231, 0, 0, 0)},
+		BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20}, Level: 10,
+		BaseAttackStats: model.AttackStats{PhyAttackMin: 100, PhyAttackMax: 100, HitRate: 100},
+	}
+	target := &model.Player{
+		ID: 2, SRObject: model.SRObject{UniqueID: 200, RtNavmeshPosition: combatTestPosition(24231, 75, 0, 0)},
+		BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20}, Level: 10,
+	}
+	attacker.SetLifeState(model.Alive)
+	target.SetLifeState(model.Alive)
+	attacker.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusShortSight, Token: 1, SkillID: 1, Power: 50, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	handler := &CombatHandler{
+		now: func() time.Time { return now }, send: func(*server.Session, network.Packet) error { return nil },
+		blockRoll: func(int) bool { return false }, damageRoll: func() int { return 0 },
+	}
+	skill := model.RefSkill{ID: 1, TargetEnemyPVP: true, AttackType: 5, AttackMin: 100, AttackMax: 100, ActionRange: 100}
+	if err := handler.executePlayerSkillAttack(context.Background(), &server.Session{}, attacker, target, skill); err != nil {
+		t.Fatal(err)
+	}
+	if got := target.CurrentHP(); got != 1000 {
+		t.Fatalf("Short Sight out-of-range attack changed HP to %d", got)
+	}
+}
+
+func TestDarknessReducesPVPVarianceDamage(t *testing.T) {
+	now := time.Unix(100, 0)
+	attacker := &model.Player{
+		BaseStats: model.BaseStats{HP: 1000, Str: 20}, Level: 10,
+		BaseAttackStats: model.AttackStats{PhyAttackMin: 100, PhyAttackMax: 200, HitRate: 100},
+	}
+	target := &model.Player{BaseStats: model.BaseStats{HP: 1000}, Level: 10, BaseDefenseStats: model.DefenseStats{ParryRate: 100}}
+	attacker.SetLifeState(model.Alive)
+	target.SetLifeState(model.Alive)
+	handler := &CombatHandler{now: func() time.Time { return now }, damageRoll: func() int { return 0 }}
+	skill := model.RefSkill{AttackType: 5}
+	baseline := handler.playerSkillDamageAgainstPlayerAt(attacker, target, skill, now)
+	attacker.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusDarkness, Token: 1, SkillID: 1, Power: 80, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	darkened := handler.playerSkillDamageAgainstPlayerAt(attacker, target, skill, now)
+	if darkened >= baseline {
+		t.Fatalf("Darkness variance damage = %d, want below baseline %d", darkened, baseline)
+	}
+}
+
+func TestShockAndParryDownReducePlayerPVPParry(t *testing.T) {
+	now := time.Unix(100, 0)
+	attacker := &model.Player{
+		BaseStats: model.BaseStats{HP: 1000, Str: 20}, Level: 10,
+		BaseAttackStats: model.AttackStats{PhyAttackMin: 100, PhyAttackMax: 200, HitRate: 100},
+	}
+	target := &model.Player{
+		BaseStats: model.BaseStats{HP: 1000}, Level: 10,
+		BaseDefenseStats: model.DefenseStats{ParryRate: 100},
+	}
+	handler := &CombatHandler{damageRoll: func() int { return 0 }}
+	skill := model.RefSkill{AttackType: 5}
+	baseline := handler.playerSkillDamageAgainstPlayerAt(attacker, target, skill, now)
+	target.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusParryDown, Token: 1, Power: 40, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	target.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusShock, Token: 2, Power: 50, Payload: 50, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	reducedParry := handler.playerSkillDamageAgainstPlayerAt(attacker, target, skill, now)
+	if reducedParry <= baseline {
+		t.Fatalf("Shock/Parry Down variance damage = %d, want above baseline %d", reducedParry, baseline)
+	}
+}
+
 func TestPlayerTargetDamageTakenUpUsesFinalFactor(t *testing.T) {
 	now := time.Unix(2000, 0)
 	target := &model.Player{BaseStats: model.BaseStats{HP: 1000}, BaseDefenseStats: model.DefenseStats{PhyDef: 25}}
@@ -585,6 +677,30 @@ func TestPlayerTargetSkillRestoresDamageToCasterVitals(t *testing.T) {
 	}
 }
 
+func TestZombieInvertsDamageToHPRecovery(t *testing.T) {
+	now := time.Unix(100, 0)
+	attacker := &model.Player{ID: 301, SRObject: model.SRObject{UniqueID: 104}, BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20}, Level: 10}
+	target := &model.Player{ID: 302, SRObject: model.SRObject{UniqueID: 204}, BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20}, Level: 10}
+	attacker.SetLifeState(model.Alive)
+	target.SetLifeState(model.Alive)
+	attacker.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusZombie, Token: 1, SkillID: 1, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	vitals := &combatVitalsFake{}
+	handler := &CombatHandler{
+		now: func() time.Time { return now }, vitals: vitals,
+		send:      func(*server.Session, network.Packet) error { return nil },
+		blockRoll: func(int) bool { return false }, damageRoll: func() int { return 0 },
+	}
+	skill := model.RefSkill{ID: 9007, TargetEnemyPVP: true, AttackType: 5, AttackMin: 100, AttackMax: 100, DamageToHPPercent: 50}
+	if err := handler.executePlayerSkillAttack(context.Background(), &server.Session{}, attacker, target, skill); err != nil {
+		t.Fatal(err)
+	}
+	if attacker.CurrentHP() >= 100 {
+		t.Fatalf("Zombie damage-to-HP recovery raised HP to %d", attacker.CurrentHP())
+	}
+}
+
 func TestHealingSkillAppliesOnlyAtAuthoredImpact(t *testing.T) {
 	caster := &model.Player{
 		ID: 302, SRObject: model.SRObject{UniqueID: 106},
@@ -614,6 +730,61 @@ func TestHealingSkillAppliesOnlyAtAuthoredImpact(t *testing.T) {
 	scheduled()
 	if got := caster.CurrentHP(); got != 150 {
 		t.Fatalf("healing at impact = %d, want 150", got)
+	}
+}
+
+func TestZombieInvertsHealingIntoHPDamage(t *testing.T) {
+	now := time.Unix(100, 0)
+	target := &model.Player{
+		ID: 304, SRObject: model.SRObject{UniqueID: 108},
+		BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20},
+	}
+	target.SetLifeState(model.Alive)
+	target.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusZombie, Token: 1, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	vitals := &combatVitalsFake{spent: true}
+	handler := &CombatHandler{
+		now:    func() time.Time { return now },
+		vitals: vitals,
+		send:   func(*server.Session, network.Packet) error { return nil },
+	}
+	skill := model.RefSkill{ID: 9019, BasicActivity: 2, TargetSelf: true, HealHP: 40}
+	if err := handler.executeHealing(context.Background(), &server.Session{}, target, target, skill); err != nil {
+		t.Fatalf("zombie healing cast failed: %v", err)
+	}
+	if got := target.CurrentHP(); got != 60 {
+		t.Fatalf("zombie healing HP = %d, want 60", got)
+	}
+	if vitals.savedHP != 60 {
+		t.Fatalf("persisted zombie HP = %d, want 60", vitals.savedHP)
+	}
+}
+
+func TestZombieInvertsPeriodicRecoveryBuffTick(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &model.Player{ID: 305, SRObject: model.SRObject{UniqueID: 109}, BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20}}
+	player.SetLifeState(model.Alive)
+	player.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusZombie, Token: 1, SkillID: 1, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	const token = uint32(77)
+	if _, ok := player.CommitActiveBuffAt(2, token, player.GetUniqueID(), time.Minute, model.BuffModifiers{}, now); !ok {
+		t.Fatal("commit recovery buff")
+	}
+	var scheduled func()
+	handler := &CombatHandler{
+		now: func() time.Time { return now }, vitals: &combatVitalsFake{},
+		schedule: func(_ time.Duration, fn func()) { scheduled = fn },
+		send:     func(*server.Session, network.Packet) error { return nil },
+	}
+	handler.scheduleRecoveryTick(player, model.RefSkill{RecoveryHP: 40}, token, time.Second)
+	if scheduled == nil {
+		t.Fatal("recovery tick was not scheduled")
+	}
+	scheduled()
+	if got := player.CurrentHP(); got != 60 {
+		t.Fatalf("Zombie periodic recovery HP = %d, want 60", got)
 	}
 }
 
@@ -685,6 +856,41 @@ func TestBuffSkillAppliesOnlyAtAuthoredImpact(t *testing.T) {
 	callbacks[0]()
 	if len(player.ActiveBuffSnapshot()) != 1 || player.BonusStats.Str != 7 {
 		t.Fatalf("buff at impact: active=%d strength=%d", len(player.ActiveBuffSnapshot()), player.BonusStats.Str)
+	}
+}
+
+func TestLifeTurnoverScalesCurrentHPAndPublishesVitals(t *testing.T) {
+	player := &model.Player{
+		ID: 305, SRObject: model.SRObject{UniqueID: 109},
+		Level: 100, BaseStats: model.BaseStats{Str: 100, Int: 100, MP: 100},
+	}
+	player.SetLifeState(model.Alive)
+	maxHP, _ := player.MaxVitals()
+	player.BaseStats.HP = maxHP
+	var sent []network.Packet
+	vitals := &combatVitalsFake{}
+	handler := &CombatHandler{
+		vitals: vitals,
+		send: func(_ *server.Session, packet network.Packet) error {
+			sent = append(sent, packet)
+			return nil
+		},
+	}
+	skill := model.RefSkill{
+		ID: 9974, BasicActivity: 2, BuffDuration: 15 * 60 * 1000,
+		BuffModifiers: model.BuffModifiers{HPPercent: -50, DamagePercent: 25, MagicalAttack: 2011},
+	}
+	if err := handler.executeBuff(context.Background(), &server.Session{}, player, player, skill); err != nil {
+		t.Fatalf("Life Turnover cast: %v", err)
+	}
+	if hp, _ := player.CurrentVitals(); hp != maxHP/2 {
+		t.Fatalf("Life Turnover current HP = %d, want %d", hp, maxHP/2)
+	}
+	if vitals.saveCalls != 1 || vitals.savedID != player.ID || vitals.savedHP != maxHP/2 || vitals.savedMP != 100 {
+		t.Fatalf("Life Turnover persistence = %+v", vitals)
+	}
+	if len(sent) == 0 || sent[len(sent)-1].MessageID != opcode.EntityUpdateStatus {
+		t.Fatalf("Life Turnover packets do not end with vitals update: %+v", sent)
 	}
 }
 
@@ -1014,6 +1220,38 @@ func TestPlayerTargetStatusSkillPublishesAndAppliesEffect(t *testing.T) {
 	}
 }
 
+func TestFearImmediatelyInterruptsCommittedPlayerAction(t *testing.T) {
+	now := time.Unix(100, 0)
+	source := &model.Player{SRObject: model.SRObject{UniqueID: 102}}
+	target := &model.Player{SRObject: model.SRObject{UniqueID: 202}}
+	target.SetLifeState(model.Alive)
+	cancelled := false
+	actionStates := 0
+	handler := &CombatHandler{
+		delayedCasts: map[uint32]delayedCast{
+			target.GetUniqueID(): {token: 1, cancel: func() { cancelled = true }},
+		},
+		send: func(*server.Session, network.Packet) error {
+			actionStates++
+			return nil
+		},
+		rollPercent: func(int) bool { return true },
+	}
+	skill := model.RefSkill{ID: 9006, StatusEffects: []model.SkillStatusEffect{{
+		Kind: model.CombatStatusFear, Chance: 100, DurationMS: 1000, Level: 1,
+	}}}
+	handler.applyPlayerSkillStatuses(target, source, skill, now)
+	if !cancelled {
+		t.Fatal("Fear did not cancel the committed player action")
+	}
+	if _, exists := handler.delayedCasts[target.GetUniqueID()]; exists {
+		t.Fatal("Fear left the committed player action registered")
+	}
+	if actionStates != 1 {
+		t.Fatalf("Fear action-state failures = %d, want 1", actionStates)
+	}
+}
+
 func TestAreaPlayerStatusSkillTargetsEnemyPlayers(t *testing.T) {
 	caster := &model.Player{SRObject: model.SRObject{UniqueID: 103, RtNavmeshPosition: combatTestPosition(24231, 0, 0, 100)}, BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20}, Level: 10}
 	target := &model.Player{SRObject: model.SRObject{UniqueID: 203, RtNavmeshPosition: combatTestPosition(24231, 10, 0, 100)}, BaseStats: model.BaseStats{HP: 1000, MP: 100, Str: 20, Int: 20}, Level: 10}
@@ -1153,6 +1391,32 @@ func TestVitalSpotFaintUsesAuthoredProbabilityAndStopsOnSuccess(t *testing.T) {
 	}
 	if len(chances) != 2 || chances[0] != 80 || chances[1] != 80 {
 		t.Fatalf("faint rolls = %v, want [80 80]", chances)
+	}
+}
+
+func TestDiseaseRaisesPlayerStatusChanceAgainstMob(t *testing.T) {
+	now := time.Now()
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}}
+	target := combatEffectNPC(205, 9000, 1000)
+	if !target.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusDisease, Token: 1, SkillID: 1, Power: 25, ExpiresAt: now.Add(time.Minute),
+	}, now) {
+		t.Fatal("apply Disease")
+	}
+	var chance int
+	handler := &CombatHandler{
+		rollPercent: func(value int) bool { chance = value; return true },
+		broadcast:   func(*model.Player, *network.Packet) {},
+	}
+	skill := model.RefSkill{ID: 8416, StatusEffects: []model.SkillStatusEffect{{
+		Kind: model.CombatStatusStun, Chance: 60, DurationMS: 5000,
+	}}}
+	handler.applySkillStatuses(nil, player, target, skill, now)
+	if chance != 85 {
+		t.Fatalf("Disease-adjusted chance = %d, want 85", chance)
+	}
+	if _, active := target.CombatStatus(model.CombatStatusStun, now); !active {
+		t.Fatal("Disease-adjusted status was not applied")
 	}
 }
 
@@ -1445,5 +1709,85 @@ func TestSyncHiddenBodyStateMapsNativeHideTypesAndRemoval(t *testing.T) {
 	handler.syncHiddenBodyState(player)
 	if player.GetBodyState() != model.Normal {
 		t.Fatalf("removed hide body state = %d, want normal", player.GetBodyState())
+	}
+}
+
+func TestClericPraiseIncreasesHealingSkillOutput(t *testing.T) {
+	now := time.Unix(100, 0)
+	caster := &model.Player{
+		ID: 401, SRObject: model.SRObject{UniqueID: 401},
+		BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20},
+		Skills:    map[uint32]byte{11665: 1},
+	}
+	caster.SetLifeState(model.Alive)
+	caster.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			11665: {ID: 11665, BasicActivity: 0, PassiveHealingPercent: 20},
+		},
+	}))
+	target := &model.Player{ID: 402, SRObject: model.SRObject{UniqueID: 402}, BaseStats: model.BaseStats{HP: 100, MP: 100, Str: 20, Int: 20}}
+	target.SetLifeState(model.Alive)
+	target.ApplyCombatDamage(50, false)
+	vitals := &combatVitalsFake{spent: true}
+	handler := &CombatHandler{now: func() time.Time { return now }, vitals: vitals, send: func(*server.Session, network.Packet) error { return nil }}
+	skill := model.RefSkill{ID: 9026, BasicActivity: 2, TargetAlly: true, HealHP: 40}
+	if err := handler.executeHealing(context.Background(), &server.Session{}, caster, target, skill); err != nil {
+		t.Fatalf("Cleric healing cast failed: %v", err)
+	}
+	if got := target.CurrentHP(); got != 98 {
+		t.Fatalf("Cleric Praise healing HP = %d, want 98", got)
+	}
+}
+
+func TestClericPraiseAmplifiesForceAndMentalBlessings(t *testing.T) {
+	caster := &model.Player{Skills: map[uint32]byte{11848: 1}}
+	caster.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			11848: {ID: 11848, BasicActivity: 0, PassiveBlessingPercent: 15},
+		},
+	}))
+	for _, test := range []struct {
+		name  string
+		skill model.RefSkill
+		want  model.BuffModifiers
+	}{
+		{"force", model.RefSkill{CodeName: "SKILL_EU_CLERIC_BLESSA_STR_A_01", BuffModifiers: model.BuffModifiers{Strength: 20}}, model.BuffModifiers{Strength: 23}},
+		{"mental", model.RefSkill{CodeName: "SKILL_EU_CLERIC_BLESSA_INT_B_01", BuffModifiers: model.BuffModifiers{Intellect: 20}}, model.BuffModifiers{Intellect: 23}},
+		{"body", model.RefSkill{CodeName: "SKILL_EU_CLERIC_BLESSA_PHYSICAL_A_01", BuffModifiers: model.BuffModifiers{PhysicalDefense: 20}}, model.BuffModifiers{PhysicalDefense: 20}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clericBlessingModifiers(caster, test.skill); got != test.want {
+				t.Fatalf("modifiers = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPlayerStatusDurationResistanceScalesAndRejectsStatuses(t *testing.T) {
+	now := time.Unix(100, 0)
+	source := &model.Player{SRObject: model.SRObject{UniqueID: 1}}
+	target := &model.Player{SRObject: model.SRObject{UniqueID: 2}, Skills: map[uint32]byte{10: 1}}
+	target.SetLifeState(model.Alive)
+	target.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			10: {ID: 10, BasicActivity: 0, PassiveStatusDurationMask: 1, PassiveStatusDurationPercent: 40},
+		},
+	}))
+	handler := &CombatHandler{rollPercent: func(chance int) bool { return chance == 100 }}
+	handler.applyPlayerSkillStatuses(target, source, model.RefSkill{ID: 20, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusFreeze, Chance: 100, DurationMS: 1000}}}, now)
+	status, active := target.CombatStatus(model.CombatStatusFreeze, now)
+	if !active || !status.ExpiresAt.Equal(now.Add(600*time.Millisecond)) {
+		t.Fatalf("Freeze status expiry = %v, active = %v; want %v", status.ExpiresAt, active, now.Add(600*time.Millisecond))
+	}
+	rejected := &model.Player{SRObject: model.SRObject{UniqueID: 3}, Skills: map[uint32]byte{11: 1}}
+	rejected.SetLifeState(model.Alive)
+	rejected.RecalculatePassiveSkillModifiers(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			11: {ID: 11, BasicActivity: 0, PassiveStatusDurationMask: 1, PassiveStatusDurationPercent: 100},
+		},
+	}))
+	handler.applyPlayerSkillStatuses(rejected, source, model.RefSkill{ID: 21, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusFreeze, Chance: 100, DurationMS: 1000}}}, now)
+	if _, active := rejected.CombatStatus(model.CombatStatusFreeze, now); active {
+		t.Fatal("100% duration resistance installed Freeze")
 	}
 }

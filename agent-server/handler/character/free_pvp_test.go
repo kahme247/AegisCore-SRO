@@ -24,7 +24,7 @@ func (p freePVPPlayers) GetPlayerByUniqueId(uniqueID uint32) (*model.Player, err
 func TestFreePVPHandlerUpdatesCapeAndNotifiesKnownPlayers(t *testing.T) {
 	session := &server.Session{}
 	session.UserContext.UniqueID = 77
-	player := &model.Player{Session: session}
+	player := &model.Player{Session: session, Job: model.PlayerJob{Type: model.PlayerJobTrader}}
 	player.UniqueID = 77
 	var sent network.Packet
 	h := &FreePVPHandler{
@@ -45,9 +45,20 @@ func TestFreePVPHandlerUpdatesCapeAndNotifiesKnownPlayers(t *testing.T) {
 }
 
 func TestFreePVPHandlerRejectsJobMode(t *testing.T) {
+	previousRefs := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousRefs })
+	model.RefItems = map[uint32]model.RefItem{
+		9001: {RefObject: model.RefObject{ID: 9001, CodeName: "ITEM_ETC_TRADE_TRADER_SUIT"}},
+	}
 	session := &server.Session{}
 	session.UserContext.UniqueID = 77
-	player := &model.Player{Session: session, Job: model.PlayerJob{Type: model.PlayerJobTrader}}
+	player := &model.Player{
+		Session: session,
+		Job:     model.PlayerJob{Type: model.PlayerJobTrader},
+		Inventory: model.NewInventory(map[byte]model.Item{
+			model.SlotExtra: {SRObject: model.SRObject{RefObjectID: 9001}},
+		}),
+	}
 	player.UniqueID = 77
 	var sent network.Packet
 	h := &FreePVPHandler{

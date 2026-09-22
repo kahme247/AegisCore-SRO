@@ -38,6 +38,39 @@ func TestActiveRealRecoveryDescriptorFollowsBuffTeardown(t *testing.T) {
 	}
 }
 
+func TestDamageAbsorptionItemBuffReducesPhysicalAndMagicalDamage(t *testing.T) {
+	player := &Player{LifeState: Alive, BaseStats: BaseStats{HP: 1000}}
+	modifiers := BuffModifiers{DamageAbsorptionPercent: 20}
+	if _, ok := player.CommitActiveBuff(9005, 89, time.Minute, modifiers); !ok {
+		t.Fatal("absorption buff commit failed")
+	}
+	if got := player.ApplyCombatDamage(100, false); got.AppliedDamage != 80 {
+		t.Fatalf("physical absorbed damage = %+v, want 80", got)
+	}
+	if got := player.ApplyCombatDamage(100, true); got.AppliedDamage != 80 {
+		t.Fatalf("magical absorbed damage = %+v, want 80", got)
+	}
+	if !player.RemoveActiveBuff(89) {
+		t.Fatal("absorption buff removal failed")
+	}
+	if got := player.ApplyCombatDamage(100, false); got.AppliedDamage != 100 {
+		t.Fatalf("damage after absorption expiry = %+v, want 100", got)
+	}
+}
+
+func TestEarthFenceAbsorbsOnlyPhysicalDamage(t *testing.T) {
+	player := &Player{LifeState: Alive, BaseStats: BaseStats{HP: 1000}}
+	if _, ok := player.CommitActiveBuff(10074, 90, time.Minute, BuffModifiers{PhysicalDamageAbsorptionPercent: 30}); !ok {
+		t.Fatal("Earth Fence commit failed")
+	}
+	if got := player.ApplyCombatDamage(100, false); got.AppliedDamage != 70 {
+		t.Fatalf("Earth Fence physical damage = %+v, want 70", got)
+	}
+	if got := player.ApplyCombatDamage(100, true); got.AppliedDamage != 100 {
+		t.Fatalf("Earth Fence magical damage = %+v, want 100", got)
+	}
+}
+
 func TestRecoveryStatusForMaskUsesHighestGrade(t *testing.T) {
 	player := &Player{}
 	player.Skills = map[uint32]byte{9003: 1, 9004: 1}
@@ -53,5 +86,21 @@ func TestRecoveryStatusForMaskUsesHighestGrade(t *testing.T) {
 	got, ok := player.RecoveryStatusForMask(0x400)
 	if !ok || got.SkillID != 9004 || got.Grade != 8 {
 		t.Fatalf("mask lookup = %+v, found=%t; want skill 9004 grade 8", got, ok)
+	}
+}
+
+func TestNegativeDefenseBuffRevertsOnBuffRemoval(t *testing.T) {
+	player := &Player{BaseDefenseStats: DefenseStats{PhyDef: 300, MagDef: 250}}
+	if _, ok := player.CommitActiveBuff(9688, 91, time.Minute, BuffModifiers{PhysicalDefense: -75, MagicalDefense: -75}); !ok {
+		t.Fatal("negative-defense buff commit failed")
+	}
+	if got := player.DerivedStats(); got.PhyDef != 225 || got.MagDef != 175 {
+		t.Fatalf("defense during negative-defense buff = %+v, want 225/175", got)
+	}
+	if !player.RemoveActiveBuff(91) {
+		t.Fatal("negative-defense buff removal failed")
+	}
+	if got := player.DerivedStats(); got.PhyDef != 300 || got.MagDef != 250 {
+		t.Fatalf("defense after sacrifice removal = %+v, want 300/250", got)
 	}
 }

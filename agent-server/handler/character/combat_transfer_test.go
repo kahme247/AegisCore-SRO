@@ -43,6 +43,29 @@ func TestTransferTargetsUseAuthoredCenters(t *testing.T) {
 	}
 }
 
+func TestTransferTargetsIncludeStockCombatantRadii(t *testing.T) {
+	handler, player, primary, candidates := transferTestActors(t, 0, 100, 0, [2]float32{26, 0}, [2]float32{126, 0})
+	player.RefObjectID = 1000
+	primary.RefObjectID = 2000
+	candidates[0].RefObjectID = 2001
+	candidates[1].RefObjectID = 2002
+	handler.referenceData = model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{
+			1000: {RefObject: model.RefObject{ID: 1000, BCRadius: 3}},
+			2000: {RefObject: model.RefObject{ID: 2000, BCRadius: 4}},
+			2001: {RefObject: model.RefObject{ID: 2001, BCRadius: 3}},
+			2002: {RefObject: model.RefObject{ID: 2002, BCRadius: 2}},
+		},
+	})
+
+	if got := handler.transferTargets(player, primary, model.RefSkill{TransferType: 1, TransferRange: 20}, 2); len(got) != 1 || got[0] != candidates[0] {
+		t.Fatalf("caster-centered radius targets = %v, want boundary-overlapping mob", transferTargetIDs(got))
+	}
+	if got := handler.transferTargets(player, primary, model.RefSkill{TransferType: 2, TransferRange: 20}, 2); len(got) != 1 || got[0] != candidates[1] {
+		t.Fatalf("target-centered radius targets = %v, want boundary-overlapping mob", transferTargetIDs(got))
+	}
+}
+
 func TestTransferTargetsChainProgressively(t *testing.T) {
 	handler, player, primary, candidates := transferTestActors(t, -20, 0, 0, [2]float32{9, 0}, [2]float32{18, 0}, [2]float32{27, 0})
 	got := handler.transferTargets(player, primary, model.RefSkill{TransferType: 6, TransferRange: 10}, 3)

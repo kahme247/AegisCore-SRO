@@ -175,6 +175,21 @@ func BuildBadEffectUpdate(targetUID, effectMask uint32, levels []byte) network.P
 	return p
 }
 
+// BuildPlayerBadEffectSnapshot publishes the local-player abnormal records
+// consumed by sro_client 0x008ADD60. Durations and elapsed values use the
+// stock server's 100-millisecond wire units.
+func BuildPlayerBadEffectSnapshot(effectMask uint32, details []CombatBadEffectDetail) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.ActionUnknownUpdate2
+	p.WriteUInt32(effectMask)
+	for _, detail := range details {
+		p.WriteUInt32(detail.DurationCentiseconds)
+		p.WriteUInt16(detail.ElapsedCentiseconds)
+		p.WriteUInt16(detail.Value)
+	}
+	return p
+}
+
 func BuildBuffRemove(tokens ...uint32) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.EntityBuffRemove

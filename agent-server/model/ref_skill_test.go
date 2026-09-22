@@ -84,6 +84,40 @@ func TestRefSkillParsesRealRecoveryDescriptor(t *testing.T) {
 	}
 }
 
+func TestMallItemBuffSupportIncludesAbsorptionRecoveryAndDetection(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []int
+		check  func(RefSkill) bool
+	}{
+		{
+			name:   "damage absorption",
+			params: []int{3, skillParameterSystemBuff, skillParameterDuration, 1800000, skillParameterDamageAbsorption, 15, 20},
+			check:  func(skill RefSkill) bool { return skill.BuffModifiers.DamageAbsorptionPercent == 20 },
+		},
+		{
+			name:   "periodic recovery",
+			params: []int{3, skillParameterSystemBuff, skillParameterDuration, 3600000, skillParameterRecovery, 500, 0},
+			check:  func(skill RefSkill) bool { return skill.RecoveryHP == 500 && skill.RecoveryMP == 0 },
+		},
+		{
+			name:   "detection",
+			params: []int{3, skillParameterSystemBuff, skillParameterDuration, 15000, skillParameterDetection, 7, 9},
+			check:  func(skill RefSkill) bool { return skill.DetectionType == 7 && skill.DetectionLevel == 9 },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			skill := RefSkill{CodeName: "SKILL_MALL_ITEM_EFFECT", BasicActivity: 2}
+			copy(skill.Params[:], test.params)
+			skill.parseParameters()
+			if !test.check(skill) || !skill.SupportsItemUseBuff() {
+				t.Fatalf("linked item skill not admitted: %+v", skill)
+			}
+		})
+	}
+}
+
 func TestRefSkillParsesHideBodyStateMetadata(t *testing.T) {
 	skill := RefSkill{Params: [50]int{skillParameterHide, 2, 9, 50}}
 	skill.parseParameters()
@@ -202,8 +236,8 @@ func TestRefSkillParsesLightningImbueTransferAndShock(t *testing.T) {
 	if !skill.IsWeaponImbue() || skill.ExecutionKind() != SkillExecutionBuff {
 		t.Fatalf("lightning skill was not classified as an imbue: %+v", skill)
 	}
-	if skill.ShockPower != 240 || skill.ShockChance != 25 || skill.ShockDuration != 24000 {
-		t.Fatalf("shock = power:%d chance:%d duration:%d", skill.ShockPower, skill.ShockChance, skill.ShockDuration)
+	if skill.ShockPower != 50 || skill.ShockChance != 25 || skill.ShockDuration != 24000 {
+		t.Fatalf("shock = magnitude:%d chance:%d duration:%d", skill.ShockPower, skill.ShockChance, skill.ShockDuration)
 	}
 	if skill.TransferRange != 50 || skill.TransferCount != 2 {
 		t.Fatalf("transfer = range:%d count:%d", skill.TransferRange, skill.TransferCount)
@@ -287,11 +321,11 @@ func TestRefSkillAdmitsOnlyRepresentedMallSystemItemBuffs(t *testing.T) {
 		t.Fatalf("mall damage item buff = supported %t modifiers %+v", damage.SupportsItemUseBuff(), damage.BuffModifiers)
 	}
 
-	unresolved := RefSkill{CodeName: "SKILL_MALL_DAMAGE_ABS_20P_SCROLL_01", BasicActivity: 2}
-	copy(unresolved.Params[:], []int{3, skillParameterSystemBuff, skillParameterDuration, 1_800_000, 1868849522, 15, 20})
-	unresolved.parseParameters()
-	if unresolved.SupportsItemUseBuff() {
-		t.Fatal("unresolved rado damage-absorption descriptor was admitted")
+	absorption := RefSkill{CodeName: "SKILL_MALL_DAMAGE_ABS_20P_SCROLL_01", BasicActivity: 2}
+	copy(absorption.Params[:], []int{3, skillParameterSystemBuff, skillParameterDuration, 1_800_000, skillParameterDamageAbsorption, 15, 20})
+	absorption.parseParameters()
+	if !absorption.SupportsItemUseBuff() || absorption.BuffModifiers.DamageAbsorptionPercent != 20 {
+		t.Fatalf("mall absorption item buff = supported %t modifiers %+v", absorption.SupportsItemUseBuff(), absorption.BuffModifiers)
 	}
 }
 
@@ -360,7 +394,7 @@ func TestRefSkillParsesCatalogWideAbnormalStatesAndTeleportVariants(t *testing.T
 		{"zombie", []int{skillParameterZombie, 206, 70}, SkillStatusEffect{Kind: CombatStatusZombie, Power: 206, Chance: 70, DurationMS: 20600}},
 		{"sleep", []int{skillParameterSleep, 5000, 80, 11}, SkillStatusEffect{Kind: CombatStatusSleep, Chance: 80, Level: 11, DurationMS: 5000}},
 		{"darkness", []int{skillParameterDarkness, 30000, 75, 10, 122}, SkillStatusEffect{Kind: CombatStatusDarkness, Power: 122, Chance: 75, Level: 10, DurationMS: 30000}},
-		{"bleed", []int{skillParameterBleed, 12000, 0, 9, 72, 65}, SkillStatusEffect{Kind: CombatStatusBleed, Power: 72, Chance: 65, Level: 9, DurationMS: 12000}},
+		{"bleed", []int{skillParameterBleed, 12000, 0, 9, 72, 65}, SkillStatusEffect{Kind: CombatStatusBleed, Power: 72, Payload: 9, Chance: 65, DurationMS: 12000}},
 		{"division", []int{skillParameterDamageTaken, 30000, 80, 11, 35}, SkillStatusEffect{Kind: CombatStatusDamageTakenUp, Power: 35, Chance: 80, Level: 11, DurationMS: 30000}},
 		{"panic", []int{skillParameterPanic, 8000, 60, 7}, SkillStatusEffect{Kind: CombatStatusPanic, Chance: 60, Level: 7, DurationMS: 8000}},
 	}
@@ -412,5 +446,180 @@ func TestRefSkillParsesUtilitySkillFamiliesFromOfficialArgumentCounts(t *testing
 	transform.parseParameters()
 	if transform.ExecutionKind() != SkillExecutionTransform || transform.TransformMaxLevel != 20 || transform.TransformItemRefID != 10371 {
 		t.Fatalf("monster mask = %+v", transform)
+	}
+}
+
+func TestRefSkillParsesMerchantBlessingGoldDropAmount(t *testing.T) {
+	skill := RefSkill{
+		CodeName:      "SKILL_ETC_WARENETWORK_EVENT_01",
+		BasicActivity: 23,
+	}
+	copy(skill.Params[:], []int{
+		skillParameterSystemBuff, 1,
+		skillParameterDuration, 1800000,
+		skillParameterGoldDropAmount, 50,
+	})
+	skill.parseParameters()
+
+	if skill.BuffDuration != 1800000 {
+		t.Fatalf("buff duration = %dms, want 1800000ms", skill.BuffDuration)
+	}
+	if skill.BuffModifiers.GoldDropAmountPercent != 50 {
+		t.Fatalf("gold drop amount = %d%%, want 50%%", skill.BuffModifiers.GoldDropAmountPercent)
+	}
+	if !skill.SupportsItemUseBuff() {
+		t.Fatal("merchant blessing linked skill was not admitted by item-use buff support")
+	}
+}
+
+func TestRefSkillParsesLifeTurnoverSacrificeAndMagicAttack(t *testing.T) {
+	skill := RefSkill{ID: 9974, BasicActivity: 2}
+	copy(skill.Params[:], []int{
+		3,
+		skillParameterDuration, 900000,
+		skillParameterDamage, 0, 25,
+		skillParameterAttackPower, 0, 2011,
+		1734702198, 1464421700,
+		skillParameterMaxHPReduction, 900000, 0, 50, 2,
+		skillParameterRequiredItem, 6, 11,
+	})
+	skill.parseParameters()
+
+	if skill.ExecutionKind() != SkillExecutionBuff || skill.BuffDuration != 900000 {
+		t.Fatalf("Life Turnover kind/duration = %d/%d", skill.ExecutionKind(), skill.BuffDuration)
+	}
+	if skill.BuffModifiers != (BuffModifiers{HPPercent: -50, DamagePercent: 25, MagicalAttack: 2011}) {
+		t.Fatalf("Life Turnover modifiers = %+v", skill.BuffModifiers)
+	}
+}
+
+func TestRefSkillParsesEuropeanCriticalAndMovementBuffs(t *testing.T) {
+	critical := RefSkill{BasicActivity: 0}
+	copy(critical.Params[:], []int{4, skillParameterCriticalRate, 2, 0, skillParameterRequiredItem, 6, 8})
+	critical.parseParameters()
+	if critical.BuffModifiers.CriticalRate != 2 {
+		t.Fatalf("Warrior critical passive = %+v", critical.BuffModifiers)
+	}
+
+	movement := RefSkill{BasicActivity: 2}
+	copy(movement.Params[:], []int{
+		3, skillParameterDuration, 600000,
+		skillParameterTransfer, 1, 1, 300, 8, 0, 5,
+		skillParameterMovementSpeed, 20,
+	})
+	movement.parseParameters()
+	if movement.BuffDuration != 600000 || movement.BuffModifiers.MovementSpeedPercent != 20 {
+		t.Fatalf("Bard movement buff = %+v", movement)
+	}
+}
+
+func TestRefSkillParsesRogueFlatPhysicalAttackBuff(t *testing.T) {
+	skill := RefSkill{ID: 9501, BasicActivity: 2}
+	copy(skill.Params[:], []int{
+		3, skillParameterDuration, 900000,
+		skillParameterDamage, 75, 0,
+		skillParameterAttackPower, 18, 0,
+		skillParameterMaxHPReduction, 900000, 0, 50, 2,
+	})
+	skill.parseParameters()
+	if skill.BuffModifiers != (BuffModifiers{HPPercent: -50, PhysicalAttack: 18}) {
+		t.Fatalf("rogue bow attack buff modifiers = %+v", skill.BuffModifiers)
+	}
+}
+
+func TestRefSkillParsesEuropeanDebuffCatalogFamilies(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []int
+		kind   CombatStatusKind
+	}{
+		{"wizard burn", []int{skillParameterBurn, 28, 20, 4}, CombatStatusBurn},
+		{"wizard freeze", []int{skillParameterFreeze, 28, 10, skillParameterFrostbite, 28, 40}, CombatStatusFreeze},
+		{"rogue poison", []int{skillParameterPoison, 48, 20, 27}, CombatStatusPoison},
+		{"warrior bleed", []int{skillParameterBleed, 30000, 25, 1, 10, 20}, CombatStatusBleed},
+		{"bard confusion", []int{skillParameterConfusion, 30000, 80, 3}, CombatStatusConfusion},
+		{"warlock disease", []int{skillParameterDisease, 20000, 80, 2, 20}, CombatStatusDisease},
+		{"wizard fear", []int{skillParameterFear, 10000, 80, 2}, CombatStatusFear},
+		{"warlock short sight", []int{skillParameterShortSight, 30000, 80, 3, 50}, CombatStatusShortSight},
+		{"wizard bind", []int{skillParameterBind, 10000, 80, 2}, CombatStatusBind},
+		{"warlock sleep", []int{skillParameterSleep, 20000, 80, 2}, CombatStatusSleep},
+		{"warrior dull", []int{skillParameterDull, 20000, 40, 1}, CombatStatusDull},
+		{"warlock panic", []int{skillParameterPanic, 15000, 80, 3}, CombatStatusPanic},
+		{"wizard combustion", []int{skillParameterCombustion, 30000, 80, 2}, CombatStatusCombustion},
+		{"warrior stun", []int{skillParameterStun, 5000, 25, 3}, CombatStatusStun},
+		{"warlock physical defense", []int{skillParameterPhyDefDown, 30000, 80, 2, 17}, CombatStatusPhysicalDefenseDown},
+		{"warlock magical defense", []int{skillParameterMagDefDown, 30000, 80, 3, 49}, CombatStatusMagicalDefenseDown},
+		{"warlock damage taken", []int{skillParameterDamageTaken, 30000, 80, 5, 35}, CombatStatusDamageTakenUp},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			skill := RefSkill{BasicActivity: 2, TargetEnemyMob: true}
+			copy(skill.Params[:], test.params)
+			skill.parseParameters()
+			if skill.ExecutionKind() != SkillExecutionStatusAttack || len(skill.StatusEffects) == 0 || skill.StatusEffects[0].Kind != test.kind {
+				t.Fatalf("European debuff = %+v", skill)
+			}
+		})
+	}
+}
+
+func TestRefSkillParsesMagicBoundAndPhysicalEarthFence(t *testing.T) {
+	magicBound := RefSkill{ID: 9956, BasicActivity: 0}
+	copy(magicBound.Params[:], []int{4, skillParameterRangePassive, 1464422997, 40})
+	magicBound.parseParameters()
+	if magicBound.PassiveSkillRangeBonus != 40 {
+		t.Fatalf("Magic Bound range bonus = %d, want 40", magicBound.PassiveSkillRangeBonus)
+	}
+
+	earthFence := RefSkill{ID: 10074, BasicActivity: 2}
+	copy(earthFence.Params[:], []int{3, skillParameterDuration, 20000, skillParameterDamageAbsorption, 4, 30})
+	earthFence.parseParameters()
+	if earthFence.BuffModifiers != (BuffModifiers{PhysicalDamageAbsorptionPercent: 30}) {
+		t.Fatalf("Earth Fence modifiers = %+v", earthFence.BuffModifiers)
+	}
+}
+
+func TestRefSkillParsesWarriorPassiveCriticalDefense(t *testing.T) {
+	skill := RefSkill{BasicActivity: 0}
+	copy(skill.Params[:], []int{4, skillParameterCriticalDefense, 14, skillParameterRequiredItem, 6, 7})
+	skill.parseParameters()
+	if skill.PassiveCriticalDefense != 14 {
+		t.Fatalf("passive critical defense = %d, want 14", skill.PassiveCriticalDefense)
+	}
+}
+
+func TestRefSkillParsesClericPraiseHealing(t *testing.T) {
+	skill := RefSkill{BasicActivity: 0}
+	copy(skill.Params[:], []int{4, skillParameterRangePassive, 1212961365, 20, 0})
+	skill.parseParameters()
+	if skill.PassiveHealingPercent != 20 {
+		t.Fatalf("Cleric Praise healing percent = %d, want 20", skill.PassiveHealingPercent)
+	}
+}
+
+func TestRefSkillParsesClericPraiseBlessing(t *testing.T) {
+	skill := RefSkill{BasicActivity: 0}
+	copy(skill.Params[:], []int{4, skillParameterRangePassive, 1212958291, 15, 0})
+	skill.parseParameters()
+	if skill.PassiveBlessingPercent != 15 {
+		t.Fatalf("Cleric Praise blessing percent = %d, want 15", skill.PassiveBlessingPercent)
+	}
+}
+
+func TestRefSkillParsesAbnormalDurationResistance(t *testing.T) {
+	skill := RefSkill{BasicActivity: 0}
+	copy(skill.Params[:], []int{skillParameterAbnormalDurationResistance, 63, 40, 10})
+	skill.parseParameters()
+	if skill.PassiveStatusDurationMask != 63 || skill.PassiveStatusDurationPercent != 40 {
+		t.Fatalf("taer = (%#x, %d), want (0x3f, 40)", skill.PassiveStatusDurationMask, skill.PassiveStatusDurationPercent)
+	}
+}
+
+func TestRefSkillLeavesUnmappedDefenseSacrificeUnsupported(t *testing.T) {
+	skill := RefSkill{BasicActivity: 2}
+	copy(skill.Params[:], []int{1886217328, 900000, 75, 75, 2})
+	skill.parseParameters()
+	if skill.BuffModifiers != (BuffModifiers{}) {
+		t.Fatalf("unmapped pdmp modifiers = %+v, want none", skill.BuffModifiers)
 	}
 }

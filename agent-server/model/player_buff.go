@@ -14,6 +14,24 @@ type ActiveBuff struct {
 	Modifiers   BuffModifiers
 	UseCount    int
 	ParentToken uint32
+	RecoveryHP  int
+	RecoveryMP  int
+}
+
+func (p *Player) ConfigureActiveBuffRecovery(token uint32, recoveryHP, recoveryMP int) bool {
+	if p == nil || token == 0 || recoveryHP < 0 || recoveryMP < 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	buff, exists := p.ActiveBuffs[token]
+	if !exists {
+		return false
+	}
+	buff.RecoveryHP = recoveryHP
+	buff.RecoveryMP = recoveryMP
+	p.ActiveBuffs[token] = buff
+	return true
 }
 
 // CommitActiveBuffUse advances a subordinate effect's authored use counter.
@@ -232,6 +250,25 @@ func (p *Player) CommitLinkedActiveBuffAt(skillID, token, sourceUID, parentToken
 	return replacedToken, true
 }
 
+// ActiveGoldDropAmountPercent returns the additive gold-amount bonus carried
+// by live item buffs. Expired buffs are ignored even if their scheduled
+// teardown has not run yet.
+func (p *Player) ActiveGoldDropAmountPercent(now time.Time) int {
+	if p == nil {
+		return 0
+	}
+	total := 0
+	for _, buff := range p.ActiveBuffSnapshot() {
+		if !buff.ExpiresAt.IsZero() && !buff.ExpiresAt.After(now) {
+			continue
+		}
+		if buff.Modifiers.GoldDropAmountPercent > 0 {
+			total += buff.Modifiers.GoldDropAmountPercent
+		}
+	}
+	return total
+}
+
 func (p *Player) AggroAbsorber(catalog *ReferenceDataCatalog) (uint32, int, bool) {
 	if p == nil || catalog == nil {
 		return 0, 0, false
@@ -313,7 +350,17 @@ func (p *Player) applyBuffModifiersLocked(modifiers BuffModifiers, direction int
 	p.BonusStats.Int += direction * modifiers.Intellect
 	p.BonusAttackStats.HitRate += direction * modifiers.HitRate
 	p.BonusAttackStats.HitRatePercent += direction * modifiers.HitRatePercent
+	p.BonusAttackStats.PhyAttackMin += direction * modifiers.PhysicalAttack
+	p.BonusAttackStats.PhyAttackMax += direction * modifiers.PhysicalAttack
+	p.BonusAttackStats.MagAttackMin += direction * modifiers.MagicalAttack
+	p.BonusAttackStats.MagAttackMax += direction * modifiers.MagicalAttack
+	p.BonusAttackStats.CriticalRate += direction * modifiers.CriticalRate
+	p.buffMovementSpeedPercent += direction * modifiers.MovementSpeedPercent
 	p.CombatDamagePercent += direction * modifiers.DamagePercent
+	p.PhyAbsorbPercent += direction * modifiers.DamageAbsorptionPercent
+	p.PhyAbsorbPercent += direction * modifiers.PhysicalDamageAbsorptionPercent
+	p.MagAbsorbPercent += direction * modifiers.MagicalDamageAbsorptionPercent
+	p.MagAbsorbPercent += direction * modifiers.DamageAbsorptionPercent
 	p.BonusDefenseStats.PhyDef += direction * modifiers.PhysicalDefense
 	p.BonusDefenseStats.MagDef += direction * modifiers.MagicalDefense
 	p.BonusDefenseStats.BlockRate += direction * modifiers.BlockRate
@@ -330,6 +377,11 @@ func (p *Player) RecalculatePassiveSkillModifiers(catalog *ReferenceDataCatalog)
 	p.applyBuffModifiersLocked(p.PassiveSkillModifiers, -1)
 	p.PassiveSkillModifiers = BuffModifiers{}
 	p.PassiveRecovery = nil
+	p.passiveSkillRangeBonus = 0
+	p.passiveCriticalDefense = 0
+	p.passiveHealingPercent = 0
+	p.passiveBlessingPercent = 0
+	p.passiveStatusDurationPercent = [6]int{}
 	inventory := p.Inventory.Snapshot()
 	avatar := p.AvatarInventory.Snapshot()
 	for skillID, enabled := range p.Skills {
@@ -338,6 +390,15 @@ func (p *Player) RecalculatePassiveSkillModifiers(catalog *ReferenceDataCatalog)
 			continue
 		}
 		p.PassiveSkillModifiers = addBuffModifiers(p.PassiveSkillModifiers, skill.BuffModifiers)
+		p.passiveSkillRangeBonus += skill.PassiveSkillRangeBonus
+		p.passiveCriticalDefense += skill.PassiveCriticalDefense
+		p.passiveHealingPercent += skill.PassiveHealingPercent
+		p.passiveBlessingPercent += skill.PassiveBlessingPercent
+		for bit := uint32(1); bit <= 1<<5; bit <<= 1 {
+			if skill.PassiveStatusDurationMask&bit != 0 {
+				p.passiveStatusDurationPercent[statusDurationResistanceIndex(bit)] += skill.PassiveStatusDurationPercent
+			}
+		}
 		if skill.RecoveryStatusMask != 0 {
 			p.PassiveRecovery = append(p.PassiveRecovery, RecoveryStatusDescriptor{
 				SkillID: skill.ID, Mask: skill.RecoveryStatusMask,
@@ -397,10 +458,86 @@ func addBuffModifiers(left, right BuffModifiers) BuffModifiers {
 	left.HitRate += right.HitRate
 	left.HitRatePercent += right.HitRatePercent
 	left.DamagePercent += right.DamagePercent
+	left.PhysicalAttack += right.PhysicalAttack
+	left.MagicalAttack += right.MagicalAttack
+	left.CriticalRate += right.CriticalRate
+	left.MovementSpeedPercent += right.MovementSpeedPercent
+	left.PhysicalDamageAbsorptionPercent += right.PhysicalDamageAbsorptionPercent
+	left.MagicalDamageAbsorptionPercent += right.MagicalDamageAbsorptionPercent
 	left.PhysicalDefense += right.PhysicalDefense
 	left.MagicalDefense += right.MagicalDefense
+
 	left.BlockRate += right.BlockRate
 	left.ParryRate += right.ParryRate
 	left.ParryRatePercent += right.ParryRatePercent
 	return left
+}
+
+func (p *Player) PassiveSkillRangeBonus() int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.passiveSkillRangeBonus
+}
+
+func (p *Player) PassiveCriticalDefense() int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.passiveCriticalDefense
+}
+
+func (p *Player) PassiveHealingPercent() int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.passiveHealingPercent
+}
+
+func (p *Player) PassiveBlessingPercent() int {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.passiveBlessingPercent
+}
+
+func (p *Player) CombatStatusDurationMS(kind CombatStatusKind, durationMS int) int {
+	if p == nil || durationMS <= 0 {
+		return durationMS
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	index := statusDurationResistanceIndex(CombatStatusBadEffectBit(kind))
+	if index < 0 {
+		return durationMS
+	}
+	resistance := min(max(p.passiveStatusDurationPercent[index], 0), 100)
+	return durationMS * (100 - resistance) / 100
+}
+
+func statusDurationResistanceIndex(bit uint32) int {
+	switch bit {
+	case 1:
+		return 0 // Freeze
+	case 2:
+		return 1 // Frostbite
+	case 4:
+		return 2 // Shock
+	case 8:
+		return 3 // Burn
+	case 16:
+		return 4 // Poison
+	case 32:
+		return 5 // Zombie
+	default:
+		return -1
+	}
 }

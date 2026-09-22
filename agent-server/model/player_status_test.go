@@ -104,3 +104,97 @@ func TestPlayerCombatMovementRestrictedByControlStatuses(t *testing.T) {
 		t.Fatal("active bind did not restrict movement")
 	}
 }
+
+func TestPlayerCombatActionRestrictedByEveryControlStatus(t *testing.T) {
+	now := time.Unix(100, 0)
+	for token, kind := range []CombatStatusKind{
+		CombatStatusFreeze,
+		CombatStatusStun,
+		CombatStatusSleep,
+		CombatStatusBind,
+		CombatStatusPetrify,
+		CombatStatusFear,
+	} {
+		player := &Player{}
+		player.ApplyCombatStatus(CombatStatus{
+			Kind:      kind,
+			Token:     uint32(token + 1),
+			ExpiresAt: now.Add(time.Second),
+		})
+		if !player.CombatActionRestricted(now) {
+			t.Fatalf("%v did not restrict offensive actions", kind)
+		}
+		if player.CombatActionRestricted(now.Add(2 * time.Second)) {
+			t.Fatalf("expired %v still restricted offensive actions", kind)
+		}
+	}
+}
+
+func TestPlayerBehavioralAbnormalMechanics(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &Player{}
+	for token, status := range []CombatStatus{
+		{Kind: CombatStatusFear, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDarkness, Power: 35, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusShortSight, Power: 40, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDisease, Power: 25, ExpiresAt: now.Add(time.Minute)},
+	} {
+		status.Token = uint32(token + 1)
+		if !player.ApplyCombatStatusAt(status, now) {
+			t.Fatalf("apply status %+v", status)
+		}
+	}
+	if !player.CombatActionRestricted(now) {
+		t.Fatal("fear did not restrict offensive actions")
+	}
+	if got := player.CombatHitRate(100, now); got != 65 {
+		t.Fatalf("darkness hit rate = %d, want 65", got)
+	}
+	if got := player.CombatAttackRange(200, now); got != 120 {
+		t.Fatalf("short-sight range = %g, want 120", got)
+	}
+	if got := player.CombatStatusChance(60, now); got != 85 {
+		t.Fatalf("disease status chance = %d, want 85", got)
+	}
+}
+
+func TestPlayerHitAndParryDebuffsComposeAcrossAttackers(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &Player{}
+	for token, status := range []CombatStatus{
+		{Kind: CombatStatusHitDown, Power: 20, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDarkness, Power: 35, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusParryDown, Power: 30, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusShock, Power: 50, Payload: 50, ExpiresAt: now.Add(time.Minute)},
+	} {
+		status.Token = uint32(token + 1)
+		if !player.ApplyCombatStatusAt(status, now) {
+			t.Fatalf("apply status %+v", status)
+		}
+	}
+	if got := player.CombatHitRate(100, now); got != 45 {
+		t.Fatalf("combined hit rate = %d, want 45", got)
+	}
+	if got := player.CombatParryRate(100, now); got != 35 {
+		t.Fatalf("combined parry rate = %d, want 35", got)
+	}
+}
+
+func TestPlayerTimedActionAdmissionAndRelease(t *testing.T) {
+	player := &Player{}
+	if !player.BeginTimedAction(100) {
+		t.Fatal("first timed action was rejected")
+	}
+	if !player.TimedActionLocked() {
+		t.Fatal("active timed action did not lock player actions")
+	}
+	if player.BeginTimedAction(200) {
+		t.Fatal("second timed action replaced the active cast")
+	}
+	if player.EndTimedAction(200) {
+		t.Fatal("wrong token ended active timed action")
+	}
+	if !player.EndTimedAction(100) || player.TimedActionLocked() {
+		t.Fatal("matching token did not release timed action")
+	}
+}

@@ -8,7 +8,6 @@ import (
 	"math"
 	"math/rand"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,12 +30,14 @@ const (
 	// `01 | 04 | targetUID:uint32 | 00` on 0x7074.
 	actionTypeAttack       = vsro188.CombatActionTypeCandidate
 	actionTypeAttackLegacy = byte(1)
+	actionTypeTrace        = byte(3)
 	actionTypeDispel       = byte(5)
 	maximumWireDamage      = 0xFFFFFF
 
 	attackPursuitPollInterval  = 25 * time.Millisecond
 	attackPursuitRetargetRate  = 200 * time.Millisecond
 	attackPursuitRetargetDelta = float32(2)
+	traceFollowDistance        = float32(20)
 
 	skillCastErrorInvalidSkill     = byte(0x03)
 	skillCastErrorInvalidMP        = byte(0x04)
@@ -55,21 +56,6 @@ type combatWorld interface {
 	StopMovingCharacter(model.ICharacter, navmeshv2.RtNavmeshPosition, string, bool) bool
 	NewPosFromGlobalCoordinates(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
 	CanMoveDirectly(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) bool
-}
-
-type pendingAttack struct {
-	session            *server.Session
-	targetUID          uint32
-	skillID            uint32
-	reach              float32
-	movementGeneration uint64
-	lastTargetGlobal   *math32.Vector3
-	lastRetarget       time.Time
-}
-
-type delayedCast struct {
-	token  uint64
-	cancel func()
 }
 
 type skillCooldownKey struct {
@@ -151,6 +137,7 @@ type CombatHandler struct {
 	delayedCasts     map[uint32]delayedCast
 	linkedBuffs      map[uint32]map[uint32]*model.Player
 	linkedParents    map[uint32]uint32
+	traceTargets     map[uint32]uint32
 	now              func() time.Time
 	rollPercent      func(int) bool
 	hitRollPercent   func(int) bool
@@ -305,6 +292,9 @@ func (h *CombatHandler) skillActionTimePercent(player *model.Player, skill model
 		if _, frosted := player.CombatStatus(model.CombatStatusFrostbite, h.combatNow()); frosted {
 			percent *= 2
 		}
+		if _, dulled := player.CombatStatus(model.CombatStatusDull, h.combatNow()); dulled {
+			percent *= 1.25
+		}
 	}
 	return percent
 }
@@ -370,6 +360,7 @@ func RegisterCombatHandler(target *server.Server, progress model.CharacterProgre
 		delayedCasts:  make(map[uint32]delayedCast),
 		linkedBuffs:   make(map[uint32]map[uint32]*model.Player),
 		linkedParents: make(map[uint32]uint32),
+		traceTargets:  make(map[uint32]uint32),
 		now:           time.Now,
 		rollPercent: func(chance int) bool {
 			return chance >= 100 || chance > 0 && rand.Intn(100) < chance
@@ -498,6 +489,39 @@ func (h *CombatHandler) interruptPlayerActionLocked(playerUID uint32) {
 	h.cancelRepeatingAttack(playerUID)
 }
 
+func (h *CombatHandler) followTraceLocked(followerUID, targetUID uint32) {
+	if h == nil || h.traceTargets[followerUID] != targetUID || h.world == nil {
+		return
+	}
+	follower, followerErr := h.world.GetPlayerByUniqueId(followerUID)
+	target, targetErr := h.world.GetPlayerByUniqueId(targetUID)
+	if followerErr != nil || targetErr != nil || follower == nil || target == nil || follower.GetLifeState() != model.Alive || target.GetLifeState() != model.Alive {
+		delete(h.traceTargets, followerUID)
+		return
+	}
+	followerPosition := follower.GetNavmeshPosition()
+	targetPosition := target.GetNavmeshPosition()
+	distance := h.world.DistanceTo(followerPosition, targetPosition)
+	if distance > traceFollowDistance {
+		followerGlobal := followerPosition.GetGlobalCoordinates()
+		targetGlobal := targetPosition.GetGlobalCoordinates()
+		scale := (distance - traceFollowDistance) / distance
+		destination, destinationErr := h.world.NewPosFromGlobalCoordinates(math32.NewVector3(
+			followerGlobal.X+(targetGlobal.X-followerGlobal.X)*scale,
+			followerGlobal.Y+(targetGlobal.Y-followerGlobal.Y)*scale,
+			followerGlobal.Z+(targetGlobal.Z-followerGlobal.Z)*scale,
+		))
+		if destinationErr == nil {
+			h.move(follower, destination)
+		}
+	}
+	h.schedule(250*time.Millisecond, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.followTraceLocked(followerUID, targetUID)
+	})
+}
+
 func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -592,6 +616,7 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 			h.cancelDelayedCast(session.UserContext.UniqueID)
 			h.cancelPendingAttack(session.UserContext.UniqueID, true)
 			h.cancelRepeatingAttack(session.UserContext.UniqueID)
+			delete(h.traceTargets, session.UserContext.UniqueID)
 			return h.sendActionState(session, false)
 		}
 		return nil
@@ -643,6 +668,31 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		// B074 acknowledges the one-shot action boundary; the entry coordinator
 		// owns the independent loading exchange and rolls admission back on error.
 		return h.sendActionState(session, false)
+	case actionTypeTrace:
+		if packet.Remaining() != 5 {
+			return h.sendActionState(session, false)
+		}
+		targetMode, readErr := packet.ReadByte()
+		if readErr != nil || targetMode != vsro188.EntityActionTargetModeEntity {
+			return h.sendActionState(session, false)
+		}
+		targetUID, readErr := packet.ReadUInt32()
+		if readErr != nil {
+			return h.sendActionState(session, false)
+		}
+		player, readErr = h.resolveCombatPlayer(session)
+		if readErr != nil || targetUID == 0 || targetUID == player.GetUniqueID() {
+			return h.sendActionState(session, false)
+		}
+		target, targetErr := h.world.GetPlayerByUniqueId(targetUID)
+		known := player.GetKnownObjectList()
+		if targetErr != nil || target == nil || target.GetLifeState() != model.Alive || known == nil || known.GetKnownObjects()[targetUID] != target {
+			return h.sendActionState(session, false)
+		}
+		h.interruptPlayerActionLocked(player.GetUniqueID())
+		h.traceTargets[player.GetUniqueID()] = targetUID
+		h.followTraceLocked(player.GetUniqueID(), targetUID)
+		return h.sendActionState(session, true)
 	case actionTypeDispel:
 		if packet.Remaining() != 5 {
 			return fmt.Errorf("buff cancellation payload has %d trailing bytes, want 5", packet.Remaining())
@@ -865,6 +915,9 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) || h.world == nil {
 			return h.sendActionState(session, false)
 		}
+		if caster.CombatActionRestricted(h.combatNow()) {
+			return h.sendActionState(session, false)
+		}
 		object, resolveErr := h.world.GetObjectByUniqueId(targetUID)
 		pvpTarget, targetIsPlayer := object.(*model.Player)
 		if resolveErr != nil {
@@ -880,6 +933,9 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 	if isSkillCast && skill.TargetEnemyPVP && (skill.ExecutionKind() == model.SkillExecutionPhysicalAttack || skill.ExecutionKind() == model.SkillExecutionMagicalAttack) {
 		caster, resolveErr := h.resolveCombatPlayer(session)
 		if resolveErr != nil || !playerOwnsSkill(caster, skill.ID, skill) {
+			return h.sendActionState(session, false)
+		}
+		if caster.CombatActionRestricted(h.combatNow()) {
 			return h.sendActionState(session, false)
 		}
 		if h.world == nil {
@@ -903,6 +959,10 @@ func (h *CombatHandler) handlePacket(ctx context.Context, session *server.Sessio
 		logrus.WithError(err).Infof("COMBAT_REJECT_TRACE gate=resolve-attack skill=%d target=%d", skill.ID, targetUID)
 		_ = h.sendActionState(session, false)
 		return nil
+	}
+	if player.CombatActionRestricted(h.combatNow()) {
+		h.cancelRepeatingAttack(player.GetUniqueID())
+		return h.sendActionState(session, false)
 	}
 	if isSkillCast && !playerOwnsSkill(player, skill.ID, skill) {
 		logrus.Infof("COMBAT_REJECT_TRACE gate=skill-ownership skill=%d target=%d", skill.ID, targetUID)
@@ -960,8 +1020,11 @@ func (h *CombatHandler) executeTargetedPlayerStatusSkill(ctx context.Context, se
 	if player == nil || target == nil || !skill.TargetEnemyPVP || skill.ExecutionKind() != model.SkillExecutionStatusAttack || target.GetLifeState() != model.Alive || !h.pvpTargetAdmitted(player, target, skill) {
 		return h.sendActionState(session, false)
 	}
-	if skill.ActionRange > 0 && navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) > float32(skill.ActionRange) {
-		return h.sendActionState(session, false)
+	if skill.ActionRange > 0 {
+		reach := player.CombatAttackRange(float32(skill.ActionRange), h.combatNow())
+		if navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) > reach {
+			return h.sendActionState(session, false)
+		}
 	}
 	_, ready, err := h.prepareStatusSkill(ctx, session, player, skill)
 	if err != nil || !ready {
@@ -1074,9 +1137,14 @@ func (h *CombatHandler) executeHealing(ctx context.Context, session *server.Sess
 		if target.GetLifeState() == model.Alive {
 			maxHP, maxMP := target.MaxVitals()
 			hpAmount, mpAmount := skill.RestorationAmounts(maxHP, maxMP)
-			expectedHP, expectedMP, nextHP, nextMP, ok := target.PreviewHealing(hpAmount, mpAmount)
-			if ok && h.vitals.SaveVitals(context.Background(), target.ID, nextHP, nextMP) == nil && target.CommitHealing(expectedHP, expectedMP, nextHP, nextMP) {
+			hpAmount += hpAmount * caster.PassiveHealingPercent() / 100
+			expectedHP, expectedMP, nextHP, nextMP, zombie, ok := target.PreviewAbnormalRecovery(hpAmount, mpAmount, h.combatNow())
+			if ok && h.vitals.SaveVitals(context.Background(), target.ID, nextHP, nextMP) == nil &&
+				target.CommitAbnormalRecovery(expectedHP, expectedMP, nextHP, nextMP) {
 				healedHP, healedMP, healed = nextHP, nextMP, true
+				if zombie && nextHP == 0 && h.world != nil {
+					h.world.StopMovingCharacter(target, target.GetNavmeshPosition(), "zombie-recovery-death", false)
+				}
 			}
 		}
 		end := model.BuildBuffCastEnd(caster.GetUniqueID(), castUID)
@@ -1129,19 +1197,20 @@ func (h *CombatHandler) applyHealingTransfers(ctx context.Context, caster, prima
 		hpAmount, mpAmount := skill.RestorationAmounts(maxHP, maxMP)
 		hpAmount = scaleTransferAmount(hpAmount, factor)
 		mpAmount = scaleTransferAmount(mpAmount, factor)
-		expectedHP, expectedMP, healedHP, healedMP, ok := target.PreviewHealing(hpAmount, mpAmount)
-		if !ok {
-			continue
-		}
-		if err := h.vitals.SaveVitals(ctx, target.ID, healedHP, healedMP); err != nil {
+		recoveredHP, recoveredMP, changed, err := h.commitAbnormalRecovery(ctx, target, hpAmount, mpAmount)
+		if err != nil {
 			return err
 		}
-		if !target.CommitHealing(expectedHP, expectedMP, healedHP, healedMP) {
+		if !changed {
 			continue
 		}
-		packet := model.BuildVitalsUpdatePacket(target.GetUniqueID(), healedHP, healedMP)
+		packet := model.BuildVitalsUpdatePacket(target.GetUniqueID(), recoveredHP, recoveredMP)
 		if err := h.sendPlayerPacket(target.Session, packet); err != nil {
 			return err
+		}
+		if target.GetLifeState() == model.Dead {
+			life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
+			target.SendToSelfAndKnown(&life)
 		}
 	}
 	return nil
@@ -1183,9 +1252,11 @@ func (h *CombatHandler) healingTransferTargets(caster, primary *model.Player, sk
 		current := primary
 		for len(result) < maximum {
 			selected, selectedIndex, best := (*model.Player)(nil), -1, float32(math.MaxFloat32)
+			currentRadius := h.transferActorRadius(current.GetRefObjectID())
 			for index, candidate := range pool {
 				distance := navmeshv2.HorizontalDistance(current.GetNavmeshPosition(), candidate.GetNavmeshPosition())
-				if distance <= radius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
+				admissionRadius := radius + currentRadius + h.transferActorRadius(candidate.GetRefObjectID())
+				if distance <= admissionRadius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
 					selected, selectedIndex, best = candidate, index, distance
 				}
 			}
@@ -1199,8 +1270,10 @@ func (h *CombatHandler) healingTransferTargets(caster, primary *model.Player, sk
 		return result
 	}
 	center := primary.GetNavmeshPosition()
+	centerRadius := h.transferActorRadius(primary.GetRefObjectID())
 	if skill.TransferType == 1 {
 		center = caster.GetNavmeshPosition()
+		centerRadius = h.transferActorRadius(caster.GetRefObjectID())
 	}
 	candidates := make([]struct {
 		player *model.Player
@@ -1208,7 +1281,8 @@ func (h *CombatHandler) healingTransferTargets(caster, primary *model.Player, sk
 	}, 0, len(pool))
 	for _, candidate := range pool {
 		distance := navmeshv2.HorizontalDistance(center, candidate.GetNavmeshPosition())
-		if distance <= radius {
+		admissionRadius := radius + centerRadius + h.transferActorRadius(candidate.GetRefObjectID())
+		if distance <= admissionRadius {
 			candidates = append(candidates, struct {
 				player *model.Player
 				metric float32
@@ -1381,11 +1455,25 @@ func (h *CombatHandler) curePlayer(target *model.Player, skill model.RefSkill, n
 	if chance <= 0 {
 		chance = 100
 	}
-	return target.CureCombatStatusesWithCurse(
+	_, frostedBefore := target.CombatStatus(model.CombatStatusFrostbite, now)
+	_, dulledBefore := target.CombatStatus(model.CombatStatusDull, now)
+	statsAffectedBefore := target.CombatStatsAffected(now)
+	removed := target.CureCombatStatusesWithCurse(
 		skill.CureStatusMask, skill.CureStatusMaxLevel,
 		skill.CureCurse, skill.CureCurseMaxLevel, chance,
 		skill.CureCount, now, roll,
 	)
+	if removed > 0 && (frostedBefore || dulledBefore) {
+		_, frostedAfter := target.CombatStatus(model.CombatStatusFrostbite, now)
+		_, dulledAfter := target.CombatStatus(model.CombatStatusDull, now)
+		if frostedBefore != frostedAfter || dulledBefore != dulledAfter {
+			target.SendMovementSpeedUpdate()
+		}
+	}
+	if removed > 0 && statsAffectedBefore {
+		target.SendStatsUpdate()
+	}
+	return removed
 }
 
 func (h *CombatHandler) executeTargetedAggroSkill(ctx context.Context, session *server.Session, caster *model.Player, target *model.NPC, skill model.RefSkill) error {
@@ -1508,13 +1596,6 @@ func (h *CombatHandler) executeMonsterMaskSkill(ctx context.Context, session *se
 		packet := buildServerInventoryItemAdded(slot, item)
 		_ = h.sendPlayerPacket(session, packet)
 	})
-}
-
-func buildServerInventoryItemAdded(slot byte, _ model.Item) network.Packet {
-	// The stock 0x0E success branch is only two scalar bytes after the
-	// discriminator. The second value is preserved from the recovered server
-	// path without assigning it an unresolved business name.
-	return vsro188.BuildItemOperationTwoByteSuccess(vsro188.ItemOperationServerAdd, slot, 0x3C)
 }
 
 func (h *CombatHandler) applyAggroSkill(caster *model.Player, target *model.NPC, skill model.RefSkill) {
@@ -1672,58 +1753,6 @@ func playerHasRangedAmmo(player *model.Player, weapon model.Item) bool {
 	return ammo.IsBolt()
 }
 
-// consumeRangedAmmo commits one equipped arrow or bolt and publishes the
-// corresponding stock inventory update. Melee attacks deliberately return
-// without mutating inventory. A nil repository is retained for isolated
-// handler tests; production composition always installs the SQL repository.
-func (h *CombatHandler) consumeRangedAmmo(ctx context.Context, session *server.Session, player *model.Player) error {
-	if player == nil {
-		return h.sendSkillCastError(session, skillCastErrorInvalidAmmo)
-	}
-	player.LockEconomy()
-	defer player.UnlockEconomy()
-
-	inventory := player.GetInventory()
-	weapon, weaponEquipped := inventory.Items[model.SlotPrimaryWeapon]
-	if !weaponEquipped || (!weapon.IsBow() && !weapon.IsCrossbow()) {
-		return nil
-	}
-	ammo, equipped := inventory.Items[model.SlotSecondaryWeapon]
-	if !equipped || ammo.StackSize < 1 || (weapon.IsBow() && !ammo.IsArrow()) || (weapon.IsCrossbow() && !ammo.IsBolt()) {
-		return h.sendSkillCastError(session, skillCastErrorInvalidAmmo)
-	}
-
-	remaining := ammo.StackSize - 1
-	if h.rangedAmmo != nil {
-		persisted, err := h.rangedAmmo.ConsumeEquippedRangedAmmo(ctx, int64(player.ID), int64(ammo.ID))
-		if err != nil {
-			if !errors.Is(err, model.ErrRangedAmmoUnavailable) {
-				logrus.WithError(err).Warn("consume equipped ranged ammunition")
-			}
-			return h.sendSkillCastError(session, skillCastErrorInvalidAmmo)
-		}
-		remaining = int(persisted)
-	}
-	if remaining == 0 {
-		delete(inventory.Items, model.SlotSecondaryWeapon)
-	} else {
-		ammo.StackSize = remaining
-		inventory.Items[model.SlotSecondaryWeapon] = ammo
-	}
-	player.CommitInventory(inventory)
-
-	var mutation network.Packet
-	if remaining == 0 {
-		mutation = vsro188.BuildItemOperationServerDeleteSuccess(model.SlotSecondaryWeapon)
-	} else {
-		mutation = vsro188.BuildInventoryItemQuantityUpdate(model.SlotSecondaryWeapon, uint16(remaining))
-	}
-	if err := h.sendPlayerPacket(session, mutation); err != nil {
-		return err
-	}
-	return h.sendPlayerPacket(session, vsro188.BuildInventoryAmmoUpdate(uint16(remaining)))
-}
-
 func playerCanBaseAttack(player *model.Player) bool {
 	if player == nil {
 		return false
@@ -1807,64 +1836,6 @@ func skillCastRejection(player *model.Player, skill model.RefSkill) (byte, bool)
 		return skillCastErrorInvalidMP, true
 	}
 	return 0, false
-}
-
-// spendSkillResources applies the complete REF_SKILL consume tuple for a
-// normal attack cast. HP is debited through the same compare-and-debit
-// repository contract as MP and is never allowed to kill the caster.
-func (h *CombatHandler) spendSkillResources(ctx context.Context, session *server.Session, player *model.Player, skill model.RefSkill) error {
-	if h == nil || player == nil {
-		if h == nil {
-			return ErrCombatTargetInvalid
-		}
-		return h.sendSkillCastError(session, skillCastErrorInvalidSkill)
-	}
-	hp, mp := player.CurrentVitals()
-	originalHP, originalMP := hp, mp
-	maxHP, maxMP := player.MaxVitals()
-	hpCost, mpCost := skill.ResourceCosts(maxHP, maxMP)
-	if hpCost == 0 && mpCost == 0 {
-		return nil
-	}
-	if h.vitals == nil || hp <= hpCost || mp < mpCost {
-		return h.sendSkillCastError(session, skillCastErrorInvalidMP)
-	}
-	rollback := func(cause error) error {
-		currentHP, currentMP := player.CurrentVitals()
-		var rollbackErr error
-		if currentHP != originalHP || currentMP != originalMP {
-			if !player.CommitHealing(currentHP, currentMP, originalHP, originalMP) {
-				rollbackErr = ErrCombatTargetInvalid
-			}
-		}
-		if player.ID > 0 {
-			if err := h.vitals.SaveVitals(ctx, player.ID, originalHP, originalMP); err != nil {
-				rollbackErr = errors.Join(rollbackErr, err)
-			}
-		}
-		return errors.Join(cause, rollbackErr)
-	}
-	if hpCost > 0 {
-		spent, err := h.vitals.SpendHP(ctx, player.ID, hp, hpCost)
-		if err != nil {
-			return rollback(err)
-		}
-		if !spent || !player.CommitHP(hp, hpCost) {
-			return rollback(h.sendSkillCastError(session, skillCastErrorInvalidMP))
-		}
-		hp -= hpCost
-	}
-	if mpCost > 0 {
-		spent, err := h.vitals.SpendMP(ctx, player.ID, mp, mpCost)
-		if err != nil {
-			return rollback(err)
-		}
-		if !spent || !player.CommitMP(mp, mpCost) {
-			return rollback(h.sendSkillCastError(session, skillCastErrorInvalidMP))
-		}
-		mp -= mpCost
-	}
-	return nil
 }
 
 func playerHasSkillResourceCost(player *model.Player, skill model.RefSkill) bool {
@@ -1980,7 +1951,9 @@ func (h *CombatHandler) applyBuffImpact(session *server.Session, caster, target 
 		h.unregisterLinkedBuff(oldToken)
 		target.RemoveActiveBuff(oldToken)
 	}
-	replacedToken, committed := target.CommitActiveBuffAt(skill.ID, token, caster.GetUniqueID(), duration, skill.BuffModifiers, now)
+	previousMaxHP, _ := target.MaxVitals()
+	modifiers := clericBlessingModifiers(caster, skill)
+	replacedToken, committed := target.CommitActiveBuffAt(skill.ID, token, caster.GetUniqueID(), duration, modifiers, now)
 	if !committed {
 		end := model.BuildBuffCastEnd(target.GetUniqueID(), castUID)
 		_ = h.emitAttack(caster, &end)
@@ -1991,6 +1964,13 @@ func (h *CombatHandler) applyBuffImpact(session *server.Session, caster, target 
 			SkillID: skill.ID, Mask: skill.RecoveryStatusMask,
 			Value: skill.RecoveryStatusValue, Grade: skill.RecoveryStatusGrade,
 		})
+	}
+	currentMaxHP, _ := target.MaxVitals()
+	currentHP, currentMP, vitalsAdjusted := target.ScaleCurrentHPForMaxReduction(previousMaxHP, currentMaxHP)
+	if vitalsAdjusted && h.vitals != nil && target.ID > 0 {
+		if err := h.vitals.SaveVitals(context.Background(), target.ID, currentHP, currentMP); err != nil {
+			return err
+		}
 	}
 	h.syncHiddenBodyState(target)
 	if skill.HideLevel > 0 || skill.DetectionLevel > 0 || skill.DamageTypeFamily == 6 {
@@ -2021,8 +2001,16 @@ func (h *CombatHandler) applyBuffImpact(session *server.Session, caster, target 
 	if err := h.sendActionState(session, false); err != nil {
 		return err
 	}
+	if skill.BuffModifiers.MovementSpeedPercent != 0 {
+		target.SendMovementSpeedUpdate()
+	}
 	if err := h.sendPlayerPacket(target.Session, target.BuildStatsUpdatePacket()); err != nil {
 		return err
+	}
+	if vitalsAdjusted {
+		if err := h.sendPlayerPacket(target.Session, model.BuildVitalsUpdatePacket(target.GetUniqueID(), currentHP, currentMP)); err != nil {
+			return err
+		}
 	}
 	if h.schedule != nil {
 		if duration > 0 {
@@ -2041,6 +2029,20 @@ func (h *CombatHandler) applyBuffImpact(session *server.Session, caster, target 
 		return err
 	}
 	return nil
+}
+
+func clericBlessingModifiers(caster *model.Player, skill model.RefSkill) model.BuffModifiers {
+	modifiers := skill.BuffModifiers
+	if caster == nil || !strings.HasPrefix(skill.CodeName, "SKILL_EU_CLERIC_BLESSA_") {
+		return modifiers
+	}
+	switch {
+	case strings.HasPrefix(skill.CodeName, "SKILL_EU_CLERIC_BLESSA_STR_"):
+		modifiers.Strength += modifiers.Strength * caster.PassiveBlessingPercent() / 100
+	case strings.HasPrefix(skill.CodeName, "SKILL_EU_CLERIC_BLESSA_INT_"):
+		modifiers.Intellect += modifiers.Intellect * caster.PassiveBlessingPercent() / 100
+	}
+	return modifiers
 }
 
 func (h *CombatHandler) propagateReferenceBuff(caster, primary *model.Player, skill model.RefSkill, parentToken uint32, duration time.Duration, nowArgs ...time.Time) error {
@@ -2089,7 +2091,7 @@ func (h *CombatHandler) propagateReferenceBuff(caster, primary *model.Player, sk
 			}
 		}
 		token := model.NextActionUID()
-		replacedToken, committed := entry.player.CommitLinkedActiveBuffAt(skill.ID, token, caster.GetUniqueID(), parentToken, duration, skill.BuffModifiers, now)
+		replacedToken, committed := entry.player.CommitLinkedActiveBuffAt(skill.ID, token, caster.GetUniqueID(), parentToken, duration, clericBlessingModifiers(caster, skill), now)
 		if !committed {
 			continue
 		}
@@ -2224,6 +2226,7 @@ func (h *CombatHandler) removeBuff(player *model.Player, token uint32) {
 	h.removeLinkedBuffs(player, token)
 	h.unregisterLinkedBuff(token)
 	affectsVisibility := h.activeBuffAffectsVisibility(player, token)
+	affectsMovementSpeed := h.activeBuffAffectsMovementSpeed(player, token)
 	if !player.RemoveActiveBuff(token) {
 		return
 	}
@@ -2234,6 +2237,9 @@ func (h *CombatHandler) removeBuff(player *model.Player, token uint32) {
 	remove := model.BuildBuffRemove(token)
 	_ = h.emitAttack(player, &remove)
 	_ = h.sendPlayerPacket(player.Session, player.BuildStatsUpdatePacket())
+	if affectsMovementSpeed {
+		player.SendMovementSpeedUpdate()
+	}
 }
 
 func (h *CombatHandler) registerLinkedBuff(parentToken, childToken uint32, owner *model.Player) {
@@ -2355,13 +2361,12 @@ func (h *CombatHandler) scheduleRecoveryTick(player *model.Player, skill model.R
 		if !active {
 			return
 		}
-		hp, mp, healedHP, healedMP, ok := player.PreviewHealing(skill.RecoveryHP, skill.RecoveryMP)
-		if ok && (healedHP != hp || healedMP != mp) && h.vitals != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			err := h.vitals.SaveVitals(ctx, player.ID, healedHP, healedMP)
-			cancel()
-			if err == nil && player.CommitHealing(hp, mp, healedHP, healedMP) {
-				_ = h.sendPlayerPacket(player.Session, model.BuildVitalsUpdatePacket(player.GetUniqueID(), healedHP, healedMP))
+		recoveredHP, recoveredMP, changed, err := h.commitAbnormalRecovery(context.Background(), player, skill.RecoveryHP, skill.RecoveryMP)
+		if err == nil && changed {
+			_ = h.sendPlayerPacket(player.Session, model.BuildVitalsUpdatePacket(player.GetUniqueID(), recoveredHP, recoveredMP))
+			if player.GetLifeState() == model.Dead {
+				life := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), model.Dead)
+				player.SendToSelfAndKnown(&life)
 			}
 		}
 		h.scheduleRecoveryTick(player, skill, token, delay)
@@ -2391,28 +2396,42 @@ func (h *CombatHandler) activeBuffAffectsVisibility(player *model.Player, token 
 	return false
 }
 
+func (h *CombatHandler) activeBuffAffectsMovementSpeed(player *model.Player, token uint32) bool {
+	if player == nil || token == 0 {
+		return false
+	}
+	for _, buff := range player.ActiveBuffSnapshot() {
+		if buff.Token == token {
+			return buff.Modifiers.MovementSpeedPercent != 0
+		}
+	}
+	return false
+}
+
 func (h *CombatHandler) skillAttackReach(player *model.Player, target *model.NPC, skill model.RefSkill) float32 {
 	reach := h.baseAttackReach(player, target)
 	if skill.ActionRange > 0 {
 		// ACTION_RANGE is an authored addition to the actor's normal SkillRange,
 		// not an absolute replacement for it. In particular, many bow attacks
 		// carry only a small positive addition and still depend on the equipped
-		// bow's ITEMDATA range. Treating that value as absolute makes the player
-		// pursue a mob into melee range before casting.
-		return reach + float32(skill.ActionRange)
+		// bow's ITEMDATA range.
+		reach += float32(skill.ActionRange)
+	} else if skill.TransferRange > 0 {
+		reach += float32(skill.TransferRange)
 	}
-	if skill.TransferRange > 0 {
-		// Several radial/nuker series omit ACTION_RANGE and carry their authored
-		// addition only in the transfer block.
-		return reach + float32(skill.TransferRange)
+	if strings.HasPrefix(skill.CodeName, "SKILL_EU_WIZARD_") {
+		reach += float32(player.PassiveSkillRangeBonus())
 	}
-	return reach
+	return player.CombatAttackRange(reach, h.combatNow())
 }
 
 func (h *CombatHandler) baseAttackReach(player *model.Player, target *model.NPC) float32 {
 	reach := player.BaseAttackRange()
 	if h == nil || h.referenceData == nil {
 		return reach
+	}
+	if skill, exists := h.referenceSkill(player.BaseAttackSkillID()); exists && skill.ActionRange > 0 {
+		reach = max(reach, float32(skill.ActionRange))
 	}
 	if character, exists := h.referenceData.Character(player.GetRefObjectID()); exists && character.BCRadius > 0 {
 		reach += float32(character.BCRadius)
@@ -2660,8 +2679,11 @@ func (h *CombatHandler) executePlayerSkillAttack(ctx context.Context, session *s
 	if !h.skillAvailable(key, now) {
 		return h.sendActionState(session, false)
 	}
-	if skill.ActionRange > 0 && navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) > float32(skill.ActionRange) {
-		return h.sendActionState(session, false)
+	if skill.ActionRange > 0 {
+		reach := player.CombatAttackRange(float32(skill.ActionRange), now)
+		if navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) > reach {
+			return h.sendActionState(session, false)
+		}
 	}
 	if err := h.consumeRangedAmmo(ctx, session, player); err != nil {
 		return err
@@ -2725,7 +2747,7 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 	} else {
 		for _, strike := range h.skillStrikes(skill) {
 			hit := h.playerSkillDamageAgainstPlayerAt(player, target, strike, now)
-			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(player) {
+			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(player, target) {
 				hit *= 2
 				damageState = model.DamageStateCritical
 			}
@@ -2767,6 +2789,7 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 		}
 		if linkedApplication.AppliedDamage > 0 {
 			linkedTarget.SendVitalsUpdate()
+			h.publishPartyStatus(linkedTarget)
 		}
 		if linkedApplication.Killed {
 			life := model.BuildLifeStateUpdatePacket(linkedTarget.GetUniqueID(), model.Dead)
@@ -2816,6 +2839,7 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 	}
 	if target.Session != nil {
 		target.SendVitalsUpdate()
+		h.publishPartyStatus(target)
 		if application.Killed {
 			life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
 			h.publishCombatPacket(player, &life)
@@ -2828,88 +2852,7 @@ func (h *CombatHandler) resolvePlayerSkillAttackImpact(ctx context.Context, sess
 }
 
 func (h *CombatHandler) applyPlayerPVPTransfers(ctx context.Context, session *server.Session, source, primary *model.Player, skill model.RefSkill, now time.Time) error {
-	maximum := skill.TransferCount - 1
-	if source == nil || primary == nil || maximum <= 0 || skill.TransferRange <= 0 || skill.TransferType == 5 || skill.TransferType == 7 || source.GetKnownObjectList() == nil {
-		return nil
-	}
-	pool := make([]*model.Player, 0)
-	for _, object := range source.GetKnownObjectList().GetKnownObjects() {
-		candidate, ok := object.(*model.Player)
-		if !ok || candidate == nil || candidate == source || candidate == primary || candidate.GetLifeState() != model.Alive || !h.pvpTargetAdmitted(source, candidate, skill) {
-			continue
-		}
-		pool = append(pool, candidate)
-	}
-	radius := float32(skill.TransferRange)
-	if skill.TransferType == 6 {
-		ordered := make([]*model.Player, 0, maximum)
-		current := primary
-		for len(ordered) < maximum {
-			bestIndex, bestDistance := -1, float32(math.MaxFloat32)
-			for index, candidate := range pool {
-				distance := navmeshv2.HorizontalDistance(current.GetNavmeshPosition(), candidate.GetNavmeshPosition())
-				if distance <= radius && (distance < bestDistance || distance == bestDistance && (bestIndex < 0 || candidate.GetUniqueID() < pool[bestIndex].GetUniqueID())) {
-					bestIndex, bestDistance = index, distance
-				}
-			}
-			if bestIndex < 0 {
-				break
-			}
-			candidate := pool[bestIndex]
-			ordered = append(ordered, candidate)
-			pool = append(pool[:bestIndex], pool[bestIndex+1:]...)
-			current = candidate
-		}
-		pool = ordered
-	} else {
-		if skill.TransferType == 3 || skill.TransferType == 4 {
-			sourceGlobal := source.GetNavmeshPosition().GetGlobalCoordinates()
-			primaryGlobal := primary.GetNavmeshPosition().GetGlobalCoordinates()
-			dx, dz := primaryGlobal.X-sourceGlobal.X, primaryGlobal.Z-sourceGlobal.Z
-			length := float32(math.Hypot(float64(dx), float64(dz)))
-			if length <= 0 {
-				return nil
-			}
-			ux, uz := dx/length, dz/length
-			forwardLimit := max(length, max(float32(skill.ActionRange), radius))
-			filtered := pool[:0]
-			for _, candidate := range pool {
-				global := candidate.GetNavmeshPosition().GetGlobalCoordinates()
-				cx, cz := global.X-sourceGlobal.X, global.Z-sourceGlobal.Z
-				projection := cx*ux + cz*uz
-				lateral := float32(math.Abs(float64(cx*uz - cz*ux)))
-				if projection >= 0 && projection <= forwardLimit && lateral <= radius {
-					filtered = append(filtered, candidate)
-				}
-			}
-			pool = filtered
-			sort.SliceStable(pool, func(i, j int) bool {
-				left := navmeshv2.HorizontalDistance(source.GetNavmeshPosition(), pool[i].GetNavmeshPosition())
-				right := navmeshv2.HorizontalDistance(source.GetNavmeshPosition(), pool[j].GetNavmeshPosition())
-				return left < right || left == right && pool[i].GetUniqueID() < pool[j].GetUniqueID()
-			})
-		} else {
-			center := primary.GetNavmeshPosition()
-			if skill.TransferType == 1 {
-				center = source.GetNavmeshPosition()
-			}
-			filtered := pool[:0]
-			for _, candidate := range pool {
-				if navmeshv2.HorizontalDistance(center, candidate.GetNavmeshPosition()) <= radius {
-					filtered = append(filtered, candidate)
-				}
-			}
-			pool = filtered
-			sort.Slice(pool, func(i, j int) bool {
-				di := navmeshv2.HorizontalDistance(center, pool[i].GetNavmeshPosition())
-				dj := navmeshv2.HorizontalDistance(center, pool[j].GetNavmeshPosition())
-				return di < dj || di == dj && pool[i].GetUniqueID() < pool[j].GetUniqueID()
-			})
-		}
-		if len(pool) > maximum {
-			pool = pool[:maximum]
-		}
-	}
+	pool := h.selectPlayerPVPTransferTargets(source, primary, skill)
 	falloff := min(max(skill.TransferFalloffPercent, 0), 100)
 	factor := 100 - falloff
 	for _, candidate := range pool {
@@ -2981,7 +2924,7 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 		for _, strike := range h.skillStrikes(skill) {
 			hit := h.playerSkillDamageAgainstPlayerAt(source, target, strike, now)
 			hit = scaleTransferAmount(hit, factor)
-			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(source) {
+			if strike.AbsoluteDamage <= 0 && h.playerAttackCritical(source, target) {
 				hit *= 2
 				critical = true
 			}
@@ -3040,6 +2983,7 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 			}
 		}
 		linkedTarget.SendVitalsUpdate()
+		h.publishPartyStatus(linkedTarget)
 		if linkedBuff != 0 {
 			removed := model.BuildBuffRemove(linkedBuff)
 			linkedTarget.SendToSelfAndKnown(&removed)
@@ -3058,6 +3002,7 @@ func (h *CombatHandler) applyPlayerPVPTransfer(ctx context.Context, session *ser
 		return err
 	}
 	target.SendVitalsUpdate()
+	h.publishPartyStatus(target)
 	if application.Killed {
 		life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
 		h.publishCombatPacket(source, &life)
@@ -3079,7 +3024,9 @@ func (h *CombatHandler) playerSkillDamageAgainstPlayerAt(player, target *model.P
 	if skill.IsMagicalAttack() {
 		minimum, maximum = stats.MagAttackMin+skill.AttackMin, stats.MagAttackMax+skill.AttackMax
 	}
-	damage := max(1, model.CombatVarianceDamage(minimum, maximum, stats.HitRate, target.DerivedStats().ParryRate, player.Level, target.Level, h.combatDamageRolls()))
+	hitRate := player.CombatHitRate(stats.HitRate, now)
+	parryRate := target.CombatParryRate(target.DerivedStats().ParryRate, now)
+	damage := max(1, model.CombatVarianceDamage(minimum, maximum, hitRate, parryRate, player.Level, target.Level, h.combatDamageRolls()))
 	if status, active := player.CombatStatus(model.CombatStatusAttackDown, now); active {
 		reduction := min(max(status.Power, 0), 100)
 		damage = max(1, damage*(100-reduction)/100)
@@ -3095,15 +3042,11 @@ func (h *CombatHandler) mitigatePlayerSkillDamage(target *model.Player, damage i
 		return damage
 	}
 	stats := target.DerivedStats()
-	defense := stats.PhyDef
+	defense := target.CombatPhysicalDefense(stats.PhyDef, now)
 	absorption := stats.PhyAbsorb
-	statusKind := model.CombatStatusPhysicalDefenseDown
 	if magical {
-		defense, statusKind = stats.MagDef, model.CombatStatusMagicalDefenseDown
+		defense = target.CombatMagicalDefense(stats.MagDef, now)
 		absorption = stats.MagAbsorb
-	}
-	if status, active := target.CombatStatus(statusKind, now); active {
-		defense = max(0, defense-status.Power)
 	}
 	damage = max(1, int(model.CombatMitigatedDamage(float32(damage), float32(defense), float32(absorption))))
 	if attackPercent <= 0 {
@@ -3133,27 +3076,38 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 	}
 	var badMask uint32
 	for _, effect := range skill.StatusEffects {
-		if effect.Kind == 0 || effect.Chance <= 0 || effect.DurationMS <= 0 || !roll(effect.Chance) {
+		durationMS := target.CombatStatusDurationMS(effect.Kind, effect.DurationMS)
+		chance := target.CombatStatusChance(effect.Chance, now)
+		if effect.Kind == 0 || chance <= 0 || durationMS <= 0 || !roll(chance) {
 			continue
 		}
-		status := model.CombatStatus{Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: source.GetUniqueID(), SkillID: skill.ID, Power: effect.Power, Level: effect.Level, Payload: effect.Payload, ExpiresAt: now.Add(time.Duration(effect.DurationMS) * time.Millisecond), Stackable: skill.LinkedSameGroup}
+		status := model.CombatStatus{Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: source.GetUniqueID(), SkillID: skill.ID, Power: effect.Power, Level: effect.Level, Payload: effect.Payload, ExpiresAt: now.Add(time.Duration(durationMS) * time.Millisecond), Stackable: skill.LinkedSameGroup}
 		if !target.ApplyCombatStatusAt(status, now) {
 			continue
 		}
 		if h.world != nil && statusRestrainsMovement(effect.Kind) {
 			h.world.StopMovingCharacter(target, target.GetNavmeshPosition(), "combat-status-control", true)
+		}
+		if statusRestrainsAction(effect.Kind) {
 			h.interruptPlayerActionLocked(target.GetUniqueID())
 			_ = h.sendActionState(target.Session, false)
 		}
-		if bit := model.CombatStatusBadEffectBit(effect.Kind); bit != 0 {
-			badMask |= bit
-			h.schedulePlayerBadEffectExpiration(target, status)
+		badEffect := model.CombatStatusBadEffectBit(effect.Kind)
+		if badEffect != 0 {
+			badMask |= badEffect
 		} else {
-			packet := model.BuildTimedBuffAdd(target.GetUniqueID(), skill.ID, status.Token, uint32(effect.DurationMS))
+			packet := model.BuildTimedBuffAdd(target.GetUniqueID(), skill.ID, status.Token, uint32(durationMS))
 			target.SendToSelfAndKnown(&packet)
 		}
+		h.schedulePlayerStatusExpiration(target, status, badEffect != 0)
+		if effect.Kind == model.CombatStatusFrostbite || effect.Kind == model.CombatStatusDull {
+			target.SendMovementSpeedUpdate()
+		}
+		if model.CombatStatusRefreshesStats(effect.Kind) {
+			target.SendStatsUpdate()
+		}
 		if effect.Kind == model.CombatStatusBurn || effect.Kind == model.CombatStatusPoison || effect.Kind == model.CombatStatusBleed {
-			h.schedulePlayerStatusDamageTick(source, target, status, now.Add(5*time.Second))
+			h.schedulePlayerStatusDamageTick(source, target, status, now.Add(2*time.Second))
 		}
 	}
 	if badMask != 0 {
@@ -3164,9 +3118,9 @@ func (h *CombatHandler) applyPlayerSkillStatuses(target, source *model.Player, s
 	return badMask
 }
 
-// schedulePlayerStatusDamageTick applies the native five-second abnormal
-// damage cadence to player targets. The token check prevents a replaced
-// same-kind status from inheriting an older actor's ticks.
+// schedulePlayerStatusDamageTick applies the stock abnormal actor's two-second
+// damage cadence. The token check prevents a replaced same-kind status from
+// inheriting an older actor's ticks.
 func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Player, expected model.CombatStatus, tickAt time.Time) {
 	if h == nil || h.schedule == nil || source == nil || target == nil || !tickAt.Before(expected.ExpiresAt) {
 		return
@@ -3189,6 +3143,13 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 		}
 		if status, active := target.CombatStatus(model.CombatStatusDamageTakenUp, now); active {
 			amount = model.CombatFinalDamageFactor(max(1, amount), status.Power)
+		}
+		if status.Kind == model.CombatStatusPoison {
+			amount = min(amount, max(0, target.CurrentHP()-1))
+			if amount == 0 {
+				h.schedulePlayerStatusDamageTick(source, target, status, now.Add(2*time.Second))
+				return
+			}
 		}
 		amount, linkedTarget, linkedApplication, linkedBuff := h.interceptPlayerLinkedDamage(source, target, max(1, amount), false)
 		application := target.ApplyCombatDamage(amount, false)
@@ -3219,6 +3180,7 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 				linkedRecord.AttackState |= model.DamageAttackStateDead
 			}
 			linkedTarget.SendVitalsUpdate()
+			h.publishPartyStatus(linkedTarget)
 			if linkedBuff != 0 {
 				removed := model.BuildBuffRemove(linkedBuff)
 				linkedTarget.SendToSelfAndKnown(&removed)
@@ -3248,6 +3210,7 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 		packet := model.BuildAttackBeginWithSkillDamageTargets(status.SkillID, source.GetUniqueID(), castUID, targets)
 		h.publishCombatPacket(source, &packet)
 		target.SendVitalsUpdate()
+		h.publishPartyStatus(target)
 		if application.Killed {
 			life := model.BuildLifeStateUpdatePacket(target.GetUniqueID(), model.Dead)
 			h.publishCombatPacket(source, &life)
@@ -3256,7 +3219,7 @@ func (h *CombatHandler) schedulePlayerStatusDamageTick(source, target *model.Pla
 			}
 			return
 		}
-		h.schedulePlayerStatusDamageTick(source, target, status, now.Add(5*time.Second))
+		h.schedulePlayerStatusDamageTick(source, target, status, now.Add(2*time.Second))
 	})
 }
 
@@ -3332,7 +3295,7 @@ func (h *CombatHandler) recordPlayerKill(ctx context.Context, killer, target *mo
 	return nil
 }
 
-func (h *CombatHandler) schedulePlayerBadEffectExpiration(target *model.Player, expected model.CombatStatus) {
+func (h *CombatHandler) schedulePlayerStatusExpiration(target *model.Player, expected model.CombatStatus, badEffect bool) {
 	if h == nil || h.schedule == nil || target == nil {
 		return
 	}
@@ -3346,9 +3309,20 @@ func (h *CombatHandler) schedulePlayerBadEffectExpiration(target *model.Player, 
 		if active && current.Token == expected.Token {
 			return
 		}
-		mask, levels := target.CombatBadEffectState(now)
-		packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
-		target.SendToSelfAndKnown(&packet)
+		if badEffect {
+			mask, levels := target.CombatBadEffectState(now)
+			packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
+			target.SendToSelfAndKnown(&packet)
+		} else {
+			packet := model.BuildBuffRemove(expected.Token)
+			target.SendToSelfAndKnown(&packet)
+		}
+		if expected.Kind == model.CombatStatusFrostbite || expected.Kind == model.CombatStatusDull {
+			target.SendMovementSpeedUpdate()
+		}
+		if model.CombatStatusRefreshesStats(expected.Kind) {
+			target.SendStatsUpdate()
+		}
 	})
 }
 
@@ -3659,7 +3633,8 @@ func (h *CombatHandler) executeAreaStatusSkill(ctx context.Context, session *ser
 				continue
 			}
 			distance := navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), npc.GetNavmeshPosition())
-			if radius > 0 && distance <= radius {
+			admissionRadius := radius + h.transferActorRadius(player.GetRefObjectID()) + h.transferActorRadius(npc.GetRefObjectID())
+			if radius > 0 && distance <= admissionRadius {
 				candidates = append(candidates, candidate{npc: npc, distance: distance})
 			}
 		}
@@ -3683,7 +3658,8 @@ func (h *CombatHandler) executeAreaStatusSkill(ctx context.Context, session *ser
 					continue
 				}
 				distance := navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), candidate.GetNavmeshPosition())
-				if radius <= 0 || distance <= radius {
+				admissionRadius := radius + h.transferActorRadius(player.GetRefObjectID()) + h.transferActorRadius(candidate.GetRefObjectID())
+				if radius <= 0 || distance <= admissionRadius {
 					playerCandidates = append(playerCandidates, candidate)
 				}
 			}
@@ -3787,465 +3763,6 @@ func (h *CombatHandler) beginStatusCast(session *server.Session, player *model.P
 	}
 	finish()
 	return nil
-}
-
-func (h *CombatHandler) skillStrikes(skill model.RefSkill) []model.RefSkill {
-	strikes := []model.RefSkill{skill}
-	seen := map[uint32]bool{skill.ID: true}
-	for len(strikes) < 16 {
-		nextID := strikes[len(strikes)-1].BasicChainCode
-		if nextID == 0 || seen[nextID] {
-			break
-		}
-		next, exists := h.referenceSkill(nextID)
-		if !exists {
-			break
-		}
-		seen[nextID] = true
-		strikes = append(strikes, next)
-	}
-	return strikes
-}
-
-func (h *CombatHandler) skillComboImpactDuration(player *model.Player, skill model.RefSkill) time.Duration {
-	var duration time.Duration
-	for _, phase := range h.skillStrikes(skill) {
-		// Resolve action time per phase so chained skills can carry distinct
-		// speed policy and future phase schedulers do not inherit phase one's
-		// stale timing.
-		duration += phase.RuntimeImpactDurationAt(h.skillActionTimePercent(player, phase))
-	}
-	return duration
-}
-
-func (h *CombatHandler) skillStrikeDamage(player *model.Player, target *model.NPC, skill model.RefSkill) int {
-	if skill.AbsoluteDamage > 0 {
-		return skill.AbsoluteDamage
-	}
-	damage := h.playerVarianceDamage(player, target, skill.IsMagicalAttack(), skill.AttackMin, skill.AttackMax)
-	if damage < 1 {
-		return 1
-	}
-	return damage
-}
-
-func (h *CombatHandler) weaponImbueDamage(player *model.Player, target *model.NPC, imbue model.RefSkill) int {
-	if player == nil || !imbue.IsWeaponImbue() {
-		return 0
-	}
-	return h.skillStrikeDamage(player, target, imbue)
-}
-
-func (h *CombatHandler) playerVarianceDamage(player *model.Player, target *model.NPC, magical bool, skillMin, skillMax int) int {
-	if player == nil {
-		return 0
-	}
-	stats := player.DerivedStats()
-	minimum, maximum := stats.PhyAttackMin, stats.PhyAttackMax
-	if magical {
-		minimum, maximum = stats.MagAttackMin, stats.MagAttackMax
-	}
-	minimum += skillMin
-	maximum += skillMax
-	targetLevel, parry := 0, 0
-	varianceAvailable := false
-	if target != nil && h != nil && h.referenceData != nil {
-		if character, exists := h.referenceData.Character(target.GetRefObjectID()); exists {
-			targetLevel, parry = character.Level, character.EvasionRate
-			varianceAvailable = true
-		}
-	}
-	if !varianceAvailable {
-		return (minimum + maximum) / 2
-	}
-	return model.CombatVarianceDamage(minimum, maximum, stats.HitRate, parry, player.Level, targetLevel, h.combatDamageRolls())
-}
-
-func (h *CombatHandler) combatDamageRolls() (rolls [4]int) {
-	for index := range rolls {
-		if h != nil && h.damageRoll != nil {
-			rolls[index] = h.damageRoll()
-		}
-	}
-	return rolls
-}
-
-func (h *CombatHandler) activeWeaponImbue(player *model.Player) (model.RefSkill, bool) {
-	if h == nil || player == nil {
-		return model.RefSkill{}, false
-	}
-	var selected model.ActiveBuff
-	for _, buff := range player.ActiveBuffSnapshot() {
-		skill, exists := h.referenceSkill(buff.SkillID)
-		if !exists || !skill.IsWeaponImbue() || buff.Token <= selected.Token {
-			continue
-		}
-		selected = buff
-	}
-	if selected.SkillID == 0 {
-		return model.RefSkill{}, false
-	}
-	return h.referenceSkill(selected.SkillID)
-}
-
-func (h *CombatHandler) applyImbueStatuses(session *server.Session, player *model.Player, target *model.NPC, imbue model.RefSkill, now time.Time) uint32 {
-	return h.applySkillStatuses(session, player, target, imbue, now)
-}
-
-func (h *CombatHandler) applySkillStatuses(session *server.Session, player *model.Player, target *model.NPC, skill model.RefSkill, now time.Time) uint32 {
-	if h == nil || player == nil || target == nil {
-		return 0
-	}
-	effects := skill.StatusEffects
-	if len(effects) == 0 && skill.ShockPower > 0 {
-		effects = []model.SkillStatusEffect{{Kind: model.CombatStatusShock, Power: skill.ShockPower, Chance: skill.ShockChance, DurationMS: skill.ShockDuration}}
-	}
-	roll := h.rollPercent
-	if roll == nil {
-		roll = func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance }
-	}
-	appliedBadEffects := uint32(0)
-	for _, effect := range effects {
-		if effect.Kind == 0 || effect.Chance <= 0 || effect.DurationMS <= 0 || !roll(effect.Chance) {
-			continue
-		}
-		status := model.CombatStatus{
-			Kind: effect.Kind, Token: model.NextActionUID(), SourceUID: player.GetUniqueID(), SkillID: skill.ID,
-			Power: effect.Power, Level: effect.Level, Payload: effect.Payload,
-			ExpiresAt: now.Add(time.Duration(effect.DurationMS) * time.Millisecond), Stackable: skill.LinkedSameGroup,
-		}
-		if !target.ApplyCombatStatusAt(status, now) {
-			continue
-		}
-		if h.world != nil && statusRestrainsMovement(effect.Kind) {
-			h.world.StopMovingCharacter(target, target.GetNavmeshPosition(), "combat-status-control", true)
-		}
-		if effect.Kind == model.CombatStatusFrostbite && h.retimeMob != nil {
-			h.retimeMob(target, now)
-		}
-		badEffect := model.CombatStatusBadEffectBit(effect.Kind)
-		if badEffect != 0 {
-			appliedBadEffects |= badEffect
-			h.scheduleBadEffectExpiration(player, target, status)
-		} else {
-			// Skill-authored stat debuffs (for example Vital Spot defense down)
-			// remain B0BD buffs. Elemental abnormal states use 0x3057 below.
-			packet := model.BuildTimedBuffAdd(target.GetUniqueID(), skill.ID, status.Token, uint32(effect.DurationMS))
-			h.publishCombatPacket(player, &packet)
-		}
-		if effect.Kind == model.CombatStatusBurn || effect.Kind == model.CombatStatusPoison || effect.Kind == model.CombatStatusBleed {
-			h.scheduleStatusDamageTick(session, player, target, status, now.Add(5*time.Second))
-		}
-	}
-	if appliedBadEffects != 0 {
-		h.publishBadEffectState(player, target, now)
-	}
-	return appliedBadEffects
-}
-
-func statusRestrainsMovement(kind model.CombatStatusKind) bool {
-	switch kind {
-	case model.CombatStatusFreeze, model.CombatStatusStun, model.CombatStatusSleep,
-		model.CombatStatusBind, model.CombatStatusPetrify:
-		return true
-	default:
-		return false
-	}
-}
-
-func (h *CombatHandler) publishCombatPacket(player *model.Player, packet *network.Packet) {
-	if h == nil || player == nil || packet == nil {
-		return
-	}
-	if h.broadcast != nil {
-		h.broadcast(player, packet)
-		return
-	}
-	player.SendToSelfAndKnown(packet)
-}
-
-func (h *CombatHandler) publishBadEffectState(player *model.Player, target *model.NPC, now time.Time) {
-	if target == nil {
-		return
-	}
-	mask, levels := target.CombatBadEffectState(now)
-	packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
-	h.publishCombatPacket(player, &packet)
-}
-
-func (h *CombatHandler) scheduleBadEffectExpiration(player *model.Player, target *model.NPC, expected model.CombatStatus) {
-	if h == nil || h.schedule == nil || player == nil || target == nil {
-		return
-	}
-	now := time.Now()
-	if h.now != nil {
-		now = h.now()
-	}
-	delay := expected.ExpiresAt.Sub(now)
-	if delay < 0 {
-		delay = 0
-	}
-	h.schedule(delay, func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		current := time.Now()
-		if h.now != nil {
-			current = h.now()
-		}
-		_, active := target.CombatStatusByToken(expected.Kind, expected.Token, current)
-		if active {
-			return
-		}
-		h.publishBadEffectState(player, target, current)
-		if expected.Kind == model.CombatStatusFrostbite && h.retimeMob != nil {
-			h.retimeMob(target, current)
-		}
-	})
-}
-
-func (h *CombatHandler) applySkillTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, skill model.RefSkill, now time.Time) error {
-	return h.applyTransfers(ctx, session, player, primary, skill, now, h.skillStrikeDamage(player, primary, skill))
-}
-
-func (h *CombatHandler) scheduleStatusDamageTick(session *server.Session, player *model.Player, target *model.NPC, expected model.CombatStatus, tickAt time.Time) {
-	if h == nil || h.schedule == nil || player == nil || target == nil || !tickAt.Before(expected.ExpiresAt) {
-		return
-	}
-	delay := time.Until(tickAt)
-	if h.now != nil {
-		delay = tickAt.Sub(h.now())
-	}
-	if delay < 0 {
-		delay = 0
-	}
-	h.schedule(delay, func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		current := time.Now()
-		if h.now != nil {
-			current = h.now()
-		}
-		status, active := target.CombatStatusByToken(expected.Kind, expected.Token, current)
-		if !active || target.GetLifeState() != model.Alive {
-			return
-		}
-		payload := status.Payload
-		if payload <= 0 {
-			payload = status.Power
-		}
-		result := h.applyPlayerDamageResult(player, target, max(1, payload))
-		if result.appliedDamage == 0 {
-			return
-		}
-		castUID := model.NextActionUID()
-		// Periodic abnormal damage is target-owned. Reusing the original
-		// player's UID makes the stock client replay that player's attack
-		// animation every five seconds, even after knockback moved the target.
-		packet := model.BuildAttackBeginWithSkillHits(status.SkillID, target.GetUniqueID(), target.GetUniqueID(), castUID, []uint32{uint32(result.wireDamage)}, result.killed)
-		_ = h.emitAttack(player, &packet)
-		if result.killed {
-			_ = h.awardPlayerKill(context.Background(), session, player, target, target.GetUniqueID())
-			return
-		}
-		h.scheduleStatusDamageTick(session, player, target, status, current.Add(5*time.Second))
-	})
-}
-
-func (h *CombatHandler) applyImbueTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, imbue model.RefSkill, now time.Time) error {
-	return h.applyTransfers(ctx, session, player, primary, imbue, now, h.weaponImbueDamage(player, primary, imbue))
-}
-
-func (h *CombatHandler) applyTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, skill model.RefSkill, now time.Time, damage int) error {
-	targets, err := h.resolveTransfers(ctx, session, player, primary, skill, now, damage)
-	if err != nil {
-		return err
-	}
-	for _, target := range targets {
-		castUID := model.NextActionUID()
-		packet := model.BuildAttackBeginWithSkillDamageRecords(skill.ID, player.GetUniqueID(), target.TargetUID, castUID, target.Records)
-		if err := h.emitAttack(player, &packet); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (h *CombatHandler) resolveTransfers(ctx context.Context, session *server.Session, player *model.Player, primary *model.NPC, skill model.RefSkill, now time.Time, damage int) ([]model.CombatDamageTarget, error) {
-	// REF_SKILL's transfer count is the simultaneous target count, including
-	// the primary target. A value of five therefore permits four nearby mobs.
-	secondaryCount := skill.TransferCount - 1
-	if h == nil || player == nil || primary == nil || secondaryCount <= 0 || skill.TransferRange <= 0 || damage <= 0 {
-		return nil, nil
-	}
-	candidates := h.transferTargets(player, primary, skill, secondaryCount)
-	targets := make([]model.CombatDamageTarget, 0, len(candidates))
-	falloff := min(max(skill.TransferFalloffPercent, 0), 100)
-	// Each native geometry producer initializes its byte accumulator to
-	// 100-falloff, accounting for the primary hit, and multiplies it once more
-	// immediately before appending the first transferred target.
-	factor := 100 - falloff
-	for _, candidate := range candidates {
-		factor = nextTransferFactor(factor, falloff)
-		transferDamage := max(1, int(math.Round(float64(damage)*float64(factor)/100)))
-		result := h.resolvePlayerDamageWithAggro(player, candidate, transferDamage, skill.IsMagicalAttack(), skill.AbsoluteDamage > 0, now, skill.AggroIncrease, skill.AggroIncreasePercent, skill.AttackPercent)
-		effectMask := uint32(0)
-		if result.appliedDamage > 0 {
-			effectMask = h.applySkillStatuses(session, player, candidate, skill, now)
-			if err := h.restoreDamageVitals(ctx, session, player, skill, result.appliedDamage); err != nil {
-				return nil, err
-			}
-		}
-		record := result.combatRecord(effectMask)
-		if result.appliedDamage > 0 && !result.killed {
-			h.applySkillDisplacement(player, candidate, skill, &record)
-		}
-		targets = append(targets, model.CombatDamageTarget{TargetUID: candidate.GetUniqueID(), Records: []model.CombatDamageRecord{record}})
-		if result.killed {
-			if err := h.awardPlayerKill(ctx, session, player, candidate, candidate.GetUniqueID()); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return targets, nil
-}
-
-func mergeCombatDamageTargets(targets, additions []model.CombatDamageTarget) []model.CombatDamageTarget {
-	for _, addition := range additions {
-		merged := false
-		for index := range targets {
-			if targets[index].TargetUID == addition.TargetUID {
-				targets[index].Records = append(targets[index].Records, addition.Records...)
-				merged = true
-				break
-			}
-		}
-		if !merged {
-			targets = append(targets, addition)
-		}
-	}
-	return targets
-}
-
-func nextTransferFactor(current, falloff int) int {
-	current = min(max(current, 0), 100)
-	falloff = min(max(falloff, 0), 100)
-	return int(math.Round(float64(current*(100-falloff)) / 100))
-}
-
-func scaleTransferAmount(amount, factor int) int {
-	if amount <= 0 || factor <= 0 {
-		return 0
-	}
-	return int(math.Round(float64(amount*min(factor, 100)) / 100))
-}
-
-type skillTransferCandidate struct {
-	npc    *model.NPC
-	metric float32
-}
-
-func (h *CombatHandler) transferTargets(player *model.Player, primary *model.NPC, skill model.RefSkill, maximum int) []*model.NPC {
-	if player == nil || primary == nil || maximum <= 0 || player.GetKnownObjectList() == nil {
-		return nil
-	}
-	// Native types 5 and 7 enumerate owner/runtime-group collections. They must
-	// not silently fall back to arbitrary visible monsters. A configured owner
-	// provider is the only supported source for those candidates.
-	if skill.TransferType == 5 || skill.TransferType == 7 {
-		if h == nil || h.ownerTargets == nil {
-			return nil
-		}
-		provided := h.ownerTargets(primary, skill, maximum)
-		result := make([]*model.NPC, 0, min(maximum, len(provided)))
-		seen := make(map[uint32]struct{}, len(provided))
-		for _, candidate := range provided {
-			if candidate == nil || candidate == primary || candidate.GetLifeState() != model.Alive || !candidate.GetTypeInfo().IsNPCMob() {
-				continue
-			}
-			if _, exists := seen[candidate.GetUniqueID()]; exists {
-				continue
-			}
-			seen[candidate.GetUniqueID()] = struct{}{}
-			result = append(result, candidate)
-			if len(result) == maximum {
-				break
-			}
-		}
-		return result
-	}
-	pool := make([]*model.NPC, 0)
-	for _, object := range player.GetKnownObjectList().GetKnownObjects() {
-		npc, ok := object.(*model.NPC)
-		if ok && npc != nil && npc != primary && npc.GetLifeState() == model.Alive && npc.GetTypeInfo().IsNPCMob() {
-			pool = append(pool, npc)
-		}
-	}
-	sort.Slice(pool, func(i, j int) bool { return pool[i].GetUniqueID() < pool[j].GetUniqueID() })
-	radius := float32(skill.TransferRange)
-	if skill.TransferType == 6 {
-		result := make([]*model.NPC, 0, maximum)
-		current := primary
-		for len(result) < maximum {
-			selected, selectedIndex, best := (*model.NPC)(nil), -1, float32(math.MaxFloat32)
-			for index, candidate := range pool {
-				distance := navmeshv2.HorizontalDistance(current.GetNavmeshPosition(), candidate.GetNavmeshPosition())
-				if distance <= radius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
-					selected, selectedIndex, best = candidate, index, distance
-				}
-			}
-			if selected == nil {
-				break
-			}
-			result = append(result, selected)
-			pool = append(pool[:selectedIndex], pool[selectedIndex+1:]...)
-			current = selected
-		}
-		return result
-	}
-
-	center := primary.GetNavmeshPosition()
-	if skill.TransferType == 1 {
-		center = player.GetNavmeshPosition()
-	}
-	candidates := make([]skillTransferCandidate, 0, len(pool))
-	if skill.TransferType == 3 || skill.TransferType == 4 {
-		sourceGlobal := player.GetNavmeshPosition().GetGlobalCoordinates()
-		primaryGlobal := primary.GetNavmeshPosition().GetGlobalCoordinates()
-		dx, dz := primaryGlobal.X-sourceGlobal.X, primaryGlobal.Z-sourceGlobal.Z
-		length := float32(math.Hypot(float64(dx), float64(dz)))
-		if length <= 0 {
-			return nil
-		}
-		ux, uz := dx/length, dz/length
-		forwardLimit := max(length, float32(max(skill.ActionRange, skill.TransferRange)))
-		for _, candidate := range pool {
-			global := candidate.GetNavmeshPosition().GetGlobalCoordinates()
-			cx, cz := global.X-sourceGlobal.X, global.Z-sourceGlobal.Z
-			projection := cx*ux + cz*uz
-			lateral := float32(math.Abs(float64(cx*uz - cz*ux)))
-			if projection >= 0 && projection <= forwardLimit && lateral <= radius {
-				candidates = append(candidates, skillTransferCandidate{npc: candidate, metric: projection})
-			}
-		}
-	} else {
-		for _, candidate := range pool {
-			distance := navmeshv2.HorizontalDistance(center, candidate.GetNavmeshPosition())
-			if distance <= radius {
-				candidates = append(candidates, skillTransferCandidate{npc: candidate, metric: distance})
-			}
-		}
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].metric < candidates[j].metric || candidates[i].metric == candidates[j].metric && candidates[i].npc.GetUniqueID() < candidates[j].npc.GetUniqueID()
-	})
-	if len(candidates) > maximum {
-		candidates = candidates[:maximum]
-	}
-	result := make([]*model.NPC, len(candidates))
-	for index := range candidates {
-		result[index] = candidates[index].npc
-	}
-	return result
 }
 
 func (h *CombatHandler) applySkillDisplacement(source *model.Player, target *model.NPC, skill model.RefSkill, record *model.CombatDamageRecord) bool {
@@ -4354,24 +3871,49 @@ func (h *CombatHandler) applyPlayerSkillDisplacement(source, target *model.Playe
 	return true
 }
 
+func (h *CombatHandler) commitAbnormalRecovery(ctx context.Context, player *model.Player, hpAmount, mpAmount int) (hp, mp int, changed bool, err error) {
+	if h == nil || h.vitals == nil || player == nil || hpAmount < 0 || mpAmount < 0 {
+		return 0, 0, false, nil
+	}
+	expectedHP, expectedMP, nextHP, nextMP, _, ok := player.PreviewAbnormalRecovery(hpAmount, mpAmount, h.combatNow())
+	if !ok || nextHP == expectedHP && nextMP == expectedMP {
+		return expectedHP, expectedMP, false, nil
+	}
+	if err := h.vitals.SaveVitals(ctx, player.ID, nextHP, nextMP); err != nil {
+		return 0, 0, false, err
+	}
+	if !player.CommitAbnormalRecovery(expectedHP, expectedMP, nextHP, nextMP) {
+		return 0, 0, false, nil
+	}
+	return nextHP, nextMP, true, nil
+}
+
 func (h *CombatHandler) restoreDamageVitals(ctx context.Context, session *server.Session, player *model.Player, skill model.RefSkill, appliedDamage int) error {
 	if h == nil || h.vitals == nil || player == nil || appliedDamage <= 0 || skill.DamageToHPPercent <= 0 && skill.DamageToMPPercent <= 0 {
 		return nil
 	}
 	hpAmount := appliedDamage * max(0, skill.DamageToHPPercent) / 100
 	mpAmount := appliedDamage * max(0, skill.DamageToMPPercent) / 100
-	expectedHP, expectedMP, healedHP, healedMP, ok := player.PreviewHealing(hpAmount, mpAmount)
-	if !ok || healedHP == expectedHP && healedMP == expectedMP {
-		return nil
-	}
-	if err := h.vitals.SaveVitals(ctx, player.ID, healedHP, healedMP); err != nil {
+	recoveredHP, recoveredMP, changed, err := h.commitAbnormalRecovery(ctx, player, hpAmount, mpAmount)
+	if err != nil || !changed {
 		return err
 	}
-	if !player.CommitHealing(expectedHP, expectedMP, healedHP, healedMP) {
-		return nil
+	packet := model.BuildVitalsUpdatePacket(player.GetUniqueID(), recoveredHP, recoveredMP)
+	if err := h.sendPlayerPacket(session, packet); err != nil {
+		return err
 	}
-	packet := model.BuildVitalsUpdatePacket(player.GetUniqueID(), healedHP, healedMP)
-	return h.sendPlayerPacket(session, packet)
+	h.publishPartyStatus(player)
+	if player.GetLifeState() == model.Dead {
+		life := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), model.Dead)
+		player.SendToSelfAndKnown(&life)
+	}
+	return nil
+}
+
+func (h *CombatHandler) publishPartyStatus(player *model.Player) {
+	if h != nil && h.party != nil {
+		h.party.PublishMemberStatus(player)
+	}
 }
 
 func (h *CombatHandler) sendPlayerPacket(session *server.Session, packet network.Packet) error {
@@ -4388,10 +3930,6 @@ func skillCooldownAt(skill model.RefSkill, actionTimePercent float64) time.Durat
 		return reuse
 	}
 	return lifecycle
-}
-
-func skillCooldown(skill model.RefSkill) time.Duration {
-	return skillCooldownAt(skill, 100)
 }
 
 func (h *CombatHandler) skillAvailable(key skillCooldownKey, now time.Time) bool {
@@ -4488,7 +4026,7 @@ func (h *CombatHandler) resolvePlayerDamageWithAggro(player *model.Player, targe
 	if !absolute && h.playerAttackBlocked(target) {
 		return playerDamageResult{attackState: model.DamageAttackStateBlock}
 	}
-	critical := !magical && !absolute && h.playerAttackCritical(player)
+	critical := !magical && !absolute && h.playerAttackCritical(player, nil)
 	percent := 100
 	if len(attackPercent) != 0 && attackPercent[0] > 0 {
 		percent = attackPercent[0]
@@ -4531,11 +4069,14 @@ func (h *CombatHandler) playerAttackBlocked(target *model.NPC) bool {
 	return exists && character.BlockRate > 0 && h.blockRoll(character.BlockRate)
 }
 
-func (h *CombatHandler) playerAttackCritical(player *model.Player) bool {
+func (h *CombatHandler) playerAttackCritical(player, defender *model.Player) bool {
 	if h == nil || player == nil || h.criticalRoll == nil {
 		return false
 	}
 	criticalRate := player.DerivedStats().CriticalRate
+	if defender != nil {
+		criticalRate -= defender.PassiveCriticalDefense()
+	}
 	return criticalRate > 0 && h.criticalRoll(criticalRate)
 }
 
@@ -4568,13 +4109,11 @@ func (h *CombatHandler) applyPlayerDamageResultWithAggroPercent(player *model.Pl
 			}
 		}
 	}
-	defenseStatus := model.CombatStatusPhysicalDefenseDown
-	if isMagical {
-		defenseStatus = model.CombatStatusMagicalDefenseDown
-	}
 	if !isAbsolute {
-		if status, active := target.CombatStatus(defenseStatus, now); active {
-			defense = max(0, defense-status.Power)
+		if isMagical {
+			defense = target.CombatMagicalDefense(defense, now)
+		} else {
+			defense = target.CombatPhysicalDefense(defense, now)
 		}
 		damage = max(1, int(model.CombatMitigatedDamage(float32(damage), float32(defense), float32(absorption))))
 		damage = damage * attackPercent / 100
@@ -4639,436 +4178,12 @@ func (h *CombatHandler) playerAttackLands(player *model.Player, target *model.NP
 	if !exists {
 		return true
 	}
-	parry := character.EvasionRate
-	if status, active := target.CombatStatus(model.CombatStatusParryDown, now); active {
-		parry = max(0, parry-status.Power)
-	}
-	if _, active := target.CombatStatus(model.CombatStatusShock, now); active {
-		// Shock is a parry impairment, not a stun. Its state level controls
-		// resistance; the applied state halves the remaining parry rate.
-		parry /= 2
-	}
-	chance := model.CombatHitChance(player.DerivedStats().HitRate, parry)
+	parry := target.CombatParryRate(character.EvasionRate, now)
+	chance := model.CombatHitChance(player.CombatHitRate(player.DerivedStats().HitRate, now), parry)
 	if h.hitRollPercent == nil {
 		return true
 	}
 	return h.hitRollPercent(chance)
-}
-
-func (h *CombatHandler) awardPlayerKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32) error {
-	if h != nil && h.party != nil {
-		recipients := h.party.ExperienceRecipients(player.GetUniqueID())
-		if len(recipients) > 1 {
-			return h.awardPartyKill(ctx, player, target, targetUID, recipients)
-		}
-	}
-	return h.awardKill(ctx, session, player, target, targetUID, true)
-}
-
-func (h *CombatHandler) awardPartyKill(ctx context.Context, killer *model.Player, target *model.NPC, targetUID uint32, recipients []*model.Player) error {
-	if h == nil || target == nil || len(recipients) == 0 {
-		return ErrCombatTargetInvalid
-	}
-	if h.rates == nil {
-		return fmt.Errorf("gameplay progression rates are unavailable")
-	}
-	if h.progress == nil {
-		return model.ErrCharacterProgressRepositoryUnavailable
-	}
-
-	baseReward := target.ExperienceReward()
-	rates := h.rates.Current()
-	partyExperienceRate := partyExperienceRate(rates)
-	experienceShares := service.SharedRewardShares(scaleCombatReward(baseReward, int(partyExperienceRate)), len(recipients))
-	skillShares := service.SharedRewardShares(scaleCombatReward(baseReward, int(rates.SkillExperienceRatePercent)), len(recipients))
-	jobRecipients := combatJobRecipients(killer, recipients)
-	if !h.isJobExperienceTarget(target) {
-		jobRecipients = nil
-	}
-	totalJobLevel := 0
-	for _, recipient := range jobRecipients {
-		totalJobLevel += recipient.Level
-	}
-	for index, recipient := range recipients {
-		if recipient == nil || recipient.GetSession() == nil {
-			continue
-		}
-		experienceBonus, skillExperienceBonus := recipient.ItemServiceRates(time.Now().UTC())
-		reward := scaleCombatReward(experienceShares[index], 100+int(experienceBonus))
-		skillReward := scaleCombatReward(skillShares[index], 100+int(skillExperienceBonus))
-		progress := recipient.PreviewExperienceAward(h.levels, reward, skillReward)
-		if err := h.progress.SaveProgress(ctx, recipient.ID, progress); err != nil {
-			return err
-		}
-		recipient.CommitProgress(progress)
-		h.tryAccumulateAcademyExperience(ctx, recipient, reward)
-		if err := sendExperienceUpdate(recipient.GetSession(), targetUID, reward, skillReward, progress); err != nil {
-			return err
-		}
-		publishLevelUpAnimation(recipient, progress)
-		if slices.Contains(jobRecipients, recipient) {
-			base := model.CombatJobExperience(h.levels, recipient.Level, h.combatTargetLevel(target), recipient.GetJob().Type)
-			jobReward := model.PartyCombatJobExperience(base, recipient.Level, totalJobLevel, len(jobRecipients))
-			h.tryAwardCombatJobExperience(ctx, recipient, jobReward, targetUID)
-		}
-	}
-
-	// Kill-side effects remain owned by the player whose attack resolved the
-	// death. Quest and HWAN records are character-specific and must not be
-	// duplicated merely because EXP was shared.
-	return h.finishKill(ctx, killer.GetSession(), killer, target, targetUID, true)
-}
-
-func partyExperienceRate(rates model.GameplayRates) uint32 {
-	if rates.PartyExperienceRatePercent != 0 {
-		return rates.PartyExperienceRatePercent
-	}
-	// Keep injected legacy rate providers safe until they expose the binary's
-	// separate party setting. Production rates are loaded from the migrated
-	// GAMEPLAY_PROGRESSION_RATES column above.
-	return rates.ExperienceRatePercent
-}
-
-func (h *CombatHandler) awardKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32, shareGrowthPetExperience bool) error {
-	baseReward := target.ExperienceReward()
-	if h.rates == nil {
-		return fmt.Errorf("gameplay progression rates are unavailable")
-	}
-	rates := h.rates.Current()
-	experienceRate := int(rates.ExperienceRatePercent)
-	skillExperienceRate := int(rates.SkillExperienceRatePercent)
-	reward := scaleCombatReward(baseReward, experienceRate)
-	skillReward := scaleCombatReward(baseReward, skillExperienceRate)
-	experienceBonus, skillExperienceBonus := player.ItemServiceRates(time.Now().UTC())
-	reward = scaleCombatReward(reward, 100+int(experienceBonus))
-	skillReward = scaleCombatReward(skillReward, 100+int(skillExperienceBonus))
-	progress := player.PreviewExperienceAward(h.levels, reward, skillReward)
-	if h.progress == nil {
-		return model.ErrCharacterProgressRepositoryUnavailable
-	}
-	if err := h.progress.SaveProgress(ctx, player.ID, progress); err != nil {
-		return err
-	}
-	player.CommitProgress(progress)
-	h.tryAccumulateAcademyExperience(ctx, player, reward)
-	if err := sendExperienceUpdate(session, targetUID, reward, skillReward, progress); err != nil {
-		return err
-	}
-	publishLevelUpAnimation(player, progress)
-	if h.isJobExperienceTarget(target) {
-		h.tryAwardCombatJobExperience(ctx, player, model.CombatJobExperience(h.levels, player.Level, h.combatTargetLevel(target), player.GetJob().Type), targetUID)
-	}
-	return h.finishKill(ctx, session, player, target, targetUID, shareGrowthPetExperience)
-}
-
-func (h *CombatHandler) tryAccumulateAcademyExperience(ctx context.Context, player *model.Player, amount uint64) {
-	if h == nil || h.academyProgress == nil || player == nil || amount == 0 {
-		return
-	}
-	states, err := h.academyProgress.AccumulateAcademyExperience(ctx, player.ID, amount)
-	if err != nil {
-		logrus.WithError(err).WithField("character_id", player.ID).Warn("academy experience accumulation failed")
-		return
-	}
-	if len(states) != 0 && h.academyBuffs != nil {
-		h.academyBuffs(states)
-	}
-}
-
-func (h *CombatHandler) isJobExperienceTarget(target *model.NPC) bool {
-	if h == nil || h.referenceData == nil || target == nil {
-		return false
-	}
-	ref, exists := h.referenceData.Character(target.GetRefObjectID())
-	if !exists {
-		return false
-	}
-	code := strings.ToUpper(strings.TrimSpace(ref.CodeName))
-	return strings.HasPrefix(code, "MOB_THIEF_NPC_") || strings.HasPrefix(code, "MOB_HUNTER_NPC_")
-}
-
-func (h *CombatHandler) combatTargetLevel(target *model.NPC) int {
-	if h == nil || h.referenceData == nil || target == nil {
-		return 0
-	}
-	character, exists := h.referenceData.Character(target.GetRefObjectID())
-	if !exists {
-		return 0
-	}
-	return character.Level
-}
-
-func combatJobRecipients(killer *model.Player, recipients []*model.Player) []*model.Player {
-	if killer == nil || !killer.GetJob().Active() {
-		return nil
-	}
-	killerJob := killer.GetJob().Type
-	result := make([]*model.Player, 0, len(recipients))
-	for _, recipient := range recipients {
-		if recipient == nil || recipient.GetSession() == nil || !recipient.GetJob().Active() {
-			continue
-		}
-		if killerJob == model.PlayerJobHunter && recipient.GetJob().Type != model.PlayerJobHunter {
-			continue
-		}
-		result = append(result, recipient)
-	}
-	return result
-}
-
-func (h *CombatHandler) awardCombatJobExperience(ctx context.Context, player *model.Player, amount uint64) error {
-	if h == nil || h.jobProgress == nil || player == nil || amount == 0 || !player.GetJob().Active() {
-		return nil
-	}
-	snapshot, err := h.jobProgress.AdvanceJob(ctx, player.ID, amount, 0)
-	if err != nil {
-		return err
-	}
-	player.SetJob(model.PlayerJob{Type: snapshot.Type, Alias: snapshot.Alias, Level: snapshot.Level, Experience: snapshot.Experience})
-	packet, err := (vsro188.JobUpdateCodec{}).Encode(vsro188.JobState{Type: snapshot.Type, Level: snapshot.Level, Experience: uint32(min(snapshot.Experience, math.MaxUint32))})
-	if err != nil {
-		return err
-	}
-	return h.sendPlayerPacket(player.GetSession(), packet)
-}
-
-// tryAwardCombatJobExperience preserves the stock update boundary: normal
-// character EXP and the rest of the kill lifecycle have independent durable
-// owners and must not be rolled back or skipped after a job update fails.
-func (h *CombatHandler) tryAwardCombatJobExperience(ctx context.Context, player *model.Player, amount uint64, targetUID uint32) {
-	if err := h.awardCombatJobExperience(ctx, player, amount); err != nil {
-		characterID := 0
-		if player != nil {
-			characterID = player.ID
-		}
-		logrus.WithError(err).WithFields(logrus.Fields{"character_id": characterID, "target_uid": targetUID, "job_experience": amount}).Warn("combat job experience award failed")
-	}
-}
-
-func (h *CombatHandler) finishKill(ctx context.Context, session *server.Session, player *model.Player, target *model.NPC, targetUID uint32, shareGrowthPetExperience bool) error {
-	if err := h.handleNativeQuestInstanceDeath(player, target); err != nil {
-		// The native OnDead callback reports action failure to its quest engine;
-		// it does not resurrect the already-dead mob or roll back ordinary kill
-		// rewards. Keep that boundary here as well.
-		logrus.WithError(err).WithField("target_uid", targetUID).Warn("native quest instance teleport submission failed")
-	}
-	if shareGrowthPetExperience && h.companions != nil {
-		if err := h.companions.AwardOwnerKillExperience(ctx, player, target); err != nil {
-			logrus.Warnf("growth pet EXP award failed owner=%d target=%d: %v", player.ID, targetUID, err)
-		}
-	}
-	if h.hwan != nil && h.referenceData != nil {
-		character, exists := h.referenceData.Character(target.GetRefObjectID())
-		if exists {
-			reward := model.HwanRewardForMonsterKill(player.Level, character.Level, target.MonsterRarity())
-			roll := h.rollHwanPoint
-			if roll == nil {
-				roll = func(chanceBasisPoints int) bool {
-					return chanceBasisPoints >= 10000 || chanceBasisPoints > 0 && rand.Intn(10000) < chanceBasisPoints
-				}
-			}
-			if roll(reward.ChanceBasisPoints) {
-				snapshot, changed, err := h.hwan.AwardPoints(ctx, player.ID, reward.Points)
-				if err != nil {
-					return err
-				}
-				player.CommitHwanSnapshot(snapshot)
-				if changed {
-					points := model.BuildHwanPointUpdatePacket(snapshot.Points, targetUID)
-					if err := h.sendPlayerPacket(session, points); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-	h.dropsMu.RLock()
-	drops := h.drops
-	h.dropsMu.RUnlock()
-	if drops != nil {
-		if _, err := drops.SpawnForKill(ctx, player, target); err != nil {
-			logrus.Warnf("monster drop materialization failed target=%d: %v", targetUID, err)
-		}
-		if resolver, ok := h.quests.(questCollectionDropRepository); ok {
-			questDrops, err := resolver.CollectionDropsForKill(ctx, player.ID, target.GetRefObjectID())
-			if err != nil {
-				return err
-			}
-			for _, questDrop := range questDrops {
-				if _, _, spawnErr := drops.SpawnQuestCollectionItem(ctx, player, target, questDrop); spawnErr != nil {
-					logrus.Warnf("quest collection drop materialization failed quest=%d target=%d: %v", questDrop.QuestID, targetUID, spawnErr)
-				}
-			}
-		}
-	}
-	if h.quests == nil {
-		return nil
-	}
-	if err := h.recordUniqueDead(ctx, session, player, target.GetRefObjectID(), targetUID); err != nil {
-		return err
-	}
-	questProgress, err := h.quests.RecordMobKill(ctx, player.ID, target.GetRefObjectID(), target.MonsterRarity())
-	if err != nil {
-		return err
-	}
-	for _, progress := range questProgress {
-		if !progress.Changed {
-			continue
-		}
-		player.CommitQuestMutation(progress.Quest)
-		update, buildErr := buildQuestStatePacket(progress.Quest)
-		if buildErr != nil {
-			return buildErr
-		}
-		if h.send != nil {
-			if sendErr := h.send(session, update); sendErr != nil {
-				return sendErr
-			}
-		} else if sendErr := session.Send(update); sendErr != nil {
-			return sendErr
-		}
-	}
-	return nil
-}
-
-func (h *CombatHandler) handleNativeQuestInstanceDeath(player *model.Player, target *model.NPC) error {
-	if h == nil || player == nil || target == nil || h.questInstances == nil || h.instanceTeleport == nil {
-		return nil
-	}
-	scope := model.GameWorldScope(player.GetGameWorldID())
-	if !scope.ValidInstance() || target.GetGameWorldID() != uint32(scope) {
-		return nil
-	}
-	instance, err := h.questInstances.Instance(scope)
-	if err != nil {
-		return err
-	}
-	variables, err := h.questInstances.Variables(scope)
-	if err != nil {
-		return err
-	}
-	elapsed := variables[model.NativeQuestInstanceElapsedTimeKey(instance.QuestID)]
-	stagePlan, stageMatched, err := h.questInstances.PrepareNativeBaekryeongStageDeath(scope, target.GetName(), elapsed)
-	if err != nil {
-		return err
-	}
-	if stageMatched {
-		_, err = h.questInstances.CommitNativeBaekryeongStageDeath(stagePlan)
-		return err
-	}
-	plan, matched, err := h.questInstances.PrepareNativeQuestInstanceDeath(scope, instance.QuestID, target.GetName(), elapsed)
-	if err != nil || !matched {
-		return err
-	}
-	return h.instanceTeleport.SubmitNativeQuestInstanceTeleport(h.questInstances, plan, player)
-}
-
-func (h *CombatHandler) recordUniqueDead(ctx context.Context, session *server.Session, player *model.Player, monsterRefObjectID, targetUID uint32) error {
-	uniqueDead, ok := h.quests.(questUniqueDeadRepository)
-	if !ok || player == nil {
-		return nil
-	}
-	result, granted, grantErr := uniqueDead.GrantUniqueDeadMissionItem(ctx, player.ID, monsterRefObjectID, player.GetNavmeshPosition().Region.ID)
-	if grantErr != nil {
-		if !errors.Is(grantErr, model.ErrQuestInventoryFull) {
-			return grantErr
-		}
-		logrus.WithFields(logrus.Fields{"character_id": player.ID, "target_uid": targetUID}).Info("UNIQUE_DEAD quest item grant skipped: inventory full")
-	} else if granted {
-		player.CommitQuestItemGrant(model.QuestItemGrantResult{Quest: result.Quest, Inventory: result.Inventory, Added: result.Added})
-		if result.RemovedSlot != nil {
-			if sendErr := h.sendPlayerPacket(session, buildQuestItemRemoved(*result.RemovedSlot)); sendErr != nil {
-				return sendErr
-			}
-			if *result.RemovedSlot != result.Added.Slot {
-				if remaining, exists := result.Inventory.Items[*result.RemovedSlot]; exists {
-					if sendErr := h.sendPlayerPacket(session, buildQuestItemAdded(model.QuestItemMutation{Slot: *result.RemovedSlot, Item: remaining})); sendErr != nil {
-						return sendErr
-					}
-				}
-			}
-		}
-		if sendErr := h.sendPlayerPacket(session, buildQuestItemAdded(result.Added)); sendErr != nil {
-			return sendErr
-		}
-		update, buildErr := buildQuestStatePacket(result.Quest)
-		if buildErr != nil {
-			return buildErr
-		}
-		if sendErr := h.sendPlayerPacket(session, update); sendErr != nil {
-			return sendErr
-		}
-	}
-	return nil
-}
-
-// AwardCOSKill routes a growth-pet kill through the owner's normal progression,
-// HWAN, and quest pipeline while retaining the killed mob as the EXP source.
-func (h *CombatHandler) AwardCOSKill(ctx context.Context, owner *model.Player, target *model.NPC) error {
-	if h == nil || owner == nil || owner.Session == nil || target == nil {
-		return ErrCombatTargetInvalid
-	}
-	return h.awardKill(ctx, owner.Session, owner, target, target.GetUniqueID(), false)
-}
-
-func (h *CombatHandler) baseAttackCooldown(player *model.Player) time.Duration {
-	if h == nil || h.referenceData == nil || player == nil {
-		return 0
-	}
-	skill, ok := h.referenceData.Skill(playerBaseAttackSkillID(player))
-	if !ok {
-		return 0
-	}
-	return skillCooldownAt(skill, h.skillActionTimePercent(player, skill))
-}
-
-func (h *CombatHandler) baseAttackSkill(player *model.Player) model.RefSkill {
-	if h == nil || h.referenceData == nil || player == nil {
-		return model.RefSkill{}
-	}
-	skill, _ := h.referenceData.Skill(playerBaseAttackSkillID(player))
-	return skill
-}
-
-func (h *CombatHandler) actionRecoveryDuration(player *model.Player, skill model.RefSkill) time.Duration {
-	if skill.ActionDuration <= 0 {
-		return 0
-	}
-	percent := h.skillActionTimePercent(player, skill)
-	milliseconds := int(math.Round(percent * float64(skill.ActionDuration) / 100))
-	return time.Duration(max(0, milliseconds)) * time.Millisecond
-}
-
-func (h *CombatHandler) finishActionAfter(session *server.Session, delay time.Duration) {
-	if delay <= 0 || h == nil || h.schedule == nil {
-		_ = h.sendActionState(session, false)
-		return
-	}
-	h.schedule(delay, func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		_ = h.sendActionState(session, false)
-	})
-}
-
-func (h *CombatHandler) resolveAttack(session *server.Session, targetUID uint32) (*model.Player, *model.NPC, error) {
-	player, err := h.resolveCombatPlayer(session)
-	if err != nil {
-		return nil, nil, ErrCombatTargetInvalid
-	}
-	object, err := h.world.GetObjectByUniqueId(targetUID)
-	if err != nil {
-		return nil, nil, ErrCombatTargetInvalid
-	}
-	target, ok := object.(*model.NPC)
-	if !ok || target == nil || !target.GetTypeInfo().IsNPCMob() || target.GetLifeState() != model.Alive {
-		return nil, nil, ErrCombatTargetInvalid
-	}
-	known := player.GetKnownObjectList()
-	if known == nil || known.GetKnownObjects()[targetUID] != target {
-		return nil, nil, ErrCombatTargetInvalid
-	}
-	return player, target, nil
 }
 
 func (h *CombatHandler) resolveDimensionHolePortalInteraction(session *server.Session, targetUID uint32) (*model.Player, *model.DimensionHolePortal, error) {
@@ -5099,309 +4214,6 @@ func (h *CombatHandler) resolveDimensionHolePortalInteraction(session *server.Se
 		return nil, nil, ErrCombatTargetInvalid
 	}
 	return player, portal, nil
-}
-
-func (h *CombatHandler) resolveCombatPlayer(session *server.Session) (*model.Player, error) {
-	if session == nil || session.UserContext.UniqueID == 0 || h.world == nil {
-		return nil, ErrCombatTargetInvalid
-	}
-	player, err := h.world.GetPlayerByUniqueId(session.UserContext.UniqueID)
-	if err != nil || player == nil || player.Session != session || player.GetLifeState() != model.Alive {
-		return nil, ErrCombatTargetInvalid
-	}
-	return player, nil
-}
-
-func (h *CombatHandler) beginAttackPursuit(session *server.Session, player *model.Player, target *model.NPC, reach float32, skillID uint32) error {
-	playerUID := player.GetUniqueID()
-	if h.pending == nil {
-		h.pending = make(map[uint32]*pendingAttack)
-	}
-	if current := h.pending[playerUID]; current != nil && current.session == session && current.targetUID == target.GetUniqueID() {
-		// The original MoveToTarget task updates its destination when the same
-		// moving target is requested again. Replacing the movement generation is
-		// safe because the existing poll owns this same pending task.
-		current.skillID = skillID
-		current.reach = reach
-		if err := h.restartAttackPursuit(player, target, current); err != nil {
-			h.cancelPendingAttack(playerUID, true)
-			return err
-		}
-		return nil
-	}
-	h.cancelPendingAttack(playerUID, true)
-
-	pending := &pendingAttack{
-		session: session, targetUID: target.GetUniqueID(), skillID: skillID, reach: reach,
-	}
-	if err := h.restartAttackPursuit(player, target, pending); err != nil {
-		return err
-	}
-	h.pending[playerUID] = pending
-	h.scheduleAttackPursuit(playerUID, pending)
-	return nil
-}
-
-func (h *CombatHandler) restartAttackPursuit(player *model.Player, target *model.NPC, pending *pendingAttack) error {
-	if h.world == nil || h.move == nil {
-		return ErrCombatTargetInvalid
-	}
-	if !h.world.CanMoveDirectly(player.GetNavmeshPosition(), target.GetNavmeshPosition()) {
-		return ErrCombatTargetInvalid
-	}
-	targetGlobal := target.GetNavmeshPosition().GetGlobalCoordinates()
-	// Pursue the target's position instead of a stand-off point derived from
-	// its latest snapshot. A moving target can leave that stand-off point
-	// behind before the next retarget, which makes the player arrive, stop, and
-	// start another movement leg. The pursuit poll stops this longer leg as soon
-	// as the live target enters attack range.
-	destination, err := h.world.NewPosFromGlobalCoordinates(targetGlobal)
-	if err != nil {
-		return err
-	}
-	pending.movementGeneration = h.move(player, destination)
-	if pending.movementGeneration == 0 {
-		return ErrCombatTargetInvalid
-	}
-	pending.lastTargetGlobal = targetGlobal.Clone()
-	pending.lastRetarget = h.combatNow()
-	return nil
-}
-
-func (h *CombatHandler) combatNow() time.Time {
-	if h != nil && h.now != nil {
-		return h.now()
-	}
-	return time.Now()
-}
-
-// beginDelayedCast reserves the actor's one in-flight delayed skill slot.
-// Native action state is actor-owned, so a newer cast or explicit cancel must
-// invalidate the older impact callback before it can apply damage/effects.
-func (h *CombatHandler) beginDelayedCast(playerUID uint32, cancel ...func()) uint64 {
-	if h == nil || playerUID == 0 {
-		return 0
-	}
-	if h.delayedCasts == nil {
-		h.delayedCasts = make(map[uint32]delayedCast)
-	}
-	token := uint64(model.NextActionUID())
-	entry := delayedCast{token: token}
-	if len(cancel) > 0 {
-		entry.cancel = cancel[0]
-	}
-	// A rapid follow-up skill replaces the actor-owned cast slot. Finish the
-	// superseded cast before installing the new token; otherwise its scheduled
-	// callback is correctly ignored, but its cast-end/action-state cleanup is
-	// lost and the stock client remains stuck in the cancelled action.
-	if previous, exists := h.delayedCasts[playerUID]; exists && previous.cancel != nil {
-		previous.cancel()
-	}
-	h.delayedCasts[playerUID] = entry
-	return token
-}
-
-func (h *CombatHandler) consumeDelayedCast(playerUID uint32, token uint64) bool {
-	if h == nil || playerUID == 0 || token == 0 || h.delayedCasts == nil {
-		return false
-	}
-	entry, exists := h.delayedCasts[playerUID]
-	if !exists || entry.token != token {
-		return false
-	}
-	delete(h.delayedCasts, playerUID)
-	return true
-}
-
-func (h *CombatHandler) cancelDelayedCast(playerUID uint32) {
-	if h == nil || playerUID == 0 || h.delayedCasts == nil {
-		return
-	}
-	entry, exists := h.delayedCasts[playerUID]
-	delete(h.delayedCasts, playerUID)
-	if exists && entry.cancel != nil {
-		entry.cancel()
-	}
-}
-
-func (h *CombatHandler) attackPursuitNeedsRetarget(target *model.NPC, pending *pendingAttack) bool {
-	if target == nil || pending == nil || pending.lastTargetGlobal == nil {
-		return true
-	}
-	if h.combatNow().Sub(pending.lastRetarget) < attackPursuitRetargetRate {
-		return false
-	}
-	targetGlobal := target.GetNavmeshPosition().GetGlobalCoordinates()
-	dx := targetGlobal.X - pending.lastTargetGlobal.X
-	dz := targetGlobal.Z - pending.lastTargetGlobal.Z
-	return dx*dx+dz*dz >= attackPursuitRetargetDelta*attackPursuitRetargetDelta
-}
-
-func (h *CombatHandler) scheduleAttackPursuit(playerUID uint32, pending *pendingAttack) {
-	schedule := h.schedule
-	if schedule == nil {
-		schedule = func(delay time.Duration, fn func()) { time.AfterFunc(delay, fn) }
-	}
-	schedule(attackPursuitPollInterval, func() { h.continueAttackPursuit(playerUID, pending) })
-}
-
-func (h *CombatHandler) continueAttackPursuit(playerUID uint32, pending *pendingAttack) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.pending == nil || h.pending[playerUID] != pending {
-		return
-	}
-	player, target, err := h.resolveAttack(pending.session, pending.targetUID)
-	if err != nil {
-		delete(h.pending, playerUID)
-		_ = h.sendActionState(pending.session, false)
-		return
-	}
-	movement := player.GetMovementData()
-	if movement != nil && movement.Generation != pending.movementGeneration {
-		// A client movement command supersedes the server-created pursuit.
-		h.cancelPendingAttack(playerUID, false)
-		_ = h.sendActionState(pending.session, false)
-		return
-	}
-	if navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) <= pending.reach {
-		if movement != nil && target.GetMovementData() != nil {
-			// A live target can enter weapon range before the last pursuit leg
-			// reaches its stale destination. Stop that leg immediately so the
-			// player attacks instead of running past or behind the target.
-			h.world.StopMovingCharacter(player, player.GetNavmeshPosition(), "combat-target-in-range", true)
-			movement = nil
-		}
-		if movement != nil {
-			// Let the pursuit movement publish its final position before starting
-			// the attack animation, avoiding an overlapping stop-and-hit snap.
-			h.scheduleAttackPursuit(playerUID, pending)
-			return
-		}
-		h.cancelPendingAttack(playerUID, false)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var executeErr error
-		if pending.skillID != 0 {
-			skill, exists := h.referenceSkill(pending.skillID)
-			if !exists || !playerOwnsSkill(player, pending.skillID) {
-				executeErr = ErrCombatTargetInvalid
-			} else {
-				switch skill.ExecutionKind() {
-				case model.SkillExecutionStatusAttack:
-					executeErr = h.executeTargetedStatusSkill(ctx, pending.session, player, target, skill)
-				case model.SkillExecutionPhysicalAttack, model.SkillExecutionMagicalAttack:
-					executeErr = h.executeSkillAttack(ctx, pending.session, player, target, skill)
-				default:
-					executeErr = ErrCombatTargetInvalid
-				}
-			}
-		} else {
-			executeErr = h.executeAttack(ctx, pending.session, player, target)
-		}
-		if executeErr != nil {
-			logrus.Warnf("queued attack failed player=%d target=%d skill=%d: %v", playerUID, pending.targetUID, pending.skillID, executeErr)
-		} else if pending.skillID == 0 && target.GetLifeState() == model.Alive {
-			h.startRepeatingAttack(player, pending.session, target)
-		}
-		return
-	}
-	if movement == nil || h.attackPursuitNeedsRetarget(target, pending) {
-		if err := h.restartAttackPursuit(player, target, pending); err != nil {
-			h.cancelPendingAttack(playerUID, false)
-			_ = h.sendActionState(pending.session, false)
-			return
-		}
-	}
-	h.scheduleAttackPursuit(playerUID, pending)
-}
-
-func (h *CombatHandler) startRepeatingAttack(player *model.Player, session *server.Session, target *model.NPC) {
-	if h == nil || h.schedule == nil || player == nil || session == nil || target == nil {
-		return
-	}
-	cooldown := h.baseAttackCooldown(player)
-	if cooldown <= 0 {
-		return
-	}
-	h.startRepeatingAttackAfter(player, session, target, cooldown)
-}
-
-func (h *CombatHandler) startRepeatingAttackAfter(player *model.Player, session *server.Session, target *model.NPC, delay time.Duration) {
-	if h == nil || h.schedule == nil || player == nil || session == nil || target == nil {
-		return
-	}
-	if h.repeating == nil {
-		h.repeating = make(map[uint32]*pendingAttack)
-	}
-	playerUID := player.GetUniqueID()
-	intent := &pendingAttack{
-		session:            session,
-		targetUID:          target.GetUniqueID(),
-		reach:              h.baseAttackReach(player, target),
-		movementGeneration: player.GetMovementGeneration(),
-	}
-	h.repeating[playerUID] = intent
-	h.schedule(delay, func() { h.continueRepeatingAttack(playerUID, intent) })
-}
-
-func (h *CombatHandler) continueRepeatingAttack(playerUID uint32, intent *pendingAttack) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.repeating == nil || h.repeating[playerUID] != intent {
-		return
-	}
-	player, target, err := h.resolveAttack(intent.session, intent.targetUID)
-	if err != nil || player.GetMovementGeneration() != intent.movementGeneration {
-		delete(h.repeating, playerUID)
-		_ = h.sendActionState(intent.session, false)
-		return
-	}
-	reach := h.baseAttackReach(player, target)
-	if navmeshv2.HorizontalDistance(player.GetNavmeshPosition(), target.GetNavmeshPosition()) > reach {
-		delete(h.repeating, playerUID)
-		if err := h.beginAttackPursuit(intent.session, player, target, reach, 0); err != nil {
-			_ = h.sendActionState(intent.session, false)
-		}
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err = h.executeAttack(ctx, intent.session, player, target)
-	cancel()
-	if err != nil || target.GetLifeState() != model.Alive {
-		delete(h.repeating, playerUID)
-		return
-	}
-	h.startRepeatingAttack(player, intent.session, target)
-}
-
-func (h *CombatHandler) cancelRepeatingAttack(playerUID uint32) {
-	if h == nil || h.repeating == nil {
-		return
-	}
-	delete(h.repeating, playerUID)
-}
-
-func (h *CombatHandler) cancelPendingAttack(playerUID uint32, stopMovement bool) {
-	if h.pending == nil {
-		return
-	}
-	pending := h.pending[playerUID]
-	if pending == nil {
-		return
-	}
-	delete(h.pending, playerUID)
-	if !stopMovement || h.world == nil {
-		return
-	}
-	player, err := h.world.GetPlayerByUniqueId(playerUID)
-	if err != nil || player == nil {
-		return
-	}
-	movement := player.GetMovementData()
-	if movement != nil && movement.Generation == pending.movementGeneration {
-		h.world.StopMovingCharacter(player, player.GetNavmeshPosition(), "combat-pursuit-stop", true)
-	}
 }
 
 func (h *CombatHandler) sendActionState(session *server.Session, active bool) error {
@@ -5454,70 +4266,6 @@ func broadcastCombatPacket(player *model.Player, packet *network.Packet) {
 	}
 }
 
-func buildActionStateResponse(active bool) network.Packet {
-	packet, _ := (vsro188.CombatActionStateResponseCodec{}).Encode(vsro188.CombatActionStateResponse{Active: active})
-	return packet
-}
-
 func combatTraceEnabled() bool {
 	return os.Getenv("SRO_COMBAT_TRACE") == "1"
-}
-
-func buildSkillCastErrorResponse(reason byte) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntitySkillCastBegin
-	p.WriteByte(2)
-	p.WriteByte(reason)
-	p.WriteByte(skillCastErrorCategory)
-	return p
-}
-
-func buildAttackBegin(sourceUID, targetUID, castUID, damage uint32, killed bool) network.Packet {
-	return model.BuildAttackBegin(sourceUID, targetUID, castUID, damage, killed)
-}
-
-func buildAttackEnd(targetUID, castUID, damage uint32, killed bool) network.Packet {
-	return model.BuildAttackEnd(targetUID, castUID, damage, killed)
-}
-
-func writeDamageBlock(p *network.Packet, targetUID, damage uint32, killed bool) {
-	model.WriteDamageBlock(p, targetUID, damage, killed)
-}
-
-func sendExperienceUpdate(session *server.Session, sourceUID uint32, gained, gainedSkillExperience uint64, progress model.ProgressionResult) error {
-	return session.Send(buildExperienceUpdate(sourceUID, gained, gainedSkillExperience, progress))
-}
-
-func publishLevelUpAnimation(player *model.Player, progress model.ProgressionResult) {
-	if player == nil || progress.LevelsGained <= 0 {
-		return
-	}
-	packet := model.BuildLevelUpAnimationPacket(player.GetUniqueID())
-	player.SendToSelfAndKnown(&packet)
-}
-
-func buildExperienceUpdate(sourceUID uint32, gained, gainedSkillExperience uint64, progress model.ProgressionResult) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.EntityUpdateExperience
-	p.WriteUInt32(sourceUID)
-	p.WriteUInt64(gained)
-	p.WriteUInt64(gainedSkillExperience)
-	p.WriteByte(0)
-	if progress.LevelsGained > 0 {
-		p.WriteUInt16(uint16(progress.StatPointsGained))
-	}
-	return p
-}
-
-func scaleCombatReward(base uint64, percent int) uint64 {
-	if percent < 0 {
-		percent = 100
-	}
-	if percent == 0 || base == 0 {
-		return 0
-	}
-	if base > math.MaxUint64/uint64(percent) {
-		return math.MaxUint64
-	}
-	return base * uint64(percent) / 100
 }

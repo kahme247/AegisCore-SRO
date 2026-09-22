@@ -1,10 +1,78 @@
 package model
 
 import (
+	"encoding/binary"
 	"testing"
+	"time"
 
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/utils"
 )
+
+func TestDarknessStatsPacketPublishesReducedHitRate(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &Player{BaseAttackStats: AttackStats{HitRate: 89}}
+	baseline := player.DerivedStats().HitRate
+	player.ApplyCombatStatusAt(CombatStatus{
+		Kind: CombatStatusDarkness, Token: 1, Power: 30, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	packet := player.BuildStatsUpdatePacketAt(now)
+	if packet.MessageID != opcode.EntityUpdateStats {
+		t.Fatalf("Darkness stats opcode = %#04x, want %#04x", packet.MessageID, opcode.EntityUpdateStats)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(packet.Payload()[20:22])), baseline-30; got != want {
+		t.Fatalf("Darkness packet Hit Rate = %d, want %d", got, want)
+	}
+	if got := player.DerivedStats().HitRate; got != baseline {
+		t.Fatalf("Darkness mutated persistent base Hit Rate to %d, want %d", got, baseline)
+	}
+}
+func TestStatDebuffPacketUsesShockMagnitudeAndDefenseFloor(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &Player{
+		BaseStats:        BaseStats{Str: 20, Int: 20},
+		BaseDefenseStats: DefenseStats{PhyDef: 80, MagDef: 60, ParryRate: 89},
+	}
+	baseline := player.DerivedStats()
+	for token, status := range []CombatStatus{
+		{Kind: CombatStatusParryDown, Power: 10, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusShock, Power: 50, Payload: 50, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusPhysicalDefenseDown, Power: 10000, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusMagicalDefenseDown, Power: 10000, ExpiresAt: now.Add(time.Minute)},
+	} {
+		status.Token = uint32(token + 1)
+		player.ApplyCombatStatusAt(status, now)
+	}
+	packet := player.BuildStatsUpdatePacketAt(now)
+	payload := packet.Payload()
+	if got, want := int(binary.LittleEndian.Uint16(payload[16:18])), CombatDefenseAfterReduction(baseline.PhyDef, 10000); got != want {
+		t.Fatalf("physical defense packet = %d, want %d", got, want)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(payload[18:20])), CombatDefenseAfterReduction(baseline.MagDef, 10000); got != want {
+		t.Fatalf("magical defense packet = %d, want %d", got, want)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(payload[22:24])), max(0, baseline.ParryRate-10)/2; got != want {
+		t.Fatalf("Shock/Parry Down packet = %d, want %d", got, want)
+	}
+}
+
+func TestBleedReducesBothDefensesWithoutMutatingBaseStats(t *testing.T) {
+	now := time.Unix(100, 0)
+	player := &Player{BaseStats: BaseStats{Str: 20, Int: 20}, BaseDefenseStats: DefenseStats{PhyDef: 80, MagDef: 60}}
+	baseline := player.DerivedStats()
+	player.ApplyCombatStatusAt(CombatStatus{Kind: CombatStatusBleed, Token: 1, Power: 17, ExpiresAt: now.Add(time.Minute)}, now)
+	packet := player.BuildStatsUpdatePacketAt(now)
+	payload := packet.Payload()
+	if got, want := int(binary.LittleEndian.Uint16(payload[16:18])), max(0, baseline.PhyDef-17); got != want {
+		t.Fatalf("Bleed physical defense packet = %d, want %d", got, want)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(payload[18:20])), max(0, baseline.MagDef-17); got != want {
+		t.Fatalf("Bleed magical defense packet = %d, want %d", got, want)
+	}
+	if got := player.DerivedStats(); got.PhyDef != baseline.PhyDef || got.MagDef != baseline.MagDef {
+		t.Fatalf("Bleed mutated base defenses: got %+v, baseline %+v", got, baseline)
+	}
+}
 
 func TestDerivedStatsCombinesEquipmentEnhancementAndRuntimeEffects(t *testing.T) {
 	original := RefItems
@@ -85,6 +153,69 @@ func TestDerivedStatsCombinesEquipmentEnhancementAndRuntimeEffects(t *testing.T)
 	}
 	if average := player.AverageAttackPower(false); average != (got.PhyAttackMin+got.PhyAttackMax)/2 {
 		t.Fatalf("combat physical average = %d", average)
+	}
+
+	now := time.Now()
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceReinforceWeapon, EffectValue: 2, ExpiresAt: now.Add(time.Hour)})
+	weaponReinforced := player.DerivedStats()
+	if weaponReinforced.PhyAttackMin <= got.PhyAttackMin || weaponReinforced.PhyDef != got.PhyDef {
+		t.Fatalf("weapon reinforcement changed attack/defense from %d/%d to %d/%d", got.PhyAttackMin, got.PhyDef, weaponReinforced.PhyAttackMin, weaponReinforced.PhyDef)
+	}
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceReinforceArmor, EffectValue: 1, ExpiresAt: now.Add(time.Hour)})
+	armorReinforced := player.DerivedStats()
+	if armorReinforced.PhyAttackMin != weaponReinforced.PhyAttackMin || armorReinforced.PhyDef <= weaponReinforced.PhyDef {
+		t.Fatalf("armor reinforcement changed attack/defense from %d/%d to %d/%d", weaponReinforced.PhyAttackMin, weaponReinforced.PhyDef, armorReinforced.PhyAttackMin, armorReinforced.PhyDef)
+	}
+}
+
+func TestLifeTurnoverModifiersChangeMaxHPAndMagicAttack(t *testing.T) {
+	player := &Player{
+		Level:           100,
+		BaseStats:       BaseStats{Str: 100, Int: 100},
+		BaseAttackStats: AttackStats{MagAttackMin: 40, MagAttackMax: 60},
+	}
+	before := player.DerivedStats()
+	if _, ok := player.CommitActiveBuff(9974, 1, time.Minute, BuffModifiers{HPPercent: -50, DamagePercent: 25, MagicalAttack: 2011}); !ok {
+		t.Fatal("commit Life Turnover")
+	}
+	during := player.DerivedStats()
+	if want := before.MaxHP + before.MaxHP*-50/100; during.MaxHP != want {
+		t.Fatalf("Life Turnover max HP = %d, want %d", during.MaxHP, want)
+	}
+	if during.MagAttackMin != before.MagAttackMin+2011 || during.MagAttackMax != before.MagAttackMax+2011 {
+		t.Fatalf("Life Turnover magical attack = %d-%d, want %d-%d", during.MagAttackMin, during.MagAttackMax, before.MagAttackMin+2011, before.MagAttackMax+2011)
+	}
+	if !player.RemoveActiveBuff(1) {
+		t.Fatal("remove Life Turnover")
+	}
+	if after := player.DerivedStats(); after != before {
+		t.Fatalf("Life Turnover removal = %+v, want %+v", after, before)
+	}
+}
+
+func TestActiveBuffModifiersApplyCriticalAndMovementSpeed(t *testing.T) {
+	player := &Player{
+		BaseAttackStats: AttackStats{CriticalRate: 30},
+		WalkSpeed:       10,
+		RunSpeed:        20,
+	}
+	if _, ok := player.CommitActiveBuff(9975, 2, time.Minute, BuffModifiers{CriticalRate: 2, MovementSpeedPercent: 20}); !ok {
+		t.Fatal("commit European critical/speed buff")
+	}
+	if stats := player.DerivedStats(); stats.CriticalRate != 32 {
+		t.Fatalf("critical rate = %d, want 32", stats.CriticalRate)
+	}
+	if walk, run := player.MovementSpeeds(); walk != 12 || run != 24 {
+		t.Fatalf("movement speeds = %.1f/%.1f, want 12/24", walk, run)
+	}
+	if !player.RemoveActiveBuff(2) {
+		t.Fatal("remove European critical/speed buff")
+	}
+	if stats := player.DerivedStats(); stats.CriticalRate != 30 {
+		t.Fatalf("critical rate after removal = %d, want 30", stats.CriticalRate)
+	}
+	if walk, run := player.MovementSpeeds(); walk != 10 || run != 20 {
+		t.Fatalf("movement speeds after removal = %.1f/%.1f, want 10/20", walk, run)
 	}
 }
 
