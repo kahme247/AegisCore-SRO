@@ -29,6 +29,17 @@ type TeleportDestination struct {
 	MinLevel uint8
 }
 
+type DungeonTeleportPoint struct {
+	ID       uint32
+	CodeName string
+	Region   int16
+	X        float32
+	Y        float32
+	Z        float32
+	Radius   float32
+	WorldID  int16
+}
+
 type TeleportResult struct {
 	Destination TeleportDestination
 	Gold        uint64
@@ -37,6 +48,16 @@ type TeleportResult struct {
 type TeleportRepository interface {
 	Quote(context.Context, uint32, uint32) (TeleportDestination, error)
 	Commit(context.Context, int64, uint32, uint32, uint32) (TeleportResult, error)
+}
+
+// DungeonTeleportLinkRepository loads the directed event-zone graph used by
+// database-backed dungeon transitions.
+type DungeonTeleportLinkRepository interface {
+	DungeonLinks(context.Context) (map[uint32]uint32, error)
+}
+
+type DungeonTeleportPointRepository interface {
+	DungeonPoints(context.Context) (map[uint32]DungeonTeleportPoint, error)
 }
 
 // TeleportDesignationRepository is implemented separately so focused tests
@@ -61,11 +82,67 @@ JOIN TELEPORT_POINT owner ON owner.ID=link.OWNER_TELEPORT_ID AND owner.SERVICE=1
 JOIN TELEPORT_POINT target ON target.ID=link.TARGET_TELEPORT_ID AND target.SERVICE=1
 WHERE owner.NPC_REF_OBJ_ID=? AND target.ID=? AND link.SERVICE=1`
 
+const SelectDungeonTeleportLinks = `SELECT SOURCE_TELEPORT_ID,TARGET_TELEPORT_ID
+FROM DUNGEON_TELEPORT_LINK
+WHERE SERVICE=1
+ORDER BY SOURCE_TELEPORT_ID`
+
+const SelectDungeonTeleportPoints = `SELECT ID,CODE_NAME,REGION_ID,POS_X,POS_Y,POS_Z,RADIUS,WORLD_ID
+FROM DUNGEON_TELEPORT_POINT
+WHERE SERVICE=1
+ORDER BY ID`
+
 func (r *SQLTeleportRepository) Quote(ctx context.Context, sourceNPCRefID, targetTeleportID uint32) (TeleportDestination, error) {
 	if r == nil || r.shard == nil {
 		return TeleportDestination{}, ErrTeleportRepositoryUnavailable
 	}
 	return scanTeleportDestination(r.shard.QueryRowContext(normalizeTeleportContext(ctx), selectTeleportLink, sourceNPCRefID, targetTeleportID))
+}
+
+func (r *SQLTeleportRepository) DungeonLinks(ctx context.Context) (map[uint32]uint32, error) {
+	if r == nil || r.shard == nil {
+		return nil, ErrTeleportRepositoryUnavailable
+	}
+	rows, err := r.shard.QueryContext(normalizeTeleportContext(ctx), SelectDungeonTeleportLinks)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	links := make(map[uint32]uint32)
+	for rows.Next() {
+		var sourceID, targetID uint32
+		if err := rows.Scan(&sourceID, &targetID); err != nil {
+			return nil, err
+		}
+		links[sourceID] = targetID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return links, nil
+}
+
+func (r *SQLTeleportRepository) DungeonPoints(ctx context.Context) (map[uint32]DungeonTeleportPoint, error) {
+	if r == nil || r.shard == nil {
+		return nil, ErrTeleportRepositoryUnavailable
+	}
+	rows, err := r.shard.QueryContext(normalizeTeleportContext(ctx), SelectDungeonTeleportPoints)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make(map[uint32]DungeonTeleportPoint)
+	for rows.Next() {
+		var point DungeonTeleportPoint
+		if err := rows.Scan(&point.ID, &point.CodeName, &point.Region, &point.X, &point.Y, &point.Z, &point.Radius, &point.WorldID); err != nil {
+			return nil, err
+		}
+		points[point.ID] = point
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return points, nil
 }
 
 // Designate persists the selected teleport building as the character's bind

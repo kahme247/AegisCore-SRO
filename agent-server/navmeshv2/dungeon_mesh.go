@@ -37,7 +37,7 @@ func (l *Loader) LoadDungeonMeshes() error {
 	}
 	loaded := make(map[int16]DungeonMeshMetadata)
 	for _, entry := range l.DungeonInfo.Dungeons {
-		if entry.Service == 0 || !isSupportedTombMesh(entry.FilePath) {
+		if entry.Service == 0 {
 			continue
 		}
 		archivePath := l.DataPk2Path + string(os.PathSeparator) + strings.ReplaceAll(entry.FilePath, "\\", string(os.PathSeparator))
@@ -53,23 +53,35 @@ func (l *Loader) LoadDungeonMeshes() error {
 		if err != nil {
 			return err
 		}
-		if _, duplicate := loaded[metadata.Region.ID]; duplicate {
-			return invalidDungeonInfo(archivePath, "duplicate dungeon region %d", metadata.Region.ID)
+		if existing, duplicate := loaded[metadata.Region.ID]; duplicate {
+			loaded[metadata.Region.ID] = mergeDungeonMeshBounds(existing, metadata)
+			continue
 		}
 		loaded[metadata.Region.ID] = metadata
 	}
 	l.DungeonData = loaded
 	return nil
 }
-
-func isSupportedTombMesh(path string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
-	switch normalized {
-	case "dungeon/china/jinsi_floor02.dof", "dungeon/china/jinsi_floor03.dof", "dungeon/china/jinsi_floor04.dof":
-		return true
-	default:
-		return false
+func mergeDungeonMeshBounds(existing, additional DungeonMeshMetadata) DungeonMeshMetadata {
+	if additional.Minimum.X < existing.Minimum.X {
+		existing.Minimum.X = additional.Minimum.X
 	}
+	if additional.Minimum.Y < existing.Minimum.Y {
+		existing.Minimum.Y = additional.Minimum.Y
+	}
+	if additional.Minimum.Z < existing.Minimum.Z {
+		existing.Minimum.Z = additional.Minimum.Z
+	}
+	if additional.Maximum.X > existing.Maximum.X {
+		existing.Maximum.X = additional.Maximum.X
+	}
+	if additional.Maximum.Y > existing.Maximum.Y {
+		existing.Maximum.Y = additional.Maximum.Y
+	}
+	if additional.Maximum.Z > existing.Maximum.Z {
+		existing.Maximum.Z = additional.Maximum.Z
+	}
+	return existing
 }
 
 func resolvePK2PathCaseInsensitive(files map[string]pk2.PackFileEntry, requested string) string {

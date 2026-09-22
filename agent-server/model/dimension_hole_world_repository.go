@@ -20,20 +20,21 @@ const (
 	DimensionHoleWorldDurationMS       uint32 = 7_200_000
 	DimensionHoleWorldEmptyRemainMS    uint32 = 600_000
 
-	SelectDimensionHoleGameWorlds = `SELECT WORLD_ID,CODE_NAME,WORLD_TYPE,MAX_INSTANCE_COUNT,MAX_USER_COUNT,
-WORLD_ENTRY_TYPE,WORLD_ENTRANCE_TYPE,WORLD_LEAVE_TYPE,WORLD_DURATION_MS,WORLD_EMPTY_REMAIN_MS,CONFIG_GROUP_CODE_NAME
-FROM SRO_SHARD.REF_GAME_WORLD
-WHERE WORLD_ID BETWEEN ? AND ?
-ORDER BY WORLD_ID`
+	SelectDimensionHoleGameWorlds = `SELECT w.WORLD_ID,w.CODE_NAME,w.WORLD_TYPE,w.MAX_INSTANCE_COUNT,w.MAX_USER_COUNT,
+w.WORLD_ENTRY_TYPE,w.WORLD_ENTRANCE_TYPE,w.WORLD_LEAVE_TYPE,w.WORLD_DURATION_MS,w.WORLD_EMPTY_REMAIN_MS,w.CONFIG_GROUP_CODE_NAME
+FROM SRO_SHARD.REF_DIMENSION_HOLE h
+JOIN SRO_SHARD.REF_GAME_WORLD w ON w.WORLD_ID=h.WORLD_ID
+WHERE h.SERVICE=1
+ORDER BY w.WORLD_ID`
 )
 
 var (
 	ErrDimensionHoleWorldRepositoryUnavailable = errors.New("Dimension Hole world repository is unavailable")
-	ErrDimensionHoleWorldCatalogMismatch       = errors.New("Dimension Hole world catalog does not match the pinned media contract")
+	ErrDimensionHoleWorldCatalogMismatch       = errors.New("Dimension Hole world catalog does not match the database definition catalog")
 )
 
 // DimensionHoleWorldReference is one validated REF_GAME_WORLD row. The
-// repository only returns a catalog after all 22 pinned worlds match exactly.
+// repository requires one matching world for every enabled database definition.
 type DimensionHoleWorldReference struct {
 	WorldID             uint16
 	CodeName            string
@@ -125,14 +126,18 @@ func (r *SQLDimensionHoleWorldRepository) LoadDimensionHoleWorldCatalog(ctx cont
 	if err := ctx.Err(); err != nil {
 		return nil, &DimensionHoleWorldRepositoryError{Operation: "query", Err: err}
 	}
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 {
+		return nil, dimensionHoleWorldMismatch(0, "definition catalog is empty")
+	}
 
-	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleGameWorlds, DimensionHoleFirstWorldID, DimensionHoleLastWorldID)
+	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleGameWorlds)
 	if err != nil {
 		return nil, &DimensionHoleWorldRepositoryError{Operation: "query", Err: err}
 	}
 	defer rows.Close()
 
-	worlds := make([]DimensionHoleWorldReference, 0, len(dimensionHoleDefinitions))
+	worlds := make([]DimensionHoleWorldReference, 0, len(definitions))
 	for rows.Next() {
 		var world DimensionHoleWorldReference
 		if err = rows.Scan(
@@ -150,10 +155,10 @@ func (r *SQLDimensionHoleWorldRepository) LoadDimensionHoleWorldCatalog(ctx cont
 		); err != nil {
 			return nil, &DimensionHoleWorldRepositoryError{Operation: "scan", Err: err}
 		}
-		if len(worlds) >= len(dimensionHoleDefinitions) {
+		if len(worlds) >= len(definitions) {
 			return nil, dimensionHoleWorldMismatch(world.WorldID, "unexpected extra row")
 		}
-		expected := dimensionHoleDefinitions[len(worlds)]
+		expected := definitions[len(worlds)]
 		if world.WorldID != expected.WorldID {
 			return nil, dimensionHoleWorldMismatch(expected.WorldID, fmt.Sprintf("expected world %d before world %d", expected.WorldID, world.WorldID))
 		}
@@ -169,17 +174,20 @@ func (r *SQLDimensionHoleWorldRepository) LoadDimensionHoleWorldCatalog(ctx cont
 }
 
 // NewDimensionHoleWorldCatalog validates a complete immutable catalog before
-// it can reach scope allocation. Startup loaders and tests share this boundary
-// so an in-memory caller cannot bypass the exact 22-world media contract.
+// it can reach scope allocation.
 func NewDimensionHoleWorldCatalog(worlds []DimensionHoleWorldReference) (*DimensionHoleWorldCatalog, error) {
-	if len(worlds) < len(dimensionHoleDefinitions) {
-		missing := dimensionHoleDefinitions[len(worlds)].WorldID
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 {
+		return nil, dimensionHoleWorldMismatch(0, "definition catalog is empty")
+	}
+	if len(worlds) < len(definitions) {
+		missing := definitions[len(worlds)].WorldID
 		return nil, dimensionHoleWorldMismatch(missing, "missing row")
 	}
-	if len(worlds) > len(dimensionHoleDefinitions) {
-		return nil, dimensionHoleWorldMismatch(worlds[len(dimensionHoleDefinitions)].WorldID, "unexpected extra row")
+	if len(worlds) > len(definitions) {
+		return nil, dimensionHoleWorldMismatch(worlds[len(definitions)].WorldID, "unexpected extra row")
 	}
-	for index, definition := range dimensionHoleDefinitions {
+	for index, definition := range definitions {
 		world := worlds[index]
 		if world.WorldID != definition.WorldID {
 			return nil, dimensionHoleWorldMismatch(definition.WorldID, fmt.Sprintf("expected world %d before world %d", definition.WorldID, world.WorldID))

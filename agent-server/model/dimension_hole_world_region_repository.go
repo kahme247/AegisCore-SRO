@@ -5,19 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
-const SelectDimensionHoleGameWorldRegions = `SELECT WORLD_ID,REGION_ID
-FROM SRO_SHARD.REF_GAME_WORLD_REGION
-WHERE WORLD_ID BETWEEN ? AND ?
-ORDER BY WORLD_ID,REGION_ID`
+const SelectDimensionHoleGameWorldRegions = `SELECT r.WORLD_ID,r.REGION_ID
+FROM SRO_SHARD.REF_DIMENSION_HOLE h
+JOIN SRO_SHARD.REF_GAME_WORLD_REGION r ON r.WORLD_ID=h.WORLD_ID
+WHERE h.SERVICE=1
+ORDER BY r.WORLD_ID,r.REGION_ID`
 
 var (
 	ErrDimensionHoleWorldRegionRepositoryUnavailable = errors.New("Dimension Hole world-region repository is unavailable")
-	ErrDimensionHoleWorldRegionCatalogMismatch       = errors.New("Dimension Hole world-region catalog does not match the pinned media contract")
+	ErrDimensionHoleWorldRegionCatalogMismatch       = errors.New("Dimension Hole world-region catalog does not match the database definition catalog")
 )
 
 type DimensionHoleWorldRegionReference struct {
@@ -76,7 +76,7 @@ func (r *SQLDimensionHoleWorldRegionRepository) LoadDimensionHoleWorldRegionCata
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleGameWorldRegions, DimensionHoleFirstWorldID, DimensionHoleLastWorldID)
+	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleGameWorldRegions)
 	if err != nil {
 		return nil, fmt.Errorf("query Dimension Hole world regions: %w", err)
 	}
@@ -96,7 +96,11 @@ func (r *SQLDimensionHoleWorldRegionRepository) LoadDimensionHoleWorldRegionCata
 }
 
 func NewDimensionHoleWorldRegionCatalog(references []DimensionHoleWorldRegionReference) (*DimensionHoleWorldRegionCatalog, error) {
-	byWorld := make(map[uint16]map[int16]struct{}, len(dimensionHoleDefinitions))
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 {
+		return nil, dimensionHoleWorldRegionMismatch(0, "definition catalog is empty")
+	}
+	byWorld := make(map[uint16]map[int16]struct{}, len(definitions))
 	for _, reference := range references {
 		if reference.RegionID == 0 {
 			return nil, dimensionHoleWorldRegionMismatch(reference.WorldID, "zero region")
@@ -112,29 +116,12 @@ func NewDimensionHoleWorldRegionCatalog(references []DimensionHoleWorldRegionRef
 		}
 		byWorld[reference.WorldID][reference.RegionID] = struct{}{}
 	}
-	for _, definition := range dimensionHoleDefinitions {
-		want, ok := dimensionHoleWorldRegionCount(definition.WorldCodeName)
-		if !ok {
-			return nil, dimensionHoleWorldRegionMismatch(definition.WorldID, "unknown family")
-		}
-		if got := len(byWorld[definition.WorldID]); got != want {
-			return nil, dimensionHoleWorldRegionMismatch(definition.WorldID, fmt.Sprintf("got %d regions, want %d", got, want))
+	for _, definition := range definitions {
+		if len(byWorld[definition.WorldID]) == 0 {
+			return nil, dimensionHoleWorldRegionMismatch(definition.WorldID, "missing regions")
 		}
 	}
 	return &DimensionHoleWorldRegionCatalog{byWorld: byWorld}, nil
-}
-
-func dimensionHoleWorldRegionCount(worldCodeName string) (int, bool) {
-	switch {
-	case strings.HasPrefix(worldCodeName, "INS_GOD_TOGUI_"):
-		return 48, true
-	case strings.HasPrefix(worldCodeName, "INS_GOD_FLAME_"):
-		return 1, true
-	case strings.HasPrefix(worldCodeName, "INS_GOD_WRECK_IN_"), strings.HasPrefix(worldCodeName, "INS_GOD_WRECK_OUT_"):
-		return 224, true
-	default:
-		return 0, false
-	}
 }
 
 func dimensionHoleWorldRegionMismatch(worldID uint16, detail string) error {

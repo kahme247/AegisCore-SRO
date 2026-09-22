@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDimensionHoleWorldRegionCatalogValidatesPinnedFamilyCounts(t *testing.T) {
+func TestDimensionHoleWorldRegionCatalogAcceptsDatabaseAuthoredRegions(t *testing.T) {
 	references := dimensionHoleWorldRegionTestReferences()
 	catalog, err := NewDimensionHoleWorldRegionCatalog(references)
 	if err != nil {
@@ -17,7 +17,7 @@ func TestDimensionHoleWorldRegionCatalogValidatesPinnedFamilyCounts(t *testing.T
 		t.Fatalf("world %d regions = %#v", definition.WorldID, catalog.Regions(definition.WorldID))
 	}
 	regions := catalog.Regions(definition.WorldID)
-	if len(regions) != 48 || regions[0] != wantFirst || regions[len(regions)-1] != wantFirst+47 {
+	if len(regions) != 1 || regions[0] != wantFirst {
 		t.Fatalf("world %d sorted regions = %#v", definition.WorldID, regions)
 	}
 	flame := DimensionHoleCatalog()[6]
@@ -58,16 +58,13 @@ func TestDimensionHoleWorldRegionCatalogRejectsMissingDuplicateUnknownAndZeroRow
 
 func dimensionHoleWorldRegionTestReferences() []DimensionHoleWorldRegionReference {
 	definitions := DimensionHoleCatalog()
-	rows := make([]DimensionHoleWorldRegionReference, 0, 2088)
+	rows := make([]DimensionHoleWorldRegionReference, 0, len(definitions))
 	for _, definition := range definitions {
-		count, _ := dimensionHoleWorldRegionCount(definition.WorldCodeName)
-		for index := 0; index < count; index++ {
-			regionID := int16(int(definition.WorldID)*300 + index)
-			if count == 1 {
-				regionID = -32750
-			}
-			rows = append(rows, DimensionHoleWorldRegionReference{WorldID: definition.WorldID, RegionID: regionID})
+		regionID := int16(int(definition.WorldID) * 300)
+		if definition.WorldID == 69 {
+			regionID = -32750
 		}
+		rows = append(rows, DimensionHoleWorldRegionReference{WorldID: definition.WorldID, RegionID: regionID})
 	}
 	return rows
 }

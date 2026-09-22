@@ -149,10 +149,11 @@ func (a *LocalDimensionHoleScopeAllocator) DimensionHoleLeaseForScope(scope Game
 }
 
 func validDimensionHoleWorldCatalog(catalog *DimensionHoleWorldCatalog) bool {
-	if catalog == nil || len(catalog.worlds) != len(dimensionHoleDefinitions) || len(catalog.byID) != len(dimensionHoleDefinitions) {
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 || catalog == nil || len(catalog.worlds) != len(definitions) || len(catalog.byID) != len(definitions) {
 		return false
 	}
-	for index, definition := range dimensionHoleDefinitions {
+	for index, definition := range definitions {
 		world := catalog.worlds[index]
 		if world.WorldID != definition.WorldID || validateDimensionHoleWorldReference(world, definition) != nil || catalog.byID[world.WorldID] != world {
 			return false

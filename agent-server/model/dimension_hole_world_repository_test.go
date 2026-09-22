@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -200,11 +199,7 @@ func assertDimensionHoleWorldQuery(t *testing.T) {
 	catalogRepositoryTestState.Lock()
 	queries := append([]catalogRepositoryTestQuery(nil), catalogRepositoryTestState.queries...)
 	catalogRepositoryTestState.Unlock()
-	wantArgs := []driver.NamedValue{
-		{Ordinal: 1, Value: int64(DimensionHoleFirstWorldID)},
-		{Ordinal: 2, Value: int64(DimensionHoleLastWorldID)},
-	}
-	if len(queries) != 1 || queries[0].query != SelectDimensionHoleGameWorlds || !reflect.DeepEqual(queries[0].args, wantArgs) {
+	if len(queries) != 1 || queries[0].query != SelectDimensionHoleGameWorlds || len(queries[0].args) != 0 {
 		t.Fatalf("queries = %#v", queries)
 	}
 }

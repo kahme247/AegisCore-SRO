@@ -9,14 +9,15 @@ import (
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
 
-const SelectDimensionHoleStartPositions = `SELECT WORLD_ID,START_INDEX,REGION_ID,POS_X,POS_Y,POS_Z,PARAM_VALUE
-FROM SRO_SHARD.REF_INSTANCE_WORLD_START_POSITION
-WHERE WORLD_ID BETWEEN ? AND ?
-ORDER BY WORLD_ID,START_INDEX`
+const SelectDimensionHoleStartPositions = `SELECT p.WORLD_ID,p.START_INDEX,p.REGION_ID,p.POS_X,p.POS_Y,p.POS_Z,p.PARAM_VALUE
+FROM SRO_SHARD.REF_DIMENSION_HOLE h
+JOIN SRO_SHARD.REF_INSTANCE_WORLD_START_POSITION p ON p.WORLD_ID=h.WORLD_ID
+WHERE h.SERVICE=1
+ORDER BY p.WORLD_ID,p.START_INDEX`
 
 var (
 	ErrDimensionHoleStartPositionRepositoryUnavailable = errors.New("Dimension Hole start-position repository is unavailable")
-	ErrDimensionHoleStartPositionCatalogMismatch       = errors.New("Dimension Hole start-position catalog does not match the pinned stock contract")
+	ErrDimensionHoleStartPositionCatalogMismatch       = errors.New("Dimension Hole start-position catalog does not match the database definition catalog")
 )
 
 // DimensionHoleStartPositionReference preserves the stock
@@ -70,12 +71,16 @@ func (r *SQLDimensionHoleStartPositionRepository) LoadDimensionHoleStartPosition
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleStartPositions, DimensionHoleFirstWorldID, DimensionHoleLastWorldID)
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 {
+		return nil, dimensionHoleStartPositionMismatch(0, "definition catalog is empty")
+	}
+	rows, err := r.shard.QueryContext(ctx, SelectDimensionHoleStartPositions)
 	if err != nil {
 		return nil, fmt.Errorf("query Dimension Hole start positions: %w", err)
 	}
 	defer rows.Close()
-	references := make([]DimensionHoleStartPositionReference, 0, len(dimensionHoleDefinitions))
+	references := make([]DimensionHoleStartPositionReference, 0, len(definitions))
 	for rows.Next() {
 		var reference DimensionHoleStartPositionReference
 		if err = rows.Scan(&reference.WorldID, &reference.StartIndex, &reference.RegionID, &reference.X, &reference.Y, &reference.Z, &reference.Param); err != nil {
@@ -93,7 +98,11 @@ func NewDimensionHoleStartPositionCatalog(regions *DimensionHoleWorldRegionCatal
 	if regions == nil {
 		return nil, dimensionHoleStartPositionMismatch(0, "world-region catalog is unavailable")
 	}
-	byWorld := make(map[uint16][]DimensionHoleStartPositionReference, len(dimensionHoleDefinitions))
+	definitions := DimensionHoleCatalog()
+	if len(definitions) == 0 {
+		return nil, dimensionHoleStartPositionMismatch(0, "definition catalog is empty")
+	}
+	byWorld := make(map[uint16][]DimensionHoleStartPositionReference, len(definitions))
 	seen := make(map[[2]uint16]struct{}, len(references))
 	for _, reference := range references {
 		if _, ok := DimensionHoleDefinitionForWorld(reference.WorldID); !ok {
@@ -112,7 +121,7 @@ func NewDimensionHoleStartPositionCatalog(regions *DimensionHoleWorldRegionCatal
 		seen[key] = struct{}{}
 		byWorld[reference.WorldID] = append(byWorld[reference.WorldID], reference)
 	}
-	for _, definition := range dimensionHoleDefinitions {
+	for _, definition := range definitions {
 		if len(byWorld[definition.WorldID]) == 0 {
 			return nil, dimensionHoleStartPositionMismatch(definition.WorldID, "missing start position")
 		}

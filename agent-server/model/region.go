@@ -2,6 +2,7 @@ package model
 
 import (
 	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/engine/geo/math"
 	"github.com/Harvi8/AegisCore/agent-server/navmesh"
@@ -310,10 +311,7 @@ func (p *Player) GetMovementSpeed() float32 {
 			}
 		}
 	}
-	multiplier := float32(100+p.speedEffectPercent) / 100
-	if p.BodyState == Berserker {
-		multiplier *= BerserkSpeedMultiplier
-	}
+	multiplier := p.movementSpeedMultiplierLocked(time.Now())
 	switch p.MotionState {
 	case Walking:
 		return p.WalkSpeed * multiplier

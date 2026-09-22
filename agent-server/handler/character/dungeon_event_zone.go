@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,12 +45,7 @@ type dungeonTeleportPoint struct {
 	worldID  int16
 }
 
-func LoadDungeonEventZoneCatalog(teleportPath, dataPK2Path string) (*dungeonEventZoneCatalog, error) {
-	file, err := os.Open(teleportPath)
-	if err != nil {
-		return nil, fmt.Errorf("open dungeon teleport catalog: %w", err)
-	}
-	defer file.Close()
+func LoadDungeonEventZoneCatalog(dataPK2Path string, points map[uint32]model.DungeonTeleportPoint, links map[uint32]uint32) (*dungeonEventZoneCatalog, error) {
 	reader := pk2.NewPk2Reader(dataPK2Path)
 	reader.IndexArchive()
 	defer reader.Close()
@@ -59,74 +53,68 @@ func LoadDungeonEventZoneCatalog(teleportPath, dataPK2Path string) (*dungeonEven
 	if err != nil {
 		return nil, fmt.Errorf("read dungeon event-zone geometry: %w", err)
 	}
-	return loadDungeonEventZoneCatalog(file, strings.NewReader(string(objectStrings)))
+	return loadDungeonEventZoneCatalog(points, links, strings.NewReader(string(objectStrings)))
 }
 
-func loadDungeonEventZoneCatalog(teleports, objectStrings io.Reader) (*dungeonEventZoneCatalog, error) {
-	teleportText, err := readDungeonCatalogText(teleports)
-	if err != nil {
-		return nil, fmt.Errorf("read dungeon teleport catalog: %w", err)
-	}
+func loadDungeonEventZoneCatalog(databasePoints map[uint32]model.DungeonTeleportPoint, links map[uint32]uint32, objectStrings io.Reader) (*dungeonEventZoneCatalog, error) {
 	objectText, err := readDungeonCatalogText(objectStrings)
 	if err != nil {
 		return nil, fmt.Errorf("read dungeon event-zone geometry: %w", err)
 	}
-	points := make(map[string]dungeonTeleportPoint)
-	scanner := bufio.NewScanner(strings.NewReader(teleportText))
-	for line := 1; scanner.Scan(); line++ {
-		fields := strings.Split(strings.TrimSuffix(scanner.Text(), "\r"), "\t")
-		if len(fields) < 13 || fields[0] != "1" || !strings.HasPrefix(fields[2], "GATE_JINSI_") {
+	points := make(map[string]dungeonTeleportPoint, len(databasePoints))
+	pointsByID := make(map[uint32]dungeonTeleportPoint, len(databasePoints))
+	for _, point := range databasePoints {
+		name := strings.ToUpper(point.CodeName)
+		isJinsiGate := strings.HasPrefix(name, "GATE_JINSI_")
+		isDonwhangCaveGate := strings.HasPrefix(name, "GATE_DUNGEON_DH_")
+		if !isJinsiGate && !isDonwhangCaveGate {
 			continue
 		}
-		parse := func(index int, bits int) (int64, error) { return strconv.ParseInt(fields[index], 10, bits) }
-		id, e := parse(1, 32)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d ID: %w", line, e)
-		}
-		region, e := parse(5, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d region: %w", line, e)
-		}
-		x, e := parse(6, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d X: %w", line, e)
-		}
-		y, e := parse(7, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d Y: %w", line, e)
-		}
-		z, e := parse(8, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d Z: %w", line, e)
-		}
-		radius, e := parse(9, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d radius: %w", line, e)
-		}
-		world, e := parse(12, 16)
-		if e != nil {
-			return nil, fmt.Errorf("dungeon teleport line %d world: %w", line, e)
-		}
-		if region >= 0 || radius <= 0 || x == 0 && y == 0 && z == 0 {
+		if point.Radius <= 0 || point.X == 0 && point.Y == 0 && point.Z == 0 || isJinsiGate && point.Region >= 0 {
 			continue
 		}
-		position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(int16(region)), Offset: math32.NewVector3(float32(x), float32(y), float32(z))}
-		name := strings.ToUpper(fields[2])
-		points[name] = dungeonTeleportPoint{id: uint32(id), name: name, position: position, radius: float32(radius), worldID: int16(world)}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read dungeon teleport catalog: %w", err)
+		position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(point.Region), Offset: math32.NewVector3(point.X, point.Y, point.Z)}
+		internalPoint := dungeonTeleportPoint{id: point.ID, name: name, position: position, radius: point.Radius, worldID: point.WorldID}
+		points[name] = internalPoint
+		pointsByID[point.ID] = internalPoint
 	}
 	catalog := &dungeonEventZoneCatalog{byRegion: make(map[int16][]dungeonEventZone)}
-	scanner = bufio.NewScanner(strings.NewReader(objectText))
+	for _, source := range pointsByID {
+		if !strings.HasPrefix(source.name, "GATE_DUNGEON_DH_") {
+			continue
+		}
+		destinationID, ok := links[source.id]
+		if !ok {
+			continue
+		}
+		target, ok := pointsByID[destinationID]
+		if !ok {
+			continue
+		}
+		region := source.position.Region.ID
+		catalog.byRegion[region] = append(catalog.byRegion[region], dungeonEventZone{
+			name:        source.name,
+			source:      source.position,
+			destination: model.TeleportDestination{ID: target.id, Region: target.position.Region.ID, X: target.position.Offset.X, Y: target.position.Offset.Y, Z: target.position.Offset.Z, WorldID: target.worldID},
+			radius:      source.radius,
+		})
+	}
+	scanner := bufio.NewScanner(strings.NewReader(objectText))
 	for line := 1; scanner.Scan(); line++ {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) != 9 {
 			continue
 		}
 		name := strings.ToUpper(strings.Trim(fields[8], "\""))
-		destinationName := dungeonGateDestinationName(name)
-		target, ok := points[destinationName]
+		source, ok := points[name]
+		if !ok {
+			continue
+		}
+		destinationID, ok := links[source.id]
+		if !ok {
+			continue
+		}
+		target, ok := pointsByID[destinationID]
 		if !ok {
 			continue
 		}
@@ -151,28 +139,13 @@ func loadDungeonEventZoneCatalog(teleports, objectStrings io.Reader) (*dungeonEv
 			name:        name,
 			source:      navmeshv2.RtNavmeshPosition{Region: navmeshv2.NewRegionFromInt16(region), Offset: math32.NewVector3(x, y, z)},
 			destination: model.TeleportDestination{ID: target.id, Region: target.position.Region.ID, X: target.position.Offset.X, Y: target.position.Offset.Y, Z: target.position.Offset.Z, WorldID: target.worldID},
-			radius:      target.radius,
+			radius:      source.radius,
 		})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read dungeon event-zone geometry: %w", err)
 	}
 	return catalog, nil
-}
-
-func dungeonGateDestinationName(sourceName string) string {
-	// The stock Jinsi stair markers name the landing-side gate, while their
-	// object-string coordinate identifies the trigger that the character is
-	// standing on. These two entrance markers form the level-2/level-3 stair;
-	// joining every marker to itself leaves the character in the same room.
-	switch sourceName {
-	case "GATE_JINSI_02X01_03":
-		return "GATE_JINSI_03X01"
-	case "GATE_JINSI_03X01":
-		return "GATE_JINSI_02X01_03"
-	default:
-		return sourceName
-	}
 }
 
 func readDungeonCatalogText(reader io.Reader) (string, error) {

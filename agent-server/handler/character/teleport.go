@@ -39,6 +39,7 @@ type TeleportHandler struct {
 	instances  *model.QuestInstanceLifecycle
 	mu         sync.Mutex
 	pending    map[*server.Session]*model.Player
+	prepared   map[*server.Session]*model.Player
 }
 
 func (h *TeleportHandler) ConfigureQuestInstanceExit(lifecycle *model.QuestInstanceLifecycle) {
@@ -237,7 +238,7 @@ func (h *TeleportHandler) SubmitDimensionHoleEntry(ctx context.Context, player *
 }
 
 func NewTeleportHandler(world teleportWorld, repository model.TeleportRepository) *TeleportHandler {
-	return &TeleportHandler{world: world, repository: repository, pending: make(map[*server.Session]*model.Player), roll: func() int { return rand.Intn(32768) }}
+	return &TeleportHandler{world: world, repository: repository, pending: make(map[*server.Session]*model.Player), prepared: make(map[*server.Session]*model.Player), roll: func() int { return rand.Intn(32768) }}
 }
 
 // SubmitSamePositionReload performs the stock world-reset exchange without
@@ -500,16 +501,22 @@ func (h *TeleportHandler) handleCancel(_ context.Context, session *server.Sessio
 	if h == nil || session == nil {
 		return nil
 	}
-	// The stock client may send 0x705B after a server-side destination failure
-	// has already unwound CharacterLoading. Treat that acknowledgement as
-	// idempotent; turning it into a dispatcher error closes an otherwise healthy
-	// session precisely when teleport recovery is needed.
+	h.mu.Lock()
+	if player := h.prepared[session]; player != nil {
+		delete(h.prepared, session)
+		player.EndTimedAction(player.GetUniqueID())
+		h.mu.Unlock()
+		if err := h.sendPacket(session, buildTeleportCancelSuccess()); err != nil {
+			return err
+		}
+		cleared := model.BuildTeleportCastingStateUpdatePacket(player.GetUniqueID(), false)
+		return h.sendPacket(session, cleared)
+	}
+	_, alreadyCommitted := h.pending[session]
+	h.mu.Unlock()
 	if session.LifecyclePhase() != server.SessionCharacterLoading {
 		return nil
 	}
-	h.mu.Lock()
-	_, alreadyCommitted := h.pending[session]
-	h.mu.Unlock()
 	if alreadyCommitted {
 		return fmt.Errorf("teleport cancel arrived after teleport commit")
 	}
@@ -521,25 +528,46 @@ func (h *TeleportHandler) handleCancel(_ context.Context, session *server.Sessio
 // teleports, then drains the last movement checkpoint before the item-use
 // transaction writes the bound-city position.
 func (h *TeleportHandler) PrepareItemReturn(session *server.Session, player *model.Player) error {
-	if h == nil || h.world == nil || session == nil || player == nil || player.Session != session {
+	if h == nil || h.world == nil || session == nil || player == nil || player.Session != session ||
+		session.LifecyclePhase() != server.SessionInWorld {
 		return fmt.Errorf("return-scroll teleport is unavailable")
 	}
-	h.mu.Lock()
-	_, pending := h.pending[session]
-	h.mu.Unlock()
-	if pending || !session.BeginTeleportLoading() {
-		return fmt.Errorf("return-scroll teleport could not begin while session is %s", session.LifecyclePhase())
+	token := player.GetUniqueID()
+	if !player.BeginTimedAction(token) {
+		return fmt.Errorf("return-scroll timed action is already active")
 	}
+	h.mu.Lock()
+	if h.pending[session] != nil || h.prepared[session] != nil {
+		h.mu.Unlock()
+		player.EndTimedAction(token)
+		return fmt.Errorf("return-scroll teleport is already pending")
+	}
+	h.prepared[session] = player
+	h.mu.Unlock()
 	h.world.StopMovingCharacter(player, player.GetNavmeshPosition(), "return-scroll-prepare", false)
 	if err := h.world.FlushPlayerPosition(player.GetUniqueID()); err != nil {
-		session.AbortTeleportLoading()
+		h.mu.Lock()
+		delete(h.prepared, session)
+		h.mu.Unlock()
+		player.EndTimedAction(token)
 		return fmt.Errorf("flush pre-return-scroll position: %w", err)
 	}
 	return nil
 }
 
 func (h *TeleportHandler) AbortItemReturn(session *server.Session) {
-	if session != nil {
+	if h == nil || session == nil {
+		return
+	}
+	h.mu.Lock()
+	prepared := h.prepared[session]
+	delete(h.prepared, session)
+	_, committed := h.pending[session]
+	h.mu.Unlock()
+	if prepared != nil {
+		prepared.EndTimedAction(prepared.GetUniqueID())
+	}
+	if !committed {
 		session.AbortTeleportLoading()
 	}
 }
@@ -548,30 +576,37 @@ func (h *TeleportHandler) AbortItemReturn(session *server.Session) {
 // GAME_RESET/ready/bootstrap exchange. The item-use success packet is sent by
 // the inventory handler before this method is called.
 func (h *TeleportHandler) CompleteItemReturn(session *server.Session, player *model.Player, destination model.TeleportDestination) error {
-	if h == nil || h.world == nil || session == nil || player == nil || session.LifecyclePhase() != server.SessionCharacterLoading {
+	if h == nil || h.world == nil || session == nil || player == nil {
 		return fmt.Errorf("return-scroll teleport was not prepared")
 	}
 	position, err := h.resolveDestination(destination)
 	if err != nil {
-		session.AbortTeleportLoading()
+		h.AbortItemReturn(session)
 		return fmt.Errorf("resolve return-scroll world position: %w", err)
+	}
+	h.mu.Lock()
+	if h.prepared[session] != player || h.pending[session] != nil || !session.BeginTeleportLoading() {
+		h.mu.Unlock()
+		return fmt.Errorf("return-scroll teleport was not prepared")
+	}
+	player.EndTimedAction(player.GetUniqueID())
+	delete(h.prepared, session)
+	h.pending[session] = player
+	h.mu.Unlock()
+	if player.CancelBerserk() {
+		body := model.BuildBodyStateUpdatePacket(player.GetUniqueID(), model.Normal)
+		player.SendToSelfAndKnown(&body)
 	}
 	player.SetLifeState(model.Spawning)
 	player.RemoveCharacterMask(0)
 	h.world.ResetPlayerVisibilityForTeleport(player)
 	h.world.StopMovingCharacter(player, position, "return-scroll", false)
 	npcInteractions.Clear(player.GetUniqueID())
-	h.mu.Lock()
-	if h.pending[session] != nil {
-		h.mu.Unlock()
-		return fmt.Errorf("return-scroll teleport is already pending")
-	}
-	h.pending[session] = player
-	h.mu.Unlock()
 	if err = h.sendPacket(session, buildTeleportReadyRequest(destination.Region)); err != nil {
 		h.mu.Lock()
 		delete(h.pending, session)
 		h.mu.Unlock()
+		session.AbortTeleportLoading()
 		return err
 	}
 	return nil
@@ -680,6 +715,13 @@ func (h *TeleportHandler) handleUse(ctx context.Context, session *server.Session
 	}
 	teleportLoading = false
 	return nil
+}
+
+func buildTeleportCancelSuccess() network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.TeleportCancelResponse
+	packet.WriteByte(1)
+	return packet
 }
 
 func buildTeleportReadyRequest(regionID int16) network.Packet {

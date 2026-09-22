@@ -36,6 +36,13 @@ func verifyDimensionHole(ctx context.Context, arguments []string, output io.Writ
 		return fmt.Errorf("open shard database: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, database.Close()) }()
+	catalogRepository, err := model.NewDimensionHoleCatalogRepository(database)
+	if err != nil {
+		return err
+	}
+	if _, err = catalogRepository.LoadDimensionHoleCatalog(ctx); err != nil {
+		return fmt.Errorf("verify Dimension Hole definitions: %w", err)
+	}
 
 	worldRepository, err := model.NewDimensionHoleWorldRepository(database)
 	if err != nil {

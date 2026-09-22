@@ -1,7 +1,9 @@
 package model
 
 import (
+	"errors"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,55 +22,62 @@ type DimensionHoleDefinition struct {
 	Cooldown      time.Duration // Item Param10 reuse cooldown, authored in milliseconds.
 }
 
-var dimensionHoleDefinitions = [...]DimensionHoleDefinition{
-	{35883, "ITEM_ETC_TELEPORT_HOLE_TOGUI_35_50_LEVEL_1", 63, "INS_GOD_TOGUI_35_50_LEVEL_1", 35, 50, 4, 1, 5 * time.Hour},
-	{35884, "ITEM_ETC_TELEPORT_HOLE_TOGUI_35_50_LEVEL_2", 64, "INS_GOD_TOGUI_35_50_LEVEL_2", 35, 50, 4, 2, 5 * time.Hour},
-	{35885, "ITEM_ETC_TELEPORT_HOLE_TOGUI_51_60_LEVEL_1", 65, "INS_GOD_TOGUI_51_60_LEVEL_1", 51, 60, 4, 1, 5 * time.Hour},
-	{35886, "ITEM_ETC_TELEPORT_HOLE_TOGUI_51_60_LEVEL_2", 66, "INS_GOD_TOGUI_51_60_LEVEL_2", 51, 60, 4, 2, 5 * time.Hour},
-	{35887, "ITEM_ETC_TELEPORT_HOLE_TOGUI_61_70_LEVEL_1", 67, "INS_GOD_TOGUI_61_70_LEVEL_1", 61, 70, 4, 1, 5 * time.Hour},
-	{35888, "ITEM_ETC_TELEPORT_HOLE_TOGUI_61_70_LEVEL_2", 68, "INS_GOD_TOGUI_61_70_LEVEL_2", 61, 70, 4, 2, 5 * time.Hour},
-	{35889, "ITEM_ETC_TELEPORT_HOLE_FLAME_71_80_LEVEL_1", 69, "INS_GOD_FLAME_71_80_LEVEL_1", 71, 80, 4, 1, 5 * time.Hour},
-	{35890, "ITEM_ETC_TELEPORT_HOLE_FLAME_71_80_LEVEL_2", 70, "INS_GOD_FLAME_71_80_LEVEL_2", 71, 80, 4, 2, 5 * time.Hour},
-	{35891, "ITEM_ETC_TELEPORT_HOLE_FLAME_71_80_LEVEL_3", 71, "INS_GOD_FLAME_71_80_LEVEL_3", 71, 80, 8, 3, 5 * time.Hour},
-	{35892, "ITEM_ETC_TELEPORT_HOLE_FLAME_71_80_LEVEL_4", 72, "INS_GOD_FLAME_71_80_LEVEL_4", 71, 80, 8, 4, 5 * time.Hour},
-	{35893, "ITEM_ETC_TELEPORT_HOLE_FLAME_81_90_LEVEL_1", 73, "INS_GOD_FLAME_81_90_LEVEL_1", 81, 90, 4, 1, 5 * time.Hour},
-	{35894, "ITEM_ETC_TELEPORT_HOLE_FLAME_81_90_LEVEL_2", 74, "INS_GOD_FLAME_81_90_LEVEL_2", 81, 90, 4, 2, 5 * time.Hour},
-	{35895, "ITEM_ETC_TELEPORT_HOLE_FLAME_81_90_LEVEL_3", 75, "INS_GOD_FLAME_81_90_LEVEL_3", 81, 90, 8, 3, 5 * time.Hour},
-	{35896, "ITEM_ETC_TELEPORT_HOLE_FLAME_81_90_LEVEL_4", 76, "INS_GOD_FLAME_81_90_LEVEL_4", 81, 90, 8, 4, 5 * time.Hour},
-	{35897, "ITEM_ETC_TELEPORT_HOLE_WRECK_91_100_LEVEL_1", 77, "INS_GOD_WRECK_IN_91_100_LEVEL_1", 91, 100, 4, 1, 5 * time.Hour},
-	{35898, "ITEM_ETC_TELEPORT_HOLE_WRECK_91_100_LEVEL_2", 78, "INS_GOD_WRECK_IN_91_100_LEVEL_2", 91, 100, 4, 2, 5 * time.Hour},
-	{35899, "ITEM_ETC_TELEPORT_HOLE_WRECK_91_100_LEVEL_3", 79, "INS_GOD_WRECK_OUT_91_100_LEVEL_3", 91, 100, 8, 3, 5 * time.Hour},
-	{35900, "ITEM_ETC_TELEPORT_HOLE_WRECK_91_100_LEVEL_4", 80, "INS_GOD_WRECK_OUT_91_100_LEVEL_4", 91, 100, 8, 4, 5 * time.Hour},
-	{35901, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_1", 81, "INS_GOD_WRECK_IN_100_110_LEVEL_1", 101, 110, 4, 1, 5 * time.Hour},
-	{35902, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_2", 82, "INS_GOD_WRECK_IN_100_110_LEVEL_2", 101, 110, 4, 2, 5 * time.Hour},
-	{35903, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_3", 83, "INS_GOD_WRECK_OUT_100_110_LEVEL_3", 101, 110, 8, 3, 5 * time.Hour},
-	{35904, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_4", 84, "INS_GOD_WRECK_OUT_100_110_LEVEL_4", 101, 110, 8, 4, 5 * time.Hour},
+var (
+	dimensionHoleCatalogMu          sync.RWMutex
+	dimensionHoleDefinitions        []DimensionHoleDefinition
+	dimensionHoleDefinitionsByItem  map[uint32]DimensionHoleDefinition
+	dimensionHoleDefinitionsByWorld map[uint16]DimensionHoleDefinition
+)
+
+func InstallDimensionHoleCatalog(definitions []DimensionHoleDefinition) error {
+	if len(definitions) == 0 {
+		return errors.New("Dimension Hole catalog is empty")
+	}
+	owned := append([]DimensionHoleDefinition(nil), definitions...)
+	byItem := make(map[uint32]DimensionHoleDefinition, len(owned))
+	byWorld := make(map[uint16]DimensionHoleDefinition, len(owned))
+	for _, definition := range owned {
+		if definition.ItemRefID == 0 || definition.WorldID == 0 || definition.ItemCodeName == "" || definition.WorldCodeName == "" ||
+			definition.MinLevel == 0 || definition.MaxLevel < definition.MinLevel || definition.Capacity == 0 ||
+			definition.Difficulty == 0 || definition.Cooldown <= 0 {
+			return errors.New("Dimension Hole catalog contains an invalid definition")
+		}
+		if _, exists := byItem[definition.ItemRefID]; exists {
+			return errors.New("Dimension Hole catalog contains a duplicate item")
+		}
+		if _, exists := byWorld[definition.WorldID]; exists {
+			return errors.New("Dimension Hole catalog contains a duplicate world")
+		}
+		byItem[definition.ItemRefID] = definition
+		byWorld[definition.WorldID] = definition
+	}
+	dimensionHoleCatalogMu.Lock()
+	dimensionHoleDefinitions = owned
+	dimensionHoleDefinitionsByItem = byItem
+	dimensionHoleDefinitionsByWorld = byWorld
+	dimensionHoleCatalogMu.Unlock()
+	return nil
 }
 
-// DimensionHoleCatalog returns a copy so runtime callers cannot mutate the
-// pinned reference catalog shared by other sessions.
 func DimensionHoleCatalog() []DimensionHoleDefinition {
-	catalog := make([]DimensionHoleDefinition, len(dimensionHoleDefinitions))
-	copy(catalog, dimensionHoleDefinitions[:])
+	dimensionHoleCatalogMu.RLock()
+	catalog := append([]DimensionHoleDefinition(nil), dimensionHoleDefinitions...)
+	dimensionHoleCatalogMu.RUnlock()
 	return catalog
 }
 
 func DimensionHoleDefinitionForItem(itemRefID uint32) (DimensionHoleDefinition, bool) {
-	for _, definition := range dimensionHoleDefinitions {
-		if definition.ItemRefID == itemRefID {
-			return definition, true
-		}
-	}
-	return DimensionHoleDefinition{}, false
+	dimensionHoleCatalogMu.RLock()
+	definition, ok := dimensionHoleDefinitionsByItem[itemRefID]
+	dimensionHoleCatalogMu.RUnlock()
+	return definition, ok
 }
 
 func DimensionHoleDefinitionForWorld(worldID uint16) (DimensionHoleDefinition, bool) {
-	for _, definition := range dimensionHoleDefinitions {
-		if definition.WorldID == worldID {
-			return definition, true
-		}
-	}
-	return DimensionHoleDefinition{}, false
+	dimensionHoleCatalogMu.RLock()
+	definition, ok := dimensionHoleDefinitionsByWorld[worldID]
+	dimensionHoleCatalogMu.RUnlock()
+	return definition, ok
 }
 
 // DimensionHoleDefinitionForReference accepts only the exact vSRO 1.188 item

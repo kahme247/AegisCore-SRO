@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/config"
+	"github.com/Harvi8/AegisCore/agent-server/engine/environment"
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/Harvi8/AegisCore/protocol/profiles"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
@@ -29,6 +31,7 @@ var (
 	ErrNeighbourPlanesUnavailable = errors.New("neighbour planes are not implemented")
 	ErrGlobalPositionInvalid      = errors.New("global position is invalid")
 	ErrGlobalPositionOutOfBounds  = errors.New("global position is outside the normal world grid")
+	ErrRegionPositionInvalid      = errors.New("region-local position is invalid")
 	// ErrWorldRepositoryConfiguration is returned when production startup
 	// attempts to configure only part of the world persistence boundary. The
 	// live Agent must use one owned shard pool for every world catalog and
@@ -995,6 +998,29 @@ func (w *WorldService) NewPosFromGlobalCoordinates(vPos *math32.Vector3) (navmes
 	}, nil
 }
 
+// NewPosFromRegionCoordinates resolves coordinates that are already local to
+// one wire region. Dungeon positions must use this path: their negative region
+// IDs are instance addresses, not normal-world grid coordinates.
+func (w *WorldService) NewPosFromRegionCoordinates(regionID int16, offset *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	if w == nil || offset == nil ||
+		math.IsNaN(float64(offset.X)) || math.IsNaN(float64(offset.Y)) || math.IsNaN(float64(offset.Z)) ||
+		math.IsInf(float64(offset.X), 0) || math.IsInf(float64(offset.Y), 0) || math.IsInf(float64(offset.Z), 0) {
+		return navmeshv2.RtNavmeshPosition{}, ErrRegionPositionInvalid
+	}
+	terrain, err := w.lookupRegionPtr(regionID)
+	if err != nil {
+		return navmeshv2.RtNavmeshPosition{}, err
+	}
+	local := offset.Clone()
+	cell, err := terrain.ResolveCell(local)
+	if err != nil {
+		return navmeshv2.RtNavmeshPosition{}, err
+	}
+	return navmeshv2.RtNavmeshPosition{
+		Cell: &cell, Region: terrain.Region, Offset: local,
+	}, nil
+}
+
 func (w *WorldService) GetVisibleObjectsForRegion(regionId int16) []model.ISRObject {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
@@ -1109,6 +1135,12 @@ func (w *WorldService) getNeighbourRegionsLocked(regionId int16) []navmeshv2.RtN
 }
 
 func (w *WorldService) getNeighbourRegionIDsLocked(regionId int16) []int16 {
+	if navmeshv2.IsDungeonRegion(regionId) {
+		if _, exists := w.regions[regionId]; exists {
+			return []int16{regionId}
+		}
+		return nil
+	}
 	regionIDs := make([]int16, 0, 9)
 	x, z := utils.Int16ToXAndZ(regionId)
 
@@ -1306,6 +1338,9 @@ func (w *WorldService) commitMovementStep(p model.ICharacter, generation uint64,
 	if player != nil {
 		w.positionPersistence.MarkDirty(player)
 	}
+	if player != nil {
+		GetPartyServiceInstance().PublishMemberStatus(player)
+	}
 	traceMovementFor(p, "commit uid=%d generation=%d completed=%t reason=%s position=%s", p.GetUniqueID(), generation, completed, reason, newPosition.String())
 	// While mounted, the client moves and corrects the transport entity. The
 	// player model is visually attached to it by B0CB, so publishing a player
@@ -1357,6 +1392,9 @@ func (w *WorldService) StopMovingCharacter(p model.ICharacter, position navmeshv
 				log.Warnf("forced position remains queued for player %d: %v", player.GetUniqueID(), err)
 			}
 		}
+	}
+	if player != nil {
+		GetPartyServiceInstance().PublishMemberStatus(player)
 	}
 	traceMovementFor(p, "stop uid=%d generation=%d reason=%s position=%s", p.GetUniqueID(), generation, reason, position.String())
 	if correction {
@@ -1495,7 +1533,13 @@ func (w *WorldService) Broadcast(packet network.Packet) {
 			continue
 		}
 		if session := player.GetSession(); session != nil {
-			_ = session.TrySend(packet)
+			delivery := packet
+			if packet.MessageID == opcode.WeatherUpdate {
+				weatherType, intensity := environment.GetCurrentWeather()
+				weatherType, intensity = environment.WeatherForRegion(player.GetNavmeshPosition().Region.ID, weatherType, intensity)
+				delivery = environment.BuildWeatherUpdate(weatherType, intensity)
+			}
+			_ = session.TrySend(delivery)
 		}
 	}
 }

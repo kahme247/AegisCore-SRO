@@ -13,6 +13,7 @@ import (
 // database package knows which concrete SQL implementation satisfies each one.
 type GameplayRepositories struct {
 	ReferenceData           model.ReferenceDataRepository
+	DimensionHoleCatalog    model.DimensionHoleCatalogRepository
 	DimensionHoleWorlds     model.DimensionHoleWorldRepository
 	DimensionHoleRegions    model.DimensionHoleWorldRegionRepository
 	DimensionHoleStarts     model.DimensionHoleStartPositionRepository
@@ -44,6 +45,8 @@ type GameplayRepositories struct {
 	Alchemy                 model.AlchemyRepository
 	MagicCube               model.MagicCubeRepository
 	Teleport                model.TeleportRepository
+	DungeonTeleportLinks    model.DungeonTeleportLinkRepository
+	DungeonTeleportPoints   model.DungeonTeleportPointRepository
 	CharacterCreator        model.CharacterCreator
 	CharacterCreationPolicy model.CharacterCreationPolicyRepository
 	CharacterProgress       model.CharacterProgressRepository
@@ -78,6 +81,9 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	var err error
 	if repositories.ReferenceData, err = model.NewReferenceDataRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent reference-data repository: %w", err)
+	}
+	if repositories.DimensionHoleCatalog, err = model.NewDimensionHoleCatalogRepository(shard); err != nil {
+		return GameplayRepositories{}, fmt.Errorf("configure Agent Dimension Hole catalog repository: %w", err)
 	}
 	if repositories.DimensionHoleWorlds, err = model.NewDimensionHoleWorldRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent Dimension Hole world repository: %w", err)
@@ -166,9 +172,13 @@ func NewGameplayRepositories(shard, account *sql.DB) (GameplayRepositories, erro
 	if repositories.MagicCube, err = model.NewMagicCubeRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent magic-cube repository: %w", err)
 	}
-	if repositories.Teleport, err = model.NewTeleportRepository(shard); err != nil {
+	teleports, err := model.NewTeleportRepository(shard)
+	if err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent teleport repository: %w", err)
 	}
+	repositories.Teleport = teleports
+	repositories.DungeonTeleportLinks = teleports
+	repositories.DungeonTeleportPoints = teleports
 	if repositories.CharacterCreator, err = model.NewCharacterCreationRepository(shard); err != nil {
 		return GameplayRepositories{}, fmt.Errorf("configure Agent character creation repository: %w", err)
 	}

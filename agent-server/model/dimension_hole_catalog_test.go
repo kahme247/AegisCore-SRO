@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-func TestDimensionHoleCatalogMatchesPinnedVSRO188(t *testing.T) {
-	want := []DimensionHoleDefinition{
+func dimensionHoleTestDefinitions() []DimensionHoleDefinition {
+	return []DimensionHoleDefinition{
 		{35883, "ITEM_ETC_TELEPORT_HOLE_TOGUI_35_50_LEVEL_1", 63, "INS_GOD_TOGUI_35_50_LEVEL_1", 35, 50, 4, 1, 5 * time.Hour},
 		{35884, "ITEM_ETC_TELEPORT_HOLE_TOGUI_35_50_LEVEL_2", 64, "INS_GOD_TOGUI_35_50_LEVEL_2", 35, 50, 4, 2, 5 * time.Hour},
 		{35885, "ITEM_ETC_TELEPORT_HOLE_TOGUI_51_60_LEVEL_1", 65, "INS_GOD_TOGUI_51_60_LEVEL_1", 51, 60, 4, 1, 5 * time.Hour},
@@ -31,6 +31,16 @@ func TestDimensionHoleCatalogMatchesPinnedVSRO188(t *testing.T) {
 		{35903, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_3", 83, "INS_GOD_WRECK_OUT_100_110_LEVEL_3", 101, 110, 8, 3, 5 * time.Hour},
 		{35904, "ITEM_ETC_TELEPORT_HOLE_WRECK_100_110_LEVEL_4", 84, "INS_GOD_WRECK_OUT_100_110_LEVEL_4", 101, 110, 8, 4, 5 * time.Hour},
 	}
+}
+
+func init() {
+	if err := InstallDimensionHoleCatalog(dimensionHoleTestDefinitions()); err != nil {
+		panic(err)
+	}
+}
+
+func TestDimensionHoleCatalogMatchesPinnedVSRO188(t *testing.T) {
+	want := dimensionHoleTestDefinitions()
 
 	got := DimensionHoleCatalog()
 	if !reflect.DeepEqual(got, want) {
