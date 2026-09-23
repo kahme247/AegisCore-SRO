@@ -118,7 +118,11 @@ func buildEmptyStorageResponses() []network.Packet {
 }
 
 func buildStorageResponses(snapshot model.StorageSnapshot) []network.Packet {
-	begin := vsro188.BuildStorageDataBegin(opcode.StorageDataBegin, snapshot.Gold)
+	return buildStorageSnapshotResponses(snapshot, opcode.StorageDataBegin, opcode.StorageData, opcode.StorageDataEnd)
+}
+
+func buildStorageSnapshotResponses(snapshot model.StorageSnapshot, beginOpcode, dataOpcode, endOpcode uint16) []network.Packet {
+	begin := vsro188.BuildStorageDataBegin(beginOpcode, snapshot.Gold)
 
 	capacity := snapshot.Capacity
 	if capacity == 0 {
@@ -137,11 +141,8 @@ func buildStorageResponses(snapshot model.StorageSnapshot) []network.Packet {
 	data := vsro188.BuildStorageItemDataPayload(capacity, records)
 
 	responses := []network.Packet{begin}
-	for _, chunk := range chunkStorageData(data.Payload()) {
-		responses = append(responses, chunk)
-	}
-
-	end := vsro188.BuildStorageDataEnd(opcode.StorageDataEnd)
+	responses = append(responses, vsro188.ChunkStorageData(dataOpcode, data.Payload())...)
+	end := vsro188.BuildStorageDataEnd(endOpcode)
 	return append(responses, end)
 }
 

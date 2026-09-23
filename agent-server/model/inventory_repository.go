@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	frameworkdb "github.com/Harvi8/AegisCore/framework/db"
 )
@@ -289,8 +290,9 @@ func decodeMagicOptions(data []byte) ([]MagicOption, error) {
 	}
 	result := make([]MagicOption, len(values))
 	for i, value := range values {
-		result[i] = MagicOption{Type: value.Type, Value: value.Value, ParamType: value.ParamType}
+		result[i] = MagicOption{Slot: value.Slot, Type: value.Type, Value: value.Value, ParamType: value.ParamType}
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Slot < result[j].Slot })
 	return result, nil
 }
 

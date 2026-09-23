@@ -10,11 +10,15 @@ import (
 )
 
 type itemUseServiceRepository struct {
-	characterID int64
-	slot        byte
-	itemType    uint16
-	vitals      model.ItemUseVitals
-	result      model.ItemUseResult
+	characterID       int64
+	slot              byte
+	itemType          uint16
+	vitals            model.ItemUseVitals
+	result            model.ItemUseResult
+	recoveryCurrentHP int
+	recoveryCurrentMP int
+	recoveryHealedHP  int
+	recoveryHealedMP  int
 }
 
 func (r *itemUseServiceRepository) UseItem(_ context.Context, characterID int64, slot byte, itemType uint16, vitals model.ItemUseVitals) (model.ItemUseResult, error) {
@@ -24,6 +28,12 @@ func (r *itemUseServiceRepository) UseItem(_ context.Context, characterID int64,
 
 func (r *itemUseServiceRepository) UseResurrectionItem(context.Context, int64, model.ItemUseVitals) (model.ItemUseResult, error) {
 	return model.ItemUseResult{}, model.ErrItemUseUnsupported
+}
+
+func (r *itemUseServiceRepository) PersistItemBuffRecovery(_ context.Context, _ int64, currentHP, currentMP, healedHP, healedMP int) (bool, error) {
+	r.recoveryCurrentHP, r.recoveryCurrentMP = currentHP, currentMP
+	r.recoveryHealedHP, r.recoveryHealedMP = healedHP, healedMP
+	return true, nil
 }
 
 func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
@@ -48,6 +58,72 @@ func TestItemUseServicePublishesCommittedRepositorySnapshot(t *testing.T) {
 	}
 	if result.NewAmount != 3 || player.BaseStats.HP != 120 || player.BaseStats.MP != 80 || player.Inventory.Items == nil {
 		t.Fatalf("committed result/player = %+v / HP=%d MP=%d inventory=%+v", result, player.BaseStats.HP, player.BaseStats.MP, player.Inventory)
+	}
+}
+
+func TestItemUseServicePassesZombieIntoAtomicPotionTransaction(t *testing.T) {
+	now := time.Unix(100, 0)
+	repository := &itemUseServiceRepository{result: model.ItemUseResult{
+		Inventory: model.Inventory{Items: map[byte]model.Item{}}, HP: 0, MP: 60,
+	}}
+	player := &model.Player{
+		ID: 77, Level: 1, LifeState: model.Alive,
+		BaseStats: model.BaseStats{HP: 30, MP: 20, Str: 20, Int: 20},
+	}
+	player.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusZombie, Token: 1, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	service := NewItemUseService(repository)
+	service.ConfigureItemCureRuntime(func() time.Time { return now }, nil)
+
+	if _, err := service.UseItem(t.Context(), player, 14, 0x08EC, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.vitals.InvertHPRecovery {
+		t.Fatal("ordinary potion transaction did not receive active Zombie state")
+	}
+	if hp, mp := player.CurrentVitals(); hp != 0 || mp != 60 {
+		t.Fatalf("committed Zombie potion vitals = %d/%d, want 0/60", hp, mp)
+	}
+	if player.GetLifeState() != model.Dead {
+		t.Fatalf("lethal Zombie potion life state = %v, want dead", player.GetLifeState())
+	}
+}
+
+func TestItemBuffRecoveryPersistsBeforeRuntimeCommit(t *testing.T) {
+	repository := &itemUseServiceRepository{}
+	player := &model.Player{ID: 77, Level: 10, LifeState: model.Alive, BaseStats: model.BaseStats{HP: 10, MP: 20, Str: 20, Int: 20}}
+	changed, err := NewItemUseService(repository).ApplyItemBuffRecovery(t.Context(), player, 50, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || repository.recoveryCurrentHP != 10 || repository.recoveryCurrentMP != 20 ||
+		repository.recoveryHealedHP != 60 || repository.recoveryHealedMP != 60 {
+		t.Fatalf("persisted recovery = %d/%d -> %d/%d changed=%t", repository.recoveryCurrentHP, repository.recoveryCurrentMP, repository.recoveryHealedHP, repository.recoveryHealedMP, changed)
+	}
+	if hp, mp := player.CurrentVitals(); hp != 60 || mp != 60 {
+		t.Fatalf("runtime recovery = %d/%d, want 60/60", hp, mp)
+	}
+}
+
+func TestItemBuffRecoveryZombieInvertsOnlyHP(t *testing.T) {
+	now := time.Unix(100, 0)
+	repository := &itemUseServiceRepository{}
+	player := &model.Player{ID: 77, Level: 10, LifeState: model.Alive, BaseStats: model.BaseStats{HP: 60, MP: 20, Str: 20, Int: 20}}
+	player.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusZombie, Token: 1, ExpiresAt: now.Add(time.Minute),
+	}, now)
+	service := NewItemUseService(repository)
+	service.ConfigureItemCureRuntime(func() time.Time { return now }, nil)
+	changed, err := service.ApplyItemBuffRecovery(t.Context(), player, 50, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || repository.recoveryHealedHP != 10 || repository.recoveryHealedMP != 60 {
+		t.Fatalf("persisted zombie recovery = %d/%d changed=%t, want 10/60", repository.recoveryHealedHP, repository.recoveryHealedMP, changed)
+	}
+	if hp, mp := player.CurrentVitals(); hp != 10 || mp != 60 {
+		t.Fatalf("runtime zombie recovery = %d/%d, want 10/60", hp, mp)
 	}
 }
 

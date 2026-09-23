@@ -104,3 +104,13 @@ func TestEnhancementProbabilityAndAttributeMutation(t *testing.T) {
 		t.Fatal("unknown attribute stone unexpectedly applied")
 	}
 }
+
+func TestNextMagicOptionSlotFillsSparsePersistedSlot(t *testing.T) {
+	slot, ok := nextMagicOptionSlot([]MagicOption{{Slot: 0}, {Slot: 2}}, 3)
+	if !ok || slot != 1 {
+		t.Fatalf("nextMagicOptionSlot() = %d, %v; want 1, true", slot, ok)
+	}
+	if _, ok = nextMagicOptionSlot([]MagicOption{{Slot: 0}, {Slot: 1}, {Slot: 2}}, 3); ok {
+		t.Fatal("full magic option slots unexpectedly accepted another option")
+	}
+}

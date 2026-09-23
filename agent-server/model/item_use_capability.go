@@ -11,28 +11,35 @@ import (
 type ItemUseFamily string
 
 const (
-	ItemUseFamilyUnknown               ItemUseFamily = "unknown"
-	ItemUseFamilyQuestInstanceEntry    ItemUseFamily = "quest_instance_entry"
-	ItemUseFamilyCOSInstrument         ItemUseFamily = "cos_instrument"
-	ItemUseFamilyCOSTransport          ItemUseFamily = "cos_transport"
-	ItemUseFamilyCOSHealthRecovery     ItemUseFamily = "cos_health_recovery"
-	ItemUseFamilyCOSHGPRecovery        ItemUseFamily = "cos_hgp_recovery"
-	ItemUseFamilyCOSTimedService       ItemUseFamily = "cos_timed_service"
-	ItemUseFamilyCOSRentalExtension    ItemUseFamily = "cos_rental_extension"
-	ItemUseFamilyCOSRevival            ItemUseFamily = "cos_revival"
-	ItemUseFamilyMonsterMask           ItemUseFamily = "monster_mask"
-	ItemUseFamilyCollectionTalisman    ItemUseFamily = "collection_talisman"
-	ItemUseFamilyDimensionHolePortal   ItemUseFamily = "dimension_hole_portal"
-	ItemUseFamilyCharacterRecovery     ItemUseFamily = "character_recovery"
-	ItemUseFamilyCharacterStatusCure   ItemUseFamily = "character_status_cure"
-	ItemUseFamilyLinkedSkillBuff       ItemUseFamily = "linked_skill_buff"
-	ItemUseFamilySpeedDrug             ItemUseFamily = "speed_drug"
-	ItemUseFamilyLinkedSkillEffect     ItemUseFamily = "linked_skill_effect"
-	ItemUseFamilyTimedCharacterService ItemUseFamily = "timed_character_service"
-	ItemUseFamilyReturnScroll          ItemUseFamily = "return_scroll"
-	ItemUseFamilyReverseReturnScroll   ItemUseFamily = "reverse_return_scroll"
-	ItemUseFamilyCharacterResurrection ItemUseFamily = "character_resurrection"
-	ItemUseFamilyDevilSpiritActivation ItemUseFamily = "devil_spirit_activation"
+	ItemUseFamilyUnknown                 ItemUseFamily = "unknown"
+	ItemUseFamilyQuestInstanceEntry      ItemUseFamily = "quest_instance_entry"
+	ItemUseFamilyCOSInstrument           ItemUseFamily = "cos_instrument"
+	ItemUseFamilyCOSTransport            ItemUseFamily = "cos_transport"
+	ItemUseFamilyCOSHealthRecovery       ItemUseFamily = "cos_health_recovery"
+	ItemUseFamilyCOSHGPRecovery          ItemUseFamily = "cos_hgp_recovery"
+	ItemUseFamilyCOSTimedService         ItemUseFamily = "cos_timed_service"
+	ItemUseFamilyCOSRentalExtension      ItemUseFamily = "cos_rental_extension"
+	ItemUseFamilyCOSRevival              ItemUseFamily = "cos_revival"
+	ItemUseFamilyCOSStatusCure           ItemUseFamily = "cos_status_cure"
+	ItemUseFamilyMonsterMask             ItemUseFamily = "monster_mask"
+	ItemUseFamilyCollectionTalisman      ItemUseFamily = "collection_talisman"
+	ItemUseFamilyDimensionHolePortal     ItemUseFamily = "dimension_hole_portal"
+	ItemUseFamilyCharacterRecovery       ItemUseFamily = "character_recovery"
+	ItemUseFamilyCharacterStatusCure     ItemUseFamily = "character_status_cure"
+	ItemUseFamilyLinkedSkillBuff         ItemUseFamily = "linked_skill_buff"
+	ItemUseFamilySpeedDrug               ItemUseFamily = "speed_drug"
+	ItemUseFamilyLinkedSkillEffect       ItemUseFamily = "linked_skill_effect"
+	ItemUseFamilyTimedCharacterService   ItemUseFamily = "timed_character_service"
+	ItemUseFamilyReturnScroll            ItemUseFamily = "return_scroll"
+	ItemUseFamilyReverseReturnScroll     ItemUseFamily = "reverse_return_scroll"
+	ItemUseFamilyCharacterResurrection   ItemUseFamily = "character_resurrection"
+	ItemUseFamilyDevilSpiritActivation   ItemUseFamily = "devil_spirit_activation"
+	ItemUseFamilyDirectSuccessExpendable ItemUseFamily = "direct_success_expendable"
+	ItemUseFamilyInventoryExpansion      ItemUseFamily = "inventory_expansion"
+	ItemUseFamilyWarehouseExpansion      ItemUseFamily = "warehouse_expansion"
+	ItemUseFamilySkillPointGrant         ItemUseFamily = "skill_point_grant"
+	ItemUseFamilyOptionLevelUpgrade      ItemUseFamily = "option_level_upgrade"
+	ItemUseFamilyMonsterSummonScroll     ItemUseFamily = "monster_summon_scroll"
 )
 
 // ItemUseCapabilityStatus separates runtime coverage from reference-data
@@ -106,6 +113,8 @@ const (
 	ItemUsePrerequisiteDeadCharacter              ItemUsePrerequisite = "dead_character"
 	ItemUsePrerequisiteResurrectionRequest        ItemUsePrerequisite = "resurrection_request"
 	ItemUsePrerequisiteDevilSpiritDuration        ItemUsePrerequisite = "devil_spirit_duration"
+	ItemUsePrerequisiteEventConfiguration         ItemUsePrerequisite = "event_configuration"
+	ItemUsePrerequisiteEquipmentTarget            ItemUsePrerequisite = "equipment_target"
 )
 
 // ItemUseCapabilityInput contains catalog and optional instance/reference
@@ -210,6 +219,15 @@ func ClassifyItemUseCapability(input ItemUseCapabilityInput) ItemUseCapability {
 			ItemUsePrerequisiteOwnedCOSTarget, ItemUsePrerequisiteLivingCOSTarget, ItemUsePrerequisiteGrowthCOSTarget, ItemUsePrerequisiteMissingCOSResource)
 	}
 
+	if IsCOSCure(ref) {
+		if _, ok := COSItemCureFromReference(ref); !ok {
+			return itemUseCapability(ItemUseFamilyCOSStatusCure, ItemUseCapabilityBrokenReference, ItemUseReasonInvalidEffectParameters,
+				ItemUsePrerequisiteOwnedCOSTarget, ItemUsePrerequisiteLivingCOSTarget, ItemUsePrerequisiteGrowthCOSTarget)
+		}
+		return itemUseCapability(ItemUseFamilyCOSStatusCure, ItemUseCapabilitySupported, ItemUseReasonNone,
+			ItemUsePrerequisiteOwnedCOSTarget, ItemUsePrerequisiteLivingCOSTarget, ItemUsePrerequisiteGrowthCOSTarget)
+	}
+
 	if itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 15 {
 		return classifyCOSTimedService(input)
 	}
@@ -290,6 +308,38 @@ func ClassifyItemUseCapability(input ItemUseCapabilityInput) ItemUseCapability {
 			ItemUsePrerequisiteReverseReturnOption, ItemUsePrerequisiteReverseReturnDestination)
 	}
 
+	if ref.ID == 36771 && itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 12 {
+		return itemUseCapability(ItemUseFamilySkillPointGrant, ItemUseCapabilitySupported, ItemUseReasonNone,
+			ItemUsePrerequisiteEventConfiguration)
+	}
+
+	if (ref.ID == 39364 || ref.ID == 39365 || ref.ID == 39366) && itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 11 {
+		return itemUseCapability(ItemUseFamilyOptionLevelUpgrade, ItemUseCapabilitySupported, ItemUseReasonNone,
+			ItemUsePrerequisiteEventConfiguration, ItemUsePrerequisiteEquipmentTarget)
+	}
+
+	if itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "INVENTORY_ADDITION") {
+		if ref.Param1 <= 0 {
+			return itemUseCapability(ItemUseFamilyInventoryExpansion, ItemUseCapabilityBrokenReference, ItemUseReasonInvalidEffectParameters)
+		}
+		return itemUseCapability(ItemUseFamilyInventoryExpansion, ItemUseCapabilitySupported, ItemUseReasonNone)
+	}
+
+	if itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "WAREHOUSE_ADDITION") {
+		if ref.Param1 <= 0 {
+			return itemUseCapability(ItemUseFamilyWarehouseExpansion, ItemUseCapabilityBrokenReference, ItemUseReasonInvalidEffectParameters)
+		}
+		return itemUseCapability(ItemUseFamilyWarehouseExpansion, ItemUseCapabilitySupported, ItemUseReasonNone)
+	}
+
+	if IsPartyMonsterSummonScroll(ref) {
+		return itemUseCapability(ItemUseFamilyMonsterSummonScroll, ItemUseCapabilitySupported, ItemUseReasonNone)
+	}
+
+	if itemUseType(ref, 3, 3, 9) || itemUseType(ref, 3, 3, 15) || itemUseType(ref, 3, 3, 6) && ref.TypeID4 == 1 || itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 4 {
+		return itemUseCapability(ItemUseFamilyDirectSuccessExpendable, ItemUseCapabilitySupported, ItemUseReasonNone)
+	}
+
 	if itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 6 {
 		return itemUseCapability(ItemUseFamilyCharacterResurrection, ItemUseCapabilitySupported, ItemUseReasonNone,
 			ItemUsePrerequisiteDeadCharacter, ItemUsePrerequisiteResurrectionRequest)
@@ -322,6 +372,8 @@ func inferItemUseFamily(ref RefItem) ItemUseFamily {
 		return ItemUseFamilyCharacterRecovery
 	case itemUseType(ref, 3, 3, 2) && (ref.TypeID4 == 1 || ref.TypeID4 == 6):
 		return ItemUseFamilyCharacterStatusCure
+	case IsCOSCure(ref):
+		return ItemUseFamilyCOSStatusCure
 	case itemUseType(ref, 3, 3, 1) && ref.TypeID4 == 4:
 		return ItemUseFamilyCOSHealthRecovery
 	case IsCOSRevival(RefItem{RefObject: RefObject{IsUseable: true, CodeName: ref.CodeName, TypeInfo: ref.TypeInfo}}):
@@ -330,6 +382,10 @@ func inferItemUseFamily(ref RefItem) ItemUseFamily {
 		return ItemUseFamilyCOSHGPRecovery
 	case itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 1:
 		return ItemUseFamilyReturnScroll
+	case ref.ID == 36771 && itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 12:
+		return ItemUseFamilySkillPointGrant
+	case (ref.ID == 39364 || ref.ID == 39365 || ref.ID == 39366) && itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 14:
+		return ItemUseFamilyOptionLevelUpgrade
 	case itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 2:
 		return ItemUseFamilyCOSTransport
 	case itemUseType(ref, 3, 3, 3) && ref.TypeID4 == 3:
@@ -342,6 +398,14 @@ func inferItemUseFamily(ref RefItem) ItemUseFamily {
 		return ItemUseFamilyLinkedSkillEffect
 	case isItemServiceCandidateIgnoringUsable(ref):
 		return ItemUseFamilyTimedCharacterService
+	case itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "INVENTORY_ADDITION"):
+		return ItemUseFamilyInventoryExpansion
+	case itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "WAREHOUSE_ADDITION"):
+		return ItemUseFamilyWarehouseExpansion
+	case IsPartyMonsterSummonScroll(ref):
+		return ItemUseFamilyMonsterSummonScroll
+	case itemUseType(ref, 3, 3, 9) || itemUseType(ref, 3, 3, 15) || itemUseType(ref, 3, 3, 6) && ref.TypeID4 == 1:
+		return ItemUseFamilyDirectSuccessExpendable
 	case itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 6:
 		return ItemUseFamilyCharacterResurrection
 	case itemUseType(ref, 3, 3, 13) && ref.TypeID4 == 12:

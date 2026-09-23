@@ -270,6 +270,16 @@ func canEquipJobSuit(item Item, player *Player) bool {
 	}
 }
 
+// HasEquippedJobSuit reports whether slot 8 contains job clothes matching the
+// player's selected trader, thief, or hunter role.
+func HasEquippedJobSuit(player *Player) bool {
+	if player == nil {
+		return false
+	}
+	item, equipped := player.Inventory.Items[SlotExtra]
+	return equipped && canEquipJobSuit(item, player)
+}
+
 // HasActiveJobSuit reports whether slot 8 contains job clothes matching the
 // player's active trader or thief role. Trade transports are not available to
 // hunters or to characters whose job clothes are only present in the bag.
@@ -278,11 +288,7 @@ func HasActiveJobSuit(player *Player) bool {
 		return false
 	}
 	jobType := player.GetJob().Type
-	if jobType != PlayerJobTrader && jobType != PlayerJobThief {
-		return false
-	}
-	item, equipped := player.Inventory.Items[SlotExtra]
-	return equipped && canEquipJobSuit(item, player)
+	return (jobType == PlayerJobTrader || jobType == PlayerJobThief) && HasEquippedJobSuit(player)
 }
 
 // ApplyInventoryRelocation applies one previously-built plan to items. It

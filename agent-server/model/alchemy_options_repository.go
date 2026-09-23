@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -62,24 +63,26 @@ func (r *SQLAlchemyRepository) FuseStone(ctx context.Context, characterID int64,
 				return AlchemyResult{}, ErrAlchemyConflict
 			}
 			option.Value = rollMagicOptionValue(minimum, maximum, r.roll())
+			var existing MagicOption
 			existingOption := false
-			for _, existing := range target.MagicOptions {
-				if existing.Type == option.Type {
-					existingOption = true
+			for _, candidate := range target.MagicOptions {
+				if candidate.Type == option.Type {
+					existing, existingOption = candidate, true
 					break
 				}
 			}
 			if existingOption {
-				_, err = tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=? WHERE `FK_ITEM`=? AND `TYPE`=?", option.Value, target.ID, option.Type)
+				_, err = tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=? WHERE `FK_ITEM`=? AND `SLOT`=? AND `TYPE`=?", option.Value, target.ID, existing.Slot, option.Type)
 			} else {
 				maxOptions := targetRef.MaxMagicOptCount
 				if maxOptions <= 0 || maxOptions > 12 {
 					maxOptions = 12
 				}
-				if len(target.MagicOptions) >= maxOptions {
+				slot, available := nextMagicOptionSlot(target.MagicOptions, maxOptions)
+				if !available {
 					return AlchemyResult{}, ErrAlchemyConflict
 				}
-				_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,?)", target.ID, len(target.MagicOptions), option.Type, option.Value)
+				_, err = tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,?)", target.ID, slot, option.Type, option.Value)
 			}
 		case alchemyTypeAttributeStone:
 			variance, ok := applyAttributeStoneValue(target.Variance, targetRef, stoneRef.Param1Desc, attributeStoneValue(r.roll()))
@@ -108,7 +111,7 @@ func (r *SQLAlchemyRepository) FuseStone(ctx context.Context, characterID int64,
 								return AlchemyResult{}, ErrAlchemyConflict
 							}
 							value := rollMagicOptionValue(minimum, maximum, r.roll())
-							if _, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=? WHERE `FK_ITEM`=? AND `SLOT`=? AND `TYPE`=?", value, target.ID, selectedIndex-len(candidates), magic.Type); updateErr != nil {
+							if _, updateErr := tx.ExecContext(ctx, "UPDATE `ITEM_MAGIC_OPTION` SET `VALUE`=? WHERE `FK_ITEM`=? AND `SLOT`=? AND `TYPE`=?", value, target.ID, magic.Slot, magic.Type); updateErr != nil {
 								return AlchemyResult{}, updateErr
 							}
 							break
@@ -156,6 +159,24 @@ func rollMagicOptionValue(minimum, maximum uint32, roll float64) uint32 {
 		roll = 0.9999999999999999
 	}
 	return minimum + uint32(roll*float64(maximum-minimum+1))
+}
+
+func nextMagicOptionSlot(options []MagicOption, maximum int) (byte, bool) {
+	if maximum <= 0 || maximum > 12 {
+		maximum = 12
+	}
+	var occupied [12]bool
+	for _, option := range options {
+		if int(option.Slot) < maximum {
+			occupied[option.Slot] = true
+		}
+	}
+	for slot := range maximum {
+		if !occupied[slot] {
+			return byte(slot), true
+		}
+	}
+	return 0, false
 }
 
 func protectionKindForMagicOption(code string) (ProtectionKind, bool) {
@@ -264,8 +285,15 @@ func (r *SQLAlchemyRepository) mutateSocketSlot(ctx context.Context, characterID
 	}
 	var materialSlot byte
 	var material Item
+	slots := make([]int, 0, len(inv.Items))
+	for slot := range inv.Items {
+		slots = append(slots, int(slot))
+	}
+	sort.Ints(slots)
 	found := false
-	for slot, candidate := range inv.Items {
+	for _, value := range slots {
+		slot := byte(value)
+		candidate := inv.Items[slot]
 		ref, refOK := RefItems[candidate.RefObjectID]
 		if slot >= 13 && refOK && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 11 && ref.TypeID4 == materialSubtype {
 			materialSlot, material, found = slot, candidate, true

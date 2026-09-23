@@ -17,10 +17,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	guildStorageTalkAction = byte(0x0D)
-	guildStorageChunkSize  = vsro188.StorageDataChunkSize
-)
+const guildStorageTalkAction = byte(0x0D)
 
 type GuildStorageHandler struct {
 	world storageWorld
@@ -140,26 +137,5 @@ func buildGuildStorageCloseSuccess() network.Packet {
 }
 
 func buildGuildStorageResponses(snapshot model.StorageSnapshot) []network.Packet {
-	begin := vsro188.BuildStorageDataBegin(opcode.GuildStorageDataBegin, snapshot.Gold)
-
-	capacity := snapshot.Capacity
-	if capacity == 0 {
-		capacity = baseStorageSize
-	}
-	slots := model.SortedInventorySlots(snapshot.Items)
-	records := make([]vsro188.StorageItemRecord, 0, len(slots))
-	for _, slot := range slots {
-		item := snapshot.Items[slot]
-		rent := network.EmptyPacket()
-		model.WriteRentInfo(&rent, item)
-		body := network.EmptyPacket()
-		model.WriteInventoryItem(&body, item)
-		records = append(records, vsro188.StorageItemRecord{Slot: slot, RentPayload: rent.Payload(), RefItemID: item.GetRefObjectID(), ItemPayload: body.Payload()})
-	}
-	data := vsro188.BuildStorageItemDataPayload(capacity, records)
-
-	responses := []network.Packet{begin}
-	responses = append(responses, vsro188.ChunkStorageData(opcode.GuildStorageData, data.Payload())...)
-	end := vsro188.BuildStorageDataEnd(opcode.GuildStorageDataEnd)
-	return append(responses, end)
+	return buildStorageSnapshotResponses(snapshot, opcode.GuildStorageDataBegin, opcode.GuildStorageData, opcode.GuildStorageDataEnd)
 }

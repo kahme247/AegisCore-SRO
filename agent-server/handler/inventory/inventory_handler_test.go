@@ -282,12 +282,18 @@ type petInventoryTransferFake struct {
 	owner, itemSource, itemDestination int
 	cosID                              uint64
 	toCOS                              bool
+	reordered                          bool
 	playerInventory, cosInventory      model.Inventory
 }
 
 func (f *petInventoryTransferFake) TransferItem(_ context.Context, owner int, cosID uint64, source, destination byte, toCOS bool) (model.Inventory, model.Inventory, error) {
 	f.owner, f.cosID, f.itemSource, f.itemDestination, f.toCOS = owner, cosID, int(source), int(destination), toCOS
 	return f.playerInventory, f.cosInventory, nil
+}
+
+func (f *petInventoryTransferFake) ReorderItem(_ context.Context, owner int, cosID uint64, source, destination byte) (model.Inventory, error) {
+	f.owner, f.cosID, f.itemSource, f.itemDestination, f.reordered = owner, cosID, int(source), int(destination), true
+	return f.cosInventory, nil
 }
 
 func (f *inventoryHandlerRelocatorFake) Relocate(_ context.Context, characterID int64, plan model.InventoryRelocationPlan) error {
@@ -414,6 +420,26 @@ func TestInventoryMoveWithTrailingPayloadIsRejectedBeforeLookupOrDatabase(t *tes
 	}
 }
 
+func TestParseMoveItemRequestReadsExactPayload(t *testing.T) {
+	packet := network.EmptyClientPacket()
+	if err := packet.WriteByte(14); err != nil {
+		t.Fatal(err)
+	}
+	if err := packet.WriteByte(15); err != nil {
+		t.Fatal(err)
+	}
+	if err := packet.WriteUInt16(49351); err != nil {
+		t.Fatal(err)
+	}
+	request, err := parseMoveItemRequest(&packet)
+	if err != nil {
+		t.Fatalf("parseMoveItemRequest() error = %v", err)
+	}
+	if request.sourceSlot != 14 || request.targetSlot != 15 || request.amount != 49351 || packet.Remaining() != 0 {
+		t.Fatalf("request = %+v, trailing=%d", request, packet.Remaining())
+	}
+}
+
 func TestStockActionZeroGroundItemPickupPersistsBeforeRemovingWorldObject(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	player := &model.Player{
@@ -455,14 +481,14 @@ func TestStockActionZeroGroundItemPickupPersistsBeforeRemovingWorldObject(t *tes
 	if got := player.Inventory.Items[13].ID; got != 91 {
 		t.Fatalf("runtime inventory item = %d, want 91", got)
 	}
-	if len(packets) != 2 || packets[0].MessageID != opcode.ItemOperationResponse || packets[1].MessageID != 0x3036 {
-		t.Fatalf("pickup packets = %#v, want 0xB034 followed by 0x3036", packets)
+	if len(packets) != 2 || packets[0].MessageID != 0x3036 || packets[1].MessageID != opcode.ItemOperationResponse {
+		t.Fatalf("pickup packets = %#v, want 0x3036 followed by 0xB034", packets)
 	}
-	if got, want := packets[0].Payload(), []byte{1, 0x06, 0x0D, 0, 0, 0, 0, 0xBC, 0x02, 0, 0, 1, 0}; !bytes.Equal(got, want) {
-		t.Fatalf("pickup inventory payload = % X, want hydrated action-6 body % X", got, want)
-	}
-	if got := packets[1].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
+	if got := packets[0].Payload(); len(got) != 5 || got[0] != 77 || got[1] != 0 || got[2] != 0 || got[3] != 0 {
 		t.Fatalf("pickup animation payload = % X, want collector UID 77 and one heading byte", got)
+	}
+	if got, want := packets[1].Payload(), []byte{1, 0x06, 0x0D, 0, 0, 0, 0, 0xBC, 0x02, 0, 0, 1, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("pickup inventory payload = % X, want hydrated action-6 body % X", got, want)
 	}
 }
 
@@ -665,7 +691,11 @@ func TestSpecialtyGroundPickupJobAdmissionMatrix(t *testing.T) {
 				if world.removed != item || transport.Inventory.Items[0].ID != 123 {
 					t.Fatalf("committed world/runtime state removed=%v inventory=%+v", world.removed, transport.Inventory.Items)
 				}
-				if len(packets) != 4 || packets[1].MessageID != opcode.ItemOperationResponse || !bytes.Equal(packets[1].Payload(), []byte{1, 0x17, 88, 0, 0, 0, 0}) || packets[2].MessageID != opcode.JobUpdateTradeScale || packets[3].MessageID != opcode.JobUpdateSafeTrade || !bytes.Equal(packets[3].Payload(), []byte{0, 0x40}) {
+				if len(packets) != 4 {
+					t.Fatalf("success packets = %#v", packets)
+				}
+				pickupPayload := packets[1].Payload()
+				if packets[1].MessageID != opcode.ItemOperationResponse || len(pickupPayload) <= 7 || !bytes.Equal(pickupPayload[:7], []byte{1, 0x11, 88, 0, 0, 0, 0}) || packets[2].MessageID != opcode.JobUpdateTradeScale || packets[3].MessageID != opcode.JobUpdateSafeTrade || !bytes.Equal(packets[3].Payload(), []byte{0, 0x40}) {
 					t.Fatalf("success packets = %#v", packets)
 				}
 			} else if repository.cosCalls != 0 || world.removed != nil {
@@ -834,6 +864,17 @@ func TestGroundGoldPickupCreditsBalanceInsteadOfInventory(t *testing.T) {
 	}
 }
 
+func TestBuildGoldPickupUpdateMarksPickupVariant(t *testing.T) {
+	packet := buildGoldPickupUpdate(350)
+	update, err := vsro188.DecodeGoldPointUpdate(&packet)
+	if err != nil {
+		t.Fatalf("DecodeGoldPointUpdate() error = %v", err)
+	}
+	if packet.MessageID != opcode.EntityUpdatePoints || update.Value != 350 || update.TrailingFlag != 1 || packet.Remaining() != 0 {
+		t.Fatalf("gold pickup update = opcode 0x%04X value=%d flag=%d trailing=%d", packet.MessageID, update.Value, update.TrailingFlag, packet.Remaining())
+	}
+}
+
 func TestGroundItemPickupRejectsForeignOwnerBeforePersistence(t *testing.T) {
 	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
 	player := &model.Player{SRObject: model.SRObject{UniqueID: 77, RtNavmeshPosition: navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}}, ID: 44, Session: session}
@@ -982,6 +1023,43 @@ func TestPlayerItemMovesFromAbilityPetInventory(t *testing.T) {
 	want := []byte{1, byte(TakeItemFromPetInventoryOperation), 88, 0, 0, 0, 3, 14}
 	if response.MessageID != 0xB034 || !bytes.Equal(response.Payload(), want) {
 		t.Fatalf("response = 0x%04X/% X, want 0xB034/% X", response.MessageID, response.Payload(), want)
+	}
+}
+
+func TestAbilityPetInventoryReorderUsesStockOperation10Layout(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 77, CharacterID: 44}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}, ID: 44, Session: session}
+	pet := &model.COS{NPC: model.NPC{SRObject: model.SRObject{UniqueID: 88}}, PersistentID: 9, OwnerCharID: 44, OwnerUniqueID: 77, Kind: model.COSAbilityPet, InventorySize: 28, Inventory: model.NewInventory(map[byte]model.Item{3: {ID: 100, StackSize: 1}})}
+	nextCOS := model.NewInventory(map[byte]model.Item{4: {ID: 100, StackSize: 1}})
+	repository := &petInventoryTransferFake{cosInventory: nextCOS}
+	handler := NewInventoryHandler(&petInventoryWorldFake{player: player, pet: pet}, nil)
+	handler.ConfigureCOSRepository(repository)
+	var responses []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		responses = append(responses, packet)
+		return nil
+	}
+	request := network.EmptyClientPacket()
+	request.WriteByte(byte(MoveItemInPetInventoryOperation))
+	request.WriteUInt32(88)
+	request.WriteByte(3)
+	request.WriteByte(4)
+	request.WriteUInt16(1)
+	if err := handler.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.reordered || repository.owner != 44 || repository.cosID != 9 || repository.itemSource != 3 || repository.itemDestination != 4 {
+		t.Fatalf("reorder = %+v", repository)
+	}
+	if _, sourceHas := pet.Snapshot().Inventory.Items[3]; sourceHas || pet.Snapshot().Inventory.Items[4].ID != 100 {
+		t.Fatalf("runtime COS inventory = %+v", pet.Snapshot().Inventory.Items)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("reorder responses = %#v, want B034 then 30C9", responses)
+	}
+	want := []byte{1, 0x10, 88, 0, 0, 0, 3, 4, 1, 0}
+	if responses[0].MessageID != opcode.ItemOperationResponse || !bytes.Equal(responses[0].Payload(), want) || responses[1].MessageID != opcode.COSUpdateResponse {
+		t.Fatalf("reorder responses = %#v, want B034/% X then 30C9", responses, want)
 	}
 }
 

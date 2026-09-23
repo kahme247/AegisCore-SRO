@@ -222,7 +222,7 @@ func parseAlchemyDismantleRequest(packet *network.Packet) ([]byte, error) {
 func (h *AlchemyHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	request, err := parseAlchemyElixirRequest(&packet)
 	if err != nil || h == nil || h.repo == nil {
-		return h.sendPacket(session, buildAlchemyFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyElixirResponse, 0))
 	}
 	resolver := &InventoryHandler{players: h.players}
 	player, err := resolver.resolvePlayer(session)
@@ -234,7 +234,7 @@ func (h *AlchemyHandler) handlePacket(ctx context.Context, session *server.Sessi
 		return h.sendPacket(session, buildAlchemyCancel())
 	}
 	if !h.beginDelayed(player, request.alchemyType) {
-		return h.sendPacket(session, buildAlchemyFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyElixirResponse, 0))
 	}
 	defer h.lifecycle().finish(player.ID)
 	wake := h.awaitPhaseThree(ctx, player)
@@ -256,7 +256,7 @@ func (h *AlchemyHandler) handlePacket(ctx context.Context, session *server.Sessi
 			return err
 		}
 		logrus.WithError(err).Debug("rejected alchemy enhancement")
-		return h.sendPacket(session, buildAlchemyFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyElixirResponse, 0))
 	}
 	player.CommitInventory(result.Inventory)
 	if err = h.sendPacket(session, buildAlchemySuccess(result)); err != nil {
@@ -303,10 +303,6 @@ func buildAlchemyCancel() network.Packet {
 	return vsro188.BuildAlchemyCancel(opcode.AlchemyElixirResponse)
 }
 
-func buildAlchemyFailure() network.Packet {
-	return vsro188.BuildAlchemyFailure(opcode.AlchemyElixirResponse, 0)
-}
-
 func buildAlchemySuccess(result model.AlchemyResult) network.Packet {
 	return buildElixirAlchemyResult(result)
 }
@@ -338,132 +334,6 @@ type alchemyPairRequest struct {
 	targetSlot   byte
 	materialSlot byte
 	index        byte
-}
-
-type alchemyAvatarRequest struct {
-	cancel bool
-	slots  []byte
-}
-
-type alchemyAvatarGrantRequest struct {
-	targetSlot byte
-	optionCode string
-}
-
-func parseAlchemyAvatarRequest(packet *network.Packet) (alchemyAvatarRequest, error) {
-	if packet == nil || packet.Remaining() < 1 {
-		return alchemyAvatarRequest{}, model.ErrAlchemyInvalidRequest
-	}
-	action, err := packet.ReadByte()
-	if err != nil {
-		return alchemyAvatarRequest{}, err
-	}
-	if action != alchemyActionFuse {
-		if packet.Remaining() != 0 {
-			return alchemyAvatarRequest{}, model.ErrAlchemyInvalidRequest
-		}
-		return alchemyAvatarRequest{cancel: true}, nil
-	}
-	count, err := packet.ReadByte()
-	if err != nil || count == 0 || count > 2 || packet.Remaining() != int(count) {
-		return alchemyAvatarRequest{}, model.ErrAlchemyInvalidRequest
-	}
-	request := alchemyAvatarRequest{slots: make([]byte, count)}
-	seen := make(map[byte]struct{}, count)
-	for index := range request.slots {
-		slot, readErr := packet.ReadByte()
-		if readErr != nil || slot < model.InventoryEquipmentSlots || slot > 0x6f {
-			return alchemyAvatarRequest{}, model.ErrAlchemyInvalidRequest
-		}
-		if _, duplicate := seen[slot]; duplicate {
-			return alchemyAvatarRequest{}, model.ErrAlchemyInvalidRequest
-		}
-		seen[slot] = struct{}{}
-		request.slots[index] = slot
-	}
-	return request, nil
-}
-
-func parseAlchemyAvatarGrantRequest(packet *network.Packet) (alchemyAvatarGrantRequest, error) {
-	if packet == nil || packet.Remaining() < 3 {
-		return alchemyAvatarGrantRequest{}, model.ErrAlchemyInvalidRequest
-	}
-	slot, err := packet.ReadByte()
-	if err != nil || slot < model.InventoryEquipmentSlots || slot > 0x6f {
-		return alchemyAvatarGrantRequest{}, model.ErrAlchemyInvalidRequest
-	}
-	optionCode, err := packet.ReadString()
-	if err != nil || optionCode == "" || packet.Remaining() != 0 {
-		return alchemyAvatarGrantRequest{}, model.ErrAlchemyInvalidRequest
-	}
-	return alchemyAvatarGrantRequest{targetSlot: slot, optionCode: optionCode}, nil
-}
-
-func buildAlchemyAvatarResult(mutated bool) network.Packet {
-	return vsro188.BuildAlchemyAvatarResult(mutated)
-}
-
-func buildAlchemyAvatarGrantResult(result model.AlchemyResult) network.Packet {
-	return vsro188.BuildAlchemyAvatarGrantResult(result.Success, result.TargetSlot, alchemyTargetPayload(result.Target))
-}
-
-func buildAlchemyAvatarFailure() network.Packet {
-	return vsro188.BuildAlchemyFailure(opcode.AlchemyAvatarResponse, 0)
-}
-
-func (h *AlchemyHandler) handleAvatarPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
-	request, err := parseAlchemyAvatarRequest(&packet)
-	if err != nil || h == nil || h.repo == nil {
-		return h.sendPacket(session, buildAlchemyAvatarFailure())
-	}
-	player, err := (&InventoryHandler{players: h.players}).resolvePlayer(session)
-	if err != nil {
-		return err
-	}
-	if request.cancel {
-		h.lifecycle().cancel(player.ID)
-		return h.sendPacket(session, buildAlchemyProtocolCancel(opcode.AlchemyAvatarResponse))
-	}
-	if !h.beginDelayed(player, alchemyTypeAvatar) {
-		return h.sendPacket(session, buildAlchemyAvatarFailure())
-	}
-	defer h.lifecycle().finish(player.ID)
-	wake := h.awaitPhaseThree(ctx, player)
-	if !wake.execute {
-		if wake.suppressResponse {
-			return nil
-		}
-		return h.sendPacket(session, buildAlchemyProtocolCancel(opcode.AlchemyAvatarResponse))
-	}
-	var stoneSlot *byte
-	if len(request.slots) == 2 {
-		stoneSlot = &request.slots[1]
-	}
-	result, err := h.repo.EnchantAvatarItem(ctx, int64(player.ID), session.UserContext.UserID, request.slots[0], stoneSlot)
-	buildResult := func(result model.AlchemyResult) network.Packet { return buildAlchemyAvatarResult(result.Success) }
-	return h.finishExtendedAlchemy(session, player, buildResult, buildAlchemyAvatarFailure, result, err)
-}
-
-func (h *AlchemyHandler) handleAvatarGrantPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
-	request, err := parseAlchemyAvatarGrantRequest(&packet)
-	if err != nil || h == nil || h.repo == nil {
-		return nil
-	}
-	player, err := (&InventoryHandler{players: h.players}).resolvePlayer(session)
-	if err != nil {
-		return err
-	}
-	result, err := h.repo.BlessAvatarItem(ctx, int64(player.ID), session.UserContext.UserID, request.targetSlot, request.optionCode)
-	if err != nil {
-		if errors.Is(err, model.ErrAlchemyOutcomeUnknown) {
-			session.Close()
-			return err
-		}
-		logrus.WithError(err).Debug("rejected avatar NPC blessing")
-		return nil
-	}
-	player.CommitInventory(result.Inventory)
-	return h.sendPacket(session, buildAlchemyAvatarGrantResult(result))
 }
 
 func parseAlchemyPairRequest(packet *network.Packet) (alchemyPairRequest, error) {
@@ -526,7 +396,7 @@ func parseAlchemySocketRequest(packet *network.Packet) (alchemyPairRequest, erro
 func (h *AlchemyHandler) handleStonePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	request, err := parseAlchemyPairRequest(&packet)
 	if err != nil || h == nil || h.repo == nil {
-		return h.sendPacket(session, buildStoneAlchemyFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyStoneResponse, 0))
 	}
 	if request.cancel {
 		player, resolveErr := (&InventoryHandler{players: h.players}).resolvePlayer(session)
@@ -541,7 +411,7 @@ func (h *AlchemyHandler) handleStonePacket(ctx context.Context, session *server.
 		return err
 	}
 	if !h.beginDelayed(player, request.alchemyType) {
-		return h.sendPacket(session, buildStoneAlchemyFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyStoneResponse, 0))
 	}
 	defer h.lifecycle().finish(player.ID)
 	wake := h.awaitPhaseThree(ctx, player)
@@ -552,7 +422,8 @@ func (h *AlchemyHandler) handleStonePacket(ctx context.Context, session *server.
 		return h.sendPacket(session, buildAlchemyProtocolCancel(opcode.AlchemyStoneResponse))
 	}
 	result, err := h.repo.FuseStone(ctx, int64(player.ID), session.UserContext.UserID, request.targetSlot, request.materialSlot, request.alchemyType)
-	return h.finishExtendedAlchemy(session, player, buildStoneAlchemyResult, buildStoneAlchemyFailure, result, err)
+	buildFailure := func() network.Packet { return vsro188.BuildAlchemyFailure(opcode.AlchemyStoneResponse, 0) }
+	return h.finishExtendedAlchemy(session, player, buildStoneAlchemyResult, buildFailure, result, err)
 }
 
 func (h *AlchemyHandler) handleSocketPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
@@ -607,7 +478,7 @@ func buildSocketAlchemyActionResult(action byte, result model.AlchemyResult) net
 func (h *AlchemyHandler) handleMaterialPacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	request, err := parseAlchemyMaterialRequest(&packet)
 	if err != nil || h == nil || h.repo == nil {
-		return h.sendPacket(session, buildAlchemyMaterialFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyMaterialResponse, 0))
 	}
 	player, err := (&InventoryHandler{players: h.players}).resolvePlayer(session)
 	if err != nil {
@@ -618,7 +489,7 @@ func (h *AlchemyHandler) handleMaterialPacket(ctx context.Context, session *serv
 		return h.sendPacket(session, buildAlchemyProtocolCancel(opcode.AlchemyMaterialResponse))
 	}
 	if !h.beginDelayed(player, request.selector) {
-		return h.sendPacket(session, buildAlchemyMaterialFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyMaterialResponse, 0))
 	}
 	defer h.lifecycle().finish(player.ID)
 	for index, slot := range request.slots {
@@ -650,7 +521,7 @@ func (h *AlchemyHandler) handleMaterialPacket(ctx context.Context, session *serv
 		}
 		// Resolve-material repeats reset the phase in the binary.
 		if !h.lifecycle().reset(player.ID) {
-			return h.sendPacket(session, buildAlchemyMaterialFailure())
+			return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyMaterialResponse, 0))
 		}
 	}
 	return nil
@@ -659,14 +530,14 @@ func (h *AlchemyHandler) handleMaterialPacket(ctx context.Context, session *serv
 func (h *AlchemyHandler) handleDismantlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	slots, err := parseAlchemyDismantleRequest(&packet)
 	if err != nil || h == nil || h.repo == nil {
-		return h.sendPacket(session, buildAlchemyDismantleFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyDismantleResponse, 0))
 	}
 	player, err := (&InventoryHandler{players: h.players}).resolvePlayer(session)
 	if err != nil {
 		return err
 	}
 	if !h.beginDelayed(player, 0x57) {
-		return h.sendPacket(session, buildAlchemyDismantleFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyDismantleResponse, 0))
 	}
 	defer h.lifecycle().finish(player.ID)
 	wake := h.awaitPhaseThree(ctx, player)
@@ -674,7 +545,7 @@ func (h *AlchemyHandler) handleDismantlePacket(ctx context.Context, session *ser
 		if wake.suppressResponse {
 			return nil
 		}
-		return h.sendPacket(session, buildAlchemyDismantleFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyDismantleResponse, 0))
 	}
 	result, err := h.repo.DismantleEquipment(ctx, int64(player.ID), session.UserContext.UserID, slots)
 	if err != nil {
@@ -682,7 +553,7 @@ func (h *AlchemyHandler) handleDismantlePacket(ctx context.Context, session *ser
 			session.Close()
 			return err
 		}
-		return h.sendPacket(session, buildAlchemyDismantleFailure())
+		return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyDismantleResponse, 0))
 	}
 	player.CommitInventory(result.Inventory)
 	if err = h.sendPacket(session, buildAlchemyDismantleSuccess()); err != nil {
@@ -695,16 +566,8 @@ func buildAlchemyMaterialSuccess(result model.AlchemyMakeResult) network.Packet 
 	return vsro188.BuildAlchemyMaterialResult(result.ResponseByte, result.ProducedValue)
 }
 
-func buildAlchemyMaterialFailure() network.Packet {
-	return vsro188.BuildAlchemyFailure(opcode.AlchemyMaterialResponse, 0)
-}
-
 func buildAlchemyDismantleSuccess() network.Packet {
 	return vsro188.BuildAlchemyDismantleSuccess()
-}
-
-func buildAlchemyDismantleFailure() network.Packet {
-	return vsro188.BuildAlchemyFailure(opcode.AlchemyDismantleResponse, 0)
 }
 
 func (h *AlchemyHandler) sendMaterialUpdates(session *server.Session, materials []model.AlchemyMaterialUpdate) error {
@@ -725,7 +588,7 @@ func (h *AlchemyHandler) finishAlchemyMake(session *server.Session, player *mode
 		session.Close()
 		return err
 	}
-	return h.sendPacket(session, buildAlchemyMaterialFailure())
+	return h.sendPacket(session, vsro188.BuildAlchemyFailure(opcode.AlchemyMaterialResponse, 0))
 }
 
 func (h *AlchemyHandler) lifecycle() *alchemyLifecycle {
@@ -773,10 +636,6 @@ func (h *AlchemyHandler) finishExtendedAlchemy(session *server.Session, player *
 		}
 	}
 	return nil
-}
-
-func buildStoneAlchemyFailure() network.Packet {
-	return vsro188.BuildAlchemyFailure(opcode.AlchemyStoneResponse, 0)
 }
 
 func buildSocketAlchemyFailure() network.Packet {

@@ -85,6 +85,28 @@ func ItemCureFromReference(ref RefItem) (ItemCureEffect, bool) {
 	}
 }
 
+func IsCOSCure(ref RefItem) bool {
+	return ref.IsUseable && ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 2 && ref.TypeID4 == 7
+}
+
+// COSItemCureFromReference decodes the stock growth-pet cure-all family
+// (TypeID 3/3/2/7). Its six authored values use the same elemental duration
+// reductions as the character TypeID4 6 callback.
+func COSItemCureFromReference(ref RefItem) (ItemCureEffect, bool) {
+	if !IsCOSCure(ref) {
+		return ItemCureEffect{}, false
+	}
+	values := [...]int{ref.Param1, ref.Param2, ref.Param3, ref.Param4, ref.Param5, ref.Param6}
+	var power [6]uint16
+	for index, value := range values {
+		if value <= 0 || value > int(^uint16(0)) {
+			return ItemCureEffect{}, false
+		}
+		power[index] = uint16(value)
+	}
+	return ItemCureEffect{Kind: ItemCureShortenElemental, ElementalPower: power}, true
+}
+
 // ApplyItemCure mutates only in-memory combat status authority after the item
 // transaction commits. randomIntn follows math/rand.Intn's [0,n) contract and
 // is injected so selection/chance behavior stays deterministic in tests.
@@ -197,6 +219,56 @@ func (p *Player) applyRandomItemCureLocked(effect ItemCureEffect, now time.Time,
 		application.Changed = true
 		application.Removed++
 	}
+	return application
+}
+
+// ApplyItemCure applies the COS cure-all descriptor to NPC/COS abnormal
+// status authority after the item transaction commits.
+func (n *NPC) ApplyItemCure(effect ItemCureEffect, now time.Time) ItemCureApplication {
+	if n == nil || effect.Kind != ItemCureShortenElemental {
+		return ItemCureApplication{}
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	application := ItemCureApplication{}
+	restored := make([]CombatStatusKind, 0, len(itemCureElementalKinds))
+	n.combat.mutex.Lock()
+	for index, kind := range itemCureElementalKinds {
+		statuses := n.combat.statuses[kind]
+		if len(statuses) == 0 {
+			continue
+		}
+		power := effect.ElementalPower[index]
+		if power == 0 {
+			continue
+		}
+		reduction := time.Duration(int64(power)*itemCureElementalMilliseconds[index]) * time.Millisecond
+		for token, status := range statuses {
+			if !status.ExpiresAt.After(now) {
+				delete(statuses, token)
+				continue
+			}
+			status.ExpiresAt = status.ExpiresAt.Add(-reduction)
+			application.Changed = true
+			if !status.ExpiresAt.After(now) {
+				delete(statuses, token)
+				application.Removed++
+				continue
+			}
+			statuses[token] = status
+			application.RefreshAt = append(application.RefreshAt, status.ExpiresAt)
+		}
+		if len(statuses) == 0 {
+			delete(n.combat.statuses, kind)
+			restored = append(restored, kind)
+		}
+	}
+	n.combat.mutex.Unlock()
+	for _, kind := range restored {
+		n.restoreStatusMovementEffect(kind)
+	}
+	sort.Slice(application.RefreshAt, func(i, j int) bool { return application.RefreshAt[i].Before(application.RefreshAt[j]) })
 	return application
 }
 

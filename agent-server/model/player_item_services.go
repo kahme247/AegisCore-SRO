@@ -55,6 +55,25 @@ func (p *Player) ItemServiceRates(now time.Time) (experienceBonus, skillExperien
 	return experienceBonus, skillExperienceBonus
 }
 
+func (p *Player) ItemServiceEffectValue(kind ItemServiceKind, now time.Time) uint32 {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	effect, exists := p.itemServices[kind]
+	if !exists || !effect.ExpiresAt.After(now) {
+		delete(p.itemServices, kind)
+		delete(p.itemServiceTokens, kind)
+		return 0
+	}
+	return effect.EffectValue
+}
+
+func ItemServiceAffectsStats(effect ItemServiceEffect) bool {
+	return effect.Kind == ItemServiceReinforceWeapon || effect.Kind == ItemServiceReinforceArmor || effect.Kind == ItemServiceReinforceAccessory
+}
+
 func (p *Player) PremiumDailyState(now time.Time, serviceRefItemID, token uint32) (ItemServiceEffect, bool) {
 	if p == nil || serviceRefItemID == 0 || token == 0 {
 		return ItemServiceEffect{}, false
@@ -134,6 +153,29 @@ func (p *Player) ItemServiceStates(now time.Time) []ItemServiceState {
 		states = append(states, ItemServiceState{Effect: effect, Token: p.itemServiceTokens[kind]})
 	}
 	return states
+}
+
+func (p *Player) ClearItemServicesForTargetSlots(slots map[byte]struct{}, now time.Time) []ItemServiceState {
+	if p == nil || len(slots) == 0 {
+		return nil
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	cleared := make([]ItemServiceState, 0, len(slots))
+	for kind, effect := range p.itemServices {
+		if !effect.ExpiresAt.After(now) {
+			delete(p.itemServices, kind)
+			delete(p.itemServiceTokens, kind)
+			continue
+		}
+		if _, matches := slots[effect.TargetSlot]; !effect.TargetSlotSet || !matches {
+			continue
+		}
+		cleared = append(cleared, ItemServiceState{Effect: effect, Token: p.itemServiceTokens[kind]})
+		delete(p.itemServices, kind)
+		delete(p.itemServiceTokens, kind)
+	}
+	return cleared
 }
 
 func (p *Player) ClearItemService(kind ItemServiceKind, token uint32) bool {

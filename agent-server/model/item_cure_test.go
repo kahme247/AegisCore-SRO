@@ -3,6 +3,7 @@ package model
 import (
 	"database/sql/driver"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -195,5 +196,42 @@ func TestPlayerItemCureWithoutEligibleStatusHasNoRuntimeChange(t *testing.T) {
 	})
 	if application.Changed || application.Removed != 0 || len(application.RefreshAt) != 0 {
 		t.Fatalf("no-effect application = %+v", application)
+	}
+}
+
+func TestCOSItemCureShortensNPCElementalStatuses(t *testing.T) {
+	now := time.Unix(4_000, 0)
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.ConfigureCombat(100, 1)
+	npc.SetLifeState(Alive)
+	for _, status := range []CombatStatus{
+		{Kind: CombatStatusFrostbite, Token: 1, SkillID: 10, ExpiresAt: now.Add(10 * time.Second)},
+		{Kind: CombatStatusShock, Token: 2, SkillID: 11, ExpiresAt: now.Add(20 * time.Second)},
+		{Kind: CombatStatusDarkness, Token: 3, SkillID: 12, ExpiresAt: now.Add(time.Minute)},
+	} {
+		if !npc.ApplyCombatStatusAt(status, now) {
+			t.Fatalf("apply NPC status %+v", status)
+		}
+	}
+	ref := RefItem{RefObject: RefObject{IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 2, TypeID4: 7}}}
+	ref.Param1, ref.Param2, ref.Param3 = 36, 36, 36
+	ref.Param4, ref.Param5, ref.Param6 = 36, 36, 36
+	effect, ok := COSItemCureFromReference(ref)
+	if !ok {
+		t.Fatal("COS cure reference did not decode")
+	}
+	application := npc.ApplyItemCure(effect, now)
+	wantFrostbiteExpiry := now.Add(time.Second)
+	if !application.Changed || application.Removed != 1 || !reflect.DeepEqual(application.RefreshAt, []time.Time{wantFrostbiteExpiry}) {
+		t.Fatalf("COS cure application = %+v", application)
+	}
+	if status, active := npc.CombatStatus(CombatStatusFrostbite, now); !active || !status.ExpiresAt.Equal(wantFrostbiteExpiry) {
+		t.Fatalf("frostbite = %+v/%t", status, active)
+	}
+	if _, active := npc.CombatStatus(CombatStatusShock, now); active {
+		t.Fatal("COS cure did not remove shock")
+	}
+	if _, active := npc.CombatStatus(CombatStatusDarkness, now); !active {
+		t.Fatal("COS cure changed high abnormal state")
 	}
 }

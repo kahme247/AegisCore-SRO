@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
+	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/agent-server/questwire"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
@@ -32,6 +33,14 @@ type preparedQuestInstanceEntry struct {
 	members  []*model.Player
 }
 
+type ItemMonsterSummoner interface {
+	SpawnItemSummonNPC(string, navmeshv2.RtNavmeshPosition, float32, model.MonsterRarity) (*model.NPC, error)
+}
+
+type itemSummonWorld interface {
+	RemoveVisibleObject(model.ISRObject)
+}
+
 type ItemUseHandler struct {
 	players           PlayerLookup
 	useCase           service.ItemUseCase
@@ -52,6 +61,8 @@ type ItemUseHandler struct {
 	cos               interface {
 		Summon(context.Context, *model.Player, uint64) (*model.COS, error)
 	}
+	summoner    ItemMonsterSummoner
+	summonWorld itemSummonWorld
 }
 
 func (h *ItemUseHandler) ConfigureDevilSpirit(repository model.AvatarInventoryRepository) {
@@ -70,10 +81,18 @@ func (h *ItemUseHandler) ConfigureCOS(runtime interface {
 	}
 }
 
+func (h *ItemUseHandler) ConfigureMonsterSummons(summoner ItemMonsterSummoner, world itemSummonWorld) {
+	if h != nil {
+		h.summoner = summoner
+		h.summonWorld = world
+	}
+}
+
 func NewItemUseHandler(players PlayerLookup, items model.ItemUseRepository) *ItemUseHandler {
 	h := &ItemUseHandler{
 		players: players, party: service.GetPartyServiceInstance(), nextDungeonKey: model.NextActionUID,
 		now: time.Now, randomIntn: rand.Intn,
+		summonWorld: service.GetWorldServiceInstance(),
 	}
 	itemUse := service.NewItemUseService(items)
 	itemUse.ConfigureItemCureRuntime(
@@ -205,15 +224,18 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	}
 	isReverse := itemExists && refExists && model.IsReverseReturnScroll(ref)
 	if isReverse {
-		if !wireRequest.HasOption {
+		switch {
+		case wireRequest.HasOption:
+			reverseOption = wireRequest.Option
+			reverseMapID = wireRequest.MapID
+		case len(wireRequest.ItemData) == 1 && (wireRequest.ItemData[0] == 2 || wireRequest.ItemData[0] == 3):
+			reverseOption = wireRequest.ItemData[0]
+			wireRequest.ItemData = nil
+		default:
 			return h.sendFailure(session)
 		}
-		reverseOption = wireRequest.Option
-		if reverseOption == 7 {
-			reverseMapID = wireRequest.MapID
-			if reverseMapID == 0 {
-				return h.sendFailure(session)
-			}
+		if reverseOption == 7 && reverseMapID == 0 {
+			return h.sendFailure(session)
 		}
 	} else if wireRequest.HasOption {
 		return h.sendFailure(session)
@@ -224,6 +246,10 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		return h.sendFailure(session)
 	}
 	if refExists && model.IsCOSTransportScroll(ref) && !model.HasActiveJobSuit(player) {
+		return h.sendFailure(session)
+	}
+	if refExists && model.IsPartyMonsterSummonScroll(ref) &&
+		(h.summoner == nil || model.IsTownRegionV188(player.GetNavmeshPosition().Region.ID)) {
 		return h.sendFailure(session)
 	}
 	if refExists && model.IsTeleportScroll(ref) && h.returnTeleport == nil {
@@ -273,7 +299,8 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	}
 	var result model.ItemUseResult
 	var publishedDimensionHole *service.DimensionHolePortalInstance
-	usesCOSSlotSelector := refExists && (model.IsCOSExtension(ref) || model.IsCOSPetTimedService(ref) || model.IsCOSRevival(ref))
+	usesCOSSlotSelector := refExists && (model.IsCOSExtension(ref) || model.IsCOSPetTimedService(ref) || model.IsCOSRevival(ref) || model.IsCOSCure(ref))
+	usesInventorySlotSelector := refExists && (model.IsConfiguredEnhancementScroll(ref) || model.IsConfiguredOptionUpgradeScroll(ref))
 	if preparedDimensionHole != nil {
 		dimensionHoleUse, ok := h.useCase.(service.DimensionHoleItemUseCase)
 		if !ok {
@@ -287,13 +314,18 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		}
 		publishedDimensionHole = &instance
 		result, err = dimensionHoleUse.UseDimensionHoleItem(ctx, player, slot, itemType, dimensionHoleDefinition.ItemRefID)
-	} else if usesCOSSlotSelector || wireRequest.HasCOSTarget {
+	} else if usesCOSSlotSelector || usesInventorySlotSelector || wireRequest.HasCOSTarget {
 		targeted, ok := h.useCase.(service.TargetedItemUseCase)
 		if !ok {
 			return h.sendFailure(session)
 		}
 		targetObjectID := wireRequest.TargetObjectID
-		if usesCOSSlotSelector {
+		if usesInventorySlotSelector {
+			if len(wireRequest.ItemData) != 1 || wireRequest.ItemData[0] == slot {
+				return h.sendFailure(session)
+			}
+			targetObjectID = uint32(wireRequest.ItemData[0]) + 1
+		} else if usesCOSSlotSelector {
 			// Timed growth-pet services are sent without an item-data selector by
 			// the stock client and apply to the active summoned growth pet. Other
 			// confirmed COS item families carry one normal-inventory slot.
@@ -359,7 +391,7 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 			Y:        wireRequest.TargetY,
 			Z:        wireRequest.TargetZ,
 		})
-	} else if len(wireRequest.ItemData) != 0 {
+	} else if len(wireRequest.ItemData) != 0 && !(refExists && len(wireRequest.ItemData) == 1) {
 		return h.sendFailure(session)
 	} else {
 		result, err = h.useCase.UseItem(ctx, player, slot, itemType, reverseOption, reverseMapID)
@@ -496,6 +528,40 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 			return applyErr
 		}
 	}
+	if result.COSCurePersistentID != 0 && result.COSCure != nil {
+		applier, ok := h.cos.(interface {
+			ApplyPersistedCure(*model.Player, uint64, model.ItemCureEffect, time.Time) (*model.COS, model.ItemCureApplication, error)
+		})
+		if !ok {
+			return fmt.Errorf("committed COS cure has no configured runtime")
+		}
+		now := h.itemUseNow()
+		updated, application, applyErr := applier.ApplyPersistedCure(player, result.COSCurePersistentID, *result.COSCure, now)
+		if applyErr != nil {
+			return applyErr
+		}
+		if updated != nil && application.Changed {
+			publish := func(at time.Time) {
+				mask, levels := updated.CombatBadEffectState(at)
+				packet := model.BuildBadEffectUpdate(updated.GetUniqueID(), mask, levels)
+				player.SendToSelfAndKnown(&packet)
+			}
+			publish(now)
+			for _, refreshAt := range application.RefreshAt {
+				delay := refreshAt.Sub(now)
+				if delay <= 0 {
+					continue
+				}
+				at := refreshAt
+				callback := func() { publish(at) }
+				if h.schedule != nil {
+					h.schedule(delay, callback)
+				} else {
+					time.AfterFunc(delay, callback)
+				}
+			}
+		}
+	}
 	if result.COSResourcePersistentID != 0 {
 		applier, ok := h.cos.(interface {
 			ApplyPersistedResources(*model.Player, uint64, int32, int) (*model.COS, error)
@@ -555,6 +621,41 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		}
 		return err
 	}
+	used := vsro188.BuildItemUsedNotification(vsro188.ItemUsedNotification{
+		FirstValue:  player.GetUniqueID(),
+		SecondValue: item.GetRefObjectID(),
+	})
+	h.publishPacket(player, &used)
+	if result.HwanSnapshot != nil {
+		hwan := model.BuildHwanPointUpdatePacket(result.HwanSnapshot.Points, player.GetUniqueID())
+		h.publishPacket(player, &hwan)
+	}
+	if result.InventorySize != 0 {
+		size := vsro188.BuildInventorySizeUpdate(vsro188.InventorySizeUpdate{FirstByte: 1, SecondByte: result.InventorySize})
+		if err = h.sendPacket(session, size); err != nil {
+			return err
+		}
+	}
+	if result.SkillPoints > 0 {
+		points := vsro188.BuildSkillPointUpdate(vsro188.SkillPointUpdate{Value: uint32(result.SkillPoints)})
+		if err = h.sendPacket(session, points); err != nil {
+			return err
+		}
+	}
+	if result.OptLevelTargetSet {
+		level := result.OptLevel
+		update, buildErr := vsro188.BuildInventoryItemUpdate(vsro188.InventoryItemUpdate{
+			ItemKind: result.OptLevelTargetSlot,
+			Flags:    0x02,
+			Flag02U8: &level,
+		})
+		if buildErr != nil {
+			return buildErr
+		}
+		if err = h.sendPacket(session, update); err != nil {
+			return err
+		}
+	}
 	if result.QuestInstanceEntryQuestID != 0 {
 		if preparedInstance == nil || result.QuestInstanceEntryQuestID != preparedInstance.instance.QuestID || h.instanceTeleport == nil {
 			return fmt.Errorf("committed quest instance item has no prepared entry")
@@ -574,6 +675,11 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		}
 		if err = h.sendPacket(session, update); err != nil {
 			return err
+		}
+	}
+	if result.SummonMonster != nil {
+		if err = h.executeMonsterSummon(player, *result.SummonMonster); err != nil {
+			return fmt.Errorf("execute committed monster summon: %w", err)
 		}
 	}
 	if result.ReturnDestination != nil {
@@ -621,12 +727,15 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 				player.SendMovementSpeedUpdate()
 			}
 		})
-	} else if result.EffectSkillID > 0 && result.EffectDuration > 0 && result.BuffModifiers != (model.BuffModifiers{}) {
+	} else if result.EffectSkillID > 0 && result.EffectDuration > 0 && (result.BuffModifiers != (model.BuffModifiers{}) || result.EffectRecoveryHP > 0 || result.EffectRecoveryMP > 0 || result.EffectVisibilityRefresh) {
 		token := model.NextActionUID()
 		duration := time.Duration(result.EffectDuration) * time.Millisecond
 		replacedToken, committed := player.CommitActiveBuff(result.EffectSkillID, token, duration, result.BuffModifiers)
 		if !committed {
 			return fmt.Errorf("commit item buff skill %d", result.EffectSkillID)
+		}
+		if result.EffectRecoveryHP > 0 || result.EffectRecoveryMP > 0 {
+			player.ConfigureActiveBuffRecovery(token, result.EffectRecoveryHP, result.EffectRecoveryMP)
 		}
 		if replacedToken != 0 {
 			removed := model.BuildBuffRemove(replacedToken)
@@ -639,6 +748,12 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 		h.publishPacket(player, &added)
 		stats := player.BuildStatsUpdatePacket()
 		player.SendToSelf(&stats)
+		if result.EffectVisibilityRefresh {
+			service.GetWorldServiceInstance().ReconcileCharacterVisibility(player)
+		}
+		if result.EffectRecoveryHP > 0 || result.EffectRecoveryMP > 0 {
+			h.scheduleItemBuffRecovery(player, token, result.EffectRecoveryHP, result.EffectRecoveryMP)
+		}
 		schedule := h.schedule
 		if schedule == nil {
 			schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
@@ -654,10 +769,66 @@ func (h *ItemUseHandler) handlePacket(ctx context.Context, session *server.Sessi
 	} else if result.ItemCure != nil {
 		// Cure status publication is completed immediately after the committed
 		// consume result, before the stock B04C success response.
+		player.SendMovementSpeedUpdate()
+		player.SendStatsUpdate()
 	} else if result.ItemService != nil {
 		h.publishItemService(player, *result.ItemService, result.ItemServiceToken, result.ReplacedItemServiceToken)
 	} else {
 		player.SendVitalsUpdate()
+	}
+	if player.GetLifeState() == model.Dead {
+		life := model.BuildLifeStateUpdatePacket(player.GetUniqueID(), model.Dead)
+		player.SendToSelfAndKnown(&life)
+	}
+	return nil
+}
+
+func (h *ItemUseHandler) executeMonsterSummon(player *model.Player, effect model.ItemSummonMonsterEffect) error {
+	if h == nil || player == nil || h.summoner == nil || h.summonWorld == nil || len(effect.Candidates) == 0 ||
+		effect.Radius <= 0 || effect.Lifetime <= 0 {
+		return model.ErrItemUseUnsupported
+	}
+	totalWeight := 0
+	for _, candidate := range effect.Candidates {
+		if candidate.CodeName == "" || candidate.Weight <= 0 {
+			return model.ErrItemUseUnsupported
+		}
+		totalWeight += candidate.Weight
+	}
+	count := 1
+	if h.party != nil {
+		count = h.party.MemberCountForPlayer(player.GetUniqueID())
+	}
+	position := player.GetNavmeshPosition()
+	spawned := make([]*model.NPC, 0, count)
+	for range count {
+		randomIntn := h.randomIntn
+		if randomIntn == nil {
+			randomIntn = rand.Intn
+		}
+		roll := randomIntn(totalWeight)
+		for _, candidate := range effect.Candidates {
+			if roll < candidate.Weight {
+				npc, spawnErr := h.summoner.SpawnItemSummonNPC(candidate.CodeName, position, effect.Radius, candidate.Rarity)
+				if spawnErr != nil {
+					for _, previous := range spawned {
+						h.summonWorld.RemoveVisibleObject(previous)
+					}
+					return spawnErr
+				}
+				spawned = append(spawned, npc)
+				break
+			}
+			roll -= candidate.Weight
+		}
+	}
+	schedule := h.schedule
+	if schedule == nil {
+		schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
+	}
+	for _, npc := range spawned {
+		spawnedNPC := npc
+		schedule(effect.Lifetime, func() { h.summonWorld.RemoveVisibleObject(spawnedNPC) })
 	}
 	return nil
 }
@@ -690,8 +861,45 @@ func (h *ItemUseHandler) scheduleItemCureRefreshes(player *model.Player, now tim
 		}
 		schedule(delay, func() {
 			h.publishPlayerBadEffectState(player, h.itemUseNow())
+			player.SendStatsUpdate()
 		})
 	}
+}
+
+func (h *ItemUseHandler) scheduleItemBuffRecovery(player *model.Player, token uint32, recoveryHP, recoveryMP int) {
+	if h == nil || player == nil || token == 0 || recoveryHP < 0 || recoveryMP < 0 || recoveryHP == 0 && recoveryMP == 0 {
+		return
+	}
+	recovery, ok := h.useCase.(service.ItemBuffRecoveryUseCase)
+	if !ok {
+		return
+	}
+	schedule := h.schedule
+	if schedule == nil {
+		schedule = func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) }
+	}
+	const interval = 5 * time.Second
+	schedule(interval, func() {
+		active := false
+		for _, buff := range player.ActiveBuffSnapshot() {
+			if buff.Token == token && (buff.ExpiresAt.IsZero() || buff.ExpiresAt.After(h.itemUseNow())) {
+				active = true
+				break
+			}
+		}
+		if !active {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		changed, err := recovery.ApplyItemBuffRecovery(ctx, player, recoveryHP, recoveryMP)
+		cancel()
+		if err != nil {
+			logrus.WithError(err).Warn("failed to persist item-buff recovery")
+		} else if changed {
+			player.SendVitalsUpdate()
+		}
+		h.scheduleItemBuffRecovery(player, token, recoveryHP, recoveryMP)
+	})
 }
 
 func (h *ItemUseHandler) activateDevilSpirit(ctx context.Context, session *server.Session, player *model.Player, slot byte) error {
@@ -787,7 +995,7 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 	}
 	if replacedToken != 0 {
 		if model.ItemServiceUsesItemPerk(effect) {
-			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, replacedToken)
+			removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect)
 			h.publishPacket(player, &removed)
 		}
 		if premiumRemoved, exists := model.BuildPremiumDailyRemove(replacedToken, effect); exists {
@@ -803,14 +1011,22 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 		return
 	}
 	if model.ItemServiceUsesItemPerk(effect) {
-		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect.SourceRefItemID, token, model.ItemServicePerkValue(effect), remaining)
+		added := model.BuildItemPerkAdd(player.GetUniqueID(), effect, remaining)
 		h.publishPacket(player, &added)
+	}
+	if model.ItemServiceTargetMatchesInventory(player, effect) {
+		if update, exists, buildErr := model.BuildPlayerItemServiceTargetLevelUpdate(player, effect, true); buildErr == nil && exists {
+			h.publishPacket(player, &update)
+		}
 	}
 	if premiumAdded, exists := model.BuildPremiumDailyAdd(token, effect, remaining); exists {
 		player.SendToSelf(&premiumAdded)
 	}
 	if buffAdded, exists := model.BuildItemServiceBuffAdd(player.GetUniqueID(), token, effect, remaining); exists {
 		h.publishPacket(player, &buffAdded)
+	}
+	if model.ItemServiceAffectsStats(effect) {
+		player.SendStatsUpdate()
 	}
 	schedule := h.schedule
 	if schedule == nil {
@@ -819,8 +1035,13 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 	schedule(remaining, func() {
 		if player.ClearItemService(effect.Kind, token) {
 			if model.ItemServiceUsesItemPerk(effect) {
-				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect.SourceRefItemID, token)
+				removed := model.BuildItemPerkRemove(player.GetUniqueID(), effect)
 				h.publishPacket(player, &removed)
+			}
+			if model.ItemServiceTargetMatchesInventory(player, effect) {
+				if update, exists, buildErr := model.BuildPlayerItemServiceTargetLevelUpdate(player, effect, false); buildErr == nil && exists {
+					h.publishPacket(player, &update)
+				}
 			}
 			if premiumRemoved, exists := model.BuildPremiumDailyRemove(token, effect); exists {
 				player.SendToSelf(&premiumRemoved)
@@ -828,6 +1049,9 @@ func (h *ItemUseHandler) publishItemService(player *model.Player, effect model.I
 			if model.ItemServiceBuffSkillID(effect) != 0 {
 				buffRemoved := model.BuildBuffRemove(token)
 				h.publishPacket(player, &buffRemoved)
+			}
+			if model.ItemServiceAffectsStats(effect) {
+				player.SendStatsUpdate()
 			}
 		}
 	})
@@ -865,9 +1089,9 @@ func (h *ItemUseHandler) sendPacket(session *server.Session, p network.Packet) e
 }
 func buildItemUseSuccess(sourceSlot byte, itemType, newAmount uint16) network.Packet {
 	return vsro188.BuildItemUseSuccess(vsro188.ItemUseSuccess{
-		SourceSlot: sourceSlot,
-		NewAmount:  newAmount,
-		ItemType:   itemType,
+		EncodedSlot:  sourceSlot,
+		NewAmount:    newAmount,
+		PackedTypeID: itemType,
 	})
 }
 

@@ -443,7 +443,7 @@ const (
 	EquipAvatarItemOperation          ItemInventoryOperation = 0x24
 	TakeItemFromPetInventoryOperation ItemInventoryOperation = 0x1A
 	PutItemIntoPetInventoryOperation  ItemInventoryOperation = 0x1B
-	MoveItemInPetInventoryOperation   ItemInventoryOperation = 0x1C
+	MoveItemInPetInventoryOperation   ItemInventoryOperation = 0x10
 	GuildStorageMoveOperation         ItemInventoryOperation = 0x1D
 	GuildStorageDepositItemOperation  ItemInventoryOperation = 0x1E
 	GuildStorageWithdrawItemOperation ItemInventoryOperation = 0x1F
@@ -974,22 +974,23 @@ func (h *InventoryHandler) handleGroundItemPickup(ctx context.Context, session *
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
 	player.CommitInventory(result.Inventory)
-	// Publish the inventory completion while the client still owns the ground
-	// object referenced by the pickup transaction. If 0x3016 removes that
-	// object first, stock OnB034 action 0x06 can dereference stale client state.
 	committedItem, exists := result.Inventory.Items[result.Slot]
 	if !exists {
 		return model.ErrGroundItemPickupOutcomeUnknown
 	}
-	if err := h.sendPacket(session, buildGroundPickupInventoryUpdate(result.Slot, committedItem)); err != nil {
+	// Stock SR_GameServer 0x004B29A0 publishes 0x3036 before the later
+	// AQ_SlotUpdater success reaches 0x004E9480 and emits B034. The client
+	// pickup branch at 0x0087BC1F gates its local activity message on that
+	// source-0 transition, so preserve the same animation-then-completion order.
+	if err := h.sendPackets(
+		session,
+		buildGroundPickupAnimation(player, item),
+		buildGroundPickupInventoryUpdate(result.Slot, committedItem),
+	); err != nil {
 		return err
 	}
-	animationErr := h.sendPacket(session, buildGroundPickupAnimation(player, item))
 	h.cancelGroundItemLifecycle(object)
 	h.objectRemover.RemoveVisibleObject(object)
-	if animationErr != nil {
-		return animationErr
-	}
 	if h.questProgress == nil {
 		return nil
 	}
@@ -1150,7 +1151,14 @@ func buildGroundPickupInventoryUpdate(slot byte, item model.Item) network.Packet
 }
 
 func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, session *server.Session, operation ItemInventoryOperation, packet *network.Packet) error {
-	if h == nil || h.cosInventory == nil || h.objects == nil || packet == nil || packet.Remaining() != 6 {
+	if h == nil || h.cosInventory == nil || h.objects == nil || packet == nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	wantBody := 6
+	if operation == MoveItemInPetInventoryOperation {
+		wantBody = 8
+	}
+	if packet.Remaining() != wantBody {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
 	petUID, err := packet.ReadUInt32()
@@ -1162,6 +1170,13 @@ func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, sessi
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
 	destination, err := packet.ReadByte()
+	if err != nil {
+		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+	}
+	var amount uint16
+	if operation == MoveItemInPetInventoryOperation {
+		amount, err = packet.ReadUInt16()
+	}
 	if err != nil || packet.Remaining() != 0 {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
@@ -1174,27 +1189,45 @@ func (h *InventoryHandler) handlePetInventoryTransfer(ctx context.Context, sessi
 	if err != nil || !valid || pet == nil || pet.InventorySize == 0 || pet.OwnerCharID != player.ID || pet.OwnerUniqueID != player.GetUniqueID() {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
-	toCOS := operation == PutItemIntoPetInventoryOperation
-	if operation == MoveItemInPetInventoryOperation && source != destination {
-		if reorder, ok := h.cosInventory.(model.COSInventoryReorderRepository); ok && source < pet.InventorySize && destination < pet.InventorySize {
-			if _, sourceHas := pet.Inventory.Snapshot().Items[source]; sourceHas {
-				player.LockEconomy()
-				defer player.UnlockEconomy()
-				if h.exchange != nil && h.exchange.Busy(player.ID) {
-					return h.sendPacket(session, buildUnsupportedItemOperationResponse())
-				}
-				cosInventory, reorderErr := reorder.ReorderItem(ctx, player.ID, pet.PersistentID, source, destination)
-				if reorderErr == nil {
-					pet.ReplaceInventory(cosInventory)
-					return h.sendPacket(session, vsro188.BuildItemOperationObjectSlotPairSuccess(byte(operation), petUID, source, destination))
-				}
-				if errors.Is(reorderErr, model.ErrInventoryRelocationOutcomeUnknown) {
-					return reorderErr
-				}
-				return h.sendPacket(session, buildUnsupportedItemOperationResponse())
-			}
+	if operation == MoveItemInPetInventoryOperation {
+		if source >= pet.InventorySize || destination >= pet.InventorySize {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 		}
+		sourceItem, sourceHas := pet.Inventory.Snapshot().Items[source]
+		stackSize := sourceItem.StackSize
+		if stackSize < 1 {
+			stackSize = 1
+		}
+		if !sourceHas || (amount != 0 && int(amount) != stackSize) {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		response := vsro188.BuildItemOperationObjectSlotPairQuantitySuccess(byte(operation), petUID, source, destination, amount)
+		if source == destination {
+			return h.sendPacket(session, response)
+		}
+		reorder, ok := h.cosInventory.(model.COSInventoryReorderRepository)
+		if !ok {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		player.LockEconomy()
+		defer player.UnlockEconomy()
+		if h.exchange != nil && h.exchange.Busy(player.ID) {
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		cosInventory, reorderErr := reorder.ReorderItem(ctx, player.ID, pet.PersistentID, source, destination)
+		if reorderErr != nil {
+			if errors.Is(reorderErr, model.ErrInventoryRelocationOutcomeUnknown) {
+				return reorderErr
+			}
+			return h.sendPacket(session, buildUnsupportedItemOperationResponse())
+		}
+		pet.ReplaceInventory(cosInventory)
+		if inventoryUpdate, supported := model.BuildCOSInventoryUpdate(pet); supported {
+			return h.sendPackets(session, response, inventoryUpdate)
+		}
+		return h.sendPacket(session, response)
 	}
+	toCOS := operation == PutItemIntoPetInventoryOperation
 	if (toCOS && destination >= pet.InventorySize) || (!toCOS && source >= pet.InventorySize) {
 		return h.sendPacket(session, buildUnsupportedItemOperationResponse())
 	}
@@ -1438,7 +1471,7 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 	if result.ItemService != nil && serviceToken != 0 {
 		if replacedServiceToken != 0 {
 			if model.ItemServiceUsesItemPerk(*result.ItemService) {
-				removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, replacedServiceToken)
+				removed := model.BuildItemPerkRemove(player.GetUniqueID(), *result.ItemService)
 				player.SendToSelfAndKnown(&removed)
 			}
 			if premiumRemoved, exists := model.BuildPremiumDailyRemove(replacedServiceToken, *result.ItemService); exists {
@@ -1452,7 +1485,7 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 		remaining := time.Until(result.ItemService.ExpiresAt)
 		if remaining > 0 {
 			if model.ItemServiceUsesItemPerk(*result.ItemService) {
-				added := model.BuildItemPerkAdd(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken, result.ItemService.DailyBudget, remaining)
+				added := model.BuildItemPerkAdd(player.GetUniqueID(), *result.ItemService, remaining)
 				player.SendToSelfAndKnown(&added)
 			}
 			if premiumAdded, exists := model.BuildPremiumDailyAdd(serviceToken, *result.ItemService, remaining); exists {
@@ -1464,7 +1497,7 @@ func (h *InventoryHandler) handleMallBuy(ctx context.Context, session *server.Se
 			time.AfterFunc(remaining, func() {
 				if player.ClearItemService(result.ItemService.Kind, serviceToken) {
 					if model.ItemServiceUsesItemPerk(*result.ItemService) {
-						removed := model.BuildItemPerkRemove(player.GetUniqueID(), result.ItemService.SourceRefItemID, serviceToken)
+						removed := model.BuildItemPerkRemove(player.GetUniqueID(), *result.ItemService)
 						player.SendToSelfAndKnown(&removed)
 					}
 					if premiumRemoved, exists := model.BuildPremiumDailyRemove(serviceToken, *result.ItemService); exists {
@@ -1542,7 +1575,7 @@ func (h *InventoryHandler) handleGuildStorageMutation(ctx context.Context, sessi
 	if operation == GuildStorageMoveOperation {
 		err = h.guild.MoveGuildStorage(ctx, int64(player.ID), source, destination, amount)
 		if err == nil {
-			return h.sendPacket(session, buildGuildStorageMoveSuccess(operation, source, destination, amount))
+			return h.sendPacket(session, buildStorageMoveSuccess(operation, source, destination, amount))
 		}
 	} else {
 		var result model.EconomyResult
@@ -1553,7 +1586,7 @@ func (h *InventoryHandler) handleGuildStorageMutation(ctx context.Context, sessi
 		}
 		if err == nil {
 			player.CommitEconomy(result.Gold, result.Inventory)
-			return h.sendPacket(session, buildGuildStorageTransferSuccess(operation, source, destination))
+			return h.sendPacket(session, buildStorageTransferSuccess(operation, source, destination))
 		}
 	}
 	return h.handleEconomyError(session, err)
@@ -2071,164 +2104,6 @@ func (h *InventoryHandler) sendPackets(session *server.Session, packets ...netwo
 		return nil
 	}
 	return session.SendBatch(packets)
-}
-
-func buildBuySuccess(tab, slot byte, amount uint16, destinations []byte, item model.Item) network.Packet {
-	rent := network.EmptyPacket()
-	model.WriteRentInfo(&rent, item)
-	return vsro188.BuildItemBuySuccess(tab, slot, amount, destinations, rent.Payload())
-}
-func buildSellSuccess(source byte, amount uint16, npcUID uint32, buybackSlot byte) network.Packet {
-	return vsro188.BuildItemSellSuccess(source, amount, npcUID, buybackSlot)
-}
-
-func buildGoldUpdate(gold uint64) network.Packet {
-	return vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold})
-}
-
-func buildGoldPickupUpdate(gold uint64) network.Packet {
-	return vsro188.BuildGoldPointUpdate(vsro188.GoldPointUpdate{Value: gold, TrailingFlag: 1})
-}
-
-func buildStorageGoldSuccess(operation ItemInventoryOperation, amount, characterGold uint64) network.Packet {
-	value := amount
-	if operation == DepositStorageGoldOperation {
-		value = characterGold
-	}
-	return vsro188.BuildItemOperationUInt64Success(byte(operation), value)
-}
-
-func buildBuyBackSuccess(destination, source byte, amount uint16) network.Packet {
-	return vsro188.BuildItemBuyBackSuccess(destination, source, amount)
-}
-func buildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {
-	return vsro188.BuildItemOperationSlotPairSuccess(byte(operation), source, destination)
-}
-func buildStorageMoveSuccess(operation ItemInventoryOperation, source, destination byte, amount uint16) network.Packet {
-	return vsro188.BuildItemOperationSlotPairQuantitySuccess(byte(operation), source, destination, amount)
-}
-
-func buildGuildStorageTransferSuccess(operation ItemInventoryOperation, source, destination byte) network.Packet {
-	return buildStorageTransferSuccess(operation, source, destination)
-}
-
-func buildGuildStorageMoveSuccess(operation ItemInventoryOperation, source, destination byte, amount uint16) network.Packet {
-	return buildStorageMoveSuccess(operation, source, destination, amount)
-}
-
-func buildGuildStorageGoldSuccess(operation ItemInventoryOperation, amount uint64) network.Packet {
-	return vsro188.BuildItemOperationUInt64Success(byte(operation), amount)
-}
-
-func buildUnsupportedItemOperationResponse() network.Packet {
-	return vsro188.BuildItemOperationFailure(0)
-}
-
-func buildItemMallBalanceUpdate(balances model.ItemMallBalances) network.Packet {
-	return vsro188.BuildBalanceStateUpdate(vsro188.BalanceStateUpdate{
-		First:  balances.Silk,
-		Second: balances.GiftSilk,
-		Third:  balances.Point,
-	})
-}
-
-func buildItemMallPurchaseSuccess(request itemMallPurchaseRequest, result model.ItemMallPurchaseResult) network.Packet {
-	if request.operation == BuyItemFromModernMallOperation {
-		itemPayload := network.EmptyPacket()
-		for range result.DestinationSlots {
-			model.WriteRentInfo(&itemPayload, result.Item)
-		}
-		return vsro188.BuildItemMallModernPurchaseSuccess(vsro188.ItemMallModernPurchaseSuccess{
-			ShopGroupID:  result.Position.RefShopGroupID,
-			GroupIndex:   result.Position.GroupIndex,
-			TabIndex:     result.Position.TabIndex,
-			SlotIndex:    result.Position.SlotIndex,
-			ResultBytes:  result.DestinationSlots,
-			PackageCount: request.purchaseCount,
-			ItemPayload:  itemPayload.Payload(),
-		})
-	}
-	if request.operation == BuyItemFromMallOperation {
-		return vsro188.BuildItemMallLegacyPurchaseSuccess(vsro188.ItemMallLegacyPurchaseSuccess{
-			Operation:        byte(request.operation),
-			MallVersion:      request.mallVersion,
-			Page:             request.page,
-			GroupIndex:       result.Position.GroupIndex,
-			TabIndex:         result.Position.TabIndex,
-			SlotIndex:        result.Position.SlotIndex,
-			DestinationSlots: result.DestinationSlots,
-			Quantity:         result.Quantity,
-		})
-	}
-	packet := network.EmptyPacket()
-	packet.MessageID = opcode.ItemOperationResponse
-	packet.WriteByte(1)
-	packet.WriteByte(byte(request.operation))
-	packet.WriteUInt16(result.Position.RefShopGroupID)
-	packet.WriteByte(result.Position.GroupIndex)
-	packet.WriteByte(result.Position.TabIndex)
-	packet.WriteByte(result.Position.SlotIndex)
-	packet.WriteByte(byte(len(result.DestinationSlots)))
-	for _, slot := range result.DestinationSlots {
-		packet.WriteByte(slot)
-	}
-	// The mall response echoes the number of packages requested. The package's
-	// delivered item quantity is already defined by the client Media catalog;
-	// sending that expanded quantity here makes the client walk past the
-	// destination list for multi-item packages.
-	packet.WriteUInt16(request.purchaseCount)
-	for range result.DestinationSlots {
-		model.WriteRentInfo(&packet, result.Item)
-	}
-	return packet
-}
-
-func parseMoveItemRequest(packet *network.Packet) (moveItemRequest, error) {
-	if packet == nil {
-		return moveItemRequest{}, errors.New("inventory move request packet is nil")
-	}
-	sourceSlot, err := packet.ReadByte()
-	if err != nil {
-		return moveItemRequest{}, fmt.Errorf("read inventory move source slot: %w", err)
-	}
-	targetSlot, err := packet.ReadByte()
-	if err != nil {
-		return moveItemRequest{}, fmt.Errorf("read inventory move target slot: %w", err)
-	}
-	amount, err := packet.ReadUInt16()
-	if err != nil {
-		return moveItemRequest{}, fmt.Errorf("read inventory move amount: %w", err)
-	}
-	if packet.Remaining() != 0 {
-		return moveItemRequest{}, fmt.Errorf("inventory move request has %d trailing bytes", packet.Remaining())
-	}
-	return moveItemRequest{sourceSlot: sourceSlot, targetSlot: targetSlot, amount: amount}, nil
-}
-
-func parseAvatarTransferRequest(packet *network.Packet) (moveItemRequest, error) {
-	if packet == nil {
-		return moveItemRequest{}, errors.New("avatar transfer request packet is nil")
-	}
-	sourceSlot, err := packet.ReadByte()
-	if err != nil {
-		return moveItemRequest{}, fmt.Errorf("read avatar transfer source slot: %w", err)
-	}
-	targetSlot, err := packet.ReadByte()
-	if err != nil {
-		return moveItemRequest{}, fmt.Errorf("read avatar transfer target slot: %w", err)
-	}
-	// vSRO 1.188 sends only the two slots. Accept the older four-byte form
-	// only when its unused quantity is zero.
-	if packet.Remaining() == 2 {
-		amount, readErr := packet.ReadUInt16()
-		if readErr != nil || amount != 0 {
-			return moveItemRequest{}, errors.New("avatar transfer quantity must be zero")
-		}
-	}
-	if packet.Remaining() != 0 {
-		return moveItemRequest{}, fmt.Errorf("avatar transfer request has %d trailing bytes", packet.Remaining())
-	}
-	return moveItemRequest{sourceSlot: sourceSlot, targetSlot: targetSlot}, nil
 }
 
 // relocate resolves the player exclusively from session-owned identity and

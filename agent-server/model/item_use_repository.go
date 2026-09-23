@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -19,6 +20,22 @@ var (
 	ErrItemServiceDailyUnavailable  = errors.New("item-service daily activation is unavailable")
 )
 
+type SummonMonsterCandidate struct {
+	CodeName string
+	Weight   int
+	Rarity   MonsterRarity
+}
+
+type ItemSummonMonsterEffect struct {
+	Candidates []SummonMonsterCandidate
+	Radius     float32
+	Lifetime   time.Duration
+}
+
+func IsPartyMonsterSummonScroll(ref RefItem) bool {
+	return ref.ID == 9318 || ref.ID == 9319
+}
+
 type ItemUseResult struct {
 	Inventory                   Inventory
 	HP                          int
@@ -30,6 +47,13 @@ type ItemUseResult struct {
 	EffectSkillID               uint32
 	SpeedPercent                int
 	EffectDuration              int
+	EffectRecoveryHP            int
+	EffectRecoveryMP            int
+	EffectVisibilityRefresh     bool
+	SkillPoints                 int
+	OptLevelTargetSlot          byte
+	OptLevelTargetSet           bool
+	OptLevel                    byte
 	EffectExpiresAt             time.Time
 	ItemCure                    *ItemCureEffect
 	ItemCureApplication         ItemCureApplication
@@ -50,6 +74,8 @@ type ItemUseResult struct {
 	COSResourceHealth           int32
 	COSResourceHGP              int
 	COSResourceKind             byte
+	COSCurePersistentID         uint64
+	COSCure                     *ItemCureEffect
 	COSExtendedPersistentID     uint64
 	COSExtendedRentEndsAt       time.Time
 	COSTimedServicePersistentID uint64
@@ -60,10 +86,14 @@ type ItemUseResult struct {
 	MaskRefCharID               uint32
 	MaskDuration                time.Duration
 	CollectionThemeID           uint32
+	StallAvatarRefID            uint32
 	CollectionSlotIndex         uint16
 	CollectionThemeComplete     bool
 	CollectionQuestProgress     []QuestProgressResult
+	HwanSnapshot                *HwanSnapshot
+	InventorySize               byte
 	DimensionHolePortal         *DimensionHoleDefinition
+	SummonMonster               *ItemSummonMonsterEffect
 }
 
 // COSItemTarget is the item-family-specific target carried by 0x704C.
@@ -78,11 +108,15 @@ type COSItemTarget struct {
 }
 
 type ItemUseVitals struct {
-	HP, MP              int
-	MaxHP, MaxMP        int
-	Level               int
-	ReverseReturnOption byte
-	ReverseReturnMapID  uint32
+	HP, MP                 int
+	MaxHP, MaxMP           int
+	Level                  int
+	Strength, Intelligence int
+	ReverseReturnOption    byte
+	ReverseReturnMapID     uint32
+	// InvertHPRecovery is captured from the authoritative abnormal-state
+	// snapshot before the atomic consume transaction. MP recovery stays positive.
+	InvertHPRecovery bool
 	// DimensionHolePreparedItemRefID is nonzero only after the runtime has
 	// reserved a direct-world lease. SQL refuses to consume a portal item
 	// through the ordinary unprepared UseItem path.
@@ -98,6 +132,10 @@ type ItemUseRepository interface {
 // together with consuming the selected item.
 type TargetedItemUseRepository interface {
 	UseTargetedItem(context.Context, int64, byte, uint16, ItemUseVitals, COSItemTarget) (ItemUseResult, error)
+}
+
+type ItemBuffRecoveryRepository interface {
+	PersistItemBuffRecovery(context.Context, int64, int, int, int, int) (bool, error)
 }
 
 type SpeedEffect struct {
@@ -117,6 +155,10 @@ const (
 	ItemServiceSkillGold
 	ItemServiceExperience
 	ItemServiceSkillExperience
+	ItemServiceHwanDuration
+	ItemServiceReinforceWeapon
+	ItemServiceReinforceArmor
+	ItemServiceReinforceAccessory
 )
 
 type ItemServiceEffect struct {
@@ -124,11 +166,16 @@ type ItemServiceEffect struct {
 	SourceRefItemID             uint32
 	ExperienceBonusPercent      uint32
 	SkillExperienceBonusPercent uint32
+	EffectValue                 uint32
 	DailyBudget                 time.Duration
 	DailyUsedOn                 time.Time
 	DailyActiveUntil            time.Time
 	ActivatedAt                 time.Time
 	ExpiresAt                   time.Time
+	TargetSlot                  byte
+	TargetSlotSet               bool
+	TargetBaseOptLevel          byte
+	TargetProjectedOptLevel     byte
 }
 
 type ItemServiceRepository interface {
@@ -137,10 +184,13 @@ type ItemServiceRepository interface {
 }
 
 type ItemBuffEffect struct {
-	SourceRefItemID uint32
-	SkillID         uint32
-	ExpiresAt       time.Time
-	Modifiers       BuffModifiers
+	SourceRefItemID   uint32
+	SkillID           uint32
+	ExpiresAt         time.Time
+	RecoveryHP        int
+	RecoveryMP        int
+	RefreshVisibility bool
+	Modifiers         BuffModifiers
 }
 
 type ItemBuffRepository interface {
@@ -174,9 +224,29 @@ func recoveryValues(ref RefItem, vitals ItemUseVitals) (int, int, bool) {
 	}
 	maxHP := maxInt(vitals.HP, vitals.MaxHP)
 	maxMP := maxInt(vitals.MP, vitals.MaxMP)
-	newHP := minInt(maxHP, vitals.HP+ref.Param1+(maxHP*ref.Param2/100))
-	newMP := minInt(maxMP, vitals.MP+ref.Param3+(maxMP*ref.Param4/100))
+	hpRecovery, mpRecovery := 0, 0
+	if ref.Param1 != 0 || ref.Param3 != 0 {
+		hpRecovery = scaledFlatPotionRecovery(ref.Param1, vitals.Strength, vitals.Level)
+		mpRecovery = scaledFlatPotionRecovery(ref.Param3, vitals.Intelligence, vitals.Level)
+	} else {
+		hpRecovery = maxHP * ref.Param2 / 100
+		mpRecovery = maxMP * ref.Param4 / 100
+	}
+	newHP := minInt(maxHP, vitals.HP+hpRecovery)
+	if vitals.InvertHPRecovery && hpRecovery > 0 {
+		newHP = maxInt(0, vitals.HP-hpRecovery)
+	}
+	newMP := minInt(maxMP, vitals.MP+mpRecovery)
 	return newHP, newMP, newHP != vitals.HP || newMP != vitals.MP
+}
+
+func scaledFlatPotionRecovery(base, stat, level int) int {
+	if base <= 0 {
+		return 0
+	}
+	stat = maxInt(0, stat)
+	level = maxInt(1, level)
+	return int(float64(base) * (1 + float64(stat)/416) * math.Pow(1.02, float64(level-1)))
 }
 
 // IsReturnScroll identifies the ordinary return-city scroll family from the
@@ -189,14 +259,29 @@ func IsReturnScroll(ref RefItem) bool {
 		ref.Param1 > 0 && strings.EqualFold(strings.TrimSpace(ref.Param3Desc), "RESURRECT")
 }
 
+func IsSpecialReturnScroll(ref RefItem) bool {
+	return ref.IsUseable &&
+		ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 1 &&
+		ref.Param1 > 0 && strings.EqualFold(strings.TrimSpace(ref.Param3Desc), "THIEFDEN") &&
+		strings.TrimSpace(ref.Param4Desc) != "" && !strings.EqualFold(strings.TrimSpace(ref.Param4Desc), "xxx")
+}
+
 func IsReverseReturnScroll(ref RefItem) bool {
 	return ref.IsUseable &&
 		ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 3 &&
 		ref.Param1 > 0
 }
 
+func IsConfiguredEnhancementScroll(ref RefItem) bool {
+	return ref.ID >= 3789 && ref.ID <= 3794 || ref.ID >= 39364 && ref.ID <= 39366
+}
+
+func IsConfiguredOptionUpgradeScroll(ref RefItem) bool {
+	return ref.ID >= 39364 && ref.ID <= 39366
+}
+
 func IsTeleportScroll(ref RefItem) bool {
-	return IsReturnScroll(ref) || IsReverseReturnScroll(ref)
+	return IsReturnScroll(ref) || IsSpecialReturnScroll(ref) || IsReverseReturnScroll(ref)
 }
 
 func (r *SQLItemUseRepository) UseItem(ctx context.Context, characterID int64, slot byte, requestedType uint16, vitals ItemUseVitals) (ItemUseResult, error) {
@@ -256,9 +341,16 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	}
 	newHP, newMP := vitals.HP, vitals.MP
 	isRecovery := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 >= 1 && ref.TypeID4 <= 3
+	isHwanPotion := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 1 && ref.TypeID4 == 8
+	isDirectSuccessExpendable := ref.TypeID1 == 3 && ref.TypeID2 == 3 && (ref.TypeID3 == 9 || ref.TypeID3 == 15 || ref.TypeID3 == 6 && ref.TypeID4 == 1 || ref.TypeID3 == 3 && ref.TypeID4 == 4)
+	isPartyMonsterSummon := IsPartyMonsterSummonScroll(ref)
+	isInventoryExpansion := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "INVENTORY_ADDITION")
+	isWarehouseExpansion := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 17 && strings.Contains(strings.ToUpper(ref.CodeName), "WAREHOUSE_ADDITION")
 	isSpeedDrug := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1
 	isTimeService := isItemServiceReference(ref)
+	isConfiguredTimedProgression := ref.ID >= 23938 && ref.ID <= 23941 || IsConfiguredEnhancementScroll(ref)
 	isReturnScroll := IsReturnScroll(ref)
+	isSpecialReturnScroll := IsSpecialReturnScroll(ref)
 	isReverseReturnScroll := IsReverseReturnScroll(ref)
 	isCOSScroll := IsCOSScroll(ref)
 	isCOSTransportScroll := IsCOSTransportScroll(ref)
@@ -267,15 +359,19 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 	isCOSExtension := IsCOSExtension(ref)
 	isCOSPetService := IsCOSPetTimedService(ref)
 	isCOSRevival := IsCOSRevival(ref)
+	isCOSCure := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 2 && ref.TypeID4 == 7
 	isMonsterMask := ref.TypeID1 == 3 && ref.TypeID2 == 2 && ref.TypeID3 == 2 && itemData != 0
 	isCollectionTalisman := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 12 && ref.TypeID4 == 5
 	isCharacterStatusCure := isCharacterStatusCureType(ref)
 	itemCure, validItemCure := ItemCureFromReference(ref)
+	cosCure, validCOSCure := COSItemCureFromReference(ref)
 	questInstanceEntryQuestID, isQuestInstanceEntry := QuestInstanceEntryQuestID(ref.CodeName)
 	dimensionHole, isDimensionHole := DimensionHoleDefinitionForReference(ref)
 	linkedSkill, hasLinkedSkill := RefSkills[uint32(skillID)]
 	isSkillBuff := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 1 &&
 		hasLinkedSkill && linkedSkill.SupportsItemUseBuff()
+	isConfiguredSkillPoint := ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 3 && ref.TypeID4 == 12
+	isConfiguredOptUpgrade := IsConfiguredOptionUpgradeScroll(ref) && !IsConfiguredEnhancementScroll(ref)
 	switch {
 	case !ref.IsUseable:
 		return result, ErrItemUseUnsupported
@@ -320,6 +416,29 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 			return result, resolveErr
 		}
 		result.COSTemporaryRideRefObjectID = refObjectID
+	case isCOSCure:
+		if target == nil || target.ObjectID == 0 || !validCOSCure {
+			return result, ErrItemUseInvalidRequest
+		}
+		var cosID uint64
+		var kind byte
+		var state COSItemState
+		var health int32
+		var rentEndsAt sql.NullTime
+		if err = tx.QueryRowContext(ctx, "SELECT `ID`,`KIND`,`STATE`,`HEALTH`,`RENT_ENDS_AT` FROM `CHAR_COS` WHERE `ID`=? AND `OWNER_CHAR_ID`=? FOR UPDATE", target.ObjectID, characterID).Scan(&cosID, &kind, &state, &health, &rentEndsAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseNoEffect
+			}
+			return result, fmt.Errorf("lock COS cure target: %w", err)
+		}
+		if err = validateCOSItemRental(COSKind(kind), rentEndsAt, time.Now().UTC()); err != nil {
+			return result, err
+		}
+		if health <= 0 || state == COSItemDead || (COSKind(kind) != COSGrowthPet && COSKind(kind) != COSAbilityPet) {
+			return result, ErrItemUseNoEffect
+		}
+		result.COSCurePersistentID = cosID
+		result.COSCure = &cosCure
 	case isCOSHealthPotion || isCOSHGPotion:
 		if target == nil || target.ObjectID == 0 || ref.Param1 <= 0 {
 			return result, ErrItemUseInvalidRequest
@@ -525,6 +644,135 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 				return ItemUseResult{}, err
 			}
 		}
+	case isConfiguredSkillPoint:
+		if target != nil {
+			return result, ErrItemUseInvalidRequest
+		}
+		var effectKind string
+		var value, maxValue uint64
+		var requiresTarget bool
+		if err = tx.QueryRowContext(ctx, "SELECT `EFFECT_KIND`,`VALUE`,`MAX_VALUE`,`REQUIRES_TARGET_SLOT` FROM `EXPENDABLE_EFFECT_CONFIG` WHERE `ITEM_REF_ID`=?", ref.ID).Scan(&effectKind, &value, &maxValue, &requiresTarget); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseUnsupported
+			}
+			return result, fmt.Errorf("load skill-point expendable configuration: %w", err)
+		}
+		if effectKind != "skill_points" || value == 0 || requiresTarget {
+			return result, ErrItemUseUnsupported
+		}
+		var current uint64
+		if err = tx.QueryRowContext(ctx, "SELECT `SKILL_POINTS` FROM `CHAR` WHERE `id`=?", characterID).Scan(&current); err != nil {
+			return result, fmt.Errorf("load skill-point balance: %w", err)
+		}
+		limit := uint64(^uint32(0))
+		if maxValue > 0 && maxValue < limit {
+			limit = maxValue
+		}
+		if current >= limit {
+			return result, ErrItemUseNoEffect
+		}
+		updated := min(limit, current+value)
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `SKILL_POINTS`=? WHERE `id`=?", updated, characterID); err != nil {
+			return result, fmt.Errorf("persist skill-point expendable: %w", err)
+		}
+		result.SkillPoints = int(updated)
+	case isConfiguredOptUpgrade:
+		if target == nil || target.ObjectID == 0 || target.ObjectID > uint32(^uint8(0))+1 {
+			return result, ErrItemUseInvalidRequest
+		}
+		targetSlot := byte(target.ObjectID - 1)
+		if targetSlot == slot {
+			return result, ErrItemUseInvalidRequest
+		}
+		var effectKind string
+		var value, maxValue uint64
+		var requiresTarget bool
+		if err = tx.QueryRowContext(ctx, "SELECT `EFFECT_KIND`,`VALUE`,`MAX_VALUE`,`REQUIRES_TARGET_SLOT` FROM `EXPENDABLE_EFFECT_CONFIG` WHERE `ITEM_REF_ID`=?", ref.ID).Scan(&effectKind, &value, &maxValue, &requiresTarget); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseUnsupported
+			}
+			return result, fmt.Errorf("load option-upgrade expendable configuration: %w", err)
+		}
+		if effectKind != "opt_level" || value == 0 || maxValue == 0 || !requiresTarget {
+			return result, ErrItemUseUnsupported
+		}
+		var targetItemID int64
+		var current uint64
+		if err = tx.QueryRowContext(ctx, "SELECT it.`id`,it.`OPT_LEVEL` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` r ON r.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? AND r.`TypeID1`=3 AND r.`TypeID2`=1 FOR UPDATE", characterID, targetSlot).Scan(&targetItemID, &current); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return result, ErrItemUseNoEffect
+			}
+			return result, fmt.Errorf("lock option-upgrade target: %w", err)
+		}
+		if current >= maxValue {
+			return result, ErrItemUseNoEffect
+		}
+		updated := min(maxValue, current+value)
+		if _, err = tx.ExecContext(ctx, "UPDATE `ITEM` SET `OPT_LEVEL`=? WHERE `id`=?", updated, targetItemID); err != nil {
+			return result, fmt.Errorf("persist option-upgrade expendable: %w", err)
+		}
+		result.OptLevelTargetSlot = targetSlot
+		result.OptLevelTargetSet = true
+		result.OptLevel = byte(updated)
+	case isPartyMonsterSummon:
+		rows, queryErr := tx.QueryContext(ctx, "SELECT c.`CodeName`,s.`WEIGHT`,s.`RUNTIME_RARITY`,s.`SPAWN_RADIUS`,s.`LIFETIME_SECONDS` FROM `REF_ITEM_SUMMON_MONSTER` s JOIN `CHAR_REF_DATA` c ON c.`RefObjID`=s.`MONSTER_REF_ID` WHERE s.`ITEM_REF_ID`=? AND s.`MIN_PLAYER_LEVEL`<=? AND s.`MAX_PLAYER_LEVEL`>=? ORDER BY s.`MONSTER_REF_ID`", ref.ID, vitals.Level, vitals.Level)
+		if queryErr != nil {
+			return result, fmt.Errorf("load summon-scroll monster catalog: %w", queryErr)
+		}
+		effect := ItemSummonMonsterEffect{}
+		for rows.Next() {
+			var candidate SummonMonsterCandidate
+			var radius, lifetimeSeconds int
+			if scanErr := rows.Scan(&candidate.CodeName, &candidate.Weight, &candidate.Rarity, &radius, &lifetimeSeconds); scanErr != nil {
+				_ = rows.Close()
+				return result, fmt.Errorf("scan summon-scroll monster catalog: %w", scanErr)
+			}
+			if candidate.CodeName == "" || candidate.Weight <= 0 || !candidate.Rarity.Valid() || candidate.Rarity.IsUniqueBoss() ||
+				radius <= 0 || lifetimeSeconds <= 0 || len(effect.Candidates) > 0 &&
+				(effect.Radius != float32(radius) || effect.Lifetime != time.Duration(lifetimeSeconds)*time.Second) {
+				_ = rows.Close()
+				return result, ErrItemUseUnsupported
+			}
+			effect.Candidates = append(effect.Candidates, candidate)
+			effect.Radius = float32(radius)
+			effect.Lifetime = time.Duration(lifetimeSeconds) * time.Second
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return result, fmt.Errorf("iterate summon-scroll monster catalog: %w", rowsErr)
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return result, fmt.Errorf("close summon-scroll monster catalog: %w", closeErr)
+		}
+		if len(effect.Candidates) == 0 {
+			return result, ErrItemUseUnsupported
+		}
+		result.RefItemID = ref.ID
+		result.SummonMonster = &effect
+	case isDirectSuccessExpendable:
+		// Stock 0x0049ACA0 returns success for TypeID3 9 and 15 without an
+		// item-specific server callback. Consumption and 0x305C are the effect.
+		result.RefItemID = ref.ID
+		if ref.TypeID3 == 3 && ref.TypeID4 == 4 {
+			result.StallAvatarRefID = ref.ID
+		}
+	case isHwanPotion:
+		points := minInt(ref.Param1, int(MaxHwanPoints))
+		if points <= 0 {
+			return result, ErrItemUseUnsupported
+		}
+		var snapshot HwanSnapshot
+		if err = tx.QueryRowContext(ctx, "SELECT `REMAIN_HWAN_COUNT`,`GATHERED_HWAN_POINT`,`HWAN_LEVEL` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&snapshot.Points, &snapshot.GatheredPoint, &snapshot.Level); err != nil {
+			return result, fmt.Errorf("lock HWAN potion state: %w", err)
+		}
+		if snapshot.Points >= byte(points) {
+			return result, ErrItemUseNoEffect
+		}
+		snapshot.Points = byte(points)
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `REMAIN_HWAN_COUNT`=? WHERE `id`=?", snapshot.Points, characterID); err != nil {
+			return result, fmt.Errorf("persist HWAN potion: %w", err)
+		}
+		result.HwanSnapshot = &snapshot
 	case isRecovery:
 		var changed bool
 		newHP, newMP, changed = recoveryValues(ref, vitals)
@@ -552,6 +800,9 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 		result.EffectDuration = linkedSkill.BuffDuration
 		result.EffectExpiresAt = expiresAt
 		result.BuffModifiers = linkedSkill.BuffModifiers
+		result.EffectRecoveryHP = linkedSkill.RecoveryHP
+		result.EffectRecoveryMP = linkedSkill.RecoveryMP
+		result.EffectVisibilityRefresh = linkedSkill.DetectionLevel > 0
 	case isSpeedDrug:
 		// vSRO speed-drug skills encode duration and movement percentage in
 		// PARAM4/PARAM6, guarded by their standard parameter identifiers.
@@ -575,34 +826,175 @@ func (r *SQLItemUseRepository) useItem(ctx context.Context, characterID int64, s
 		result.SpeedPercent = speedPercent
 		result.EffectDuration = int(expiresAt.Sub(now).Milliseconds())
 		result.EffectExpiresAt = expiresAt
-	case isTimeService:
-		effect, effectErr := itemServiceFromReference(ref, time.Now().UTC())
+	case isInventoryExpansion:
+		var inventorySize byte
+		if err = tx.QueryRowContext(ctx, "SELECT `INVENTORY_SIZE` FROM `CHAR` WHERE `id`=?", characterID).Scan(&inventorySize); err != nil {
+			return result, fmt.Errorf("load inventory expansion capacity: %w", err)
+		}
+		current := inventorySize
+		if current < InventoryEquipmentSlots {
+			current = BaseInventorySize
+		}
+		expanded := minInt(int(MaxInventoryWireSize), int(current)+ref.Param1)
+		if ref.Param1 <= 0 || expanded <= int(current) {
+			return result, ErrItemUseNoEffect
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `CHAR` SET `INVENTORY_SIZE`=? WHERE `id`=?", expanded, characterID); err != nil {
+			return result, fmt.Errorf("persist inventory expansion: %w", err)
+		}
+		result.InventorySize = byte(expanded)
+	case isWarehouseExpansion:
+		if ref.Param1 <= 0 {
+			return result, ErrItemUseUnsupported
+		}
+		var userID int64
+		if err = tx.QueryRowContext(ctx, "SELECT `FK_USER` FROM `CHAR` WHERE `id`=?", characterID).Scan(&userID); err != nil {
+			return result, fmt.Errorf("resolve warehouse owner: %w", err)
+		}
+		var capacity int
+		if err = tx.QueryRowContext(ctx, "SELECT `CAPACITY` FROM `STORAGE_INFO` WHERE `FK_USER`=? FOR UPDATE", userID).Scan(&capacity); err != nil {
+			return result, fmt.Errorf("lock warehouse capacity: %w", err)
+		}
+		expanded := minInt(255, capacity+ref.Param1)
+		if expanded <= capacity {
+			return result, ErrItemUseNoEffect
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE `STORAGE_INFO` SET `CAPACITY`=? WHERE `FK_USER`=?", expanded, userID); err != nil {
+			return result, fmt.Errorf("persist warehouse expansion: %w", err)
+		}
+	case isTimeService || isConfiguredTimedProgression:
+		now := time.Now().UTC()
+		var effect ItemServiceEffect
+		var effectErr error
+		var cooldownSeconds uint32
+		var reinforceEquipment bool
+		if isTimeService {
+			effect, effectErr = itemServiceFromReference(ref, now)
+		} else {
+			var effectKind string
+			var value, maxValue, durationSeconds uint32
+			var requiresTarget bool
+			effectErr = tx.QueryRowContext(ctx, "SELECT `EFFECT_KIND`,`VALUE`,`MAX_VALUE`,`DURATION_SECONDS`,`COOLDOWN_SECONDS`,`REQUIRES_TARGET_SLOT` FROM `EXPENDABLE_EFFECT_CONFIG` WHERE `ITEM_REF_ID`=?", ref.ID).Scan(&effectKind, &value, &maxValue, &durationSeconds, &cooldownSeconds, &requiresTarget)
+			if effectErr == nil {
+				effect = ItemServiceEffect{SourceRefItemID: ref.ID, EffectValue: value, DailyBudget: time.Millisecond, ActivatedAt: now, ExpiresAt: now.Add(time.Duration(durationSeconds) * time.Second)}
+				switch effectKind {
+				case "hwan_duration":
+					effect.Kind = ItemServiceHwanDuration
+					if timeService, exists := RefItems[ref.ID+6]; exists &&
+						timeService.TypeID1 == 3 && timeService.TypeID2 == 3 && timeService.TypeID3 == 13 && timeService.TypeID4 == 14 &&
+						timeService.Param1 == ref.Param1 {
+						effect.SourceRefItemID = timeService.ID
+					}
+				case "reinforce_weapon":
+					effect.Kind = ItemServiceReinforceWeapon
+				case "reinforce_armor":
+					effect.Kind = ItemServiceReinforceArmor
+				case "reinforce_accessory":
+					effect.Kind = ItemServiceReinforceAccessory
+				case "reinforce_equipment":
+					reinforceEquipment = true
+				case "opt_level":
+					if !IsConfiguredOptionUpgradeScroll(ref) || ref.Param1 <= 0 {
+						effectErr = ErrItemUseUnsupported
+						break
+					}
+					reinforceEquipment = true
+					durationSeconds = uint32(ref.Param1)
+					effect.ExpiresAt = now.Add(time.Duration(durationSeconds) * time.Second)
+				default:
+					effectErr = ErrItemUseUnsupported
+				}
+				if value == 0 || maxValue == 0 || value > maxValue || durationSeconds == 0 ||
+					requiresTarget != IsConfiguredEnhancementScroll(ref) {
+					effectErr = ErrItemUseUnsupported
+				}
+			}
+		}
+		if errors.Is(effectErr, sql.ErrNoRows) {
+			return result, ErrItemUseUnsupported
+		}
 		if effectErr != nil {
 			return result, effectErr
 		}
-		var currentExpiration time.Time
-		err = tx.QueryRowContext(ctx, "SELECT `EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `SERVICE_KIND`=? FOR UPDATE", characterID, effect.Kind).Scan(&currentExpiration)
+		if effect.Kind == ItemServiceHwanDuration {
+			var points byte
+			if err = tx.QueryRowContext(ctx, "SELECT `REMAIN_HWAN_COUNT` FROM `CHAR` WHERE `id`=?", characterID).Scan(&points); err != nil {
+				return result, fmt.Errorf("load HWAN gauge for Energy of Life: %w", err)
+			}
+			if points >= MaxHwanPoints {
+				return result, ErrItemUseNoEffect
+			}
+		}
+		if IsConfiguredEnhancementScroll(ref) {
+			if target == nil || target.ObjectID == 0 || target.ObjectID > uint32(^uint8(0))+1 {
+				return result, ErrItemUseInvalidRequest
+			}
+			targetSlot := byte(target.ObjectID - 1)
+			var targetTypeID3, targetOptLevel int
+			if err = tx.QueryRowContext(ctx, "SELECT r.`TypeID_3`,it.`OPT_LEVEL` FROM `INVENTORY` i JOIN `ITEM` it ON it.`id`=i.`FK_ITEM` JOIN `ITEMDATA` r ON r.`ItemID`=it.`FK_REF_ITEM` WHERE i.`FK_CHAR`=? AND i.`SLOT`=? FOR UPDATE", characterID, targetSlot).Scan(&targetTypeID3, &targetOptLevel); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return result, ErrItemUseNoEffect
+				}
+				return result, fmt.Errorf("lock reinforcement target: %w", err)
+			}
+			if reinforceEquipment {
+				switch {
+				case targetTypeID3 == TypeID3Weapon:
+					effect.Kind = ItemServiceReinforceWeapon
+				case targetTypeID3 >= 1 && targetTypeID3 <= 4:
+					effect.Kind = ItemServiceReinforceArmor
+				case targetTypeID3 == 5 || targetTypeID3 == 12:
+					effect.Kind = ItemServiceReinforceAccessory
+				default:
+					return result, ErrItemUseNoEffect
+				}
+			}
+			validTarget := effect.Kind == ItemServiceReinforceWeapon && targetTypeID3 == TypeID3Weapon ||
+				effect.Kind == ItemServiceReinforceArmor && targetTypeID3 >= 1 && targetTypeID3 <= 4 ||
+				effect.Kind == ItemServiceReinforceAccessory && (targetTypeID3 == 5 || targetTypeID3 == 12)
+			if !validTarget {
+				return result, ErrItemUseNoEffect
+			}
+			effect.TargetSlot = targetSlot
+			effect.TargetSlotSet = true
+			effect.TargetBaseOptLevel = byte(min(255, max(0, targetOptLevel)))
+			effect.TargetProjectedOptLevel = byte(min(255, max(0, targetOptLevel)+int(effect.EffectValue)))
+		}
+		var currentActivation, currentExpiration time.Time
+		err = tx.QueryRowContext(ctx, "SELECT `ACTIVATED_AT`,`EXPIRES_AT` FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `SERVICE_KIND`=? FOR UPDATE", characterID, effect.Kind).Scan(&currentActivation, &currentExpiration)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return result, fmt.Errorf("lock character item service: %w", err)
+		}
+		if currentExpiration.After(now) && (IsConfiguredEnhancementScroll(ref) || effect.Kind == ItemServiceHwanDuration) {
+			return result, ErrItemUseNoEffect
 		}
 		base := effect.ActivatedAt
 		if currentExpiration.After(base) {
 			base = currentExpiration
 		}
 		effect.ExpiresAt = base.Add(effect.ExpiresAt.Sub(effect.ActivatedAt))
-		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_ITEM_SERVICE` (`CHAR_ID`,`SERVICE_KIND`,`SOURCE_REF_ITEM_ID`,`EXPERIENCE_BONUS_PERCENT`,`SKILL_EXPERIENCE_BONUS_PERCENT`,`DAILY_BUDGET_MS`,`ACTIVATED_AT`,`EXPIRES_AT`) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `SOURCE_REF_ITEM_ID`=VALUES(`SOURCE_REF_ITEM_ID`),`EXPERIENCE_BONUS_PERCENT`=VALUES(`EXPERIENCE_BONUS_PERCENT`),`SKILL_EXPERIENCE_BONUS_PERCENT`=VALUES(`SKILL_EXPERIENCE_BONUS_PERCENT`),`DAILY_BUDGET_MS`=VALUES(`DAILY_BUDGET_MS`),`ACTIVATED_AT`=VALUES(`ACTIVATED_AT`),`EXPIRES_AT`=VALUES(`EXPIRES_AT`)", characterID, effect.Kind, effect.SourceRefItemID, effect.ExperienceBonusPercent, effect.SkillExperienceBonusPercent, effect.DailyBudget.Milliseconds(), effect.ActivatedAt, effect.ExpiresAt); err != nil {
+		var targetSlot, targetBaseOptLevel, targetProjectedOptLevel any
+		if effect.TargetSlotSet {
+			targetSlot = effect.TargetSlot
+			targetBaseOptLevel = effect.TargetBaseOptLevel
+			targetProjectedOptLevel = effect.TargetProjectedOptLevel
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO `CHAR_ITEM_SERVICE` (`CHAR_ID`,`SERVICE_KIND`,`SOURCE_REF_ITEM_ID`,`EXPERIENCE_BONUS_PERCENT`,`SKILL_EXPERIENCE_BONUS_PERCENT`,`EFFECT_VALUE`,`TARGET_SLOT`,`TARGET_BASE_OPT_LEVEL`,`TARGET_PROJECTED_OPT_LEVEL`,`DAILY_BUDGET_MS`,`ACTIVATED_AT`,`EXPIRES_AT`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE `SOURCE_REF_ITEM_ID`=VALUES(`SOURCE_REF_ITEM_ID`),`EXPERIENCE_BONUS_PERCENT`=VALUES(`EXPERIENCE_BONUS_PERCENT`),`SKILL_EXPERIENCE_BONUS_PERCENT`=VALUES(`SKILL_EXPERIENCE_BONUS_PERCENT`),`EFFECT_VALUE`=VALUES(`EFFECT_VALUE`),`TARGET_SLOT`=VALUES(`TARGET_SLOT`),`TARGET_BASE_OPT_LEVEL`=VALUES(`TARGET_BASE_OPT_LEVEL`),`TARGET_PROJECTED_OPT_LEVEL`=VALUES(`TARGET_PROJECTED_OPT_LEVEL`),`DAILY_BUDGET_MS`=VALUES(`DAILY_BUDGET_MS`),`ACTIVATED_AT`=VALUES(`ACTIVATED_AT`),`EXPIRES_AT`=VALUES(`EXPIRES_AT`)", characterID, effect.Kind, effect.SourceRefItemID, effect.ExperienceBonusPercent, effect.SkillExperienceBonusPercent, effect.EffectValue, targetSlot, targetBaseOptLevel, targetProjectedOptLevel, effect.DailyBudget.Milliseconds(), effect.ActivatedAt, effect.ExpiresAt); err != nil {
 			return result, fmt.Errorf("persist character item service: %w", err)
 		}
 		result.ItemService = &effect
-	case isReturnScroll:
-		// RETURN_TELEPORT_ID is the authoritative per-character bind point.
-		// Resolve it while the character row is locked and commit the item and
-		// destination together so reconnecting can never duplicate the scroll
-		// or leave the character at the old position.
+	case isReturnScroll || isSpecialReturnScroll:
 		var destination TeleportDestination
-		err = tx.QueryRowContext(ctx, "SELECT t.`ID`,t.`REGION_ID`,t.`POS_X`,t.`POS_Y`,t.`POS_Z`,t.`WORLD_ID`,0,0 FROM `CHAR` c JOIN `TELEPORT_POINT` t ON t.`ID`=c.`RETURN_TELEPORT_ID` AND t.`SERVICE`=1 WHERE c.`ID`=?", characterID).Scan(
-			&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel,
-		)
+		if isSpecialReturnScroll {
+			err = tx.QueryRowContext(ctx, "SELECT `ID`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID`,0,0 FROM `TELEPORT_POINT` WHERE `CODE_NAME`=? AND `SERVICE`=1", strings.TrimSpace(ref.Param4Desc)).Scan(
+				&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel,
+			)
+		} else {
+			// RETURN_TELEPORT_ID is the authoritative per-character bind point.
+			err = tx.QueryRowContext(ctx, "SELECT t.`ID`,t.`REGION_ID`,t.`POS_X`,t.`POS_Y`,t.`POS_Z`,t.`WORLD_ID`,0,0 FROM `CHAR` c JOIN `TELEPORT_POINT` t ON t.`ID`=c.`RETURN_TELEPORT_ID` AND t.`SERVICE`=1 WHERE c.`ID`=?", characterID).Scan(
+				&destination.ID, &destination.Region, &destination.X, &destination.Y, &destination.Z, &destination.WorldID, &destination.Fee, &destination.MinLevel,
+			)
+		}
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, ErrItemUseUnsupported
 		}
@@ -1099,7 +1491,7 @@ func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	rows, err := r.shard.QueryContext(ctx, "SELECT s.`SERVICE_KIND`,s.`SOURCE_REF_ITEM_ID`,s.`EXPERIENCE_BONUS_PERCENT`,s.`SKILL_EXPERIENCE_BONUS_PERCENT`,s.`DAILY_BUDGET_MS`,s.`ACTIVATED_AT`,s.`EXPIRES_AT`,d.`USED_ON`,d.`ACTIVE_UNTIL` FROM `CHAR_ITEM_SERVICE` s LEFT JOIN `CHAR_ITEM_SERVICE_DAILY` d ON d.`CHAR_ID`=s.`CHAR_ID` AND d.`SERVICE_KIND`=s.`SERVICE_KIND` WHERE s.`CHAR_ID`=? AND s.`EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY s.`SERVICE_KIND`", characterID)
+	rows, err := r.shard.QueryContext(ctx, "SELECT s.`SERVICE_KIND`,s.`SOURCE_REF_ITEM_ID`,s.`EXPERIENCE_BONUS_PERCENT`,s.`SKILL_EXPERIENCE_BONUS_PERCENT`,s.`EFFECT_VALUE`,s.`TARGET_SLOT`,s.`TARGET_BASE_OPT_LEVEL`,s.`TARGET_PROJECTED_OPT_LEVEL`,s.`DAILY_BUDGET_MS`,s.`ACTIVATED_AT`,s.`EXPIRES_AT`,d.`USED_ON`,d.`ACTIVE_UNTIL` FROM `CHAR_ITEM_SERVICE` s LEFT JOIN `CHAR_ITEM_SERVICE_DAILY` d ON d.`CHAR_ID`=s.`CHAR_ID` AND d.`SERVICE_KIND`=s.`SERVICE_KIND` WHERE s.`CHAR_ID`=? AND s.`EXPIRES_AT`>UTC_TIMESTAMP(6) ORDER BY s.`SERVICE_KIND`", characterID)
 	if err != nil {
 		return nil, fmt.Errorf("load character item services: %w", err)
 	}
@@ -1108,9 +1500,16 @@ func (r *SQLItemUseRepository) LoadItemServices(ctx context.Context, characterID
 	for rows.Next() {
 		var effect ItemServiceEffect
 		var budgetMS int64
+		var targetSlot, targetBaseOptLevel, targetProjectedOptLevel sql.NullByte
 		var usedOn, activeUntil sql.NullTime
-		if err = rows.Scan(&effect.Kind, &effect.SourceRefItemID, &effect.ExperienceBonusPercent, &effect.SkillExperienceBonusPercent, &budgetMS, &effect.ActivatedAt, &effect.ExpiresAt, &usedOn, &activeUntil); err != nil {
+		if err = rows.Scan(&effect.Kind, &effect.SourceRefItemID, &effect.ExperienceBonusPercent, &effect.SkillExperienceBonusPercent, &effect.EffectValue, &targetSlot, &targetBaseOptLevel, &targetProjectedOptLevel, &budgetMS, &effect.ActivatedAt, &effect.ExpiresAt, &usedOn, &activeUntil); err != nil {
 			return nil, fmt.Errorf("scan character item service: %w", err)
+		}
+		if targetSlot.Valid && targetBaseOptLevel.Valid && targetProjectedOptLevel.Valid {
+			effect.TargetSlot = targetSlot.Byte
+			effect.TargetSlotSet = true
+			effect.TargetBaseOptLevel = targetBaseOptLevel.Byte
+			effect.TargetProjectedOptLevel = targetProjectedOptLevel.Byte
 		}
 		effect.DailyBudget = time.Duration(budgetMS) * time.Millisecond
 		effect.ActivatedAt = effect.ActivatedAt.UTC()
@@ -1153,6 +1552,9 @@ func (r *SQLItemUseRepository) LoadItemBuffs(ctx context.Context, characterID in
 		}
 		effect.ExpiresAt = effect.ExpiresAt.UTC()
 		effect.Modifiers = skill.BuffModifiers
+		effect.RecoveryHP = skill.RecoveryHP
+		effect.RecoveryMP = skill.RecoveryMP
+		effect.RefreshVisibility = skill.DetectionLevel > 0
 		effects = append(effects, effect)
 	}
 	if err = rows.Err(); err != nil {
@@ -1250,6 +1652,27 @@ func (r *SQLItemUseRepository) LoadSpeedEffect(ctx context.Context, characterID 
 	}
 	effect.ExpiresAt = effect.ExpiresAt.UTC()
 	return effect, true, nil
+}
+
+func (r *SQLItemUseRepository) PersistItemBuffRecovery(ctx context.Context, characterID int64, currentHP, currentMP, healedHP, healedMP int) (bool, error) {
+	if r == nil || r.shard == nil {
+		return false, ErrItemUseRepositoryUnavailable
+	}
+	if characterID <= 0 || healedHP < currentHP || healedMP < currentMP || healedHP == currentHP && healedMP == currentMP {
+		return false, ErrItemUseInvalidRequest
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := r.shard.ExecContext(ctx, "UPDATE `CHAR` SET `HP`=?,`MP`=? WHERE `id`=? AND `HP`=? AND `MP`=?", healedHP, healedMP, characterID, currentHP, currentMP)
+	if err != nil {
+		return false, fmt.Errorf("persist item-buff recovery: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("inspect item-buff recovery: %w", err)
+	}
+	return affected == 1, nil
 }
 
 func loadInventoryInItemUseTransaction(ctx context.Context, tx *sql.Tx, characterID int64) (Inventory, error) {

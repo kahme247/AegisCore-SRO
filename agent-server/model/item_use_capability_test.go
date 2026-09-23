@@ -240,9 +240,10 @@ func TestClassifyItemUseCapability(t *testing.T) {
 			family: ItemUseFamilyCharacterStatusCure, status: ItemUseCapabilityBrokenReference, reason: ItemUseReasonInvalidEffectParameters,
 		},
 		{
-			name:   "COS Grass of Life remains a separate unsupported family",
-			input:  ItemUseCapabilityInput{RefItem: capabilityTestPositiveItem(3, 2, 7)},
-			family: ItemUseFamilyUnknown, status: ItemUseCapabilityUnsupported, reason: ItemUseReasonNoRuntimeHandler,
+			name:   "COS Grass of Life",
+			input:  ItemUseCapabilityInput{RefItem: capabilityTestCOSCure()},
+			family: ItemUseFamilyCOSStatusCure, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
+			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteOwnedCOSTarget, ItemUsePrerequisiteLivingCOSTarget, ItemUsePrerequisiteGrowthCOSTarget},
 		},
 		{
 			name:   "mall cure bag remains a separate unsupported family",
@@ -262,9 +263,9 @@ func TestClassifyItemUseCapability(t *testing.T) {
 			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteLinkedSkill},
 		},
 		{
-			name:   "linked unresolved mall damage absorption stays blocked",
+			name:   "linked mall damage absorption",
 			input:  ItemUseCapabilityInput{RefItem: capabilityTestLinkedItem(unresolvedMallEffect.CodeName), LinkedSkill: &unresolvedMallEffect},
-			family: ItemUseFamilyLinkedSkillEffect, status: ItemUseCapabilityUnsupported, reason: ItemUseReasonLinkedSkillKindUnsupported,
+			family: ItemUseFamilyLinkedSkillBuff, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
 			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteLinkedSkill},
 		},
 		{
@@ -346,6 +347,14 @@ func TestClassifyItemUseCapability(t *testing.T) {
 			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteReverseReturnOption, ItemUsePrerequisiteReverseReturnDestination},
 		},
 		{
+			name: "option level enhancement scroll",
+			input: ItemUseCapabilityInput{RefItem: RefItem{RefObject: RefObject{
+				ID: 39364, IsUseable: true, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 11},
+			}}},
+			family: ItemUseFamilyOptionLevelUpgrade, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
+			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteEventConfiguration, ItemUsePrerequisiteEquipmentTarget},
+		},
+		{
 			name:   "character resurrection uses dedicated request",
 			input:  ItemUseCapabilityInput{RefItem: capabilityTestItemWithCode(3, 13, 6, "ITEM_MALL_RESURRECTION_100P")},
 			family: ItemUseFamilyCharacterResurrection, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
@@ -376,8 +385,18 @@ func TestClassifyItemUseCapability(t *testing.T) {
 			prerequisites: []ItemUsePrerequisite{ItemUsePrerequisiteDevilSpiritDuration},
 		},
 		{
-			name:   "no runtime handler",
+			name:   "stock direct-success expendable",
 			input:  ItemUseCapabilityInput{RefItem: capabilityTestItem(true, 3, 9, 9)},
+			family: ItemUseFamilyDirectSuccessExpendable, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
+		},
+		{
+			name:   "stall avatar expendable",
+			input:  ItemUseCapabilityInput{RefItem: capabilityTestItem(true, 3, 3, 4)},
+			family: ItemUseFamilyDirectSuccessExpendable, status: ItemUseCapabilitySupported, reason: ItemUseReasonNone,
+		},
+		{
+			name:   "no runtime handler",
+			input:  ItemUseCapabilityInput{RefItem: capabilityTestItem(true, 3, 8, 9)},
 			family: ItemUseFamilyUnknown, status: ItemUseCapabilityUnsupported, reason: ItemUseReasonNoRuntimeHandler,
 		},
 	}
@@ -465,6 +484,12 @@ func capabilityTestElementalCure() RefItem {
 	ref := capabilityTestItem(true, 3, 2, 6)
 	ref.Param1, ref.Param2, ref.Param3 = 36, 36, 36
 	ref.Param4, ref.Param5, ref.Param6 = 36, 36, 36
+	return ref
+}
+
+func capabilityTestCOSCure() RefItem {
+	ref := capabilityTestElementalCure()
+	ref.TypeID4 = 7
 	return ref
 }
 

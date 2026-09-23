@@ -44,9 +44,9 @@ func TestGuildStorageOperationSuccessLayouts(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"move", hex.EncodeToString(guildPacketPayload(buildGuildStorageMoveSuccess(GuildStorageMoveOperation, 1, 2, 3))), "011d01020300"},
-		{"deposit", hex.EncodeToString(guildPacketPayload(buildGuildStorageTransferSuccess(GuildStorageDepositItemOperation, 13, 0))), "011e0d00"},
-		{"withdraw", hex.EncodeToString(guildPacketPayload(buildGuildStorageTransferSuccess(GuildStorageWithdrawItemOperation, 0, 13))), "011f000d"},
+		{"move", hex.EncodeToString(guildPacketPayload(buildStorageMoveSuccess(GuildStorageMoveOperation, 1, 2, 3))), "011d01020300"},
+		{"deposit", hex.EncodeToString(guildPacketPayload(buildStorageTransferSuccess(GuildStorageDepositItemOperation, 13, 0))), "011e0d00"},
+		{"withdraw", hex.EncodeToString(guildPacketPayload(buildStorageTransferSuccess(GuildStorageWithdrawItemOperation, 0, 13))), "011f000d"},
 		{"gold deposit", hex.EncodeToString(guildPacketPayload(buildGuildStorageGoldSuccess(GuildStorageDepositGoldOperation, 5))), "01200500000000000000"},
 	}
 	for _, test := range tests {

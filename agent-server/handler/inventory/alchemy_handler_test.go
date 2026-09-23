@@ -8,6 +8,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 func TestAlchemyLifecycleAdvancesOnThirdGameTick(t *testing.T) {
@@ -294,13 +295,32 @@ func TestAlchemyProtocolFailuresMatchVSRO188Layouts(t *testing.T) {
 		opcode uint16
 		want   []byte
 	}{
-		{name: "stone", packet: buildStoneAlchemyFailure(), opcode: opcode.AlchemyStoneResponse, want: []byte{2, 0, 0}},
+		{name: "stone", packet: vsro188.BuildAlchemyFailure(opcode.AlchemyStoneResponse, 0), opcode: opcode.AlchemyStoneResponse, want: []byte{2, 0, 0}},
 		{name: "socket", packet: buildSocketAlchemyFailure(), opcode: opcode.AlchemySocketResponse, want: []byte{2, 2, 0, 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.packet.MessageID != tt.opcode || !bytes.Equal(tt.packet.Payload(), tt.want) {
 				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload % X", tt.packet.MessageID, tt.packet.Payload(), tt.opcode, tt.want)
+			}
+		})
+	}
+}
+
+func TestAlchemyZeroCodeFailureOpcodesUseCanonicalWireLayout(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		opcode uint16
+	}{
+		{name: "elixir", opcode: opcode.AlchemyElixirResponse},
+		{name: "avatar", opcode: opcode.AlchemyAvatarResponse},
+		{name: "material", opcode: opcode.AlchemyMaterialResponse},
+		{name: "dismantle", opcode: opcode.AlchemyDismantleResponse},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := vsro188.BuildAlchemyFailure(test.opcode, 0)
+			if packet.MessageID != test.opcode || !bytes.Equal(packet.Payload(), []byte{2, 0, 0}) {
+				t.Fatalf("packet = opcode %#x payload % X, want opcode %#x payload 02 00 00", packet.MessageID, packet.Payload(), test.opcode)
 			}
 		})
 	}

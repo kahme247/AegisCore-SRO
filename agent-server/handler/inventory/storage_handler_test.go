@@ -26,6 +26,29 @@ func TestBuildEmptyStorageResponsesUsesVSROChunkSequence(t *testing.T) {
 	}
 }
 
+func TestGuildAndPersonalStorageResponsesDifferOnlyByOpcodes(t *testing.T) {
+	snapshot := model.StorageSnapshot{Capacity: baseStorageSize, Gold: 99, Items: map[byte]model.Item{}}
+	personal := buildStorageResponses(snapshot)
+	guild := buildGuildStorageResponses(snapshot)
+	if len(personal) != len(guild) {
+		t.Fatalf("response counts = %d and %d", len(personal), len(guild))
+	}
+	for index := range personal {
+		if !reflect.DeepEqual(personal[index].Payload(), guild[index].Payload()) {
+			t.Fatalf("response %d payloads = %x and %x", index, personal[index].Payload(), guild[index].Payload())
+		}
+	}
+	if personal[0].MessageID != opcode.StorageDataBegin || guild[0].MessageID != opcode.GuildStorageDataBegin {
+		t.Fatalf("begin opcodes = 0x%04X and 0x%04X", personal[0].MessageID, guild[0].MessageID)
+	}
+	if personal[1].MessageID != opcode.StorageData || guild[1].MessageID != opcode.GuildStorageData {
+		t.Fatalf("data opcodes = 0x%04X and 0x%04X", personal[1].MessageID, guild[1].MessageID)
+	}
+	if personal[2].MessageID != opcode.StorageDataEnd || guild[2].MessageID != opcode.GuildStorageDataEnd {
+		t.Fatalf("end opcodes = 0x%04X and 0x%04X", personal[2].MessageID, guild[2].MessageID)
+	}
+}
+
 func TestChunkStorageDataUsesStockCompatibleMultipartLimit(t *testing.T) {
 	packets := chunkStorageData(make([]byte, storageDataChunkSize*2+1))
 	if len(packets) != 3 {

@@ -13,6 +13,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	"github.com/g3n/engine/math32"
 )
 
@@ -418,15 +419,126 @@ func TestItemUseResponseMatchesExactVSRO188Parser(t *testing.T) {
 	result, e1 := success.ReadByte()
 	slot, e2 := success.ReadByte()
 	amount, e3 := success.ReadUInt16()
-	itemType, e4 := success.ReadUInt16()
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || result != 1 || slot != 14 || itemType != 0x08EC || amount != 49 || success.Remaining() != 0 {
-		t.Fatalf("success response = result %d slot %d itemType 0x%04X amount %d remaining %d errors %v/%v/%v/%v", result, slot, itemType, amount, success.Remaining(), e1, e2, e3, e4)
+	packedTypeID, e4 := success.ReadUInt16()
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || result != 1 || slot != 14 || packedTypeID != 0x08EC || amount != 49 || success.Remaining() != 0 {
+		t.Fatalf("success response = result %d slot %d packedTypeID 0x%04X amount %d remaining %d errors %v/%v/%v/%v", result, slot, packedTypeID, amount, success.Remaining(), e1, e2, e3, e4)
 	}
 	failure := buildItemUseFailure()
 	result, e1 = failure.ReadByte()
 	errorCode, e2 := failure.ReadUInt16()
 	if e1 != nil || e2 != nil || result != 2 || errorCode != 0 || failure.Remaining() != 0 {
 		t.Fatalf("failure response = result %d errorCode %d remaining %d errors %v/%v", result, errorCode, failure.Remaining(), e1, e2)
+	}
+}
+
+func TestSuccessfulItemUsePublishesStockEntityItemUsedNotification(t *testing.T) {
+	previousRefs := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousRefs })
+	ref := model.RefItem{RefObject: model.RefObject{
+		ID: 1, IsUseable: true,
+		TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 1, TypeID4: 1},
+	}}
+	model.RefItems = map[uint32]model.RefItem{ref.ID: ref}
+	item := model.Item{SRObject: model.SRObject{RefObjectID: ref.ID}, StackSize: 2}
+	inventory := model.NewInventory(map[byte]model.Item{14: item})
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 7, Session: session, Level: 1, BaseStats: model.BaseStats{HP: 10, MP: 10}, Inventory: inventory}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{Inventory: inventory, HP: 20, MP: 10, SourceSlot: 14, ItemType: model.InventoryItemType(ref), NewAmount: 1}}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	h.send = func(*server.Session, network.Packet) error { return nil }
+	var published []network.Packet
+	h.publish = func(_ *model.Player, packet *network.Packet) { published = append(published, *packet) }
+	request := network.EmptyClientPacket()
+	request.WriteByte(14)
+	request.WriteUInt16(model.InventoryItemType(ref))
+	request.WriteByte(2) // stock target/action suffix; not a reverse-return option
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatalf("handle item use: %v", err)
+	}
+	if len(published) != 1 || published[0].MessageID != opcode.EntityItemUsed {
+		t.Fatalf("published packets = %+v, want one 0x305C", published)
+	}
+	uid, e1 := published[0].ReadUInt32()
+	refID, e2 := published[0].ReadUInt32()
+	if errors.Join(e1, e2) != nil || uid != 100 || refID != ref.ID || published[0].Remaining() != 0 {
+		t.Fatalf("0x305C = uid %d ref %d trailing %d errors %v", uid, refID, published[0].Remaining(), errors.Join(e1, e2))
+	}
+}
+func TestOptionUpgradeTreatsEquipmentSlotTwoAsTargetNotReverseOption(t *testing.T) {
+	previousRefs := model.RefItems
+	t.Cleanup(func() { model.RefItems = previousRefs })
+	ref := model.RefItem{RefObject: model.RefObject{
+		ID: 39365, IsUseable: true,
+		TypeInfo: model.TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 13, TypeID4: 11},
+	}}
+	model.RefItems = map[uint32]model.RefItem{ref.ID: ref}
+	inventory := model.NewInventory(map[byte]model.Item{14: {
+		SRObject: model.SRObject{RefObjectID: ref.ID}, StackSize: 1,
+	}})
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 100, CharacterID: 7}}
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 100}, ID: 7, Session: session, Level: 1, BaseStats: model.BaseStats{HP: 10, MP: 10}, Inventory: inventory}
+	repository := &itemUseRepositoryFake{result: model.ItemUseResult{Inventory: inventory, HP: 10, MP: 10, SourceSlot: 14, ItemType: model.InventoryItemType(ref)}}
+	h := NewItemUseHandler(&inventoryHandlerPlayerLookupFake{player: player}, repository)
+	h.send = func(*server.Session, network.Packet) error { return nil }
+	h.publish = func(*model.Player, *network.Packet) {}
+	request := network.EmptyClientPacket()
+	request.WriteByte(14)
+	request.WriteUInt16(model.InventoryItemType(ref))
+	request.WriteByte(2)
+	if err := h.handlePacket(context.Background(), session, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.calls != 1 || repository.target.ObjectID != 3 {
+		t.Fatalf("option-upgrade target = calls:%d object:%d, want inventory slot 2 encoded as 3", repository.calls, repository.target.ObjectID)
+	}
+}
+
+func TestTemporaryEnhancementPublishesProjectedAndBaseItemLevels(t *testing.T) {
+	effect := model.ItemServiceEffect{
+		TargetSlot:              6,
+		TargetSlotSet:           true,
+		TargetBaseOptLevel:      4,
+		TargetProjectedOptLevel: 6,
+	}
+	active, exists, err := model.BuildItemServiceTargetLevelUpdate(effect, true)
+	if err != nil || !exists {
+		t.Fatalf("active update exists=%v error=%v", exists, err)
+	}
+	decoded, err := vsro188.DecodeInventoryItemUpdate(active)
+	if err != nil || decoded.ItemKind != 6 || decoded.Flags != 0x82 || decoded.Flag02U8 == nil || *decoded.Flag02U8 != 6 || decoded.Flag80U32 == nil || *decoded.Flag80U32 != 0 {
+		t.Fatalf("active update = %+v error=%v", decoded, err)
+	}
+	reverted, exists, err := model.BuildItemServiceTargetLevelUpdate(effect, false)
+	if err != nil || !exists {
+		t.Fatalf("revert update exists=%v error=%v", exists, err)
+	}
+	decoded, err = vsro188.DecodeInventoryItemUpdate(reverted)
+	if err != nil || decoded.Flag02U8 == nil || *decoded.Flag02U8 != 4 {
+		t.Fatalf("revert update = %+v error=%v", decoded, err)
+	}
+	item := model.Item{
+		OptLevel:        4,
+		AdvancedElixirs: []model.BindingOption{{Slot: 0, ID: 25874, Value: 2}},
+		SRObject: model.SRObject{TypeInfo: model.TypeInfo{
+			TypeID1: model.TypeID1Item, TypeID2: model.TypeID2Wearable, TypeID3: model.TypeID3Weapon,
+		}},
+	}
+	player := &model.Player{Inventory: model.NewInventory(map[byte]model.Item{6: item})}
+	active, exists, err = model.BuildPlayerItemServiceTargetLevelUpdate(player, effect, true)
+	if err != nil || !exists {
+		t.Fatalf("advanced active update exists=%v error=%v", exists, err)
+	}
+	decoded, err = vsro188.DecodeInventoryItemUpdate(active)
+	if err != nil || decoded.Flag02U8 == nil || *decoded.Flag02U8 != 8 {
+		t.Fatalf("advanced active update = %+v error=%v, want displayed +8", decoded, err)
+	}
+	reverted, exists, err = model.BuildPlayerItemServiceTargetLevelUpdate(player, effect, false)
+	if err != nil || !exists {
+		t.Fatalf("advanced reverted update exists=%v error=%v", exists, err)
+	}
+	decoded, err = vsro188.DecodeInventoryItemUpdate(reverted)
+	if err != nil || decoded.Flag02U8 == nil || *decoded.Flag02U8 != 6 {
+		t.Fatalf("advanced reverted update = %+v error=%v, want displayed +6", decoded, err)
 	}
 }
 
@@ -543,19 +655,19 @@ func TestSpeedItemPublishesTimedBuffIcon(t *testing.T) {
 	if err := h.handlePacket(context.Background(), session, request); err != nil {
 		t.Fatalf("speed item use failed: %v", err)
 	}
-	if len(published) != 1 || published[0].MessageID != opcode.EntityBuffAdd || expire == nil {
+	if len(published) != 2 || published[0].MessageID != opcode.EntityItemUsed || published[1].MessageID != opcode.EntityBuffAdd || expire == nil {
 		t.Fatalf("published packets = %+v, expiry scheduled = %v", published, expire != nil)
 	}
 	for range 3 {
-		if _, err := published[0].ReadUInt32(); err != nil {
+		if _, err := published[1].ReadUInt32(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if published[0].Remaining() != 0 {
-		t.Fatalf("stock speed buff has %d trailing bytes", published[0].Remaining())
+	if published[1].Remaining() != 0 {
+		t.Fatalf("stock speed buff has %d trailing bytes", published[1].Remaining())
 	}
 	expire()
-	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {
+	if len(published) != 3 || published[2].MessageID != opcode.EntityBuffRemove {
 		t.Fatalf("expiration packets = %+v, want buff removal", published)
 	}
 }
@@ -593,14 +705,14 @@ func TestReferenceSkillItemAppliesAndExpiresStatBuff(t *testing.T) {
 	if player.ActiveCombatDamagePercent() != 20 || player.BonusStats.HP != 500 || player.BonusAttackStats.HitRate != 10 {
 		t.Fatalf("applied modifiers = damage %d hp %d hit %d", player.ActiveCombatDamagePercent(), player.BonusStats.HP, player.BonusAttackStats.HitRate)
 	}
-	if len(published) != 1 || published[0].MessageID != opcode.EntityBuffAdd || expire == nil {
+	if len(published) != 2 || published[0].MessageID != opcode.EntityItemUsed || published[1].MessageID != opcode.EntityBuffAdd || expire == nil {
 		t.Fatalf("buff publication = %+v expiry=%v", published, expire != nil)
 	}
 	expire()
 	if player.ActiveCombatDamagePercent() != 0 || player.BonusStats.HP != 0 || player.BonusAttackStats.HitRate != 0 {
 		t.Fatalf("expired modifiers = damage %d hp %d hit %d", player.ActiveCombatDamagePercent(), player.BonusStats.HP, player.BonusAttackStats.HitRate)
 	}
-	if len(published) != 2 || published[1].MessageID != opcode.EntityBuffRemove {
+	if len(published) != 3 || published[2].MessageID != opcode.EntityBuffRemove {
 		t.Fatalf("expiration publication = %+v", published)
 	}
 }
@@ -657,15 +769,15 @@ func TestDirectCureItemConsumesOnNoEffectAndPublishesChangedStatus(t *testing.T)
 				t.Fatal("committed cure did not publish consumed inventory snapshot")
 			}
 			if !active {
-				if len(published) != 0 {
-					t.Fatalf("no-effect cure published %+v", published)
+				if len(published) != 1 || published[0].MessageID != opcode.EntityItemUsed {
+					t.Fatalf("no-effect cure publications = %+v, want item-used notification", published)
 				}
 				return
 			}
 			if _, remains := player.CombatStatus(model.CombatStatusDarkness, now); remains {
 				t.Fatal("eligible darkness was not cured")
 			}
-			if len(published) != 1 || published[0].MessageID != opcode.EntityUpdateStatus {
+			if len(published) != 2 || published[0].MessageID != opcode.EntityUpdateStatus || published[1].MessageID != opcode.EntityItemUsed {
 				t.Fatalf("cure publications = %+v", published)
 			}
 			uid, e1 := published[0].ReadUInt32()
@@ -720,17 +832,17 @@ func TestElementalCureSchedulesShortenedStatusExpiration(t *testing.T) {
 	if err := h.handlePacket(context.Background(), session, request); err != nil {
 		t.Fatal(err)
 	}
-	if delay != 6_508*time.Millisecond || expire == nil || len(published) != 1 {
-		t.Fatalf("shortened expiry = %v scheduled=%t publications=%d", delay, expire != nil, len(published))
+	if delay != 6_508*time.Millisecond || expire == nil || len(published) != 2 || published[0].MessageID != opcode.EntityUpdateStatus || published[1].MessageID != opcode.EntityItemUsed {
+		t.Fatalf("shortened expiry = %v scheduled=%t publications=%+v", delay, expire != nil, published)
 	}
 	current = current.Add(delay)
 	expire()
-	if len(published) != 2 || published[1].MessageID != opcode.EntityUpdateStatus {
+	if len(published) != 3 || published[2].MessageID != opcode.EntityUpdateStatus {
 		t.Fatalf("expiry publications = %+v", published)
 	}
 	// Exact payload decoding is already covered above; the refresh must expose
 	// an empty abnormal-state mask after the shortened authoritative expiry.
-	packet := published[1]
+	packet := published[2]
 	_, _ = packet.ReadUInt32()
 	_, _ = packet.ReadUInt16()
 	_, _ = packet.ReadByte()
@@ -787,5 +899,73 @@ func TestReturnScrollPreparesAndCompletesAfterReferenceDelay(t *testing.T) {
 	delayed()
 	if teleport.completed != 1 || teleport.destination != destination {
 		t.Fatalf("completed return = %d destination %+v, want %+v", teleport.completed, teleport.destination, destination)
+	}
+}
+
+type summonScrollSpawnerFake struct {
+	codes    []string
+	rarities []model.MonsterRarity
+}
+
+func (f *summonScrollSpawnerFake) SpawnItemSummonNPC(codeName string, _ navmeshv2.RtNavmeshPosition, _ float32, rarity model.MonsterRarity) (*model.NPC, error) {
+	f.codes = append(f.codes, codeName)
+	f.rarities = append(f.rarities, rarity)
+	return &model.NPC{SRObject: model.SRObject{UniqueID: uint32(900 + len(f.codes))}}, nil
+}
+
+type summonScrollWorldFake struct {
+	removed []model.ISRObject
+}
+
+func (f *summonScrollWorldFake) RemoveVisibleObject(object model.ISRObject) {
+	f.removed = append(f.removed, object)
+}
+
+func TestExecuteMonsterSummonUsesPartyCountRandomCandidatesAndFiveMinuteExpiry(t *testing.T) {
+	player := &model.Player{SRObject: model.SRObject{UniqueID: 77}}
+	party := service.NewPartyService(nil)
+	party.Parties[77] = &model.Party{Members: []uint32{77, 78, 79}}
+	spawner := &summonScrollSpawnerFake{}
+	world := &summonScrollWorldFake{}
+	var callbacks []func()
+	rolls := []int{0, 1, 0}
+	handler := &ItemUseHandler{
+		party:       party,
+		summoner:    spawner,
+		summonWorld: world,
+		randomIntn: func(int) int {
+			roll := rolls[0]
+			rolls = rolls[1:]
+			return roll
+		},
+		schedule: func(delay time.Duration, callback func()) {
+			if delay != 5*time.Minute {
+				t.Fatalf("summon expiry delay = %v, want 5m", delay)
+			}
+			callbacks = append(callbacks, callback)
+		},
+	}
+	effect := model.ItemSummonMonsterEffect{
+		Candidates: []model.SummonMonsterCandidate{{CodeName: "MOB_CH_STRONG_TIGER", Weight: 1, Rarity: model.MonsterNormal}, {CodeName: "MOB_WC_DEVILBUG", Weight: 1, Rarity: model.MonsterGiant}},
+		Radius:     100,
+		Lifetime:   5 * time.Minute,
+	}
+	if err := handler.executeMonsterSummon(player, effect); err != nil {
+		t.Fatal(err)
+	}
+	if got := spawner.codes; len(got) != 3 || got[0] != "MOB_CH_STRONG_TIGER" || got[1] != "MOB_WC_DEVILBUG" || got[2] != "MOB_CH_STRONG_TIGER" {
+		t.Fatalf("spawned candidates = %v", got)
+	}
+	if got := spawner.rarities; len(got) != 3 || got[0] != model.MonsterNormal || got[1] != model.MonsterGiant || got[2] != model.MonsterNormal {
+		t.Fatalf("spawned rarities = %v", got)
+	}
+	if len(callbacks) != 3 {
+		t.Fatalf("expiry callbacks = %d, want 3", len(callbacks))
+	}
+	for _, callback := range callbacks {
+		callback()
+	}
+	if len(world.removed) != 3 {
+		t.Fatalf("expired removals = %d, want 3", len(world.removed))
 	}
 }

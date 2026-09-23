@@ -1468,6 +1468,28 @@ not all present in the executable export. The handler proves the consumption
 boundary, not a complete classifier for every teleport, return, resurrection,
 pet, premium, and consumable scroll.
 
+### Recovery-item effect calculation
+
+The ordinary recovery callback at `0x0049B710` delegates HP/MP amount
+extraction to `0x0049AA70`. Reference fields at offsets `+0xA8`, `+0xB0`,
+`+0xB8`, and `+0xC0` are the recovery parameters represented by emulator
+`Param1..Param4`.
+
+When either flat field is nonzero, percentage fields are ignored. The callback
+calculates:
+
+```text
+HP amount = trunc(Param1 * (1 + STR / 416) * 1.02^(level - 1))
+MP amount = trunc(Param3 * (1 + INT / 416) * 1.02^(level - 1))
+```
+
+When both flat fields are zero, it instead calculates
+`trunc(maxHP * Param2 / 100)` and `trunc(maxMP * Param4 / 100)`. The
+`CGObjPC` vtable at `0x00AF59FC` corroborates the inputs: virtual `+0x104`
+resolves stat selectors `1`/`2`, `+0x110` and `+0x114` return maximum HP/MP,
+and `+0x124` returns level. The concrete getters are `0x004AA5C0`,
+`0x004A6830`, `0x004A6850`, and `0x004A6870`.
+
 ### Function-level pre-use gate and consume call
 
 The call around `0x004919E0` is a mastery/eligibility gate, not a universal
@@ -1526,15 +1548,15 @@ if result != 1:
     u16 errorCode
 else:
     u8  encodedSlot       // client derives inventory index as encodedSlot - 0x0D
-    u16 packedTypeID      // reused by the TypeID4/action branches
-    u16 actionOrState     // consumed by the final UI/action split; name unresolved
+    u16 remainingAmount   // zero removes the item; nonzero updates its stack
+    u16 packedTypeID      // reused by the TypeID3/TypeID4 action branches
 ```
 
 The decoder's failure path passes category `1`, the `u16` code, resource key
 `0xFFDBC99B`, and the fixed notification arguments to `0x00778190`. The
-success path uses the packed TypeID bits to select item-family UI/action
-branches, while the final `u16` only controls the observed zero/nonzero split;
-the executable does not establish a universal semantic name for it. This is
+success path uses the final packed TypeID bits to select item-family UI/action
+branches. The preceding `u16` controls the final zero/remove versus
+nonzero/stack-update split. This is
 the client-side response grammar for the ordinary PC item-use result, not the
 separate COS `0xB0C5` grammar.
 

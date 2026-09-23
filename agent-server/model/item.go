@@ -49,6 +49,7 @@ type Item struct {
 }
 
 type MagicOption struct {
+	Slot      byte
 	Type      uint32
 	Value     uint32
 	ParamType uint32

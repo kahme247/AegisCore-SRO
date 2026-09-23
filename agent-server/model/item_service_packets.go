@@ -6,40 +6,110 @@ import (
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
-func BuildItemPerkAdd(characterUID, refItemID, token uint32, value time.Duration, remaining time.Duration) network.Packet {
+func BuildItemPerkAdd(characterUID uint32, effect ItemServiceEffect, remaining time.Duration) network.Packet {
+	refItemID, action, value := itemServicePerkFields(effect)
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemPerkAdd
 	packet.WriteUInt32(characterUID)
 	packet.WriteUInt32(refItemID)
-	packet.WriteUInt32(token)
-	packet.WriteUInt32(durationMilliseconds(value))
+	packet.WriteUInt32(action)
+	packet.WriteUInt32(value)
 	packet.WriteUInt32(durationSecondsCeil(remaining))
 	return packet
 }
 
-func BuildItemPerkRemove(characterUID, refItemID, token uint32) network.Packet {
+func BuildItemPerkRemove(characterUID uint32, effect ItemServiceEffect) network.Packet {
+	refItemID, action, _ := itemServicePerkFields(effect)
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.ItemPerkRemove
 	packet.WriteUInt32(characterUID)
 	packet.WriteUInt32(refItemID)
-	packet.WriteUInt32(token)
+	packet.WriteUInt32(action)
 	return packet
 }
 
-func ItemServicePerkValue(effect ItemServiceEffect) time.Duration {
-	if effect.Kind != ItemServiceExperience && effect.Kind != ItemServiceSkillExperience {
-		return effect.DailyBudget
+func BuildItemServiceTargetLevelUpdate(effect ItemServiceEffect, active bool) (network.Packet, bool, error) {
+	if !effect.TargetSlotSet {
+		return network.Packet{}, false, nil
 	}
-	ref, exists := RefItems[effect.SourceRefItemID]
-	if !exists || ref.Param3 <= 0 {
-		return 0
+	level := effect.TargetBaseOptLevel
+	expiry := uint32(0)
+	if active {
+		level = effect.TargetProjectedOptLevel
+		if effect.ExpiresAt.After(time.Now()) {
+			expiry = uint32(effect.ExpiresAt.Unix())
+		}
 	}
-	// ItemPerkAdd's fourth field is an opaque uint32 whose meaning is selected
-	// by the source item. EXP/SP scrolls store their authored percentage here;
-	// premium packages use the daily service budget in milliseconds.
-	return time.Duration(ref.Param3) * time.Millisecond
+	packet, err := vsro188.BuildInventoryItemUpdate(vsro188.InventoryItemUpdate{
+		ItemKind:  effect.TargetSlot,
+		Flags:     0x82,
+		Flag02U8:  &level,
+		Flag80U32: &expiry,
+	})
+	return packet, err == nil, err
+}
+
+func BuildPlayerItemServiceTargetLevelUpdate(player *Player, effect ItemServiceEffect, active bool) (network.Packet, bool, error) {
+	if player == nil || !effect.TargetSlotSet {
+		return network.Packet{}, false, nil
+	}
+	item, exists := player.Inventory.Snapshot().Items[effect.TargetSlot]
+	if !exists {
+		return network.Packet{}, false, nil
+	}
+	var advanced byte
+	for _, option := range item.AdvancedElixirs {
+		if option.Value > uint32(math.MaxUint8-advanced) {
+			advanced = math.MaxUint8
+			break
+		}
+		advanced += byte(option.Value)
+	}
+	projected := effect
+	projected.TargetBaseOptLevel = byte(min(math.MaxUint8, int(effect.TargetBaseOptLevel)+int(advanced)))
+	projected.TargetProjectedOptLevel = byte(min(math.MaxUint8, int(effect.TargetProjectedOptLevel)+int(advanced)))
+	return BuildItemServiceTargetLevelUpdate(projected, active)
+}
+
+func ItemServiceTargetMatchesInventory(player *Player, effect ItemServiceEffect) bool {
+	if player == nil || !effect.TargetSlotSet {
+		return false
+	}
+	item, exists := player.Inventory.Snapshot().Items[effect.TargetSlot]
+	if !exists || !item.IsEquipment() || item.OptLevel != effect.TargetBaseOptLevel {
+		return false
+	}
+	switch effect.Kind {
+	case ItemServiceReinforceWeapon:
+		return item.TypeID3 == TypeID3Weapon
+	case ItemServiceReinforceArmor:
+		return item.TypeID3 >= 1 && item.TypeID3 <= 4
+	case ItemServiceReinforceAccessory:
+		return item.TypeID3 == 5 || item.TypeID3 == 12
+	default:
+		return false
+	}
+}
+
+func itemServicePerkFields(effect ItemServiceEffect) (refItemID, action, value uint32) {
+	refItemID = effect.SourceRefItemID
+	ref, exists := RefItems[refItemID]
+	if !exists {
+		return refItemID, 0, 0
+	}
+	actionRef := ref
+	if effect.Kind == ItemServiceHwanDuration &&
+		ref.TypeID1 == 3 && ref.TypeID2 == 3 && ref.TypeID3 == 13 && ref.TypeID4 == 14 &&
+		refItemID >= 6 {
+		if consumable, paired := RefItems[refItemID-6]; paired &&
+			consumable.TypeID1 == 3 && consumable.TypeID2 == 3 && consumable.TypeID3 == 3 && consumable.TypeID4 == 10 {
+			actionRef = consumable
+		}
+	}
+	return refItemID, uint32(max(0, actionRef.Param2)), uint32(max(0, actionRef.Param3))
 }
 
 func ItemServiceUsesItemPerk(effect ItemServiceEffect) bool {

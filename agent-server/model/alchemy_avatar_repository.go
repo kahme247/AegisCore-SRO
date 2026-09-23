@@ -81,18 +81,20 @@ func applyAvatarBlessing(ctx context.Context, tx *sql.Tx, target Item, targetRef
 		return fmt.Errorf("resolve avatar blessing option: %w", err)
 	}
 	maximum := avatarBlessingMaximum(option.ParamType, packedRange)
-	existingSlot := -1
-	for slot, existing := range target.MagicOptions {
+	existingSlot := byte(0)
+	exists := false
+	for _, existing := range target.MagicOptions {
 		if existing.Type == option.Type {
-			existingSlot, option.Value = slot, existing.Value
+			existingSlot, option.Value, exists = existing.Slot, existing.Value, true
 			break
 		}
 	}
-	if existingSlot < 0 {
-		if len(target.MagicOptions) >= targetRef.MaxMagicOptCount {
+	if !exists {
+		slot, available := nextMagicOptionSlot(target.MagicOptions, targetRef.MaxMagicOptCount)
+		if !available {
 			return ErrAlchemyConflict
 		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,1)", target.ID, len(target.MagicOptions), option.Type)
+		_, err := tx.ExecContext(ctx, "INSERT INTO `ITEM_MAGIC_OPTION` (`FK_ITEM`,`SLOT`,`TYPE`,`VALUE`) VALUES (?,?,?,1)", target.ID, slot, option.Type)
 		return err
 	}
 	if option.Value >= maximum {
