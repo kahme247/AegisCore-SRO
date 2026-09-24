@@ -99,7 +99,7 @@ func InitSpawnAreaFromSpawnNestWithRates(spawn Spawn, countRatePercent, respawnR
 		respawnRatePercent: respawnRatePercent,
 	}
 
-	initialSpawnTime := area.calculateRespawnTime()
+	initialSpawnTime := time.Now()
 
 	spawnCount := (spawn.MaxTotalCount*countRatePercent + 99) / 100
 	area.targetCount = spawnCount

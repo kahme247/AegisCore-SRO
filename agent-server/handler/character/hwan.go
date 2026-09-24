@@ -67,7 +67,7 @@ func (h *HwanHandler) handleBodyState(ctx context.Context, session *server.Sessi
 	}
 	player.CommitHwanSnapshot(snapshot)
 	now := h.now()
-	duration := model.BerserkDurationForPoints(consumedPoints)
+	duration := player.BerserkDurationForPoints(consumedPoints, now)
 	generation := player.ActivateBerserk(now.Add(duration))
 	if generation == 0 {
 		return fmt.Errorf("persisted Berserk activation could not be published")

@@ -29,6 +29,16 @@ type PlayerJob struct {
 	Alias      string
 }
 
+type PlayerGuildAffiliation struct {
+	ID                 uint32
+	Name               string
+	MemberNickname     string
+	CrestRevision      uint32
+	UnionID            uint32
+	UnionCrestRevision uint32
+	SiegeAuthority     byte
+}
+
 func (j PlayerJob) Active() bool {
 	return j.Type >= PlayerJobTrader && j.Type <= PlayerJobHunter
 }
@@ -83,77 +93,86 @@ type Player struct {
 	LifeState
 	BodyState
 	BattleState
-	CharKnownObjectList   *CharKnownObjectList
-	Session               *server.Session
-	Mutex                 sync.Mutex
-	economyGate           sync.Mutex
-	activeMagicCubeID     int
-	Scale                 byte
-	ID                    int
-	CharName              string
-	Inventory             Inventory
-	AvatarInventory       Inventory
-	InventorySize         byte
-	BaseStats             BaseStats
-	BaseAttackStats       AttackStats
-	BaseDefenseStats      DefenseStats
-	BonusStats            BonusBaseStats
-	BonusAttackStats      BonusAttackStats
-	BonusDefenseStats     BonusDefenseStats
-	PassiveSkillModifiers BuffModifiers
-	PassiveRecovery       []RecoveryStatusDescriptor
-	CombatDamagePercent   int
-	PhyAbsorbPercent      int
-	MagAbsorbPercent      int
-	PhyBalancePercent     int
-	MagBalancePercent     int
-	SkillPoints           int
-	StatPoints            int
-	ExpOffset             uint64
-	SkillExpOffset        uint
-	Gold                  uint64
-	Job                   PlayerJob
-	Masteries             map[uint32]byte
-	Skills                map[uint32]byte
-	ActiveBuffs           map[uint32]ActiveBuff
-	activeRecovery        map[uint32]RecoveryStatusDescriptor
-	combatStatuses        map[CombatStatusKind]CombatStatus
-	characterMask         CharacterMask
-	activeBarrier         ActiveBarrier
-	QuickSlots            map[byte]CharacterQuickSlot
-	AutoPotionSettings    AutoPotionSettings
-	HasAutoPotionSettings bool
-	Quests                []CharacterQuest
-	questMarks            map[uint32]QuestMark
-	nextQuestMarkID       uint32
-	questTimers           map[int]QuestTimer
-	questTimerGeneration  uint64
-	Level                 int
-	MaxLevel              int
-	PKState               PKState
-	pkCounters            CharacterPKState
-	CTFTeam               CTFTeam
-	PVPCape               PVPCape
-	IsGm                  bool
-	Party                 *Party
-	WalkSpeed             float32
-	RunSpeed              float32
-	HwanSpeed             float32
-	HwanLevel             byte
-	RemainHwanCount       byte
-	GatheredHwanPoint     uint32
-	berserkGeneration     uint64
-	berserkExpiresAt      time.Time
-	speedEffectPercent    int
-	speedEffectGeneration uint64
-	speedEffectToken      uint32
-	speedEffectSkillID    uint32
-	speedEffectExpiresAt  time.Time
-	itemServices          map[ItemServiceKind]ItemServiceEffect
-	itemServiceTokens     map[ItemServiceKind]uint32
-	premiumDecoration     PremiumDecorationState
-	premiumPaused         map[byte]bool
-	COSState              PlayerCOSState
+	CharKnownObjectList          *CharKnownObjectList
+	Session                      *server.Session
+	Mutex                        sync.Mutex
+	economyGate                  sync.Mutex
+	activeMagicCubeID            int
+	Scale                        byte
+	ID                           int
+	CharName                     string
+	Inventory                    Inventory
+	AvatarInventory              Inventory
+	InventorySize                byte
+	BaseStats                    BaseStats
+	BaseAttackStats              AttackStats
+	BaseDefenseStats             DefenseStats
+	BonusStats                   BonusBaseStats
+	BonusAttackStats             BonusAttackStats
+	BonusDefenseStats            BonusDefenseStats
+	PassiveSkillModifiers        BuffModifiers
+	PassiveRecovery              []RecoveryStatusDescriptor
+	CombatDamagePercent          int
+	PhyAbsorbPercent             int
+	MagAbsorbPercent             int
+	buffMovementSpeedPercent     int
+	passiveSkillRangeBonus       int
+	passiveCriticalDefense       int
+	passiveHealingPercent        int
+	passiveBlessingPercent       int
+	passiveStatusDurationPercent [6]int
+	PhyBalancePercent            int
+	MagBalancePercent            int
+	SkillPoints                  int
+	StatPoints                   int
+	ExpOffset                    uint64
+	SkillExpOffset               uint
+	Gold                         uint64
+	Job                          PlayerJob
+	Guild                        PlayerGuildAffiliation
+	Masteries                    map[uint32]byte
+	Skills                       map[uint32]byte
+	ActiveBuffs                  map[uint32]ActiveBuff
+	activeRecovery               map[uint32]RecoveryStatusDescriptor
+	combatStatuses               map[CombatStatusKind]CombatStatus
+	characterMask                CharacterMask
+	activeBarrier                ActiveBarrier
+	QuickSlots                   map[byte]CharacterQuickSlot
+	AutoPotionSettings           AutoPotionSettings
+	HasAutoPotionSettings        bool
+	Quests                       []CharacterQuest
+	questMarks                   map[uint32]QuestMark
+	nextQuestMarkID              uint32
+	questTimers                  map[int]QuestTimer
+	questTimerGeneration         uint64
+	Level                        int
+	MaxLevel                     int
+	PKState                      PKState
+	pkCounters                   CharacterPKState
+	CTFTeam                      CTFTeam
+	PVPCape                      PVPCape
+	IsGm                         bool
+	Party                        *Party
+	WalkSpeed                    float32
+	RunSpeed                     float32
+	HwanSpeed                    float32
+	HwanLevel                    byte
+	RemainHwanCount              byte
+	GatheredHwanPoint            uint32
+	berserkGeneration            uint64
+	berserkExpiresAt             time.Time
+	speedEffectPercent           int
+	speedEffectGeneration        uint64
+	speedEffectToken             uint32
+	speedEffectSkillID           uint32
+	speedEffectExpiresAt         time.Time
+	itemServices                 map[ItemServiceKind]ItemServiceEffect
+	itemServiceTokens            map[ItemServiceKind]uint32
+	timedActionToken             uint32
+	premiumDecoration            PremiumDecorationState
+	StallAvatarRefID             uint32
+	premiumPaused                map[byte]bool
+	COSState                     PlayerCOSState
 
 	/* TODO
 	- Teleport Position
@@ -161,6 +180,42 @@ type Player struct {
 	- TeleportLocation
 	- Active Buffs / Effects
 	*/
+}
+
+func (p *Player) BeginTimedAction(token uint32) bool {
+	if p == nil || token == 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.timedActionToken != 0 {
+		return false
+	}
+	p.timedActionToken = token
+	return true
+}
+
+func (p *Player) EndTimedAction(token uint32) bool {
+	if p == nil || token == 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.timedActionToken != token {
+		return false
+	}
+	p.timedActionToken = 0
+	return true
+}
+
+func (p *Player) TimedActionLocked() bool {
+	if p == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	locked := p.timedActionToken != 0
+	p.Mutex.Unlock()
+	return locked
 }
 
 // ActivateMagicCube records the authenticated ITEM identity selected through
@@ -294,6 +349,27 @@ func (p *Player) SetJob(job PlayerJob) {
 	}
 	p.Mutex.Lock()
 	p.Job = job
+	p.Mutex.Unlock()
+}
+
+func (p *Player) GetGuildAffiliation() PlayerGuildAffiliation {
+	if p == nil {
+		return PlayerGuildAffiliation{}
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.Guild
+}
+
+func (p *Player) SetGuildAffiliation(guild PlayerGuildAffiliation) {
+	if p == nil {
+		return
+	}
+	if guild.ID == 0 {
+		guild = PlayerGuildAffiliation{}
+	}
+	p.Mutex.Lock()
+	p.Guild = guild
 	p.Mutex.Unlock()
 }
 
@@ -762,13 +838,32 @@ func (p *Player) MovementSpeedEffect() (uint32, int, time.Time, uint64, uint32, 
 	return p.speedEffectSkillID, p.speedEffectPercent, p.speedEffectExpiresAt, p.speedEffectGeneration, p.speedEffectToken, true
 }
 
-func (p *Player) MovementSpeeds() (float32, float32) {
-	p.Mutex.Lock()
-	defer p.Mutex.Unlock()
-	multiplier := float32(100+p.speedEffectPercent) / 100
+func (p *Player) movementSpeedMultiplierLocked(now time.Time) float32 {
+	multiplier := float32(100+p.speedEffectPercent+p.buffMovementSpeedPercent) / 100
 	if p.BodyState == Berserker {
 		multiplier *= BerserkSpeedMultiplier
 	}
+	if status, active := p.combatStatuses[CombatStatusFrostbite]; active {
+		if status.ExpiresAt.After(now) {
+			multiplier *= 0.5
+		} else {
+			delete(p.combatStatuses, CombatStatusFrostbite)
+		}
+	}
+	if status, active := p.combatStatuses[CombatStatusDull]; active {
+		if status.ExpiresAt.After(now) {
+			multiplier *= 0.75
+		} else {
+			delete(p.combatStatuses, CombatStatusDull)
+		}
+	}
+	return multiplier
+}
+
+func (p *Player) MovementSpeeds() (float32, float32) {
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	multiplier := p.movementSpeedMultiplierLocked(time.Now())
 	return p.WalkSpeed * multiplier, p.RunSpeed * multiplier
 }
 
@@ -779,6 +874,9 @@ func (p *Player) SendMovementSpeedUpdate() {
 }
 
 func (p *Player) SendStatsUpdate() {
+	if p == nil || p.Session == nil {
+		return
+	}
 	packet := p.BuildStatsUpdatePacket()
 	_ = p.Session.Send(packet)
 }
@@ -814,6 +912,30 @@ func (p *Player) CurrentVitals() (int, int) {
 	p.Mutex.Lock()
 	defer p.Mutex.Unlock()
 	return p.BaseStats.HP, p.BaseStats.MP
+}
+
+// ScaleCurrentHPForMaxReduction preserves the owner's current-health ratio
+// when an active effect lowers the derived maximum. It never kills a living
+// player and intentionally does nothing for maximum increases or equal values.
+func (p *Player) ScaleCurrentHPForMaxReduction(previousMaxHP, currentMaxHP int) (hp, mp int, changed bool) {
+	if p == nil || previousMaxHP <= 0 || currentMaxHP <= 0 || currentMaxHP >= previousMaxHP {
+		return 0, 0, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	hp, mp = p.BaseStats.HP, p.BaseStats.MP
+	if p.LifeState != Alive || hp <= 0 {
+		return hp, mp, false
+	}
+	scaledHP := int(int64(hp) * int64(currentMaxHP) / int64(previousMaxHP))
+	if scaledHP < 1 {
+		scaledHP = 1
+	}
+	if scaledHP >= hp {
+		return hp, mp, false
+	}
+	p.BaseStats.HP = scaledHP
+	return scaledHP, mp, true
 }
 
 func (p *Player) CommitMP(expectedMP, cost int) bool {
@@ -875,6 +997,51 @@ func (p *Player) CommitHealing(expectedHP, expectedMP, hp, mp int) bool {
 		return false
 	}
 	p.BaseStats.HP, p.BaseStats.MP = hp, mp
+	return true
+}
+
+// PreviewAbnormalRecovery applies the stock Zombie inversion before a
+// repository compare-and-set: HP recovery becomes HP loss while MP recovery
+// remains positive.
+func (p *Player) PreviewAbnormalRecovery(hpAmount, mpAmount int, now time.Time) (hp, mp, nextHP, nextMP int, zombie bool, ok bool) {
+	if p == nil || hpAmount < 0 || mpAmount < 0 {
+		return 0, 0, 0, 0, false, false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.LifeState != Alive || p.BaseStats.HP <= 0 {
+		return 0, 0, 0, 0, false, false
+	}
+	hp, mp = p.BaseStats.HP, p.BaseStats.MP
+	status, active := p.combatStatuses[CombatStatusZombie]
+	zombie = active && status.ExpiresAt.After(now)
+	magic := equippedMagicOptionStats(p.Inventory, p.AvatarInventory)
+	if zombie {
+		nextHP = max(0, hp-hpAmount)
+	} else {
+		maxHP := utils.BaseHPOrMP(p.Level, p.BaseStats.Str+p.BonusStats.Str+magic.Strength) + p.BonusStats.HP + magic.HP
+		maxHP += maxHP * p.BonusStats.HpPercent / 100
+		nextHP = min(hp+hpAmount, maxHP)
+	}
+	maxMP := utils.BaseHPOrMP(p.Level, p.BaseStats.Int+p.BonusStats.Int+magic.Intellect) + p.BonusStats.MP + magic.MP
+	maxMP += maxMP * p.BonusStats.MpPercent / 100
+	nextMP = min(mp+mpAmount, maxMP)
+	return hp, mp, nextHP, nextMP, zombie, true
+}
+
+func (p *Player) CommitAbnormalRecovery(expectedHP, expectedMP, hp, mp int) bool {
+	if p == nil || hp < 0 || mp < 0 {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.LifeState != Alive || p.BaseStats.HP != expectedHP || p.BaseStats.MP != expectedMP {
+		return false
+	}
+	p.BaseStats.HP, p.BaseStats.MP = hp, mp
+	if hp == 0 {
+		p.LifeState = Dead
+	}
 	return true
 }
 
@@ -954,6 +1121,21 @@ func BuildMotionStateUpdatePacket(uniqueID uint32, state MotionState) network.Pa
 	return packet
 }
 
+// BuildTeleportCastingStateUpdatePacket emits entity state category 11. The
+// vSRO 1.188 client uses a zero value to tear down its return-scroll casting UI.
+func BuildTeleportCastingStateUpdatePacket(uniqueID uint32, active bool) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.EntityUpdateMovementState
+	packet.WriteUInt32(uniqueID)
+	packet.WriteByte(11)
+	if active {
+		packet.WriteByte(1)
+	} else {
+		packet.WriteByte(0)
+	}
+	return packet
+}
+
 func (p *Player) SendVitalsUpdate() {
 	hp, mp := p.CurrentVitals()
 	packet := BuildVitalsUpdatePacket(p.GetUniqueID(), hp, mp)
@@ -966,7 +1148,15 @@ func (p *Player) SendVitalsUpdate() {
 // Current HP/MP remain unchanged; only their calculated maxima change when a
 // base attribute or level changes.
 func (p *Player) BuildStatsUpdatePacket() network.Packet {
+	return p.BuildStatsUpdatePacketAt(time.Now())
+}
+
+func (p *Player) BuildStatsUpdatePacketAt(now time.Time) network.Packet {
 	stats := p.DerivedStats()
+	stats.HitRate = p.CombatHitRate(stats.HitRate, now)
+	stats.ParryRate = p.CombatParryRate(stats.ParryRate, now)
+	stats.PhyDef = p.CombatPhysicalDefense(stats.PhyDef, now)
+	stats.MagDef = p.CombatMagicalDefense(stats.MagDef, now)
 
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.EntityUpdateStats
@@ -1003,8 +1193,26 @@ func (p *Player) DerivedStats() DerivedCharacterStats {
 	defenseBonus := p.BonusDefenseStats
 	inventory := p.Inventory.Snapshot()
 	avatar := p.AvatarInventory.Snapshot()
+	now := time.Now()
+	var weaponBonus, armorBonus, accessoryBonus byte
+	for kind, effect := range p.itemServices {
+		if !effect.ExpiresAt.After(now) {
+			delete(p.itemServices, kind)
+			delete(p.itemServiceTokens, kind)
+			continue
+		}
+		value := byte(min(effect.EffectValue, uint32(^uint8(0))))
+		switch kind {
+		case ItemServiceReinforceWeapon:
+			weaponBonus = value
+		case ItemServiceReinforceArmor:
+			armorBonus = value
+		case ItemServiceReinforceAccessory:
+			accessoryBonus = value
+		}
+	}
 	p.Mutex.Unlock()
-	equipment := equippedItemStats(inventory)
+	equipment := equippedItemStats(inventory, weaponBonus, armorBonus, accessoryBonus)
 	magic := equippedMagicOptionStats(inventory, avatar)
 	effectiveStr, effectiveInt := stats.Str+bonus.Str+magic.Strength, stats.Int+bonus.Int+magic.Intellect
 	maxHP := utils.BaseHPOrMP(level, effectiveStr) + bonus.HP + magic.HP
@@ -1139,6 +1347,12 @@ func (p *Player) ApplyCombatDamage(damage int, magical bool) PlayerDamageApplica
 		return PlayerDamageApplication{}
 	}
 	barrierDamage := 0
+	absorptionPercent := p.PhyAbsorbPercent
+	if magical {
+		absorptionPercent = p.MagAbsorbPercent
+	}
+	absorptionPercent = min(max(absorptionPercent, 0), 100)
+	damage -= damage * absorptionPercent / 100
 	barrier := ActiveBarrier{}
 	if magical {
 		damage, barrierDamage, barrier = p.absorbMagicalDamageLocked(damage)

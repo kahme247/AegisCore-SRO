@@ -40,6 +40,7 @@ type mobAIWorld interface {
 	RegisterMovingCharacter(model.ICharacter, model.MovementData) model.MovementData
 	StopMovingCharacter(model.ICharacter, navmeshv2.RtNavmeshPosition, string, bool) bool
 	NewPosFromGlobalCoordinates(*math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
+	NewPosFromRegionCoordinates(int16, *math32.Vector3) (navmeshv2.RtNavmeshPosition, error)
 	CanMoveDirectly(navmeshv2.RtNavmeshPosition, navmeshv2.RtNavmeshPosition) bool
 }
 
@@ -54,6 +55,7 @@ type MobAIManager struct {
 	criticalRoll    func(int) bool
 	blockRoll       func(int) bool
 	damageRoll      func() int
+	skillRoll       func() int
 	now             func() time.Time
 	schedule        func(time.Duration, func())
 	ownerTargets    func(*model.NPC, *model.Player, model.RefSkill, int) []*model.Player
@@ -100,28 +102,28 @@ func (m *MobAIManager) ConfigureVitals(repository model.CharacterVitalsRepositor
 }
 
 type mobAttackProfile struct {
-	reach     float32
-	delay     time.Duration
-	impact    time.Duration
-	lifecycle time.Duration
-	frosted   bool
-	cooldown  time.Duration
-	attackMin int
-	attackMax int
-	magical   bool
+	reach             float32
+	delay             time.Duration
+	impact            time.Duration
+	lifecycle         time.Duration
+	actionTimePercent float64
+	cooldown          time.Duration
+	attackMin         int
+	attackMax         int
+	magical           bool
 }
 
 type mobPendingAttack struct {
-	npc       *model.NPC
-	targetUID uint32
-	skillID   uint32
-	castUID   uint32
-	damage    int
-	magical   bool
-	readyAt   time.Time
-	impact    time.Duration
-	lifecycle time.Duration
-	frosted   bool
+	npc               *model.NPC
+	targetUID         uint32
+	skillID           uint32
+	castUID           uint32
+	damage            int
+	magical           bool
+	readyAt           time.Time
+	impact            time.Duration
+	lifecycle         time.Duration
+	actionTimePercent float64
 }
 
 type mobLinkedDamage struct {
@@ -141,6 +143,7 @@ func GetMobAIManagerInstance() *MobAIManager {
 			criticalRoll:   func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
 			blockRoll:      func(chance int) bool { return chance >= 100 || chance > 0 && rand.Intn(100) < chance },
 			damageRoll:     func() int { return rand.Intn(32768) },
+			skillRoll:      rand.Int,
 			now:            time.Now,
 			schedule:       func(delay time.Duration, callback func()) { time.AfterFunc(delay, callback) },
 		}
@@ -176,9 +179,9 @@ func (m *MobAIManager) ConfigureSkillOwnerTargetProvider(provider func(*model.NP
 	m.stateMu.Unlock()
 }
 
-// ConfigurePlayerAttackInterrupter connects NPC-authored forced movement to
-// the player combat runtime so casts and repeating attacks cannot complete
-// from the position occupied before displacement.
+// ConfigurePlayerAttackInterrupter connects NPC-authored control and forced
+// movement effects to the player combat runtime so casts and repeating attacks
+// cannot complete after the actor becomes action-incompatible.
 func (m *MobAIManager) ConfigurePlayerAttackInterrupter(interrupt func(*model.Player)) {
 	if m == nil {
 		return
@@ -330,6 +333,10 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		}
 		return
 	}
+	if npc.CombatActionRestricted(now) {
+		m.clearPendingAttack(npc.GetUniqueID())
+		return
+	}
 	if m.resolvePendingAttack(world, npc, now) {
 		return
 	}
@@ -417,7 +424,7 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 		m.stateMu.Unlock()
 		if catalog != nil {
 			if character, exists := catalog.Character(npc.GetRefObjectID()); exists {
-				attackRate = character.HitRate
+				attackRate = npc.CombatHitRate(character.HitRate, now)
 				varianceAvailable = character.HitRate > 0
 			}
 		}
@@ -428,13 +435,14 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 			}
 		}
 		if varianceAvailable {
-			damage = model.CombatVarianceDamage(profile.attackMin, profile.attackMax, attackRate, target.DerivedStats().ParryRate, level, target.Level, rolls)
+			parryRate := target.CombatParryRate(target.DerivedStats().ParryRate, now)
+			damage = model.CombatVarianceDamage(profile.attackMin, profile.attackMax, attackRate, parryRate, level, target.Level, rolls)
 		} else {
 			damage = (profile.attackMin + profile.attackMax) / 2
 		}
-		defense := target.DerivedStats().PhyDef
+		defense := target.CombatPhysicalDefense(target.DerivedStats().PhyDef, now)
 		if profile.magical {
-			defense = target.DerivedStats().MagDef
+			defense = target.CombatMagicalDefense(target.DerivedStats().MagDef, now)
 		}
 		damage -= defense
 	}
@@ -451,22 +459,36 @@ func (m *MobAIManager) tickNPC(world mobAIWorld, npc *model.NPC, now time.Time) 
 	}
 	if profile.delay > 0 {
 		m.setPendingAttack(npc.GetUniqueID(), mobPendingAttack{
-			npc:       npc,
-			targetUID: target.GetUniqueID(),
-			skillID:   skillID,
-			castUID:   castUID,
-			damage:    damage,
-			magical:   profile.magical,
-			readyAt:   now.Add(profile.delay),
-			impact:    profile.impact,
-			lifecycle: profile.lifecycle,
-			frosted:   profile.frosted,
+			npc:               npc,
+			targetUID:         target.GetUniqueID(),
+			skillID:           skillID,
+			castUID:           castUID,
+			damage:            damage,
+			magical:           profile.magical,
+			readyAt:           now.Add(profile.delay),
+			impact:            profile.impact,
+			lifecycle:         profile.lifecycle,
+			actionTimePercent: profile.actionTimePercent,
 		})
 		begin := model.BuildDelayedAttackBegin(skillID, npc.GetUniqueID(), target.GetUniqueID(), castUID)
 		npc.SendToKnown(&begin)
+		m.selectNextAttackSkill(npc)
 		return
 	}
 	m.applyMobSkillAttack(world, npc, target, castUID, damage, false, skillID, profile.magical)
+	m.selectNextAttackSkill(npc)
+}
+
+func (m *MobAIManager) selectNextAttackSkill(npc *model.NPC) {
+	if m == nil || npc == nil {
+		return
+	}
+	m.stateMu.Lock()
+	roll := m.skillRoll
+	m.stateMu.Unlock()
+	if roll != nil {
+		npc.SelectAttackSkill(roll())
+	}
 }
 
 func (m *MobAIManager) isExactSealStone(npc *model.NPC) bool {
@@ -541,16 +563,16 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 	if attackRange <= mobAttackClearance {
 		attackRange = mobAttackRange
 	}
+	attackRange = npc.CombatAttackRange(attackRange, now)
 
-	// Ordinary damage lands at the authored impact point. Frostbite halves the
-	// client's action speed; keep the delayed hit behind the complete slowed
-	// animation instead of finishing B071 while the model is still attacking.
+	// Ordinary damage lands at the authored impact point. Frostbite and Dull
+	// each halve action speed; combined states multiply their slowdown.
+	actionTimePercent := npc.CombatActionTimePercent(100, now)
 	impact := milliseconds(skill.ActionPreparingTime + skill.ActionCastingTime)
-	lifecycle := skill.RuntimeImpactDurationAt(100)
-	delay := impact
-	_, frostbitten := npc.CombatStatus(model.CombatStatusFrostbite, now)
-	if frostbitten {
-		delay = skill.RuntimeImpactDurationAt(200)
+	lifecycle := skill.RuntimeImpactDurationAt(actionTimePercent)
+	delay := lifecycle
+	if actionTimePercent == 100 {
+		delay = impact
 	}
 	if delay < mobClientActionRegistrationDelay {
 		delay = mobClientActionRegistrationDelay
@@ -566,7 +588,8 @@ func (m *MobAIManager) attackProfile(npc *model.NPC, target *model.Player, skill
 		cooldown, _, _, _, _ = m.gameplayTimings()
 	}
 	return mobAttackProfile{
-		reach: attackRange, delay: delay, impact: impact, lifecycle: lifecycle, frosted: frostbitten, cooldown: cooldown,
+		reach: attackRange, delay: delay, impact: impact, lifecycle: lifecycle,
+		actionTimePercent: actionTimePercent, cooldown: cooldown,
 		attackMin: skill.AttackMin, attackMax: skill.AttackMax, magical: skill.IsMagicalAttack(),
 	}, true
 }
@@ -581,25 +604,25 @@ func (m *MobAIManager) ReconcileAttackTiming(npc *model.NPC, now time.Time) {
 	if now.IsZero() {
 		now = m.combatNow()
 	}
-	_, frosted := npc.CombatStatus(model.CombatStatusFrostbite, now)
+	nextPercent := npc.CombatActionTimePercent(100, now)
 	m.stateMu.Lock()
 	pending, exists := m.pending[npc.GetUniqueID()]
-	if !exists || pending.frosted == frosted {
+	if !exists || pending.actionTimePercent == nextPercent {
 		m.stateMu.Unlock()
 		return
 	}
-	remaining := max(time.Duration(0), pending.readyAt.Sub(now))
-	if frosted {
-		// A normal pending hit targets the authored impact point. Once the model
-		// becomes cold, include the animation tail and play all remaining work at
-		// half speed before publishing B071.
-		remaining += max(time.Duration(0), pending.lifecycle-pending.impact)
-		pending.readyAt = now.Add(2 * remaining)
-	} else {
-		// The remaining work was scheduled at half speed; resume it at normal.
-		pending.readyAt = now.Add(remaining / 2)
+	previousPercent := pending.actionTimePercent
+	if previousPercent <= 0 {
+		previousPercent = 100
 	}
-	pending.frosted = frosted
+	remaining := max(time.Duration(0), pending.readyAt.Sub(now))
+	remaining = time.Duration(float64(remaining) * nextPercent / previousPercent)
+	if previousPercent == 100 && nextPercent > 100 {
+		tail := max(time.Duration(0), pending.lifecycle-pending.impact)
+		remaining += time.Duration(float64(tail) * nextPercent / 100)
+	}
+	pending.readyAt = now.Add(remaining)
+	pending.actionTimePercent = nextPercent
 	m.pending[npc.GetUniqueID()] = pending
 	m.stateMu.Unlock()
 }
@@ -624,8 +647,12 @@ func (m *MobAIManager) standOffDestination(world mobAIWorld, npc *model.NPC, tar
 	if world == nil || npc == nil || target == nil || distance <= attackRange || distance <= 0 {
 		return navmeshv2.RtNavmeshPosition{}, false
 	}
-	start := npc.GetNavmeshPosition().GetGlobalCoordinates()
-	end := target.GetNavmeshPosition().GetGlobalCoordinates()
+	sourcePosition := npc.GetNavmeshPosition()
+	targetPosition := target.GetNavmeshPosition()
+	start, end, ok := mobAIMovementCoordinates(sourcePosition, targetPosition)
+	if !ok {
+		return navmeshv2.RtNavmeshPosition{}, false
+	}
 	standOff := attackRange - mobArrivalMargin
 	if standOff < 0 {
 		standOff = 0
@@ -636,11 +663,30 @@ func (m *MobAIManager) standOffDestination(world mobAIWorld, npc *model.NPC, tar
 		start.Y,
 		start.Z+(end.Z-start.Z)*ratio,
 	)
-	position, err := world.NewPosFromGlobalCoordinates(destination)
+	position, err := resolveMobAIDestination(world, sourcePosition, destination)
 	if err != nil {
 		return navmeshv2.RtNavmeshPosition{}, false
 	}
 	return position, true
+}
+
+func mobAIMovementCoordinates(source, target navmeshv2.RtNavmeshPosition) (*math32.Vector3, *math32.Vector3, bool) {
+	sourceDungeon := navmeshv2.IsDungeonRegion(source.Region.ID)
+	targetDungeon := navmeshv2.IsDungeonRegion(target.Region.ID)
+	if sourceDungeon || targetDungeon {
+		if !sourceDungeon || !targetDungeon || source.Region.ID != target.Region.ID || source.Offset == nil || target.Offset == nil {
+			return nil, nil, false
+		}
+		return source.Offset, target.Offset, true
+	}
+	return source.GetGlobalCoordinates(), target.GetGlobalCoordinates(), true
+}
+
+func resolveMobAIDestination(world mobAIWorld, reference navmeshv2.RtNavmeshPosition, coordinates *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	if navmeshv2.IsDungeonRegion(reference.Region.ID) {
+		return world.NewPosFromRegionCoordinates(reference.Region.ID, coordinates)
+	}
+	return world.NewPosFromGlobalCoordinates(coordinates)
 }
 
 func (m *MobAIManager) setPendingAttack(npcUID uint32, pending mobPendingAttack) {
@@ -780,14 +826,34 @@ func (m *MobAIManager) applyMobSkillAttack(world mobAIWorld, npc *model.NPC, pri
 		attack = model.BuildAttackBeginWithSkillDamageTargets(skillID, npc.GetUniqueID(), castUID, allTargets)
 	}
 	npc.SendToKnown(&attack)
+	if mobDamageTargetsHaveEffects(allTargets, primary.GetUniqueID()) {
+		m.publishNPCBadEffectState(primary, m.combatNow())
+	}
+	for _, secondary := range secondaries {
+		if mobDamageTargetsHaveEffects(allTargets, secondary.GetUniqueID()) {
+			m.publishNPCBadEffectState(secondary, m.combatNow())
+		}
+	}
 	primary.SendVitalsUpdate()
 	for _, secondary := range secondaries {
 		secondary.SendVitalsUpdate()
 	}
 }
 
+func (m *MobAIManager) transferActorRadius(refObjectID uint32) float32 {
+	if m == nil || m.referenceData == nil || refObjectID == 0 {
+		return 0
+	}
+	character, exists := m.referenceData.Character(refObjectID)
+	if !exists || character.BCRadius <= 0 {
+		return 0
+	}
+	return float32(character.BCRadius)
+}
+
 func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Player, skill model.RefSkill) []*model.Player {
-	if m == nil || npc == nil || primary == nil || skill.TransferCount <= 0 {
+	maximum := skill.TransferCount - 1
+	if m == nil || npc == nil || primary == nil || maximum <= 0 {
 		return nil
 	}
 	if skill.TransferType == 5 || skill.TransferType == 7 {
@@ -797,8 +863,8 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 		if provider == nil {
 			return nil
 		}
-		provided := provider(npc, primary, skill, skill.TransferCount)
-		result := make([]*model.Player, 0, min(skill.TransferCount, len(provided)))
+		provided := provider(npc, primary, skill, maximum)
+		result := make([]*model.Player, 0, min(maximum, len(provided)))
 		seen := make(map[uint32]struct{}, len(provided))
 		for _, candidate := range provided {
 			if candidate == nil || candidate == primary || candidate.GetLifeState() != model.Alive {
@@ -809,7 +875,7 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 			}
 			seen[candidate.GetUniqueID()] = struct{}{}
 			result = append(result, candidate)
-			if len(result) == skill.TransferCount {
+			if len(result) == maximum {
 				break
 			}
 		}
@@ -828,13 +894,15 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 	sort.Slice(pool, func(i, j int) bool { return pool[i].GetUniqueID() < pool[j].GetUniqueID() })
 	radius := float32(skill.TransferRange)
 	if skill.TransferType == 6 {
-		result := make([]*model.Player, 0, min(skill.TransferCount, len(pool)))
-		current := primary.GetNavmeshPosition()
-		for len(result) < skill.TransferCount {
+		result := make([]*model.Player, 0, min(maximum, len(pool)))
+		current := primary
+		for len(result) < maximum {
 			selected, selectedIndex, best := (*model.Player)(nil), -1, float32(math.MaxFloat32)
+			currentRadius := m.transferActorRadius(current.GetRefObjectID())
 			for index, candidate := range pool {
-				distance := navmeshv2.HorizontalDistance(current, candidate.GetNavmeshPosition())
-				if distance <= radius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
+				distance := navmeshv2.HorizontalDistance(current.GetNavmeshPosition(), candidate.GetNavmeshPosition())
+				admissionRadius := radius + currentRadius + m.transferActorRadius(candidate.GetRefObjectID())
+				if distance <= admissionRadius && (distance < best || distance == best && (selected == nil || candidate.GetUniqueID() < selected.GetUniqueID())) {
 					selected, selectedIndex, best = candidate, index, distance
 				}
 			}
@@ -843,13 +911,15 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 			}
 			result = append(result, selected)
 			pool = append(pool[:selectedIndex], pool[selectedIndex+1:]...)
-			current = selected.GetNavmeshPosition()
+			current = selected
 		}
 		return result
 	}
 	center := npc.GetNavmeshPosition()
+	centerRadius := m.transferActorRadius(npc.GetRefObjectID())
 	if skill.TransferType == 2 {
 		center = primary.GetNavmeshPosition()
+		centerRadius = m.transferActorRadius(primary.GetRefObjectID())
 	}
 	type candidateMetric struct {
 		player *model.Player
@@ -870,15 +940,17 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 			position := candidate.GetNavmeshPosition().GetGlobalCoordinates()
 			cx, cz := position.X-source.X, position.Z-source.Z
 			projection := cx*ux + cz*uz
+			candidateRadius := m.transferActorRadius(candidate.GetRefObjectID())
 			lateral := float32(math.Abs(float64(cx*uz - cz*ux)))
-			if projection >= 0 && projection <= forwardLimit && lateral <= radius {
-				candidates = append(candidates, candidateMetric{player: candidate, metric: projection})
+			if projection >= -candidateRadius && projection <= forwardLimit+candidateRadius && lateral <= radius+candidateRadius {
+				candidates = append(candidates, candidateMetric{player: candidate, metric: max(projection, 0)})
 			}
 		}
 	} else {
 		for _, candidate := range pool {
 			distance := navmeshv2.HorizontalDistance(center, candidate.GetNavmeshPosition())
-			if distance <= radius {
+			admissionRadius := radius + centerRadius + m.transferActorRadius(candidate.GetRefObjectID())
+			if distance <= admissionRadius {
 				candidates = append(candidates, candidateMetric{player: candidate, metric: distance})
 			}
 		}
@@ -886,8 +958,8 @@ func (m *MobAIManager) mobSkillTransferTargets(npc *model.NPC, primary *model.Pl
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].metric < candidates[j].metric || candidates[i].metric == candidates[j].metric && candidates[i].player.GetUniqueID() < candidates[j].player.GetUniqueID()
 	})
-	if len(candidates) > skill.TransferCount {
-		candidates = candidates[:skill.TransferCount]
+	if len(candidates) > maximum {
+		candidates = candidates[:maximum]
 	}
 	result := make([]*model.Player, len(candidates))
 	for index := range candidates {
@@ -1013,6 +1085,9 @@ func (m *MobAIManager) applyAttackDamageWithSkillResult(world mobAIWorld, npc *m
 	}
 	if emit {
 		npc.SendToKnown(&attack)
+		if effectMask != 0 {
+			m.publishNPCBadEffectState(target, m.combatNow())
+		}
 		target.SendVitalsUpdate()
 	}
 	if linked.player != nil {
@@ -1071,18 +1146,21 @@ func (m *MobAIManager) applyNPCSkillDisplacement(world mobAIWorld, npc *model.NP
 	if distance <= 0 || chance > 0 && (roll == nil || !roll(chance)) {
 		return false
 	}
-	sourceGlobal := npc.GetNavmeshPosition().GetGlobalCoordinates()
+	sourcePosition := npc.GetNavmeshPosition()
 	targetPosition := target.GetNavmeshPosition()
-	targetGlobal := targetPosition.GetGlobalCoordinates()
-	dx, dz := targetGlobal.X-sourceGlobal.X, targetGlobal.Z-sourceGlobal.Z
+	sourceCoordinates, targetCoordinates, ok := mobAIMovementCoordinates(sourcePosition, targetPosition)
+	if !ok {
+		return false
+	}
+	dx, dz := targetCoordinates.X-sourceCoordinates.X, targetCoordinates.Z-sourceCoordinates.Z
 	length := float32(math.Hypot(float64(dx), float64(dz)))
 	if length <= 0 {
 		dx, dz, length = 1, 0, 1
 	}
-	destination, err := world.NewPosFromGlobalCoordinates(math32.NewVector3(
-		targetGlobal.X+dx/length*distance,
-		targetGlobal.Y,
-		targetGlobal.Z+dz/length*distance,
+	destination, err := resolveMobAIDestination(world, targetPosition, math32.NewVector3(
+		targetCoordinates.X+dx/length*distance,
+		targetCoordinates.Y,
+		targetCoordinates.Z+dz/length*distance,
 	))
 	if err != nil || !world.CanMoveDirectly(targetPosition, destination) {
 		return false
@@ -1120,7 +1198,7 @@ func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, t
 	}
 	effects := skill.StatusEffects
 	if len(effects) == 0 && skill.ShockPower > 0 {
-		effects = []model.SkillStatusEffect{{Kind: model.CombatStatusShock, Power: skill.ShockPower, Chance: skill.ShockChance, DurationMS: skill.ShockDuration}}
+		effects = []model.SkillStatusEffect{{Kind: model.CombatStatusShock, Power: skill.ShockPower, Payload: skill.ShockPower, Chance: skill.ShockChance, DurationMS: skill.ShockDuration}}
 	}
 	if len(effects) == 0 {
 		return 0
@@ -1133,7 +1211,8 @@ func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, t
 	}
 	var badMask uint32
 	for _, effect := range effects {
-		if effect.Kind == 0 || effect.Chance <= 0 || effect.DurationMS <= 0 || !roll(effect.Chance) {
+		chance := target.CombatStatusChance(effect.Chance, now)
+		if effect.Kind == 0 || chance <= 0 || effect.DurationMS <= 0 || !roll(chance) {
 			continue
 		}
 		status := model.CombatStatus{
@@ -1146,12 +1225,20 @@ func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, t
 		}
 		if npcStatusRestrainsMovement(effect.Kind) && world != nil {
 			world.StopMovingCharacter(target, target.GetNavmeshPosition(), "mob-skill-control", true)
+		}
+		if npcStatusRestrainsAction(effect.Kind) {
 			m.stateMu.Lock()
 			interrupt := m.interruptPlayer
 			m.stateMu.Unlock()
 			if interrupt != nil {
 				interrupt(target)
 			}
+		}
+		if effect.Kind == model.CombatStatusFrostbite || effect.Kind == model.CombatStatusDull {
+			target.SendMovementSpeedUpdate()
+		}
+		if model.CombatStatusRefreshesStats(effect.Kind) {
+			target.SendStatsUpdate()
 		}
 		bit := model.CombatStatusBadEffectBit(effect.Kind)
 		if bit != 0 {
@@ -1162,15 +1249,35 @@ func (m *MobAIManager) applyNPCSkillStatuses(world mobAIWorld, npc *model.NPC, t
 		}
 		m.scheduleNPCStatusExpiry(target, status, bit != 0)
 		if effect.Kind == model.CombatStatusBurn || effect.Kind == model.CombatStatusPoison || effect.Kind == model.CombatStatusBleed {
-			m.scheduleNPCStatusDamageTick(world, npc, target, status, magical, now.Add(5*time.Second))
+			m.scheduleNPCStatusDamageTick(world, npc, target, status, magical, now.Add(2*time.Second))
 		}
 	}
-	if badMask != 0 {
-		mask, levels := target.CombatBadEffectState(now)
-		packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
-		target.SendToSelfAndKnown(&packet)
-	}
 	return badMask
+}
+
+func (m *MobAIManager) publishNPCBadEffectState(target *model.Player, now time.Time) {
+	if target == nil {
+		return
+	}
+	mask, levels, details := target.CombatBadEffectSnapshot(now)
+	update := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
+	target.SendToSelfAndKnown(&update)
+	snapshot := model.BuildPlayerBadEffectSnapshot(mask, details)
+	target.SendToSelf(&snapshot)
+}
+
+func mobDamageTargetsHaveEffects(targets []model.CombatDamageTarget, targetUID uint32) bool {
+	for _, target := range targets {
+		if target.TargetUID != targetUID {
+			continue
+		}
+		for _, record := range target.Records {
+			if record.EffectMask != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func npcStatusRestrainsMovement(kind model.CombatStatusKind) bool {
@@ -1183,34 +1290,42 @@ func npcStatusRestrainsMovement(kind model.CombatStatusKind) bool {
 	}
 }
 
+func npcStatusRestrainsAction(kind model.CombatStatusKind) bool {
+	return npcStatusRestrainsMovement(kind) || kind == model.CombatStatusFear
+}
+
 func (m *MobAIManager) scheduleNPCStatusExpiry(target *model.Player, expected model.CombatStatus, badEffect bool) {
 	if target == nil || expected.ExpiresAt.IsZero() {
 		return
 	}
-	delay := time.Until(expected.ExpiresAt)
+	delay := expected.ExpiresAt.Sub(m.combatNow())
 	if delay < 0 {
 		delay = 0
 	}
 	m.scheduleAfter(delay, func() {
-		_, active := target.CombatStatus(expected.Kind, time.Now())
+		now := m.combatNow()
+		_, active := target.CombatStatus(expected.Kind, now)
 		if active {
 			return
 		}
 		if badEffect {
-			mask, levels := target.CombatBadEffectState(time.Now())
-			packet := model.BuildBadEffectUpdate(target.GetUniqueID(), mask, levels)
+			m.publishNPCBadEffectState(target, now)
+			if expected.Kind == model.CombatStatusFrostbite || expected.Kind == model.CombatStatusDull {
+				target.SendMovementSpeedUpdate()
+			}
+		} else {
+			packet := model.BuildBuffRemove(expected.Token)
 			target.SendToSelfAndKnown(&packet)
-			return
 		}
-		packet := model.BuildBuffRemove(expected.Token)
-		target.SendToSelfAndKnown(&packet)
+		if model.CombatStatusRefreshesStats(expected.Kind) {
+			target.SendStatsUpdate()
+		}
 	})
 }
 
-// scheduleNPCStatusDamageTick follows the binary-confirmed five-second
-// abnormal cadence. The tick is routed through the existing mob damage/result
-// producer with status admission disabled, so the parent effect is not
-// reapplied on every tick.
+// scheduleNPCStatusDamageTick follows the stock abnormal actor's two-second
+// cadence. The tick is routed through the existing mob damage/result producer
+// with status admission disabled, so the parent effect is not reapplied.
 func (m *MobAIManager) scheduleNPCStatusDamageTick(world mobAIWorld, npc *model.NPC, target *model.Player, expected model.CombatStatus, magical bool, tickAt time.Time) {
 	if m == nil || world == nil || npc == nil || target == nil || !tickAt.Before(expected.ExpiresAt) {
 		return
@@ -1229,8 +1344,15 @@ func (m *MobAIManager) scheduleNPCStatusDamageTick(world mobAIWorld, npc *model.
 		if amount <= 0 {
 			amount = status.Power
 		}
+		if status.Kind == model.CombatStatusPoison {
+			amount = min(amount, max(0, target.CurrentHP()-1))
+			if amount == 0 {
+				m.scheduleNPCStatusDamageTick(world, npc, target, expected, magical, now.Add(2*time.Second))
+				return
+			}
+		}
 		m.applyAttackDamageWithSkill(world, npc, target, model.NextActionUID(), max(1, amount), true, status.SkillID, false, magical)
-		m.scheduleNPCStatusDamageTick(world, npc, target, expected, magical, now.Add(5*time.Second))
+		m.scheduleNPCStatusDamageTick(world, npc, target, expected, magical, now.Add(2*time.Second))
 	})
 }
 
@@ -1355,11 +1477,9 @@ func (m *MobAIManager) mobAttackLands(npc *model.NPC, target *model.Player, now 
 	if !exists {
 		return true
 	}
-	hit := character.HitRate
-	if status, active := npc.CombatStatus(model.CombatStatusHitDown, now); active {
-		hit = max(0, hit-status.Power)
-	}
-	chance := model.CombatHitChance(hit, target.DerivedStats().ParryRate)
+	hit := npc.CombatHitRate(character.HitRate, now)
+	parry := target.CombatParryRate(target.DerivedStats().ParryRate, now)
+	chance := model.CombatHitChance(hit, parry)
 	if roll == nil {
 		return true
 	}
@@ -1428,14 +1548,21 @@ func (m *MobAIManager) wander(world mobAIWorld, npc *model.NPC, now time.Time) {
 	if area == nil || area.GenerateRadius <= 0 {
 		return
 	}
-	home := area.Position.GetGlobalCoordinates()
+	homePosition := area.Position
+	home := homePosition.GetGlobalCoordinates()
+	if navmeshv2.IsDungeonRegion(homePosition.Region.ID) {
+		if homePosition.Offset == nil {
+			return
+		}
+		home = homePosition.Offset
+	}
 	radius := area.GenerateRadius
-	targetGlobal := math32.NewVector3(
+	targetCoordinates := math32.NewVector3(
 		home.X+float32(rand.Intn(radius*2+1)-radius),
 		home.Y,
 		home.Z+float32(rand.Intn(radius*2+1)-radius),
 	)
-	target, err := world.NewPosFromGlobalCoordinates(targetGlobal)
+	target, err := resolveMobAIDestination(world, homePosition, targetCoordinates)
 	if err != nil {
 		return
 	}

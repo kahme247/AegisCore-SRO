@@ -33,7 +33,7 @@ func TestNPCCombatStatusMovesAndRestoresFrostbite(t *testing.T) {
 	npc.SetWalkSpeed(8)
 	npc.SetRunSpeed(22)
 	now := time.Unix(1000, 0)
-	if !npc.ApplyCombatStatus(CombatStatus{Kind: CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 50, ExpiresAt: now.Add(time.Second)}) {
+	if !npc.ApplyCombatStatusAt(CombatStatus{Kind: CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 50, ExpiresAt: now.Add(time.Second)}, now) {
 		t.Fatal("frostbite was not applied")
 	}
 	if got := npc.GetRunSpeed(); got != 11 {
@@ -44,6 +44,23 @@ func TestNPCCombatStatusMovesAndRestoresFrostbite(t *testing.T) {
 	}
 	if got := npc.GetRunSpeed(); got != 22 {
 		t.Fatalf("restored speed = %g, want 22", got)
+	}
+}
+
+func TestNPCDullAndFrostbiteComposeMovementSpeed(t *testing.T) {
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.SetLifeState(Alive)
+	npc.ConfigureCombat(100, 10)
+	npc.SetWalkSpeed(8)
+	npc.SetRunSpeed(24)
+	now := time.Unix(1000, 0)
+	npc.ApplyCombatStatusAt(CombatStatus{Kind: CombatStatusDull, Token: 1, SkillID: 1, ExpiresAt: now.Add(time.Minute)}, now)
+	if got := npc.GetRunSpeed(); got != 18 {
+		t.Fatalf("Dull run speed = %g, want 18", got)
+	}
+	npc.ApplyCombatStatusAt(CombatStatus{Kind: CombatStatusFrostbite, Token: 2, SkillID: 2, ExpiresAt: now.Add(time.Minute)}, now)
+	if got := npc.GetRunSpeed(); got != 9 {
+		t.Fatalf("Dull/Frostbite run speed = %g, want 9", got)
 	}
 }
 
@@ -183,6 +200,40 @@ func TestNPCCombatBadEffectStateAggregatesAllFamiliesAndLevels(t *testing.T) {
 	}
 	if !slices.Equal(levels, []byte{11, 9, 7}) {
 		t.Fatalf("levels = %v, want [11 9 7]", levels)
+	}
+}
+
+func TestNPCBehavioralDebuffMechanics(t *testing.T) {
+	now := time.Unix(100, 0)
+	npc := &NPC{Mutex: &sync.Mutex{}}
+	npc.ConfigureCombat(1000, 10)
+	npc.SetLifeState(Alive)
+	for token, status := range []CombatStatus{
+		{Kind: CombatStatusDarkness, SkillID: 1, Power: 35, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusShortSight, SkillID: 2, Power: 40, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDull, SkillID: 3, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusFear, SkillID: 4, ExpiresAt: now.Add(time.Minute)},
+		{Kind: CombatStatusDisease, SkillID: 5, Power: 25, ExpiresAt: now.Add(time.Minute)},
+	} {
+		status.Token = uint32(token + 1)
+		if !npc.ApplyCombatStatusAt(status, now) {
+			t.Fatalf("apply status %+v", status)
+		}
+	}
+	if got := npc.CombatHitRate(100, now); got != 65 {
+		t.Fatalf("darkness hit rate = %d, want 65", got)
+	}
+	if got := npc.CombatAttackRange(200, now); got != 120 {
+		t.Fatalf("short-sight range = %g, want 120", got)
+	}
+	if got := npc.CombatActionTimePercent(100, now); got != 125 {
+		t.Fatalf("Dull action time = %g, want 125", got)
+	}
+	if !npc.CombatActionRestricted(now) {
+		t.Fatal("Fear did not restrict mob actions")
+	}
+	if got := npc.CombatStatusChance(60, now); got != 85 {
+		t.Fatalf("Disease status chance = %d, want 85", got)
 	}
 }
 

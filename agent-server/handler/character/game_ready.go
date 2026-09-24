@@ -3,6 +3,7 @@ package character
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
@@ -28,6 +29,10 @@ type gameReadyVisibilityActivator interface {
 	ActivatePlayer(*model.Player) []service.VisibilityDelta
 }
 
+type gameReadyNPCLookup interface {
+	GetNPCs() []*model.NPC
+}
+
 // GameReadyHandler confirms the client has received the character bootstrap.
 // A staged player remains Spawning until this one-way confirmation succeeds.
 type GameReadyHandler struct {
@@ -45,6 +50,7 @@ type GameReadyHandler struct {
 	countdowns interface {
 		Rehydrate(context.Context, *server.Session, *model.Player) error
 	}
+	questIndicators model.QuestIndicatorRepository
 }
 
 func (h *GameReadyHandler) ConfigurePremiumDecoration(repository model.PremiumDecorationRepository) {
@@ -76,6 +82,12 @@ func (h *GameReadyHandler) ConfigureQuestCountdowns(runtime interface {
 	Rehydrate(context.Context, *server.Session, *model.Player) error
 }) {
 	h.countdowns = runtime
+}
+
+func (h *GameReadyHandler) ConfigureQuestIndicators(repository model.QuestIndicatorRepository) {
+	if h != nil {
+		h.questIndicators = repository
+	}
 }
 
 func NewGameReadyHandler(players gameReadyPlayerLookup, mall ...model.ItemMallRepository) *GameReadyHandler {
@@ -236,9 +248,58 @@ func (h *GameReadyHandler) handleSessionPacket(ctx context.Context, session *ser
 			return fmt.Errorf("rehydrate quest countdowns after GameReady: %w", err)
 		}
 	}
-	publishRestoredItemServices(player)
+	if err := publishAvailableQuestIndicators(ctx, h.questIndicators, world, player, session.Send); err != nil {
+		return err
+	}
 	publishRestoredActiveBuffs(player)
+	time.AfterFunc(2*time.Second, func() {
+		if player.Session == session && player.GetLifeState() != model.Spawning {
+			publishRestoredItemServices(player)
+		}
+	})
 	logrus.Debugf("player %s's client is ready", player.CharName)
+	return nil
+}
+
+func publishAvailableQuestIndicators(ctx context.Context, repository model.QuestIndicatorRepository, world gameReadyPlayerLookup, player *model.Player, send func(network.Packet) error) error {
+	if repository == nil || player == nil || send == nil {
+		return nil
+	}
+	indicators, err := repository.ListAvailableIndicators(ctx, player.ID)
+	if err != nil {
+		return fmt.Errorf("list available quest indicators after GameReady: %w", err)
+	}
+	// The trailing 0x30D6 target is the live CIGIDObject unique ID, not the
+	// RefObj NPC ID. sro_client.exe:0x009CF2F0 looks the mark up with
+	// CIGIDObject::m_uniqueId (+0xF8) before selecting the overhead icon.
+	npcs, ok := world.(gameReadyNPCLookup)
+	if !ok {
+		return nil
+	}
+	targetsByRefObjectID := make(map[uint32][]uint32)
+	for _, npc := range npcs.GetNPCs() {
+		if npc == nil || npc.GetUniqueID() == 0 || npc.GetRefObjectID() == 0 {
+			continue
+		}
+		refObjectID := uint32(npc.GetRefObjectID())
+		targetsByRefObjectID[refObjectID] = append(targetsByRefObjectID[refObjectID], npc.GetUniqueID())
+	}
+	for _, targets := range targetsByRefObjectID {
+		slices.Sort(targets)
+	}
+	publisher := questMarkPublisher{send: send}
+	for _, indicator := range indicators {
+		for _, targetUID := range targetsByRefObjectID[indicator.NPCRefObjectID] {
+			if _, err = publisher.add(player, model.QuestMark{
+				QuestID:  indicator.QuestID,
+				Flags:    0x02,
+				Kind:     1,
+				TargetID: targetUID,
+			}); err != nil {
+				return fmt.Errorf("publish available quest indicator %d for NPC %d: %w", indicator.QuestID, targetUID, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -273,12 +334,25 @@ func publishRestoredActiveBuffs(player *model.Player) {
 	}
 }
 
-func publishRestoredItemServices(_ *model.Player) {
-	// The stock vSRO 1.188 client currently rejects the restored premium
-	// service sequence emitted here (0x3159 followed by 0xB0BD) during
-	// GameReady and enters its deliberate access-violation fail-fast path.
-	// Keep the persisted effects loaded for server-side accounting, but do
-	// not publish the unverified restoration packets on login.
+func publishRestoredItemServices(player *model.Player) {
+	if player == nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, state := range player.ItemServiceStates(now) {
+		if state.Token == 0 || !state.Effect.TargetSlotSet || !state.Effect.ExpiresAt.After(now) {
+			continue
+		}
+		if !model.ItemServiceTargetMatchesInventory(player, state.Effect) {
+			if player.ClearItemService(state.Effect.Kind, state.Token) && model.ItemServiceAffectsStats(state.Effect) {
+				player.SendStatsUpdate()
+			}
+			continue
+		}
+		if update, exists, err := model.BuildPlayerItemServiceTargetLevelUpdate(player, state.Effect, true); err == nil && exists {
+			player.SendToSelf(&update)
+		}
+	}
 }
 
 func (h *GameReadyHandler) playerLookup() gameReadyPlayerLookup {

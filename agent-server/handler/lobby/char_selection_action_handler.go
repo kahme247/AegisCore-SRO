@@ -55,13 +55,20 @@ func (h *CharacterSelectionHandler) handleAction(ctx context.Context, session *s
 	if ownerErr != nil {
 		return sendCharacterActionResult(session, 0, ResultFalse, 0)
 	}
-	if !session.EnterLobby() {
-		return fmt.Errorf("character action is invalid while session is %s", session.LifecyclePhase())
-	}
-
 	action, err := packet.ReadByte()
 	if err != nil {
 		return sendCharacterActionResult(session, 0, ResultFalse, 0)
+	}
+	if session.LifecyclePhase() == server.SessionCharacterLoading {
+		// The stock client requests a fresh character list immediately after
+		// selecting a character. It is read-only, so serve it without moving
+		// the staged session back to the lobby. All state-changing lobby
+		// actions remain unavailable until loading finishes or aborts.
+		if action != CharActionList {
+			return fmt.Errorf("character action %d is invalid while session is %s", action, session.LifecyclePhase())
+		}
+	} else if !session.EnterLobby() {
+		return fmt.Errorf("character action is invalid while session is %s", session.LifecyclePhase())
 	}
 	if action == CharActionCreate || action == CharActionDelete || action == CharActionRestore {
 		ctx = model.WithCharacterCommand(ctx, model.CharacterCommandIdentity{Key: fmt.Sprintf("character:%s:%02x:%04x", session.ID, packet.Sequence, packet.MessageID), Name: fmt.Sprintf("character.action.%d", action)})

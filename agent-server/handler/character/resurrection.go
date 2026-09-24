@@ -132,9 +132,9 @@ func (h *ResurrectionHandler) publishResurrection(player *model.Player) error {
 
 func buildResurrectionItemUseSuccess(result model.ItemUseResult) network.Packet {
 	return vsro188.BuildItemUseSuccess(vsro188.ItemUseSuccess{
-		SourceSlot: result.SourceSlot,
-		NewAmount:  result.NewAmount,
-		ItemType:   result.ItemType,
+		EncodedSlot:  result.SourceSlot,
+		NewAmount:    result.NewAmount,
+		PackedTypeID: result.ItemType,
 	})
 }
 

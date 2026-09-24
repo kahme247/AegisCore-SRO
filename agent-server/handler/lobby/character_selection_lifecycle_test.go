@@ -1,6 +1,7 @@
 package lobby
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/framework/utils"
 	"github.com/g3n/engine/math32"
@@ -68,6 +70,7 @@ func (w *lifecycleJoinWorld) PlayerDisconnected(uid uint32, charName string) {
 type bootstrapFailConn struct {
 	failAfter int
 	writes    int
+	buffer    bytes.Buffer
 }
 
 func (c *bootstrapFailConn) Read([]byte) (int, error)         { return 0, io.EOF }
@@ -83,7 +86,7 @@ func (c *bootstrapFailConn) Write(payload []byte) (int, error) {
 		return 0, errors.New("intentional bootstrap write failure")
 	}
 	c.writes++
-	return len(payload), nil
+	return c.buffer.Write(payload)
 }
 
 type lifecycleTestAddr string
@@ -174,6 +177,24 @@ func TestCharacterJoinKeepsPlayerSpawningUntilGameReady(t *testing.T) {
 	})
 	if err := handler.handleJoin(context.Background(), session, request); err != nil {
 		t.Fatalf("validated character join failed: %v", err)
+	}
+	packets, err := network.NewPacketReader(bytes.NewReader(conn.buffer.Bytes())).ReadPackets()
+	if err != nil {
+		t.Fatalf("decode character bootstrap: %v", err)
+	}
+	var endIndex = -1
+	for index, packet := range packets {
+		if packet.MessageID == opcode.CharacterDataEnd {
+			endIndex = index
+			break
+		}
+	}
+	if endIndex < 0 || endIndex+1 >= len(packets) {
+		t.Fatalf("character bootstrap lacks packet after 34A6: %#v", packets)
+	}
+	badEffects := packets[endIndex+1]
+	if badEffects.MessageID != opcode.ActionUnknownUpdate2 || !bytes.Equal(badEffects.Payload(), []byte{0, 0, 0, 0}) {
+		t.Fatalf("packet after 34A6 = opcode:%04X payload:% X, want 30D2 zero abnormal mask", badEffects.MessageID, badEffects.Payload())
 	}
 
 	if world.added == nil {

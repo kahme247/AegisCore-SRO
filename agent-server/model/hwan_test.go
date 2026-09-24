@@ -41,6 +41,23 @@ func TestBerserkLifecycleAndCombatModifier(t *testing.T) {
 	}
 }
 
+func TestFrostbiteHalvesPlayerMovementAndComposesWithBerserk(t *testing.T) {
+	now := time.Now()
+	player := &Player{BodyState: Berserker, WalkSpeed: 20, RunSpeed: 40}
+	if !player.ApplyCombatStatusAt(CombatStatus{
+		Kind: CombatStatusFrostbite, Token: 1, ExpiresAt: now.Add(time.Minute),
+	}, now) {
+		t.Fatal("apply Frostbite")
+	}
+	walk, run := player.MovementSpeeds()
+	if walk != 20 || run != 40 {
+		t.Fatalf("Berserk plus Frostbite speeds = %.1f/%.1f, want 20/40", walk, run)
+	}
+	if got := player.GetMovementSpeed(); got != 40 {
+		t.Fatalf("authoritative Frostbite movement speed = %.1f, want 40", got)
+	}
+}
+
 func TestBerserkEffectVariantUsesBlueForLevelFive(t *testing.T) {
 	for level := byte(0); level < BlueBerserkHwanLevel; level++ {
 		if got := BerserkEffectVariant(level); got != 0 {
@@ -87,6 +104,18 @@ func TestBerserkDurationScalesWithConsumedPoints(t *testing.T) {
 		if got := BerserkDurationForPoints(byte(points)); got != want {
 			t.Fatalf("duration for %d points = %s, want %s", points, got, want)
 		}
+	}
+}
+
+func TestHwanDurationServiceExtendsEachBerserkActivation(t *testing.T) {
+	now := time.Now()
+	player := &Player{}
+	player.ApplyItemService(ItemServiceEffect{Kind: ItemServiceHwanDuration, EffectValue: 14, ExpiresAt: now.Add(time.Hour)})
+	if got, want := player.BerserkDurationForPoints(5, now), BerserkDurationForPoints(5)+14*time.Second; got != want {
+		t.Fatalf("duration with HWAN service = %v, want %v", got, want)
+	}
+	if got := player.BerserkDurationForPoints(5, now.Add(2*time.Hour)); got != BerserkDurationForPoints(5) {
+		t.Fatalf("expired HWAN service duration = %v", got)
 	}
 }
 

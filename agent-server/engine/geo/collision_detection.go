@@ -7,19 +7,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func getObjectTileFromLocalPoint(object *navmesh.Object, point *math32.Vector3) *navmesh.ObjectTile {
-	x := int(point.X - object.Grid.Origin.X/100)
-	z := int(point.Z - object.Grid.Origin.Z/100)
-
-	tileIdx := x + object.Grid.Height*z
-
-	if tileIdx >= len(object.Grid.GridTiles) {
-		return nil
-	}
-
-	return object.Grid.GridTiles[tileIdx]
-}
-
 func FindTriangleHeight(t *math.Triangle, vPos *math32.Vector3) bool {
 	//From http://totologic.blogspot.se/2014/01/accurate-point-in-triangle-test.html
 

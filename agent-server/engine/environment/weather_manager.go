@@ -47,6 +47,13 @@ func SetCurrentWeather(weatherType model.WeatherType, intensity byte) error {
 	return currentWeather.Set(weatherType, intensity)
 }
 
+func WeatherForRegion(regionID int16, weatherType model.WeatherType, intensity byte) (model.WeatherType, byte) {
+	if regionID >= -32766 && regionID <= -32761 {
+		return model.Clear, 0
+	}
+	return weatherType, intensity
+}
+
 func StartWeatherSystem(ctx context.Context, broadcaster weatherBroadcaster) {
 	if ctx == nil {
 		return

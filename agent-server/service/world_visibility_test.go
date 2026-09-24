@@ -563,6 +563,35 @@ func TestWorldVisibilityDoesNotWrapNormalWorldEdges(t *testing.T) {
 		t.Fatalf("normal-world edge omitted its own region: %#v", regionIDs)
 	}
 }
+func TestWorldVisibilityIsolatesDungeonWireRegions(t *testing.T) {
+	const dungeon = int16(-32767)
+	adjacentDungeon := int16(dungeon + 1)
+	x, _ := utils.Int16ToXAndZ(dungeon)
+	normalNeighbour := utils.XAndZToInt16(byte(x), 127)
+	terrain := func(regionID int16) *navmeshv2.RtNavmeshTerrain {
+		value := navmeshv2.NewRtNavmeshTerrain("visibility-test", navmeshv2.NewRegionFromInt16(regionID))
+		return &value
+	}
+	world := &WorldService{
+		regions: map[int16]*navmeshv2.RtNavmeshTerrain{
+			dungeon: terrain(dungeon), adjacentDungeon: terrain(adjacentDungeon), normalNeighbour: terrain(normalNeighbour),
+		},
+		visibleObjectsByRegion: map[int16][]model.ISRObject{
+			dungeon: nil, adjacentDungeon: nil, normalNeighbour: nil,
+		},
+		mutex: &sync.Mutex{},
+	}
+
+	world.mutex.Lock()
+	visibilityIDs := world.visibilityNeighbourRegionIDsLocked(dungeon)
+	knownObjectIDs := world.getNeighbourRegionIDsLocked(dungeon)
+	world.mutex.Unlock()
+	for name, regionIDs := range map[string][]int16{"visibility": visibilityIDs, "known objects": knownObjectIDs} {
+		if len(regionIDs) != 1 || regionIDs[0] != dungeon {
+			t.Errorf("%s dungeon regions = %#v, want only %d", name, regionIDs, dungeon)
+		}
+	}
+}
 
 type blockingVisibilityKnownObjectList struct {
 	addStarted chan struct{}

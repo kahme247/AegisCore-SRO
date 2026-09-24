@@ -496,6 +496,12 @@ func (w *WorldService) reconcilePlayerObject(player *model.Player, object model.
 // this lets teardown tests use the same safe path before world bootstrap.
 // Callers must hold w.mutex.
 func (w *WorldService) visibilityNeighbourRegionIDsLocked(regionID int16) []int16 {
+	if navmeshv2.IsDungeonRegion(regionID) {
+		if _, exists := w.visibleObjectsByRegion[regionID]; exists {
+			return []int16{regionID}
+		}
+		return nil
+	}
 	x, z := utils.Int16ToXAndZ(regionID)
 	regionIDs := make([]int16, 0, 9)
 	for x1 := x - 1; x1 <= x+1; x1++ {

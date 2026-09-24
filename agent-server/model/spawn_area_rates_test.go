@@ -10,6 +10,9 @@ func TestSpawnAreaRatesScaleCountAndFixedDatabaseDelay(t *testing.T) {
 	if got := len(area.RespawnTimes); got != 6 {
 		t.Fatalf("initial spawn count = %d, want 6", got)
 	}
+	if got := area.TakeDueRespawns(time.Now()); got != 6 {
+		t.Fatalf("immediately due initial population = %d, want 6", got)
+	}
 	delay := area.calculateRespawnTime().Sub(time.Now())
 	if delay < 4900*time.Millisecond || delay > 5100*time.Millisecond {
 		t.Fatalf("scaled fixed respawn delay = %v, want about 5s", delay)

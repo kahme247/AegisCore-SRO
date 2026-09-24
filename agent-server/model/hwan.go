@@ -64,6 +64,14 @@ func BerserkDurationForPoints(points byte) time.Duration {
 	return time.Duration(min(points, MaxHwanPoints)) * RuntimeBerserkDurationPerPoint()
 }
 
+func (p *Player) BerserkDurationForPoints(points byte, now time.Time) time.Duration {
+	duration := BerserkDurationForPoints(points)
+	if p == nil {
+		return duration
+	}
+	return duration + time.Duration(p.ItemServiceEffectValue(ItemServiceHwanDuration, now))*time.Second
+}
+
 // BerserkEffectVariant is the boolean effect selector consumed after a
 // Berserker body-state value by the stock vSRO 1.188 client. It is not the
 // numeric HWAN title level: zero selects red Berserk and one selects Blue
@@ -239,6 +247,22 @@ func (p *Player) ExpireBerserk(generation uint64) bool {
 	if p.berserkGeneration != generation || p.BodyState != Berserker {
 		return false
 	}
+	p.BodyState = Normal
+	p.berserkExpiresAt = time.Time{}
+	return true
+}
+
+// CancelBerserk invalidates a pending expiry and restores the normal body state.
+func (p *Player) CancelBerserk() bool {
+	if p == nil {
+		return false
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	if p.BodyState != Berserker {
+		return false
+	}
+	p.berserkGeneration++
 	p.BodyState = Normal
 	p.berserkExpiresAt = time.Time{}
 	return true

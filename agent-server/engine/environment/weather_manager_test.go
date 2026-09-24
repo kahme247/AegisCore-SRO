@@ -34,6 +34,19 @@ func TestWeatherManagerValidatesStoresAndBroadcasts(t *testing.T) {
 	}
 }
 
+func TestWeatherForRegionKeepsQinShiTombClear(t *testing.T) {
+	for regionID := int16(-32766); regionID <= -32761; regionID++ {
+		weatherType, intensity := WeatherForRegion(regionID, model.Rain, 75)
+		if weatherType != model.Clear || intensity != 0 {
+			t.Fatalf("WeatherForRegion(%d) = (%d, %d)", regionID, weatherType, intensity)
+		}
+	}
+	weatherType, intensity := WeatherForRegion(25000, model.Snow, 40)
+	if weatherType != model.Snow || intensity != 40 {
+		t.Fatalf("outside Tomb = (%d, %d)", weatherType, intensity)
+	}
+}
+
 func TestWeatherManagerRunStopsWithContext(t *testing.T) {
 	broadcast := &signalingWeatherBroadcastFake{sent: make(chan struct{}, 1)}
 	manager := NewWeatherManager(broadcast, 2)

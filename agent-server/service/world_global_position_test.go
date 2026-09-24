@@ -70,6 +70,29 @@ func TestNewPosFromGlobalCoordinatesUsesFloorAtNormalRegionBoundaries(t *testing
 	}
 }
 
+func TestNewPosFromRegionCoordinatesPreservesDungeonLocalAddressing(t *testing.T) {
+	const regionID = int16(-32767)
+	terrain := newGlobalPositionTestTerrain(regionID)
+	terrain.DungeonMinimum = math32.NewVector3(700, -100, -1600)
+	terrain.DungeonMaximum = math32.NewVector3(1200, 100, -600)
+	world := &WorldService{
+		regions: map[int16]*navmeshv2.RtNavmeshTerrain{regionID: &terrain},
+		mutex:   &sync.Mutex{},
+	}
+	offset := math32.NewVector3(1011, 0, -862)
+	position, err := world.NewPosFromRegionCoordinates(regionID, offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if position.Region.ID != regionID || position.Cell == nil || position.Offset == nil || *position.Offset != *offset {
+		t.Fatalf("dungeon position = %+v", position)
+	}
+	offset.X = 9999
+	if position.Offset.X != 1011 {
+		t.Fatal("resolved dungeon position retained caller-owned coordinates")
+	}
+}
+
 func TestNewPosFromGlobalCoordinatesRejectsCoordinatesOutsideNormalGridBeforeLookup(t *testing.T) {
 	world := newGlobalPositionTestWorld()
 

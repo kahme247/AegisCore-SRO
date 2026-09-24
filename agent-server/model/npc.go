@@ -136,6 +136,7 @@ type CombatStatus struct {
 	Power     int
 	Level     int
 	Payload   int
+	AppliedAt time.Time
 	ExpiresAt time.Time
 	Stackable bool
 }
@@ -369,6 +370,86 @@ func (n *NPC) CombatStatus(kind CombatStatusKind, now time.Time) (CombatStatus, 
 	return selected, true
 }
 
+func (n *NPC) CombatHitRate(base int, now time.Time) int {
+	for _, kind := range []CombatStatusKind{CombatStatusHitDown, CombatStatusDarkness} {
+		if status, active := n.CombatStatus(kind, now); active {
+			base -= status.Power
+		}
+	}
+	return max(0, base)
+}
+
+func (n *NPC) CombatParryRate(base int, now time.Time) int {
+	if status, active := n.CombatStatus(CombatStatusParryDown, now); active {
+		base -= status.Power
+	}
+	base = max(0, base)
+	if status, active := n.CombatStatus(CombatStatusShock, now); active {
+		magnitude := status.Payload
+		if magnitude <= 0 {
+			magnitude = status.Power
+		}
+		base = base * (100 - min(max(magnitude, 0), 100)) / 100
+	}
+	return base
+}
+
+func (n *NPC) CombatPhysicalDefense(base int, now time.Time) int {
+	if status, active := n.CombatStatus(CombatStatusPhysicalDefenseDown, now); active {
+		base = CombatDefenseAfterReduction(base, status.Power)
+	}
+	if status, active := n.CombatStatus(CombatStatusBleed, now); active {
+		base -= status.Power
+	}
+	return max(0, base)
+}
+
+func (n *NPC) CombatMagicalDefense(base int, now time.Time) int {
+	if status, active := n.CombatStatus(CombatStatusMagicalDefenseDown, now); active {
+		base = CombatDefenseAfterReduction(base, status.Power)
+	}
+	if status, active := n.CombatStatus(CombatStatusBleed, now); active {
+		base -= status.Power
+	}
+	return max(0, base)
+}
+
+func (n *NPC) CombatAttackRange(base float32, now time.Time) float32 {
+	if base <= 0 {
+		return 0
+	}
+	if status, active := n.CombatStatus(CombatStatusShortSight, now); active {
+		reduction := min(max(status.Power, 0), 100)
+		return base * float32(100-reduction) / 100
+	}
+	return base
+}
+
+func (n *NPC) CombatActionTimePercent(base float64, now time.Time) float64 {
+	if base < 0 {
+		base = 0
+	}
+	if _, active := n.CombatStatus(CombatStatusFrostbite, now); active {
+		base *= 2
+	}
+	if _, active := n.CombatStatus(CombatStatusDull, now); active {
+		base *= 1.25
+	}
+	return base
+}
+
+func (n *NPC) CombatActionRestricted(now time.Time) bool {
+	_, active := n.CombatStatus(CombatStatusFear, now)
+	return active
+}
+
+func (n *NPC) CombatStatusChance(base int, now time.Time) int {
+	if status, active := n.CombatStatus(CombatStatusDisease, now); active {
+		base += status.Power
+	}
+	return min(max(base, 0), 100)
+}
+
 func (n *NPC) CombatStatusByToken(kind CombatStatusKind, token uint32, now time.Time) (CombatStatus, bool) {
 	if n == nil || kind == 0 || token == 0 {
 		return CombatStatus{}, false
@@ -392,62 +473,72 @@ func (n *NPC) CombatStatusByToken(kind CombatStatusKind, token uint32, now time.
 }
 
 func (n *NPC) applyStatusMovementEffect(kind CombatStatusKind, power int, now time.Time) {
-	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite) {
+	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite && kind != CombatStatusDull) {
 		return
 	}
+	n.recomputeStatusMovementEffect(now)
+}
+
+func (n *NPC) restoreStatusMovementEffect(kind CombatStatusKind) {
+	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite && kind != CombatStatusDull) {
+		return
+	}
+	n.recomputeStatusMovementEffect(time.Now())
+}
+
+func (n *NPC) recomputeStatusMovementEffect(now time.Time) {
 	n.combat.mutex.Lock()
 	if n.combat.baseSpeed == nil {
-		n.combat.baseSpeed = &npcBaseSpeed{walk: n.GetWalkSpeed(), run: n.GetRunSpeed()}
+		n.combat.baseSpeed = &npcBaseSpeed{walk: n.WalkSpeed, run: n.RunSpeed}
 	}
 	base := *n.combat.baseSpeed
-	n.combat.mutex.Unlock()
-	if kind == CombatStatusFreeze {
-		n.WalkSpeed = 0
-		n.RunSpeed = 0
-		return
+	frozen := combatStatusMapActive(n.combat.statuses[CombatStatusFreeze], now)
+	frosted := combatStatusMapActive(n.combat.statuses[CombatStatusFrostbite], now)
+	dulled := combatStatusMapActive(n.combat.statuses[CombatStatusDull], now)
+	if !frozen && !frosted && !dulled {
+		n.combat.baseSpeed = nil
 	}
-	// Frostbite's first parameter is the abnormal-state level used for
-	// resistance, not a speed percentage. The vSRO state itself halves speed.
-	reduction := 50
-	factor := float32(100-reduction) / 100
+	n.combat.mutex.Unlock()
+	factor := float32(1)
+	if frozen {
+		factor = 0
+	} else {
+		if frosted {
+			factor *= 0.5
+		}
+		if dulled {
+			factor *= 0.75
+		}
+	}
 	n.WalkSpeed = base.walk * factor
 	n.RunSpeed = base.run * factor
 }
 
-func (n *NPC) restoreStatusMovementEffect(kind CombatStatusKind) {
-	if n == nil || (kind != CombatStatusFreeze && kind != CombatStatusFrostbite) {
-		return
+func combatStatusMapActive(statuses map[uint32]CombatStatus, now time.Time) bool {
+	for _, status := range statuses {
+		if status.ExpiresAt.After(now) {
+			return true
+		}
 	}
-	n.combat.mutex.Lock()
-	base := n.combat.baseSpeed
-	if kind == CombatStatusFreeze {
-		n.combat.baseSpeed = nil
-	} else if frozen := len(n.combat.statuses[CombatStatusFreeze]) > 0; frozen {
-		n.combat.mutex.Unlock()
-		return
-	}
-	n.combat.mutex.Unlock()
-	if base == nil {
-		return
-	}
-	n.WalkSpeed = base.walk
-	n.RunSpeed = base.run
+	return false
 }
 
 type npcAIState struct {
-	mutex          sync.Mutex
-	level          int
-	aggressive     bool
-	sightRange     float32
-	attackSkillID  uint32
-	targetUID      uint32
-	threat         map[uint32]int64
-	nextAttack     time.Time
-	nextWander     time.Time
-	nextPursuit    time.Time
-	pursuitPending bool
-	aggroCandidate uint32
-	aggroReadyAt   time.Time
+	mutex            sync.Mutex
+	level            int
+	aggressive       bool
+	sightRange       float32
+	attackSkillIDs   [10]uint32
+	attackSkillCount uint8
+	attackSkillIndex uint8
+	targetUID        uint32
+	threat           map[uint32]int64
+	nextAttack       time.Time
+	nextWander       time.Time
+	nextPursuit      time.Time
+	pursuitPending   bool
+	aggroCandidate   uint32
+	aggroReadyAt     time.Time
 }
 
 func (n *NPC) ConfigureAI(level int, aggressive bool, sightRange int) {
@@ -477,15 +568,24 @@ func (n *NPC) AIProfile() (level int, aggressive bool, sightRange float32, targe
 	return n.ai.level, n.ai.aggressive, n.ai.sightRange, n.ai.targetUID
 }
 
-// ConfigureAttackSkill binds the immutable character-reference default skill
-// used for this NPC's basic attack animation. A zero value means the reference
-// row does not define an attack and must not be replaced with a player skill.
-func (n *NPC) ConfigureAttackSkill(skillID uint32) {
+// ConfigureAttackSkills binds the character-reference default skill set used
+// by this NPC. Zero entries are omitted; the first authored skill is selected
+// until MobAI chooses a subsequent attack.
+func (n *NPC) ConfigureAttackSkills(skillIDs ...uint32) {
 	if n == nil {
 		return
 	}
 	n.ai.mutex.Lock()
-	n.ai.attackSkillID = skillID
+	n.ai.attackSkillIDs = [10]uint32{}
+	n.ai.attackSkillCount = 0
+	n.ai.attackSkillIndex = 0
+	for _, skillID := range skillIDs {
+		if skillID == 0 || n.ai.attackSkillCount == uint8(len(n.ai.attackSkillIDs)) {
+			continue
+		}
+		n.ai.attackSkillIDs[n.ai.attackSkillCount] = skillID
+		n.ai.attackSkillCount++
+	}
 	n.ai.mutex.Unlock()
 }
 
@@ -495,7 +595,25 @@ func (n *NPC) AttackSkillID() uint32 {
 	}
 	n.ai.mutex.Lock()
 	defer n.ai.mutex.Unlock()
-	return n.ai.attackSkillID
+	if n.ai.attackSkillCount == 0 {
+		return 0
+	}
+	return n.ai.attackSkillIDs[n.ai.attackSkillIndex]
+}
+
+// SelectAttackSkill maps an arbitrary non-negative random value onto the
+// configured skill set and returns the selected reference skill.
+func (n *NPC) SelectAttackSkill(roll int) uint32 {
+	if n == nil {
+		return 0
+	}
+	n.ai.mutex.Lock()
+	defer n.ai.mutex.Unlock()
+	if n.ai.attackSkillCount == 0 {
+		return 0
+	}
+	n.ai.attackSkillIndex = uint8(uint(roll) % uint(n.ai.attackSkillCount))
+	return n.ai.attackSkillIDs[n.ai.attackSkillIndex]
 }
 
 func (n *NPC) SetAggroTarget(uid uint32) {

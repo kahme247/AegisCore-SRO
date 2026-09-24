@@ -2,6 +2,7 @@ package character
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 )
 
@@ -19,6 +21,7 @@ type fakeGameReadyPlayers struct {
 	lookups         int
 	activations     int
 	jobAtActivation model.PlayerJob
+	npcs            []*model.NPC
 }
 
 func (f *fakeGameReadyPlayers) GetPlayerByUniqueId(_ uint32) (*model.Player, error) {
@@ -27,6 +30,10 @@ func (f *fakeGameReadyPlayers) GetPlayerByUniqueId(_ uint32) (*model.Player, err
 		return nil, f.err
 	}
 	return f.player, nil
+}
+
+func (f *fakeGameReadyPlayers) GetNPCs() []*model.NPC {
+	return append([]*model.NPC(nil), f.npcs...)
 }
 
 func (f *fakeGameReadyPlayers) ActivatePlayer(player *model.Player) []service.VisibilityDelta {
@@ -317,6 +324,45 @@ func TestGameReadyRejectsMismatchedStagedCharacterID(t *testing.T) {
 	}
 	if got, want := player.GetLifeState(), model.Spawning; got != want {
 		t.Fatalf("mismatched character ID changed life state to %d, want %d", got, want)
+	}
+}
+
+type fakeQuestIndicatorRepository struct {
+	indicators  []model.QuestNPCIndicator
+	characterID int
+}
+
+func (f *fakeQuestIndicatorRepository) ListAvailableIndicators(_ context.Context, characterID int) ([]model.QuestNPCIndicator, error) {
+	f.characterID = characterID
+	return append([]model.QuestNPCIndicator(nil), f.indicators...), nil
+}
+
+func TestGameReadyPublishesAvailableNPCQuestIndicators(t *testing.T) {
+	repository := &fakeQuestIndicatorRepository{indicators: []model.QuestNPCIndicator{
+		{QuestID: 58, NPCRefObjectID: 2003},
+	}}
+	player := &model.Player{ID: 123}
+	npc := &model.NPC{SRObject: model.SRObject{UniqueID: 0x11223344, RefObjectID: 2003}}
+	world := &fakeGameReadyPlayers{npcs: []*model.NPC{npc}}
+	var sent []network.Packet
+	err := publishAvailableQuestIndicators(context.Background(), repository, world, player, func(packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository.characterID != player.ID || len(sent) != 1 || sent[0].MessageID != opcode.QuestMarkAdd {
+		t.Fatalf("indicator publication character=%d packets=%#v", repository.characterID, sent)
+	}
+	payload := sent[0].Payload()
+	if len(payload) != 24 || payload[4] != 0x02 || payload[5] != 1 ||
+		binary.LittleEndian.Uint32(payload[20:24]) != npc.GetUniqueID() {
+		t.Fatalf("quest indicator payload = %x", payload)
+	}
+	marks := player.QuestMarksSnapshot()
+	if len(marks) != 1 || marks[0].QuestID != 58 || marks[0].TargetID != npc.GetUniqueID() {
+		t.Fatalf("registered quest indicators = %+v", marks)
 	}
 }
 

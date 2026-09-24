@@ -405,6 +405,37 @@ func TestCharacterSelectionListUsesAuthenticatedOwner(t *testing.T) {
 	}
 }
 
+func TestCharacterSelectionListIsAllowedWhileCharacterLoading(t *testing.T) {
+	store := &fakeCharacterStore{list: []model.Char{}}
+	handler := NewCharacterSelectionHandler(store)
+	session, clientConn := newCharacterSelectionTestSession(t)
+	defer session.Close()
+	defer clientConn.Close()
+	session.MarkAuthenticated()
+	session.UserContext.UserID = 42
+	if !session.EnterLobby() || !session.BeginCharacterLoading() {
+		t.Fatal("could not prepare character-loading session")
+	}
+
+	request := buildCharacterSelectionRequest(t, func(packet *network.Packet) error {
+		return packet.WriteByte(CharActionList)
+	})
+	response, err := dispatchCharacterSelectionHandler(t, clientConn, func() error {
+		return handler.handleAction(context.Background(), session, request)
+	})
+	if err != nil {
+		t.Fatalf("handleAction(list during loading) error = %v", err)
+	}
+	expectedAction := byte(CharActionList)
+	assertCharacterSelectionResult(t, &response, OpcodeCharSelectionActionResponse, &expectedAction, ResultTrue)
+	if got, want := session.LifecyclePhase(), server.SessionCharacterLoading; got != want {
+		t.Fatalf("list action lifecycle = %s, want %s", got, want)
+	}
+	if got, want := store.listCalls, 1; got != want {
+		t.Fatalf("CharactersForOwner calls = %d, want %d", got, want)
+	}
+}
+
 func TestCharacterSelectionActionRejectsMalformedAndUnknownInputWithoutStoreAccess(t *testing.T) {
 	tests := []struct {
 		name              string

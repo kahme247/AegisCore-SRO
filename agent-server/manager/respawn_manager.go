@@ -196,6 +196,20 @@ func (s *RespawnManager) spawnNpc(spawnArea *model.SpawnArea) error {
 // deliberately does not bind the NPC to a SpawnArea: death/despawn must not
 // enqueue an ordinary world respawn for a periodic quest pursuer.
 func (s *RespawnManager) SpawnQuestNPC(codeName string, center navmeshv2.RtNavmeshPosition, radius float32) (*model.NPC, error) {
+	return s.spawnTransientNPC(codeName, center, radius, nil)
+}
+
+// SpawnItemSummonNPC materializes the ordinary monster class authored by the
+// summon-scroll catalog. Unique classes are rejected: these event scrolls
+// create strong, giant, or party field mobs rather than world uniques.
+func (s *RespawnManager) SpawnItemSummonNPC(codeName string, center navmeshv2.RtNavmeshPosition, radius float32, rarity model.MonsterRarity) (*model.NPC, error) {
+	if !rarity.Valid() || rarity.IsUniqueBoss() {
+		return nil, ErrRespawnReferenceCharacterUnavailable
+	}
+	return s.spawnTransientNPC(codeName, center, radius, &rarity)
+}
+
+func (s *RespawnManager) spawnTransientNPC(codeName string, center navmeshv2.RtNavmeshPosition, radius float32, forcedRarity *model.MonsterRarity) (*model.NPC, error) {
 	catalog := s.configuredReferenceData()
 	if catalog == nil {
 		return nil, ErrRespawnReferenceCatalogUnavailable
@@ -208,7 +222,7 @@ func (s *RespawnManager) SpawnQuestNPC(codeName string, center navmeshv2.RtNavme
 		Position: center, RefObjID: uint64(refChar.ID), NpcCodeName: codeName,
 		ChampionGenPercentage: 0, AggressType: byte(model.Aggressive), SightRange: 100,
 	}}
-	npc, err := s.newNPCForSpawn(area)
+	npc, err := s.newNPCForSpawnWithRarity(area, forcedRarity)
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +308,10 @@ func questSpawnOffset(radius float32, angleUnit, distanceUnit float64) (float32,
 // a missing row fail closed rather than triggering the legacy per-call DB
 // loader during a tick.
 func (s *RespawnManager) newNPCForSpawn(spawnArea *model.SpawnArea) (*model.NPC, error) {
+	return s.newNPCForSpawnWithRarity(spawnArea, nil)
+}
+
+func (s *RespawnManager) newNPCForSpawnWithRarity(spawnArea *model.SpawnArea, forcedRarity *model.MonsterRarity) (*model.NPC, error) {
 	if spawnArea == nil {
 		return nil, fmt.Errorf("%w: spawn area is nil", ErrRespawnReferenceCharacterUnavailable)
 	}
@@ -320,8 +338,14 @@ func (s *RespawnManager) newNPCForSpawn(spawnArea *model.SpawnArea) (*model.NPC,
 	npc.ConfigureMovementSpeeds(float32(refChar.Speed1), float32(refChar.Speed2))
 	if refChar.TypeInfo.IsNPCMob() {
 		rarity := s.selectRuntimeRarity(refChar.Rarity, spawnArea.ChampionGenPercentage)
+		if forcedRarity != nil {
+			rarity = *forcedRarity
+		}
 		npc.SetRarity(byte(rarity))
 		multiplier := rarity.RuntimeStatMultiplier()
+		if forcedRarity != nil && rarity.IsParty() {
+			multiplier = rarity.BaseClass().RuntimeStatMultiplier()
+		}
 		experience := uint64(0)
 		if refChar.ExpToGive > 0 {
 			experience = uint64(refChar.ExpToGive) * uint64(multiplier)
@@ -334,9 +358,18 @@ func (s *RespawnManager) newNPCForSpawn(spawnArea *model.SpawnArea) (*model.NPC,
 		npc.ConfigureDecayTime(refChar.DecayTime)
 		npc.SetLifeState(model.Alive)
 		npc.ConfigureAI(refChar.Level, spawnArea.AggressType == byte(model.Aggressive), spawnArea.SightRange)
-		if refChar.DefaultSkill1 > 0 {
-			npc.ConfigureAttackSkill(uint32(refChar.DefaultSkill1))
-		}
+		npc.ConfigureAttackSkills(
+			uint32(max(refChar.DefaultSkill1, 0)),
+			uint32(max(refChar.DefaultSkill2, 0)),
+			uint32(max(refChar.DefaultSkill3, 0)),
+			uint32(max(refChar.DefaultSkill4, 0)),
+			uint32(max(refChar.DefaultSkill5, 0)),
+			uint32(max(refChar.DefaultSkill6, 0)),
+			uint32(max(refChar.DefaultSkill7, 0)),
+			uint32(max(refChar.DefaultSkill8, 0)),
+			uint32(max(refChar.DefaultSkill9, 0)),
+			uint32(max(refChar.DefaultSkill10, 0)),
+		)
 	}
 	return npc, nil
 }

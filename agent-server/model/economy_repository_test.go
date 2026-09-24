@@ -29,6 +29,14 @@ func TestPurchaseStacks(t *testing.T) {
 	}
 }
 
+func TestShopGoodCatalogTabPreservesMediaIndex(t *testing.T) {
+	for _, tab := range []byte{0, 1, 2, 4} {
+		if got := shopGoodCatalogTab(tab); got != tab {
+			t.Fatalf("shopGoodCatalogTab(%d) = %d, want %d", tab, got, tab)
+		}
+	}
+}
+
 func TestResolveStorageMoveAmount(t *testing.T) {
 	for _, test := range []struct {
 		name                              string
@@ -51,5 +59,22 @@ func TestResolveStorageMoveAmount(t *testing.T) {
 				t.Fatalf("resolveStorageMoveAmount() = %d/%v, want %d/%v", got, valid, test.want, test.valid)
 			}
 		})
+	}
+}
+
+func TestValidStorageCapacity(t *testing.T) {
+	for _, test := range []struct {
+		capacity int
+		valid    bool
+	}{
+		{capacity: 0},
+		{capacity: 150, valid: true},
+		{capacity: 180, valid: true},
+		{capacity: 255, valid: true},
+		{capacity: 256},
+	} {
+		if got := validStorageCapacity(test.capacity); got != test.valid {
+			t.Fatalf("validStorageCapacity(%d) = %v, want %v", test.capacity, got, test.valid)
+		}
 	}
 }

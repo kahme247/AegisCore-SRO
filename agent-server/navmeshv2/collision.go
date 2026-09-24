@@ -440,26 +440,6 @@ func regionLocalToGlobal(local *math32.Vector3, region Region) *math32.Vector3 {
 	)
 }
 
-func findNearestGlobalCollision(globalPosition *math32.Vector3, collisions []Collision) (Collision, error) {
-	if len(collisions) == 0 {
-		return Collision{}, ErrEmptyCollisionList
-	}
-
-	delta := math32.Inf(1)
-	var nearest Collision
-	for _, collision := range collisions {
-		collisionGlobal := collision.VectorGlobal
-		if collision.Flag.IsObject() {
-			collisionGlobal = regionLocalToGlobal(collision.VectorGlobal, collision.Region)
-		}
-		if distance := globalPosition.DistanceToSquared(collisionGlobal); distance <= delta {
-			delta = distance
-			nearest = collision
-		}
-	}
-	return nearest, nil
-}
-
 func FindNearestCollision(localPosition *math32.Vector3, collisions []Collision) (Collision, error) {
 	delta := math32.Inf(1)
 	var nearestCollision Collision

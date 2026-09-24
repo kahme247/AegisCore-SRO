@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"encoding/binary"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -138,10 +139,14 @@ func TestBuildGroupSpawnPacketsDespawnSortsUniqueIDs(t *testing.T) {
 		11: &model.SRObject{UniqueID: 11},
 	}
 
-	begin, body, end, err := buildGroupSpawnPackets(objects, false)
+	packets, err := buildGroupSpawnPackets(objects, false)
 	if err != nil {
 		t.Fatalf("build group despawn packets: %v", err)
 	}
+	if len(packets) != 3 {
+		t.Fatalf("group packet count = %d, want 3", len(packets))
+	}
+	begin, body, end := packets[0], packets[1], packets[2]
 	if begin.MessageID != opcode.EntityGroupSpawnBegin || body.MessageID != opcode.EntityGroupSpawnData || end.MessageID != opcode.EntityGroupSpawnEnd {
 		t.Fatalf("group opcodes = 0x%04X, 0x%04X, 0x%04X", begin.MessageID, body.MessageID, end.MessageID)
 	}
@@ -161,9 +166,61 @@ func TestBuildGroupSpawnPacketsDespawnSortsUniqueIDs(t *testing.T) {
 }
 
 func TestBuildGroupSpawnPacketsRejectsNilObject(t *testing.T) {
-	_, _, _, err := buildGroupSpawnPackets(map[uint32]model.ISRObject{7: nil}, true)
+	_, err := buildGroupSpawnPackets(map[uint32]model.ISRObject{7: nil}, true)
 	if err == nil {
 		t.Fatal("expected nil object error")
+	}
+}
+
+func TestBuildGroupSpawnPacketsChunksDungeonEntryWithinStockMessageBlock(t *testing.T) {
+	position := navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(-32762),
+		Offset: math32.NewVector3(900, 0, -900),
+	}
+	objects := make(map[uint32]model.ISRObject, 88)
+	for uid := uint32(1); uid <= 87; uid++ {
+		objects[uid] = &model.NPC{
+			SRObject: model.SRObject{
+				UniqueID: uid, RefObjectID: 1972,
+				TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1},
+				RtNavmeshPosition: position,
+			},
+			Mutex: new(sync.Mutex), LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
+		}
+	}
+	objects[88] = &model.COS{
+		NPC: model.NPC{
+			SRObject: model.SRObject{
+				UniqueID: 88, RefObjectID: 23857,
+				TypeInfo:          model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 3, TypeID4: 4},
+				RtNavmeshPosition: position,
+			},
+			Mutex: new(sync.Mutex), LifeState: model.Alive, MotionState: model.Stand, BodyState: model.Normal,
+		},
+		OwnerUniqueID: 58702, OwnerName: "Khaled", Kind: model.COSAbilityPet,
+	}
+
+	packets, err := buildGroupSpawnPackets(objects, true)
+	if err != nil {
+		t.Fatalf("build dungeon entry group spawn: %v", err)
+	}
+	wantOpcodes := []uint16{
+		opcode.EntityGroupSpawnBegin,
+		opcode.EntityGroupSpawnData,
+		opcode.EntityGroupSpawnData,
+		opcode.EntityGroupSpawnEnd,
+	}
+	if got := packetOpcodes(packets); !reflect.DeepEqual(got, wantOpcodes) {
+		t.Fatalf("dungeon entry opcodes = %#v, want %#v", got, wantOpcodes)
+	}
+	if got, want := packets[0].Payload(), []byte{1, 88, 0}; !bytes.Equal(got, want) {
+		t.Fatalf("dungeon entry begin = %x, want %x", got, want)
+	}
+	if got := len(packets[1].Payload()); got != groupSpawnDataChunkSize {
+		t.Fatalf("first 0x3019 payload = %d, want %d", got, groupSpawnDataChunkSize)
+	}
+	if got := len(packets[2].Payload()); got != 174 {
+		t.Fatalf("second 0x3019 payload = %d, want 174", got)
 	}
 }
 
@@ -302,12 +359,12 @@ func TestSupportedSpawnObjectsAcceptsPlayerLayout(t *testing.T) {
 		t.Fatalf("supported player objects = %#v, want UID 77", filtered)
 	}
 
-	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	packets, err := buildGroupSpawnPackets(filtered, true)
 	if err != nil {
 		t.Fatalf("build player group spawn: %v", err)
 	}
-	if begin.MessageID != opcode.EntityGroupSpawnBegin || body.MessageID != opcode.EntityGroupSpawnData || end.MessageID != opcode.EntityGroupSpawnEnd {
-		t.Fatalf("player group opcodes = %#v", []uint16{begin.MessageID, body.MessageID, end.MessageID})
+	if len(packets) != 3 || packets[0].MessageID != opcode.EntityGroupSpawnBegin || packets[1].MessageID != opcode.EntityGroupSpawnData || packets[2].MessageID != opcode.EntityGroupSpawnEnd {
+		t.Fatalf("player group opcodes = %#v", packetOpcodes(packets))
 	}
 }
 
@@ -345,10 +402,14 @@ func TestSupportedSpawnObjectsAdmitsTeleportGatesWithVerifiedStructureLayout(t *
 		t.Fatalf("supported structure objects = %#v, want only teleport gate", filtered)
 	}
 
-	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	packets, err := buildGroupSpawnPackets(filtered, true)
 	if err != nil {
 		t.Fatalf("build teleport gate group spawn: %v", err)
 	}
+	if len(packets) != 3 {
+		t.Fatalf("teleport gate packet count = %d, want 3", len(packets))
+	}
+	begin, body, end := packets[0], packets[1], packets[2]
 	if got := begin.Payload(); !bytes.Equal(got, []byte{1, 1, 0}) {
 		t.Fatalf("teleport gate group begin = %x, want 010100", got)
 	}
@@ -389,10 +450,14 @@ func TestSupportedSpawnObjectsAdmitsDimensionHoleStateSixLayout(t *testing.T) {
 		t.Fatalf("supported Dimension Hole objects = %#v, want only UID 77", filtered)
 	}
 
-	begin, body, end, err := buildGroupSpawnPackets(filtered, true)
+	packets, err := buildGroupSpawnPackets(filtered, true)
 	if err != nil {
 		t.Fatalf("build Dimension Hole group spawn: %v", err)
 	}
+	if len(packets) != 3 {
+		t.Fatalf("Dimension Hole packet count = %d, want 3", len(packets))
+	}
+	begin, body, end := packets[0], packets[1], packets[2]
 	if got := begin.Payload(); !bytes.Equal(got, []byte{1, 1, 0}) {
 		t.Fatalf("Dimension Hole group begin = %x, want 010100", got)
 	}

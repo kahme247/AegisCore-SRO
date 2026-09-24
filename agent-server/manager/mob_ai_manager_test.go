@@ -2,7 +2,9 @@ package manager
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -265,12 +267,29 @@ func TestMobAIPursuitUsesHorizontalStandOffAndPreservesHeight(t *testing.T) {
 		t.Fatalf("horizontal pursuit stand-off = %.2f, want 23", got)
 	}
 }
+func TestMobAIPursuitResolvesDungeonLocalDestination(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(100)
+	npc.ConfigureAI(5, true, 150)
+	npc.SetNavmeshPosition(mobAIDungeonPosition(800, -900))
+	player.SetNavmeshPosition(mobAIDungeonPosition(900, -900))
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+
+	mobAIManagerForTest().tick(world, now)
+	if world.moves != 1 || world.regionResolutions != 1 || world.globalResolutions != 0 {
+		t.Fatalf("dungeon pursuit = moves:%d local:%d global:%d, want 1/1/0", world.moves, world.regionResolutions, world.globalResolutions)
+	}
+	destination := world.lastMovement.TargetPosition
+	if destination.Region.ID != -32767 || destination.Offset == nil || destination.Offset.X < 876 || destination.Offset.X > 878 || destination.Offset.Z != -900 {
+		t.Fatalf("dungeon pursuit destination = %+v", destination)
+	}
+}
 
 func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	now := time.Now()
 	npc, player := mobAIFixture(10)
 	npc.ConfigureAI(5, true, 150)
-	npc.ConfigureAttackSkill(160)
+	npc.ConfigureAttackSkills(160, 161)
 	conn := &mobAICaptureConn{}
 	player.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-ai-test")
 	defer player.Session.Close()
@@ -278,8 +297,12 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	player.GetCharKnownObjectList().MarkSpawned(spawned)
 
 	manager := mobAIManagerForTest()
+	manager.skillRoll = func() int { return 1 }
 	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
 	manager.tick(world, now)
+	if got := npc.AttackSkillID(); got != 161 {
+		t.Fatalf("next mob attack skill = %d; want authored secondary skill 161", got)
+	}
 
 	packets := readCapturedPackets(t, conn, 1)
 	if len(packets) != 1 || packets[0].MessageID != opcode.EntitySkillCastBegin {
@@ -319,6 +342,42 @@ func TestMobAIAttackUsesReferenceSkillDelayAndB071Damage(t *testing.T) {
 	}
 	if got := player.CurrentHP(); got != 90 {
 		t.Fatalf("HP at B071 = %d, want 90", got)
+	}
+}
+
+func TestMobAIUsesSecondaryDefaultSkillAndAppliesItsDebuff(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(10)
+	npc.ConfigureAI(5, true, 150)
+	npc.ConfigureAttackSkills(160, 161)
+	conn := &mobAICaptureConn{}
+	player.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-secondary-skill-test")
+	defer player.Session.Close()
+	player.GetCharKnownObjectList().MarkSpawned(player.GetCharKnownObjectList().GetObjectsToSpawn())
+
+	manager := mobAIManagerForTest()
+	manager.skillRoll = func() int { return 1 }
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	manager.tick(world, now)
+	manager.tick(world, now.Add(800*time.Millisecond))
+	manager.tick(world, now.Add(3*time.Second))
+	manager.tick(world, now.Add(3800*time.Millisecond))
+
+	status, active := player.CombatStatus(model.CombatStatusStun, now.Add(3800*time.Millisecond))
+	if !active || status.SkillID != 161 {
+		t.Fatalf("secondary skill debuff = active:%t status:%+v; want skill 161 stun", active, status)
+	}
+	packets := readCapturedPackets(t, conn, 8)
+	var snapshot *network.Packet
+	for index := range packets {
+		if packets[index].MessageID == opcode.ActionUnknownUpdate2 {
+			snapshot = &packets[index]
+			break
+		}
+	}
+	wantSnapshot := []byte{0x00, 0x40, 0x00, 0x00, 50, 0, 0, 0, 0, 0, 8, 0}
+	if snapshot == nil || !bytes.Equal(snapshot.Payload(), wantSnapshot) {
+		t.Fatalf("secondary skill timer snapshot = %#v, want 30D2 % X", snapshot, wantSnapshot)
 	}
 }
 
@@ -458,6 +517,234 @@ func TestMobAINPCSkillAppliesDirectStatusActor(t *testing.T) {
 	}
 }
 
+func TestMobAIDiseaseRaisesSubsequentStatusAdmissionChance(t *testing.T) {
+	now := time.Unix(100, 0)
+	npc, target := mobAIFixture(10)
+	target.ApplyCombatStatus(model.CombatStatus{
+		Kind: model.CombatStatusDisease, Token: 1, Power: 25, ExpiresAt: now.Add(time.Minute),
+	})
+	const skillID = 163
+	var rolled int
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return now }
+	manager.hitRollPercent = func(chance int) bool {
+		rolled = chance
+		return chance == 75
+	}
+	manager.schedule = func(time.Duration, func()) {}
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{
+				Kind: model.CombatStatusStun, Chance: 50, Level: 2, DurationMS: 1000,
+			}}},
+		},
+	}))
+	manager.applyNPCSkillStatuses(nil, npc, target, skillID, false, now)
+	if rolled != 75 {
+		t.Fatalf("diseased status admission chance = %d, want 75", rolled)
+	}
+	if _, active := target.CombatStatus(model.CombatStatusStun, now); !active {
+		t.Fatal("Disease-adjusted NPC status was not applied")
+	}
+}
+
+func TestMobAIFearInterruptsPlayerWithoutStoppingMovement(t *testing.T) {
+	now := time.Unix(100, 0)
+	npc, target := mobAIFixture(10)
+	const skillID = 164
+	interrupted := uint32(0)
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return now }
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.schedule = func(time.Duration, func()) {}
+	manager.ConfigurePlayerAttackInterrupter(func(player *model.Player) {
+		interrupted = player.GetUniqueID()
+	})
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{
+				Kind: model.CombatStatusFear, Chance: 100, Level: 2, DurationMS: 1000,
+			}}},
+		},
+	}))
+	world := &mobAIWorldFake{}
+	manager.applyNPCSkillStatuses(world, npc, target, skillID, false, now)
+	if interrupted != target.GetUniqueID() {
+		t.Fatalf("feared player interruption = %d, want %d", interrupted, target.GetUniqueID())
+	}
+	if world.stops != 0 {
+		t.Fatalf("Fear stopped player movement %d times", world.stops)
+	}
+}
+
+func TestMobAIFrostbitePublishesApplyAndExpirySpeed(t *testing.T) {
+	current := time.Now()
+	npc, target := mobAIFixture(10)
+	target.SetWalkSpeed(20)
+	target.SetRunSpeed(40)
+	conn := &mobAICaptureConn{}
+	target.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-ai-frostbite-speed-test")
+	defer target.Session.Close()
+	const skillID = 165
+	var scheduled []func()
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return current }
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.schedule = func(_ time.Duration, callback func()) {
+		scheduled = append(scheduled, callback)
+	}
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{
+				Kind: model.CombatStatusFrostbite, Power: 240, Chance: 100, Level: 2, DurationMS: 1000,
+			}}},
+		},
+	}))
+	manager.applyNPCSkillStatuses(nil, npc, target, skillID, false, current)
+	packets := readCapturedPackets(t, conn, 1)
+	if packets[0].MessageID != opcode.EntityUpdateMovementSpeed {
+		t.Fatalf("Frostbite apply opcode = %#04x, want %#04x", packets[0].MessageID, opcode.EntityUpdateMovementSpeed)
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("Frostbite expiry callbacks = %d, want 1", len(scheduled))
+	}
+	current = current.Add(2 * time.Second)
+	scheduled[0]()
+	packets = readCapturedPackets(t, conn, 4)
+	speedUpdates := 0
+	for _, packet := range packets {
+		if packet.MessageID == opcode.EntityUpdateMovementSpeed {
+			speedUpdates++
+		}
+	}
+	if speedUpdates != 2 {
+		t.Fatalf("Frostbite movement-speed updates = %d, want apply and expiry", speedUpdates)
+	}
+}
+
+func TestMobAIDarknessPublishesReducedAndRestoredHitRate(t *testing.T) {
+	current := time.Now()
+	npc, target := mobAIFixture(10)
+	target.BaseAttackStats.HitRate = 89
+	baseline := target.DerivedStats().HitRate
+	conn := &mobAICaptureConn{}
+	target.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-ai-darkness-stats-test")
+	defer target.Session.Close()
+	const skillID = 166
+	var scheduled []func()
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return current }
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.schedule = func(_ time.Duration, callback func()) {
+		scheduled = append(scheduled, callback)
+	}
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{
+				Kind: model.CombatStatusDarkness, Power: 30, Chance: 100, Level: 2, DurationMS: 1000,
+			}}},
+		},
+	}))
+	manager.applyNPCSkillStatuses(nil, npc, target, skillID, false, current)
+	packets := readCapturedPackets(t, conn, 1)
+	if packets[0].MessageID != opcode.EntityUpdateStats {
+		t.Fatalf("Darkness apply opcode = %#04x, want %#04x", packets[0].MessageID, opcode.EntityUpdateStats)
+	}
+	if got, want := int(binary.LittleEndian.Uint16(packets[0].Payload()[20:22])), baseline-30; got != want {
+		t.Fatalf("Darkness applied Hit Rate = %d, want %d", got, want)
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("Darkness expiry callbacks = %d, want 1", len(scheduled))
+	}
+	current = current.Add(2 * time.Second)
+	scheduled[0]()
+	packets = readCapturedPackets(t, conn, 4)
+	statsPackets := make([]network.Packet, 0, 2)
+	for _, packet := range packets {
+		if packet.MessageID == opcode.EntityUpdateStats {
+			statsPackets = append(statsPackets, packet)
+		}
+	}
+	if len(statsPackets) != 2 {
+		t.Fatalf("Darkness stats updates = %d, want apply and expiry", len(statsPackets))
+	}
+	if got := int(binary.LittleEndian.Uint16(statsPackets[1].Payload()[20:22])); got != baseline {
+		t.Fatalf("Darkness expired Hit Rate = %d, want %d", got, baseline)
+	}
+}
+
+func TestMobAIParryDownPublishesStatsAndServerRemoval(t *testing.T) {
+	current := time.Now()
+	npc, target := mobAIFixture(10)
+	target.BaseDefenseStats.ParryRate = 89
+	conn := &mobAICaptureConn{}
+	target.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-ai-parry-down-stats-test")
+	defer target.Session.Close()
+	const skillID = 167
+	var scheduled []func()
+	manager := mobAIManagerForTest()
+	manager.now = func() time.Time { return current }
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.schedule = func(_ time.Duration, callback func()) {
+		scheduled = append(scheduled, callback)
+	}
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{
+				Kind: model.CombatStatusParryDown, Power: 30, Chance: 100, DurationMS: 1000,
+			}}},
+		},
+	}))
+	manager.applyNPCSkillStatuses(nil, npc, target, skillID, false, current)
+	packets := readCapturedPackets(t, conn, 2)
+	if got, want := packetOpcodes(packets), []uint16{opcode.EntityUpdateStats, opcode.EntityBuffAdd}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parry Down apply packets = %#v, want %#v", got, want)
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("Parry Down expiry callbacks = %d, want 1", len(scheduled))
+	}
+	current = current.Add(2 * time.Second)
+	scheduled[0]()
+	packets = readCapturedPackets(t, conn, 4)
+	if got, want := packetOpcodes(packets), []uint16{opcode.EntityUpdateStats, opcode.EntityBuffAdd, opcode.EntityBuffRemove, opcode.EntityUpdateStats}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parry Down lifecycle packets = %#v, want %#v", got, want)
+	}
+}
+func TestMobAIZombieStatePublishesAfterAttackResult(t *testing.T) {
+	npc, target := mobAIFixture(10)
+	const skillID = 162
+	conn := &mobAICaptureConn{}
+	target.Session = server.NewSession(conn, network.EncodingOptions{}, nil, nil, "mob-ai-zombie-order-test")
+	defer target.Session.Close()
+	spawned := target.GetCharKnownObjectList().GetObjectsToSpawn()
+	target.GetCharKnownObjectList().MarkSpawned(spawned)
+	manager := mobAIManagerForTest()
+	manager.blockRoll = func(int) bool { return false }
+	manager.criticalRoll = func(int) bool { return false }
+	manager.hitRollPercent = func(int) bool { return true }
+	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
+		Characters: map[uint32]model.RefChar{
+			npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}},
+		},
+		Skills: map[uint32]model.RefSkill{
+			skillID: {ID: skillID, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusZombie, Chance: 100, DurationMS: 1000}}},
+		},
+	}))
+
+	manager.applyAttackDamageWithSkill(&mobAIWorldFake{}, npc, target, 12, 1, true, skillID, true, false)
+	packets := readCapturedPackets(t, conn, 4)
+	if got, want := packetOpcodes(packets), []uint16{opcode.EntitySkillCastEnd, opcode.EntityUpdateStatus, opcode.ActionUnknownUpdate2, opcode.EntityUpdateStatus}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("zombie attack packet order = %#v, want %#v", got, want)
+	}
+	if payload := packets[1].Payload(); len(payload) != 11 || payload[6] != 0x04 || binary.LittleEndian.Uint32(payload[7:]) != 0x20 {
+		t.Fatalf("zombie aggregate payload = % X", payload)
+	}
+	wantSnapshot := []byte{0x20, 0, 0, 0, 10, 0, 0, 0, 0, 0, 1, 0}
+	if payload := packets[2].Payload(); !bytes.Equal(payload, wantSnapshot) {
+		t.Fatalf("zombie timer snapshot = % X, want % X", payload, wantSnapshot)
+	}
+}
+
 func TestMobAINPCSkillAppliesAuthoredKnockbackAndInterruptsPlayer(t *testing.T) {
 	npc, target := mobAIFixture(10)
 	const skillID = 165
@@ -527,7 +814,7 @@ func TestMobAINPCSkillAggregatesOrdinaryTransferTargets(t *testing.T) {
 			npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}},
 		},
 		Skills: map[uint32]model.RefSkill{
-			skillID: {ID: skillID, TransferType: 2, TransferRange: 20, TransferCount: 1, TransferFalloffPercent: 50},
+			skillID: {ID: skillID, TransferType: 2, TransferRange: 20, TransferCount: 2, TransferFalloffPercent: 50},
 		},
 	}))
 	manager.applyMobSkillAttack(&mobAIWorldFake{}, npc, primary, 13, 100, false, skillID, false)
@@ -548,7 +835,7 @@ func TestMobAINPCSkillOwnerTransferUsesExplicitProvider(t *testing.T) {
 	manager.criticalRoll = func(int) bool { return false }
 	manager.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{
 		Characters: map[uint32]model.RefChar{npc.GetRefObjectID(): {RefObject: model.RefObject{ID: npc.GetRefObjectID()}}},
-		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, TransferType: 5, TransferRange: 1, TransferCount: 1}},
+		Skills:     map[uint32]model.RefSkill{skillID: {ID: skillID, TransferType: 5, TransferRange: 1, TransferCount: 2}},
 	}))
 	manager.ConfigureSkillOwnerTargetProvider(func(_ *model.NPC, _ *model.Player, _ model.RefSkill, _ int) []*model.Player {
 		return []*model.Player{primary, secondary, secondary}
@@ -573,7 +860,7 @@ func TestMobAINPCSkillChainTransferUsesProgressiveNearestTargets(t *testing.T) {
 	second := makePlayer(204, 122)
 	makePlayer(205, 140)
 	manager := mobAIManagerForTest()
-	got := manager.mobSkillTransferTargets(npc, primary, model.RefSkill{TransferType: 6, TransferRange: 10, TransferCount: 2})
+	got := manager.mobSkillTransferTargets(npc, primary, model.RefSkill{TransferType: 6, TransferRange: 10, TransferCount: 3})
 	if len(got) != 2 || got[0] != first || got[1] != second {
 		t.Fatalf("chain targets = %v, want [%d %d]", got, first.GetUniqueID(), second.GetUniqueID())
 	}
@@ -713,8 +1000,12 @@ func TestVitalSpotHitDownChangesMonsterHitChance(t *testing.T) {
 	if !manager.mobAttackLands(npc, player, now) {
 		t.Fatal("hit-down monster hit rejected")
 	}
-	if len(chances) != 2 || chances[0] != 98 || chances[1] != 90 {
-		t.Fatalf("monster hit chances = %v, want [98 90]", chances)
+	npc.ApplyCombatStatus(model.CombatStatus{Kind: model.CombatStatusDarkness, Token: 2, SkillID: 2, Power: 35, ExpiresAt: now.Add(time.Minute)})
+	if !manager.mobAttackLands(npc, player, now) {
+		t.Fatal("darkened monster hit rejected")
+	}
+	if len(chances) != 3 || chances[0] != 98 || chances[1] != 90 || chances[2] != 70 {
+		t.Fatalf("monster hit chances = %v, want [98 90 70]", chances)
 	}
 }
 
@@ -765,6 +1056,48 @@ func TestMobAIFrostbiteSlowsImpactThroughCompleteAnimation(t *testing.T) {
 	}
 }
 
+func TestMobAIShortSightAndDullChangeAttackProfile(t *testing.T) {
+	now := time.Now()
+	npc, player := mobAIFixture(10)
+	npc.ConfigureCombat(100, 1)
+	manager := mobAIManagerForTest()
+	baseline, ok := manager.attackProfile(npc, player, 160, now)
+	if !ok {
+		t.Fatal("baseline attack profile unavailable")
+	}
+	for token, status := range []model.CombatStatus{
+		{Kind: model.CombatStatusShortSight, SkillID: 1, Power: 50, ExpiresAt: now.Add(time.Minute)},
+		{Kind: model.CombatStatusDull, SkillID: 2, ExpiresAt: now.Add(time.Minute)},
+	} {
+		status.Token = uint32(token + 1)
+		if !npc.ApplyCombatStatusAt(status, now) {
+			t.Fatalf("apply status %+v", status)
+		}
+	}
+	debuffed, ok := manager.attackProfile(npc, player, 160, now)
+	if !ok || debuffed.reach != baseline.reach/2 || debuffed.delay != 4*time.Second || debuffed.actionTimePercent != 125 {
+		t.Fatalf("debuffed attack profile = %+v/%t, baseline %+v", debuffed, ok, baseline)
+	}
+}
+
+func TestMobAIFearClearsPendingAttack(t *testing.T) {
+	now := time.Now()
+	npc, _ := mobAIFixture(10)
+	npc.ConfigureCombat(100, 1)
+	if !npc.ApplyCombatStatusAt(model.CombatStatus{
+		Kind: model.CombatStatusFear, Token: 1, SkillID: 1, ExpiresAt: now.Add(time.Minute),
+	}, now) {
+		t.Fatal("apply Fear")
+	}
+	manager := mobAIManagerForTest()
+	manager.pending[npc.GetUniqueID()] = mobPendingAttack{npc: npc, readyAt: now}
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+	manager.tick(world, now)
+	if _, exists := manager.pending[npc.GetUniqueID()]; exists || world.moves != 0 {
+		t.Fatalf("feared mob pending=%t moves=%d", exists, world.moves)
+	}
+}
+
 func TestMobAIFrostbiteRetimesPendingSwingOnApplyAndExpiry(t *testing.T) {
 	now := time.Unix(100, 0)
 	npc, _ := mobAIFixture(10)
@@ -772,7 +1105,7 @@ func TestMobAIFrostbiteRetimesPendingSwingOnApplyAndExpiry(t *testing.T) {
 	manager := &MobAIManager{pending: map[uint32]mobPendingAttack{
 		npc.GetUniqueID(): {
 			npc: npc, readyAt: now.Add(800 * time.Millisecond),
-			impact: 800 * time.Millisecond, lifecycle: 3200 * time.Millisecond,
+			impact: 800 * time.Millisecond, lifecycle: 3200 * time.Millisecond, actionTimePercent: 100,
 		},
 	}}
 	status := model.CombatStatus{Kind: model.CombatStatusFrostbite, Token: 1, SkillID: 7972, Power: 240, ExpiresAt: now.Add(10 * time.Second)}
@@ -782,8 +1115,8 @@ func TestMobAIFrostbiteRetimesPendingSwingOnApplyAndExpiry(t *testing.T) {
 	}
 	manager.ReconcileAttackTiming(npc, applyAt)
 	pending := manager.pending[npc.GetUniqueID()]
-	if got, want := pending.readyAt, applyAt.Add(5600*time.Millisecond); !got.Equal(want) || !pending.frosted {
-		t.Fatalf("frosted pending ready = %s frosted=%t, want %s/true", got, pending.frosted, want)
+	if got, want := pending.readyAt, applyAt.Add(5600*time.Millisecond); !got.Equal(want) || pending.actionTimePercent != 200 {
+		t.Fatalf("slowed pending ready = %s percent=%g, want %s/200", got, pending.actionTimePercent, want)
 	}
 	removeAt := applyAt.Add(time.Second)
 	if !npc.RemoveCombatStatus(model.CombatStatusFrostbite, status.Token) {
@@ -791,8 +1124,8 @@ func TestMobAIFrostbiteRetimesPendingSwingOnApplyAndExpiry(t *testing.T) {
 	}
 	manager.ReconcileAttackTiming(npc, removeAt)
 	pending = manager.pending[npc.GetUniqueID()]
-	if got, want := pending.readyAt, removeAt.Add(2300*time.Millisecond); !got.Equal(want) || pending.frosted {
-		t.Fatalf("restored pending ready = %s frosted=%t, want %s/false", got, pending.frosted, want)
+	if got, want := pending.readyAt, removeAt.Add(2300*time.Millisecond); !got.Equal(want) || pending.actionTimePercent != 100 {
+		t.Fatalf("restored pending ready = %s percent=%g, want %s/100", got, pending.actionTimePercent, want)
 	}
 }
 
@@ -904,6 +1237,25 @@ func TestMobAIWandersInsideSpawnArea(t *testing.T) {
 		t.Fatalf("wander moves = %d, want 1", world.moves)
 	}
 }
+func TestMobAIWanderResolvesDungeonLocalDestination(t *testing.T) {
+	now := time.Now().Add(4 * time.Second)
+	npc, _ := mobAIFixture(100)
+	npc.ConfigureAI(5, false, 150)
+	home := mobAIDungeonPosition(1000, -1000)
+	npc.SetNavmeshPosition(home)
+	npc.BindSpawnArea(&model.SpawnArea{Spawn: model.Spawn{
+		Position: home, GenerateRadius: 50,
+	}})
+	world := &mobAIWorldFake{npcs: []*model.NPC{npc}}
+
+	mobAIManagerForTest().tick(world, now)
+	if world.moves != 1 || world.regionResolutions != 1 || world.globalResolutions != 0 {
+		t.Fatalf("dungeon wander = moves:%d local:%d global:%d, want 1/1/0", world.moves, world.regionResolutions, world.globalResolutions)
+	}
+	if destination := world.lastMovement.TargetPosition; destination.Region.ID != -32767 || destination.Offset == nil {
+		t.Fatalf("dungeon wander destination = %+v", destination)
+	}
+}
 
 func TestMobAITickSkipsMobsNotKnownToPlayers(t *testing.T) {
 	now := time.Now().Add(4 * time.Second)
@@ -936,6 +1288,8 @@ type mobAIWorldFake struct {
 	lastMovement            model.MovementData
 	blocked                 bool
 	emitPositionCorrections bool
+	globalResolutions       int
+	regionResolutions       int
 }
 
 func (w *mobAIWorldFake) GetNPCs() []*model.NPC { return w.npcs }
@@ -970,6 +1324,7 @@ func (w *mobAIWorldFake) StopMovingCharacter(character model.ICharacter, positio
 }
 
 func (w *mobAIWorldFake) NewPosFromGlobalCoordinates(global *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	w.globalResolutions++
 	if w.useNewPosition {
 		return w.newPosition, nil
 	}
@@ -982,6 +1337,17 @@ func (w *mobAIWorldFake) NewPosFromGlobalCoordinates(global *math32.Vector3) (na
 			global.Y,
 			global.Z-float32(regionZ)*navmeshv2.RegionHeight,
 		),
+	}, nil
+}
+
+func (w *mobAIWorldFake) NewPosFromRegionCoordinates(regionID int16, offset *math32.Vector3) (navmeshv2.RtNavmeshPosition, error) {
+	w.regionResolutions++
+	if w.useNewPosition {
+		return w.newPosition, nil
+	}
+	return navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(regionID),
+		Offset: offset.Clone(),
 	}, nil
 }
 
@@ -1001,7 +1367,7 @@ func mobAIFixture(distance float32) (*model.NPC, *model.Player) {
 	npc.SetNavmeshPosition(mobAIPosition(100, 100))
 	npc.KnownObjectList = model.NewKnownObjectList(npc)
 	npc.SetLifeState(model.Alive)
-	npc.ConfigureAttackSkill(160)
+	npc.ConfigureAttackSkills(160)
 
 	player := &model.Player{
 		ID:        1,
@@ -1029,6 +1395,7 @@ func mobAIManagerForTest() *MobAIManager {
 		},
 		Skills: map[uint32]model.RefSkill{
 			160: {ID: 160, ActionPreparingTime: 200, ActionCastingTime: 600, ActionDuration: 2400, ReuseDelay: 3000, CoolTime: 3000, ActionRange: 10, AttackMin: 17, AttackMax: 19},
+			161: {ID: 161, ActionPreparingTime: 200, ActionCastingTime: 600, ActionDuration: 2400, ReuseDelay: 3000, CoolTime: 3000, ActionRange: 10, AttackMin: 17, AttackMax: 19, StatusEffects: []model.SkillStatusEffect{{Kind: model.CombatStatusStun, Chance: 100, DurationMS: 5000, Level: 8}}},
 		},
 	}))
 	return manager
@@ -1080,6 +1447,13 @@ func (a mobAIAddr) String() string  { return string(a) }
 func mobAIPosition(x, z float32) navmeshv2.RtNavmeshPosition {
 	return navmeshv2.RtNavmeshPosition{
 		Region: navmeshv2.NewRegionFromInt16(25000),
+		Offset: math32.NewVector3(x, 0, z),
+	}
+}
+
+func mobAIDungeonPosition(x, z float32) navmeshv2.RtNavmeshPosition {
+	return navmeshv2.RtNavmeshPosition{
+		Region: navmeshv2.NewRegionFromInt16(-32767),
 		Offset: math32.NewVector3(x, 0, z),
 	}
 }

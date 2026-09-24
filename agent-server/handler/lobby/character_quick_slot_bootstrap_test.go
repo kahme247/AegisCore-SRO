@@ -6,6 +6,7 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 func TestWriteCharacterQuickSlotConfigUsesVSROLayoutAndSlotOrder(t *testing.T) {
@@ -52,5 +53,12 @@ func TestWriteAutoPotionConfigUsesStockThreeUInt16AndByteDefault(t *testing.T) {
 	want := []byte{0, 0, 1, 0, 1, 0, 0}
 	if got := packet.Payload(); !bytes.Equal(got, want) {
 		t.Fatalf("default auto-potion config = %x, want %x", got, want)
+	}
+}
+
+func TestBuildPlayerBadEffectBootstrapInitializesEmptyLocalState(t *testing.T) {
+	packet := buildPlayerBadEffectBootstrap()
+	if packet.MessageID != opcode.ActionUnknownUpdate2 || !bytes.Equal(packet.Payload(), []byte{0, 0, 0, 0}) {
+		t.Fatalf("bad-effect bootstrap = opcode:%04X payload:% X, want 30D2 and zero mask", packet.MessageID, packet.Payload())
 	}
 }

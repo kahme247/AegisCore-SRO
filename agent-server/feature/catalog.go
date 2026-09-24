@@ -209,12 +209,10 @@ func serverFlag(key Key, directive string, legacyEnabled bool, additional ...str
 }
 
 func availableServerFlag(key Key, directive string, legacyEnabled bool, evidence Evidence) Definition {
-	upper := strings.ToUpper(strings.ReplaceAll(string(key), "-", "_"))
-	return Definition{
-		Key: key, ConfigKey: "agent.features." + string(key) + ".enabled", Environment: "AGENT_FEATURE_" + upper + "_ENABLED",
-		DefaultEnabled: false, LegacyEnabled: legacyEnabled, Available: true,
-		Evidence: []Evidence{evidence}, LegacyDirectives: []string{directive},
-	}
+	definition := baseDefinition(key, legacyEnabled, evidence)
+	definition.Available = true
+	definition.LegacyDirectives = []string{directive}
+	return definition
 }
 
 func scheduleFlag(key Key, locator string, legacyEnabled bool) Definition {
@@ -222,12 +220,18 @@ func scheduleFlag(key Key, locator string, legacyEnabled bool) Definition {
 }
 
 func unavailableDefinition(key Key, legacyEnabled bool, directives []string, evidence Evidence) Definition {
+	definition := baseDefinition(key, legacyEnabled, evidence)
+	definition.UnavailableReason = "implementation and evidence certification are incomplete"
+	definition.LegacyDirectives = directives
+	return definition
+}
+
+func baseDefinition(key Key, legacyEnabled bool, evidence Evidence) Definition {
 	upper := strings.ToUpper(strings.ReplaceAll(string(key), "-", "_"))
 	return Definition{
 		Key: key, ConfigKey: "agent.features." + string(key) + ".enabled", Environment: "AGENT_FEATURE_" + upper + "_ENABLED",
-		DefaultEnabled: false, LegacyEnabled: legacyEnabled, Available: false,
-		UnavailableReason: "implementation and evidence certification are incomplete",
-		Evidence:          []Evidence{evidence}, LegacyDirectives: directives,
+		DefaultEnabled: false, LegacyEnabled: legacyEnabled,
+		Evidence: []Evidence{evidence},
 	}
 }
 

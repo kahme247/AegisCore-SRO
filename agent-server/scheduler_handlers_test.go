@@ -169,8 +169,11 @@ func (recorder *schedulerNoticeRecorder) BroadcastServerEventData(records []vsro
 
 func TestScheduledSeasonalEventHandlersBroadcastTypedPackets(t *testing.T) {
 	recorder := &schedulerNoticeRecorder{recipients: 2}
-	if err := handleScheduledGlobalEvent(context.Background(), scheduler.Run{Payload: []byte(`{"name":" summer ","value":7}`)}, recorder); err != nil || recorder.globalName != "summer" || recorder.globalValue != 7 {
+	if err := handleScheduledGlobalEvent(context.Background(), scheduler.Run{Phase: scheduler.Start, Payload: []byte(`{"name":" summer ","value":7}`)}, recorder); err != nil || recorder.globalName != "summer" || recorder.globalValue != 7 {
 		t.Fatalf("global event = %q/%d, %v", recorder.globalName, recorder.globalValue, err)
+	}
+	if recorder.message != "summer event has started." {
+		t.Fatalf("global event notice = %q", recorder.message)
 	}
 	if err := handleScheduledVietnamMR(context.Background(), scheduler.Run{Payload: []byte(`{"elapsedSeconds":3600,"startHour":1,"endHour":2}`)}, recorder); err != nil || recorder.vietnam.ElapsedSeconds != 3600 {
 		t.Fatalf("Vietnam MR = %+v, %v", recorder.vietnam, err)
@@ -183,7 +186,7 @@ func TestScheduledSeasonalEventHandlersBroadcastTypedPackets(t *testing.T) {
 func TestScheduledServerEventAdvanceBroadcastsCommittedProgress(t *testing.T) {
 	controller := &schedulerServerEventRecorder{result: service.ServerEventProgressResult{InstanceID: 9, Progress: 7, Target: 10}}
 	broadcaster := &schedulerNoticeRecorder{recipients: 2}
-	run := scheduler.Run{ScheduleID: "summer-progress", ScheduledFor: time.Unix(100, 5).UTC(), Payload: []byte(`{"instanceKey":"summer-2026","serverEventId":12,"characterId":77,"delta":2,"target":10}`)}
+	run := scheduler.Run{ScheduleID: "summer-progress", ScheduledFor: time.Unix(100, 5).UTC(), Phase: scheduler.Start, Payload: []byte(`{"instanceKey":"summer-2026","serverEventId":12,"characterId":77,"delta":2,"target":10,"notice":"The summer event is now active."}`)}
 	if err := handleScheduledServerEventAdvance(context.Background(), run, controller, broadcaster); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
@@ -195,6 +198,9 @@ func TestScheduledServerEventAdvanceBroadcastsCommittedProgress(t *testing.T) {
 	}
 	if len(broadcaster.serverData) != 1 || broadcaster.serverData[0] != (vsro188.ServerEventData{ServerEventID: 12, Value: 7, Target: 10}) {
 		t.Fatalf("server progress = %#v", broadcaster.serverData)
+	}
+	if broadcaster.message != "The summer event is now active." {
+		t.Fatalf("server event notice = %q", broadcaster.message)
 	}
 }
 

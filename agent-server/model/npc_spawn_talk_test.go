@@ -11,7 +11,7 @@ import (
 	"github.com/g3n/engine/math32"
 )
 
-func TestNormalNPCSpawnAdvertisesTalkabilityWithEmptyInlineOptions(t *testing.T) {
+func TestNormalNPCSpawnAdvertisesCompleteInteractionMask(t *testing.T) {
 	npc := &NPC{SRObject: SRObject{
 		RefObjectID: 1,
 		UniqueID:    2,
@@ -31,8 +31,8 @@ func TestNormalNPCSpawnAdvertisesTalkabilityWithEmptyInlineOptions(t *testing.T)
 	if len(payload) < 2 {
 		t.Fatalf("spawn payload too short for talk data: %x", payload)
 	}
-	if got := payload[len(payload)-2:]; !bytes.Equal(got, []byte{2, 0}) {
-		t.Fatalf("normal NPC talk data = %x, want 0200", got)
+	if got := payload[len(payload)-7:]; !bytes.Equal(got, []byte{2, 5, 0, 2, 8, 0, 0}) {
+		t.Fatalf("normal NPC talk data = %x, want 02050002080000", got)
 	}
 }
 

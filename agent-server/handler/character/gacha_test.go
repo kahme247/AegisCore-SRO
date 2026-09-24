@@ -179,7 +179,7 @@ func TestGachaExchangeConsumesAllWinningCardsInOneRequest(t *testing.T) {
 	if repository.exchangeCalls != 2 {
 		t.Fatalf("exchange calls = %d, want 2 successful exchanges", repository.exchangeCalls)
 	}
-	wantOpcodes := []uint16{opcode.GachaExchangeResponse, opcode.ItemOperationResponse, opcode.ItemOperationResponse, opcode.ItemOperationResponse, opcode.ItemOperationResponse}
+	wantOpcodes := []uint16{opcode.ItemOperationResponse, opcode.ItemOperationResponse, opcode.ItemOperationResponse, opcode.ItemOperationResponse, opcode.GachaExchangeResponse}
 	if len(sent) != len(wantOpcodes) {
 		t.Fatalf("sent packet count = %d, want %d", len(sent), len(wantOpcodes))
 	}
@@ -188,7 +188,7 @@ func TestGachaExchangeConsumesAllWinningCardsInOneRequest(t *testing.T) {
 			t.Fatalf("sent[%d] opcode = 0x%04X, want 0x%04X", i, sent[i].MessageID, want)
 		}
 	}
-	if got := sent[0].Payload(); len(got) != 3 || got[0] != 1 {
+	if got := sent[len(sent)-1].Payload(); len(got) != 3 || got[0] != 1 {
 		t.Fatalf("exchange response = %x", got)
 	}
 	if len(player.Inventory.Items) != 2 || player.Inventory.Items[14].ID != rewardOne.ID || player.Inventory.Items[15].ID != rewardTwo.ID {

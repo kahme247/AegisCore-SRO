@@ -34,6 +34,15 @@ type QuestOfferRepository interface {
 	ListAvailable(context.Context, int, uint32) ([]QuestOffer, error)
 }
 
+type QuestNPCIndicator struct {
+	QuestID        int
+	NPCRefObjectID uint32
+}
+
+type QuestIndicatorRepository interface {
+	ListAvailableIndicators(context.Context, int) ([]QuestNPCIndicator, error)
+}
+
 type SQLQuestOfferRepository struct {
 	shard frameworkdb.Queryer
 }
@@ -213,4 +222,42 @@ func (r *SQLQuestOfferRepository) ListAvailable(ctx context.Context, characterID
 		return nil, fmt.Errorf("iterate available quest offers: %w", err)
 	}
 	return offers, nil
+}
+
+var selectAvailableQuestIndicators = func() string {
+	query := strings.Replace(selectAvailableQuestOffers,
+		"SELECT quest.ID,",
+		"SELECT start_npc.NPC_REF_OBJECT_ID AS NPC_REF_OBJECT_ID,quest.ID AS QUEST_ID,current_quest.STATUS AS QUEST_STATUS,",
+		1)
+	query = strings.Replace(query, " AND start_npc.NPC_REF_OBJECT_ID=?", "", 1)
+	return "SELECT NPC_REF_OBJECT_ID,QUEST_ID FROM (" + query + ") available_quests WHERE QUEST_STATUS IS NULL OR QUEST_STATUS IN (4,6)"
+}()
+
+func (r *SQLQuestOfferRepository) ListAvailableIndicators(ctx context.Context, characterID int) ([]QuestNPCIndicator, error) {
+	if r == nil || r.shard == nil {
+		return nil, ErrQuestOfferRepositoryUnavailable
+	}
+	if characterID <= 0 {
+		return nil, fmt.Errorf("invalid quest indicator character")
+	}
+	rows, err := r.shard.QueryContext(ctx, selectAvailableQuestIndicators, characterID)
+	if err != nil {
+		return nil, fmt.Errorf("list available quest indicators: %w", err)
+	}
+	defer rows.Close()
+	indicators := make([]QuestNPCIndicator, 0)
+	for rows.Next() {
+		var indicator QuestNPCIndicator
+		if err = rows.Scan(&indicator.NPCRefObjectID, &indicator.QuestID); err != nil {
+			return nil, fmt.Errorf("scan available quest indicator: %w", err)
+		}
+		if indicator.NPCRefObjectID == 0 || indicator.QuestID <= 0 {
+			return nil, fmt.Errorf("invalid available quest indicator")
+		}
+		indicators = append(indicators, indicator)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate available quest indicators: %w", err)
+	}
+	return indicators, nil
 }

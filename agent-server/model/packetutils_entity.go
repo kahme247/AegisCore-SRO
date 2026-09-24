@@ -1,6 +1,8 @@
 package model
 
 import (
+	"math"
+	"sort"
 	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
@@ -96,17 +98,7 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 		p.WriteFloat32(character.GetRunSpeed())
 		p.WriteFloat32(character.GetHwanSpeed())
 
-		p.WriteByte(0) // TODO BuffCount
-		//	for (int i = 0; i < State.BuffCount; i++)
-		//	{
-		//	4   uint    Buff.RefSkillID
-		//	4   uint    Buff.Duration
-		//	if(skill.Params.Contains(1701213281))
-		//	{
-		//	//1701213281 -> atfe -> "auto transfer effect" like Recovery Division
-		//	1   bool    IsCreator
-		//	}
-		//	}
+		WriteCharacterSpawnBuffs(p, character, false, time.Now())
 
 		if typeInfo.IsPlayerCharacter() {
 			player := character.(IPlayer)
@@ -124,11 +116,13 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 			p.WriteByte(0xFF) // PK Flag
 		} else if typeInfo.IsNPC() {
 			if typeInfo.IsNPCNpc() {
-				// Normal service NPCs must advertise talkability or the stock
-				// client never emits 0x7046. Keep the inline option list empty;
-				// the selected-NPC response supplies the actual service actions.
+				// The stock client derives service buttons and quest indicators from
+				// this five-byte interaction mask. Quest-state changes still arrive
+				// through 0x30D5; omitting the mask suppresses the NPC's visual hooks.
+				options := NPCTalkOptions(object.GetName())
 				p.WriteByte(2)
-				p.WriteByte(0)
+				p.WriteByte(byte(len(options)))
+				p.WriteBytes(options)
 			} else {
 				p.WriteByte(0)
 			}
@@ -319,11 +313,11 @@ func WriteEntitySpawnData(p *network.Packet, object ISRObject) {
 }
 
 // WriteCOSSpawnTail is the vSRO 1.188 NPC_COS branch consumed after the
-// ordinary bionic/NPC state. The layout is cross-checked against RSBot's
-// SpawnedCos reader; unsupported guild metadata remains explicit and bounded.
+// ordinary bionic/NPC state. The preceding NPC byte is the runtime-flags byte
+// consumed by CICCos::Read at client 0x009C6A40.
 func WriteCOSSpawnTail(p *network.Packet, cos COSSnapshot) {
-	// Ride transports (TypeID4=1) end after the ordinary NPC state. Their
-	// owner association is delivered owner-only by 0x30C8, not in 0x3019.
+	// Ride transports end after the preceding runtime flags. Their owner
+	// association is delivered owner-only by 0x30C8, not in 0x3019.
 	if cos.Kind == COSRideTransport {
 		return
 	}
@@ -339,12 +333,16 @@ func WriteCOSSpawnTail(p *network.Packet, cos COSSnapshot) {
 	}
 	switch cos.Kind {
 	case COSJobTransport, COSGrowthPet, COSAbilityPet, COSGuild, COSFellowPet:
-		p.WriteByte(0) // owner job type
+		ownerJobType := cos.OwnerJobType
+		if ownerJobType < PlayerJobTrader || ownerJobType > PlayerJobNone {
+			ownerJobType = PlayerJobNone
+		}
+		p.WriteByte(ownerJobType)
 		if cos.Kind != COSAbilityPet {
-			p.WriteByte(0) // owner PvP/murder state
+			p.WriteByte(cos.OwnerPKState)
 		}
 		if cos.Kind == COSGuild {
-			p.WriteUInt32(0) // owner reference/guild field
+			p.WriteUInt32(cos.OwnerGuildID)
 		}
 	}
 	p.WriteUInt32(cos.OwnerUniqueID)
@@ -353,72 +351,10 @@ func WriteCOSSpawnTail(p *network.Packet, cos COSSnapshot) {
 	}
 }
 
+// WriteEntitySpawn is the legacy player-only entry point. Keep one canonical
+// wire projection so single/group visibility paths cannot drift.
 func WriteEntitySpawn(p *network.Packet, player *Player) {
-	// TODO not just players supported
-	p.WriteUInt32(uint32(player.GetRefObjectID()))
-
-	p.WriteByte(byte(player.Scale))
-	p.WriteByte(player.GetHwanLevel())
-	p.WriteByte(byte(player.PVPCape))
-	p.WriteByte(1) // AutoInverstXP
-	inventory := player.GetInventory()
-	slots := equippedAppearanceSlots(inventory)
-	p.WriteByte(player.GetInventorySize())
-	p.WriteByte(byte(len(slots)))
-
-	// The legacy appearance list does not include a slot field. Keep its
-	// order explicitly aligned with ascending inventory slots.
-	for _, slot := range slots {
-		item := inventory.Items[slot]
-		p.WriteUInt32(item.GetRefObjectID())
-
-		if item.IsEquipment() {
-			p.WriteByte(item.OptLevel)
-		}
-	}
-
-	writeAvatarAppearance(p, player.GetAvatarInventory())
-
-	p.WriteByte(0) // HasMask
-	p.WriteUInt32(player.UniqueID)
-	WritePosition(p, player.GetNavmeshPosition())
-
-	// TODO movement still does not save a target location
-	p.WriteByte(0)                                             // Movement.HasDestination
-	p.WriteByte(1)                                             // Movement.Type
-	p.WriteByte(1)                                             // Movement Source | 0 - Spinning | 1 - Skywalking
-	p.WriteUInt16(uint16(player.GetNavmeshPosition().Heading)) // Angle
-
-	p.WriteByte(byte(player.LifeState))
-	p.WriteByte(0) // unknown
-	p.WriteByte(byte(player.MotionState))
-	p.WriteByte(byte(player.BodyState))
-	p.WriteFloat32(player.GetWalkSpeed()) // WalkSpeed
-	p.WriteFloat32(player.GetRunSpeed())
-	p.WriteFloat32(player.GetHwanSpeed()) // HwanSpeed TODO: is this correct?
-	p.WriteByte(0)                        // TODO BuffCount
-
-	p.WriteString(player.GetName())
-	writePlayerJobState(p, player.GetJob())
-	p.WriteByte(byte(player.GetPKState()))
-	WritePlayerTransportState(p, player)
-	p.WriteByte(0) // TODO ScrollMode / 0 = None / 1 = Return Scroll / 2 = Bandit Return Scroll
-	p.WriteByte(0) // TODO Interact Mode / 0 = None / 2 = P2P / 4 = P2N_Talk / 6 = OPNMKT_DEAL
-	p.WriteByte(0) // unknown
-
-	WriteGuild(p, player)
-
-	p.WriteByte(0)    // Equipment Cooldown, probably when equipping pvp capes or job eq
-	p.WriteByte(0xFF) // PK Flag
-
-	// TODO:
-	//  - Check if inventory contains job equipment
-	//  - Check interact mode os P2N_Talk
-	//  - If player has transport(camel, horse, etc.) send transport's unique id
-
-	if p.MessageID == opcode.EntitySingleSpawn {
-		p.WriteByte(0) // TODO find out what this is
-	}
+	WriteEntitySpawnData(p, player)
 }
 
 func writePlayerJobState(packet *network.Packet, job PlayerJob) {
@@ -477,6 +413,66 @@ func WritePlayerTransportState(p *network.Packet, player IPlayer) {
 	}
 }
 
+// WriteCharacterSpawnBuffs mirrors SR_GameServer.exe:0x0059CDC0. Observer
+// records carry skill/token; the owning bootstrap additionally carries the
+// remaining lifetime. Skills with the native atfe descriptor append one
+// creator byte in both forms.
+func WriteCharacterSpawnBuffs(p *network.Packet, character any, owner bool, now time.Time) {
+	if p == nil {
+		return
+	}
+	source, ok := character.(interface {
+		ActiveBuffSnapshot() []ActiveBuff
+		GetUniqueID() uint32
+	})
+	if !ok {
+		p.WriteByte(0)
+		return
+	}
+	buffs := source.ActiveBuffSnapshot()
+	active := buffs[:0]
+	for _, buff := range buffs {
+		if buff.SkillID == 0 || buff.Token == 0 || (!buff.ExpiresAt.IsZero() && !buff.ExpiresAt.After(now)) {
+			continue
+		}
+		active = append(active, buff)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].Token < active[j].Token })
+	if len(active) > math.MaxUint8 {
+		active = active[:math.MaxUint8]
+	}
+	p.WriteByte(byte(len(active)))
+	for _, buff := range active {
+		p.WriteUInt32(buff.SkillID)
+		p.WriteUInt32(buff.Token)
+		if owner {
+			var remaining uint64
+			if buff.ExpiresAt.IsZero() {
+				remaining = math.MaxUint32
+			} else {
+				remaining = uint64(buff.ExpiresAt.Sub(now) / time.Millisecond)
+				if remaining > math.MaxUint32 {
+					remaining = math.MaxUint32
+				}
+			}
+			p.WriteUInt32(uint32(remaining))
+		}
+		if skillHasAutoTransferEffect(RefSkills[buff.SkillID]) {
+			p.WriteBool(buff.SourceUID == source.GetUniqueID())
+		}
+	}
+}
+
+func skillHasAutoTransferEffect(skill RefSkill) bool {
+	const autoTransferEffect = 1701213281 // atfe
+	for _, parameter := range skill.Params {
+		if parameter == autoTransferEffect {
+			return true
+		}
+	}
+	return false
+}
+
 func WritePosition(p *network.Packet, position navmeshv2.RtNavmeshPosition) {
 	p.WriteUInt16(uint16(position.Region.ID))
 	p.WriteFloat32(position.Offset.X)
@@ -486,14 +482,18 @@ func WritePosition(p *network.Packet, position navmeshv2.RtNavmeshPosition) {
 }
 
 func WriteGuild(p *network.Packet, player IPlayer) {
-	// todo
-	p.WriteUInt16(0) // GuildNameLength
-
-	p.WriteUInt32(0) // Guild ID
-	p.WriteUInt16(0) // Guild Member Nickname length
-	p.WriteUInt32(0) // Guild last crest rev
-	p.WriteUInt32(0) // Union ID
-	p.WriteUInt32(0) // Union last crest rev
-	p.WriteByte(0)   // Guild IsFriendly
-	p.WriteByte(0)   // GuildMember.SiegeAuthority
+	var guild PlayerGuildAffiliation
+	if affiliated, ok := player.(interface {
+		GetGuildAffiliation() PlayerGuildAffiliation
+	}); ok {
+		guild = affiliated.GetGuildAffiliation()
+	}
+	p.WriteString(guild.Name)
+	p.WriteUInt32(guild.ID)
+	p.WriteString(guild.MemberNickname)
+	p.WriteUInt32(guild.CrestRevision)
+	p.WriteUInt32(guild.UnionID)
+	p.WriteUInt32(guild.UnionCrestRevision)
+	p.WriteByte(0) // Recipient-relative friendliness requires observer context.
+	p.WriteByte(guild.SiegeAuthority)
 }

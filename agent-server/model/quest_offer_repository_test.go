@@ -46,6 +46,37 @@ func TestQuestOfferRepositoryListsOnlyQueryQualifiedRows(t *testing.T) {
 	}
 }
 
+func TestQuestOfferRepositoryListsAvailableIndicatorsInOneQuery(t *testing.T) {
+	resetCatalogRepositoryTestState()
+	setCatalogRepositoryTestResponse(selectAvailableQuestIndicators, catalogRepositoryTestResponse{
+		columns: []string{"NPC_REF_OBJECT_ID", "QUEST_ID"},
+		rows: [][]driver.Value{
+			{int64(2003), int64(3)},
+			{int64(2003), int64(58)},
+		},
+	})
+	repository, err := NewQuestOfferRepository(openCatalogRepositoryTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.ListAvailableIndicators(context.Background(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []QuestNPCIndicator{{QuestID: 3, NPCRefObjectID: 2003}, {QuestID: 58, NPCRefObjectID: 2003}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("indicators = %#v, want %#v", got, want)
+	}
+	catalogRepositoryTestState.Lock()
+	defer catalogRepositoryTestState.Unlock()
+	if len(catalogRepositoryTestState.queries) != 1 ||
+		catalogRepositoryTestState.queries[0].query != selectAvailableQuestIndicators ||
+		len(catalogRepositoryTestState.queries[0].args) != 1 ||
+		catalogRepositoryTestState.queries[0].args[0].Value != int64(42) {
+		t.Fatalf("queries = %#v", catalogRepositoryTestState.queries)
+	}
+}
+
 func TestQuestOfferQueryKeepsQuestsAvailableAboveMinimumLevel(t *testing.T) {
 	for _, required := range []string{
 		"current_quest.STATUS IN (1,6,7,8)",

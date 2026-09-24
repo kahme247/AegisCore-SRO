@@ -13,12 +13,13 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
-const gachaClientSettleDelay = 250 * time.Millisecond
+const gachaClientAnimationSettleDelay = 4500 * time.Millisecond
 
 type GachaHandler struct {
 	repository model.GachaRepository
 	world      gachaWorld
 	send       func(*server.Session, network.Packet) error
+	settleDelay time.Duration
 }
 
 type gachaWorld interface {
@@ -30,7 +31,7 @@ func RegisterGachaHandler(target *server.Server, repository model.GachaRepositor
 	if target == nil || repository == nil || world == nil {
 		return nil, fmt.Errorf("configure Gacha handler: dependencies are required")
 	}
-	h := &GachaHandler{repository: repository, world: world}
+	h := &GachaHandler{repository: repository, world: world, settleDelay: gachaClientAnimationSettleDelay}
 	target.RegisterHandler(opcode.GachaPlayRequest, h.handlePlay)
 	target.RegisterHandler(opcode.GachaExchangeRequest, h.handleExchange)
 	return h, nil
@@ -74,17 +75,15 @@ func (h *GachaHandler) handlePlay(ctx context.Context, session *server.Session, 
 	if err = h.sendPacket(session, vsro188.BuildGachaPlayResponse(1, detail)); err != nil {
 		return err
 	}
-	// The stock slot worker completes after the Gacha result. Give the client
-	// one UI update boundary so its card vector is rebuilt before B034 arrives.
-	time.Sleep(gachaClientSettleDelay)
+	if h.settleDelay > 0 {
+		time.Sleep(h.settleDelay)
+	}
 	if result.CardRemaining == 0 {
 		if err = h.sendPacket(session, vsro188.BuildItemOperationServerDeleteSuccess(result.CardSlot)); err != nil {
 			return err
 		}
-	} else if result.CardRemaining > 0 {
-		if err = h.sendPacket(session, vsro188.BuildInventoryItemQuantityUpdate(result.CardSlot, result.CardRemaining)); err != nil {
-			return err
-		}
+	} else if err = h.sendPacket(session, vsro188.BuildInventoryItemQuantityUpdate(result.CardSlot, result.CardRemaining)); err != nil {
+		return err
 	}
 	if err = h.sendPacket(session, buildGachaItemAdded(result.RewardSlot, result.RewardItem)); err != nil {
 		return err
@@ -145,10 +144,6 @@ func (h *GachaHandler) handleExchange(ctx context.Context, session *server.Sessi
 		return exchangeErr
 	}
 	player.CommitInventory(results[len(results)-1].Inventory)
-	if err = h.sendPacket(session, vsro188.BuildGachaExchangeResponse(1, 0)); err != nil {
-		return err
-	}
-	time.Sleep(gachaClientSettleDelay)
 	for _, result := range results {
 		if result.CardRemaining == 0 {
 			if err = h.sendPacket(session, vsro188.BuildItemOperationServerDeleteSuccess(result.CardSlot)); err != nil {
@@ -160,6 +155,9 @@ func (h *GachaHandler) handleExchange(ctx context.Context, session *server.Sessi
 		if err = h.sendPacket(session, buildGachaItemAdded(result.RewardSlot, result.RewardItem)); err != nil {
 			return err
 		}
+	}
+	if err = h.sendPacket(session, vsro188.BuildGachaExchangeResponse(1, 0)); err != nil {
+		return err
 	}
 	return nil
 }

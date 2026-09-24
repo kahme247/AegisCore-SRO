@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 )
@@ -213,10 +214,6 @@ func (c *MonsterDropCatalog) rollForMonsterIdentityAtRuntimeRates(monsterRefID u
 		exception.ItemsByCode = nativeExceptionItemReferences()
 	}
 	return rollMonsterDropTableAtRates(table, monsterLevel, country, exception, c.profiles, random, itemRatePercent, goldAmountRatePercent)
-}
-
-func rollMonsterDropTable(table MonsterDropTable, monsterLevel, country int, exception NativeDropExceptionContext, profiles *DropProfileCatalog, random DropRandom) ([]model.GroundItemSpec, error) {
-	return rollMonsterDropTableAtRate(table, monsterLevel, country, exception, profiles, random, 100)
 }
 
 func rollMonsterDropTableAtRate(table MonsterDropTable, monsterLevel, country int, exception NativeDropExceptionContext, profiles *DropProfileCatalog, random DropRandom, ratePercent uint32) ([]model.GroundItemSpec, error) {
@@ -655,6 +652,7 @@ func (s *MonsterDropService) SpawnForKill(ctx context.Context, killer *model.Pla
 			goldAmountRatePercent = configured
 		}
 	}
+	goldAmountRatePercent = goldAmountRateForKiller(goldAmountRatePercent, killer, time.Now())
 	dropClass := target.Rarity()
 	country := 0
 	if ref, ok := model.RefChars[target.GetRefObjectID()]; ok {
@@ -672,6 +670,21 @@ func (s *MonsterDropService) SpawnForKill(ctx context.Context, killer *model.Pla
 	}
 	specs = s.appendBinaryEventDrops(specs, target)
 	return s.spawnDropSpecs(ctx, killer, target, specs)
+}
+
+func goldAmountRateForKiller(base uint32, killer *model.Player, now time.Time) uint32 {
+	if base == 0 {
+		base = 100
+	}
+	bonus := killer.ActiveGoldDropAmountPercent(now)
+	if bonus <= 0 {
+		return base
+	}
+	scaled := uint64(base) * uint64(100+bonus) / 100
+	if scaled > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(scaled)
 }
 
 func (s *MonsterDropService) appendBinaryEventDrops(specs []model.GroundItemSpec, target *model.NPC) []model.GroundItemSpec {

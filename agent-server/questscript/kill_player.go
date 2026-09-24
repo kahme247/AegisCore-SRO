@@ -55,11 +55,10 @@ func KillPlayerObjectives(definitions []Definition) ([]KillPlayerObjective, erro
 				filterKeys = append(filterKeys, value.String)
 			}
 			tail := 8 + int(filterCount)
-			regionValue, ok11 := signedInteger32(call.Args[tail])
 			regionID, regionOK := serverRegionID(call.Args[tail])
 			parameter12, ok12 := unsignedInteger(call.Args[tail+1])
 			jobStateCount, ok13 := unsignedInteger(call.Args[tail+2])
-			if !ok11 || !regionOK || !ok12 || parameter12 == 0 || parameter12 > math.MaxUint8 || !ok13 || jobStateCount == 0 ||
+			if !regionOK || !ok12 || parameter12 == 0 || parameter12 > math.MaxUint8 || !ok13 || jobStateCount == 0 ||
 				uint64(len(call.Args)) != uint64(tail+3)+uint64(jobStateCount) || call.Args[3].String == "" || call.Args[5].String == "" {
 				return nil, fmt.Errorf("%w: %s variant %d has invalid kill-player declaration values", ErrInvalidChunk, definition.CodeName, definition.Variant)
 			}
@@ -75,7 +74,7 @@ func KillPlayerObjectives(definitions []Definition) ([]KillPlayerObjective, erro
 				QuestCodeName: definition.CodeName, Variant: definition.Variant, MissionIndex: missionIndex,
 				ObjectiveKey: call.Args[3].String, Parameter4: parameter4, TargetNPCCode: call.Args[5].String,
 				Parameter6: parameter6, RequiredCount: parameter6, FilterCount: filterCount, FilterKeys: filterKeys,
-				RegionValue: regionValue, RegionID: regionID, Parameter12: parameter12, MinimumLevel: uint8(parameter12),
+				RegionValue: int32(call.Args[tail].Number), RegionID: regionID, Parameter12: parameter12, MinimumLevel: uint8(parameter12),
 				JobStates: jobStates, Parameters: append([]Value(nil), call.Args...),
 			}
 			if len(filterKeys) == 3 {
@@ -92,11 +91,4 @@ func serverRegionID(value Value) (int16, bool) {
 		return 0, false
 	}
 	return int16(uint16(int64(value.Number))), true
-}
-
-func signedInteger32(value Value) (int32, bool) {
-	if value.Kind != ValueNumber || value.Number < math.MinInt32 || value.Number > math.MaxInt32 || math.Trunc(value.Number) != value.Number {
-		return 0, false
-	}
-	return int32(value.Number), true
 }

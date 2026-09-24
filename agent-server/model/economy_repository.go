@@ -1038,7 +1038,7 @@ func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, 
 			return EconomyResult{}, ErrEconomyConflict
 		}
 		var capacity int
-		if err = tx.QueryRowContext(ctx, "SELECT `CAPACITY` FROM `STORAGE_INFO` WHERE `FK_USER`=? FOR UPDATE", userID).Scan(&capacity); err != nil || capacity <= 0 || capacity > 150 {
+		if err = tx.QueryRowContext(ctx, "SELECT `CAPACITY` FROM `STORAGE_INFO` WHERE `FK_USER`=? FOR UPDATE", userID).Scan(&capacity); err != nil || !validStorageCapacity(capacity) {
 			return EconomyResult{}, ErrEconomyConflict
 		}
 		if int(destination) >= capacity {
@@ -1098,6 +1098,10 @@ func (r *SQLEconomyRepository) transfer(ctx context.Context, characterID int64, 
 		return EconomyResult{}, errors.Join(ErrEconomyOutcomeUnknown, err)
 	}
 	return EconomyResult{Gold: gold, Inventory: inv, SourceSlot: source, DestinationSlots: []byte{destination}}, err
+}
+
+func validStorageCapacity(capacity int) bool {
+	return capacity > 0 && capacity <= 255
 }
 
 func (r *SQLEconomyRepository) MoveStorage(ctx context.Context, userID uint32, source, destination byte, amount uint16) error {
@@ -1213,17 +1217,19 @@ func lockEconomyCharacter(ctx context.Context, tx *sql.Tx, characterID int64) (u
 	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT `FK_USER`,`GOLD` FROM `CHAR` WHERE `id`=? FOR UPDATE", characterID).Scan(&owner, &gold)
 	return owner, gold, err
 }
+// NPC buy packets and SHOP_GOODS both use the zero-based Media tab index.
+// Keep this boundary explicit: shifting nonzero tabs redirects consumables to
+// the preceding equipment tab.
+func shopGoodCatalogTab(packetTab byte) byte {
+	return packetTab
+}
+
 func loadShopGood(ctx context.Context, tx *sql.Tx, npc string, tab, slot byte) (ShopGood, error) {
 	var g ShopGood
 	g.NPCCodeName = npc
 	g.TabIndex = tab
 	g.SlotIndex = slot
-	dbTab := tab
-	// NPC shop packets use one-based tab numbers, while SHOP_GOODS is stored zero-based.
-	if dbTab > 0 {
-		dbTab--
-	}
-	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT g.`FK_REF_ITEM`,g.`BUY_PRICE`,g.`SELL_PRICE`,g.`OPT_LEVEL`,g.`VARIANCE`,g.`DATA`,COALESCE(NULLIF(i.`Stack_Size`,0),1),g.`RENT_TYPE`,g.`RENT_CAN_DELETE`,g.`RENT_CAN_RECHARGE`,g.`RENT_PERIOD_BEGIN_TIME`,g.`RENT_PERIOD_END_TIME`,g.`RENT_METER_RATE_TIME`,g.`RENT_PACKING_TIME` FROM `SHOP_GOODS` g JOIN `ITEMDATA` i ON i.`ItemID`=g.`FK_REF_ITEM` WHERE g.`NPC_CODE_NAME`=? AND g.`TAB_INDEX`=? AND g.`SLOT_INDEX`=?", npc, dbTab, slot).Scan(&g.RefItemID, &g.BuyPrice, &g.SellPrice, &g.OptLevel, &g.Variance, &g.Data, &g.MaxStack, &g.RentInfo.Type, &g.RentInfo.CanDelete, &g.RentInfo.CanRecharge, &g.RentInfo.PeriodBeginTime, &g.RentInfo.PeriodEndTime, &g.RentInfo.MeterRateTime, &g.RentInfo.PackingTime)
+	err := tx.QueryRowContext(normalizeEconomyContext(ctx), "SELECT g.`FK_REF_ITEM`,g.`BUY_PRICE`,g.`SELL_PRICE`,g.`OPT_LEVEL`,g.`VARIANCE`,g.`DATA`,COALESCE(NULLIF(i.`Stack_Size`,0),1),g.`RENT_TYPE`,g.`RENT_CAN_DELETE`,g.`RENT_CAN_RECHARGE`,g.`RENT_PERIOD_BEGIN_TIME`,g.`RENT_PERIOD_END_TIME`,g.`RENT_METER_RATE_TIME`,g.`RENT_PACKING_TIME` FROM `SHOP_GOODS` g JOIN `ITEMDATA` i ON i.`ItemID`=g.`FK_REF_ITEM` WHERE g.`NPC_CODE_NAME`=? AND g.`TAB_INDEX`=? AND g.`SLOT_INDEX`=?", npc, shopGoodCatalogTab(tab), slot).Scan(&g.RefItemID, &g.BuyPrice, &g.SellPrice, &g.OptLevel, &g.Variance, &g.Data, &g.MaxStack, &g.RentInfo.Type, &g.RentInfo.CanDelete, &g.RentInfo.CanRecharge, &g.RentInfo.PeriodBeginTime, &g.RentInfo.PeriodEndTime, &g.RentInfo.MeterRateTime, &g.RentInfo.PackingTime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ShopGood{}, ErrEconomyShopGoodNotFound
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 )
@@ -407,5 +408,28 @@ func TestMonsterDropServiceSpawnsQualifiedQuestCollectionItem(t *testing.T) {
 	}
 	if spawned || item != nil || world.object != nil {
 		t.Fatalf("failed quest roll materialized item=%v spawned=%t world=%v", item, spawned, world.object)
+	}
+}
+
+func TestGoldAmountRateIncludesLiveMerchantBlessing(t *testing.T) {
+	now := time.Unix(1000, 0)
+	player := &model.Player{}
+	if _, ok := player.CommitLinkedActiveBuffAt(
+		7001,
+		9001,
+		1,
+		0,
+		30*time.Minute,
+		model.BuffModifiers{GoldDropAmountPercent: 50},
+		now,
+	); !ok {
+		t.Fatal("failed to install merchant blessing")
+	}
+
+	if got := goldAmountRateForKiller(200, player, now.Add(time.Minute)); got != 300 {
+		t.Fatalf("gold amount rate = %d%%, want 300%%", got)
+	}
+	if got := goldAmountRateForKiller(200, player, now.Add(31*time.Minute)); got != 200 {
+		t.Fatalf("expired gold amount rate = %d%%, want 200%%", got)
 	}
 }

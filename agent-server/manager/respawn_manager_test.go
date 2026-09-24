@@ -78,6 +78,7 @@ func TestRespawnManagerBuildsNPCFromConfiguredReferenceCatalog(t *testing.T) {
 					Speed2: 0,
 				},
 				DefaultSkill1: 160,
+				DefaultSkill2: 161,
 			},
 		},
 	}
@@ -108,6 +109,9 @@ func TestRespawnManagerBuildsNPCFromConfiguredReferenceCatalog(t *testing.T) {
 	}
 	if got := npc.AttackSkillID(); got != 160 {
 		t.Fatalf("npc attack skill = %d; want reference default 160", got)
+	}
+	if got := npc.SelectAttackSkill(1); got != 161 {
+		t.Fatalf("npc secondary attack skill = %d; want reference default 161", got)
 	}
 	if !npc.HasStationaryMovementProfile() || npc.GetWalkSpeed() != 0 || npc.GetRunSpeed() != 0 {
 		t.Fatalf("authored zero-speed NPC profile = stationary:%t walk:%.1f run:%.1f; want true/0/0", npc.HasStationaryMovementProfile(), npc.GetWalkSpeed(), npc.GetRunSpeed())
@@ -201,6 +205,25 @@ func TestRespawnManagerSelectsAndScalesRuntimeMonsterClasses(t *testing.T) {
 				t.Fatalf("EXP = %d, want %d", got, test.wantExperience)
 			}
 		})
+	}
+}
+
+func TestItemSummonForcesNonUniquePartyClassAndScalesBaseReference(t *testing.T) {
+	base := model.RefChar{
+		RefObject: model.RefObject{ID: 4001, CodeName: "MOB_TEST", TypeInfo: model.TypeInfo{TypeID1: 1, TypeID2: 2, TypeID3: 1, TypeID4: 1}},
+		Level:     10, MaxHP: 100, ExpToGive: 50,
+	}
+	respawn := &RespawnManager{}
+	if err := respawn.ConfigureReferenceData(model.NewReferenceDataCatalog(model.ReferenceDataSnapshot{Characters: map[uint32]model.RefChar{4001: base}})); err != nil {
+		t.Fatal(err)
+	}
+	rarity := model.MonsterPartyGiant
+	npc, err := respawn.newNPCForSpawnWithRarity(&model.SpawnArea{Spawn: model.Spawn{RefObjID: 4001}}, &rarity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if npc.MonsterRarity() != model.MonsterPartyGiant || npc.CurrentHitPoints() != 2000 || npc.ExperienceReward() != 1000 {
+		t.Fatalf("forced party giant = rarity %d HP %d EXP %d", npc.MonsterRarity(), npc.CurrentHitPoints(), npc.ExperienceReward())
 	}
 }
 

@@ -411,6 +411,11 @@ func NewAgentServer() (AgentServer, error) {
 	gameReadyHandler.ConfigurePremiumDecoration(repositories.PremiumDecoration)
 	questCountdowns := character.NewQuestCountdownService(repositories.CharacterQuests)
 	gameReadyHandler.ConfigureQuestCountdowns(questCountdowns)
+	questIndicators, ok := repositories.QuestOffers.(model.QuestIndicatorRepository)
+	if !ok {
+		return AgentServer{}, fmt.Errorf("configure Agent quest indicators: repository is unavailable")
+	}
+	gameReadyHandler.ConfigureQuestIndicators(questIndicators)
 	character.RegisterGuideHandler(&serv)
 	agentServer.Hwan, err = character.RegisterHwanHandler(&serv, repositories.Hwan)
 	if err != nil {
@@ -477,6 +482,11 @@ func NewAgentServer() (AgentServer, error) {
 	if _, err := character.RegisterQuestRewardSelectionHandler(&serv, questRuntime); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Agent quest reward selection: %w", err)
 	}
+	dimensionHoleDefinitions, dimensionHoleCatalogErr := repositories.DimensionHoleCatalog.LoadDimensionHoleCatalog(context.Background())
+	if dimensionHoleCatalogErr != nil {
+		return AgentServer{}, fmt.Errorf("load Dimension Hole catalog: %w", dimensionHoleCatalogErr)
+	}
+	log.WithField("definitions", len(dimensionHoleDefinitions)).Info("loaded database-backed Dimension Hole catalog")
 	teleportHandler := character.RegisterTeleportHandler(&serv, repositories.Teleport)
 	agentServer.DimensionHoles, err = service.LoadDimensionHoleRuntime(
 		context.Background(), repositories.DimensionHoleWorlds, repositories.DimensionHoleRegions, repositories.DimensionHoleStarts,
@@ -488,26 +498,34 @@ func NewAgentServer() (AgentServer, error) {
 	if err = agentServer.DimensionHoles.ConfigureEntry(agentServer.DimensionHoles.Destinations, teleportHandler); err != nil {
 		return AgentServer{}, fmt.Errorf("configure Dimension Hole entry: %w", err)
 	}
-	if dungeonTeleportPath := viper.GetString(config.AgentDungeonTeleportDataPath); dungeonTeleportPath != "" {
-		dungeonEventZones, dungeonEventErr := character.LoadDungeonEventZoneCatalog(dungeonTeleportPath, viper.GetString(config.AgentDataPath))
-		if dungeonEventErr != nil {
-			return AgentServer{}, fmt.Errorf("configure dungeon event zones: %w", dungeonEventErr)
-		}
-		log.WithFields(log.Fields{
-			"level_2": dungeonEventZones.ZoneCount(-32762),
-			"level_3": dungeonEventZones.ZoneCount(-32763),
-			"level_4": dungeonEventZones.ZoneCount(-32764),
-		}).Info("loaded authoritative Tomb event zones")
-		dungeonEventZoneLatch := character.NewDungeonEventZoneLatch(dungeonEventZones)
-		movementHandler.ConfigureDungeonEventZones(func(player *model.Player, target navmeshv2.RtNavmeshPosition) (bool, error) {
-			destination, zoneName, ok := dungeonEventZoneLatch.DestinationAt(player.GetUniqueID(), target)
-			if !ok {
-				return false, nil
-			}
-			log.WithFields(log.Fields{"uid": player.GetUniqueID(), "zone": zoneName, "region": destination.Region}).Info("activated dungeon event zone")
-			return true, teleportHandler.SubmitDungeonEventZoneTeleport(player, destination)
-		})
+	dungeonLinks, dungeonLinkErr := repositories.DungeonTeleportLinks.DungeonLinks(context.Background())
+	if dungeonLinkErr != nil {
+		return AgentServer{}, fmt.Errorf("load dungeon teleport links: %w", dungeonLinkErr)
 	}
+	dungeonPoints, dungeonPointErr := repositories.DungeonTeleportPoints.DungeonPoints(context.Background())
+	if dungeonPointErr != nil {
+		return AgentServer{}, fmt.Errorf("load dungeon teleport points: %w", dungeonPointErr)
+	}
+	dungeonEventZones, dungeonEventErr := character.LoadDungeonEventZoneCatalog(viper.GetString(config.AgentDataPath), dungeonPoints, dungeonLinks)
+	if dungeonEventErr != nil {
+		return AgentServer{}, fmt.Errorf("configure dungeon event zones: %w", dungeonEventErr)
+	}
+	log.WithFields(log.Fields{
+		"level_2":            dungeonEventZones.ZoneCount(-32762),
+		"level_3":            dungeonEventZones.ZoneCount(-32763),
+		"level_4":            dungeonEventZones.ZoneCount(-32764),
+		"stone_cave_inside":  dungeonEventZones.ZoneCount(-32767),
+		"stone_cave_outside": dungeonEventZones.ZoneCount(27027),
+	}).Info("loaded database-backed dungeon event zones")
+	dungeonEventZoneLatch := character.NewDungeonEventZoneLatch(dungeonEventZones)
+	movementHandler.ConfigureDungeonEventZones(func(player *model.Player, target navmeshv2.RtNavmeshPosition) (bool, error) {
+		destination, zoneName, ok := dungeonEventZoneLatch.DestinationAt(player.GetUniqueID(), target)
+		if !ok {
+			return false, nil
+		}
+		log.WithFields(log.Fields{"uid": player.GetUniqueID(), "zone": zoneName, "region": destination.Region}).Info("activated dungeon event zone")
+		return true, teleportHandler.SubmitDungeonEventZoneTeleport(player, destination)
+	})
 	agentServer.QuestInstances = model.NewQuestInstanceRegistry()
 	questInstanceMembers, err := model.NewQuestInstanceMemberRepository(shardPool)
 	if err != nil {
@@ -656,6 +674,7 @@ func NewAgentServer() (AgentServer, error) {
 	itemUseHandler.ConfigureQuestInstanceEntry(agentServer.QuestInstanceLifecycle, teleportHandler)
 	itemUseHandler.ConfigureDevilSpirit(repositories.AvatarInventory)
 	itemUseHandler.ConfigureCOS(cosLifecycle.Service())
+	itemUseHandler.ConfigureMonsterSummons(manager.GetRespawnManagerInstance(), world)
 	agentServer.COS = cosLifecycle.Service()
 	if agentServer.COS != nil && agentServer.GroundItems != nil {
 		agentServer.COS.ConfigureCargoGroundItems(agentServer.GroundItems)

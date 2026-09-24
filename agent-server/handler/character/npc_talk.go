@@ -346,11 +346,7 @@ func (h *NPCTalkHandler) handleDialogObjectives(ctx context.Context, session *se
 	for index, prompt := range prompts {
 		entries[index] = prompt.DialogueKey
 	}
-	menu, err := buildQuestTalkPacket(questTalkExtendedTypeMin, "", entries)
-	if err != nil {
-		return false, err
-	}
-	return true, h.sendPacket(session, menu)
+	return true, h.sendQuestTalkMenu(session, entries)
 }
 
 func (h *NPCTalkHandler) publishJobPrices(ctx context.Context, session *server.Session, npcRefObjectID uint32) (bool, error) {
@@ -396,11 +392,15 @@ func (h *NPCTalkHandler) handleStandardDeliveries(ctx context.Context, session *
 	for index, prompt := range prompts {
 		entries[index] = prompt.DialogueKey
 	}
+	return true, h.sendQuestTalkMenu(session, entries)
+}
+
+func (h *NPCTalkHandler) sendQuestTalkMenu(session *server.Session, entries []string) error {
 	menu, err := buildQuestTalkPacket(questTalkExtendedTypeMin, "", entries)
 	if err != nil {
-		return false, err
+		return err
 	}
-	return true, h.sendPacket(session, menu)
+	return h.sendPacket(session, menu)
 }
 
 func (h *NPCTalkHandler) completeStandardDelivery(ctx context.Context, session *server.Session, player *model.Player, questID int, npcRefObjectID uint32) error {

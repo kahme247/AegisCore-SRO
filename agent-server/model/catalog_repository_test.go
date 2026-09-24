@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 const catalogRepositoryTestDriverName = "aegiscore-agent-catalog-repository-test"
@@ -193,6 +194,100 @@ func TestContinentSpawnRepositoryListsDeterministically(t *testing.T) {
 		t.Fatalf("spawns = %#v, want %#v", spawns, want)
 	}
 	assertCatalogRepositoryQuery(t, SelectSpawnsForContinent, "Europe")
+}
+
+func TestDungeonTeleportLinkRepositoryLoadsDirectedGraph(t *testing.T) {
+	resetCatalogRepositoryTestState()
+	setCatalogRepositoryTestResponse(SelectDungeonTeleportLinks, catalogRepositoryTestResponse{
+		columns: []string{"SOURCE_TELEPORT_ID", "TARGET_TELEPORT_ID"},
+		rows:    [][]driver.Value{{int64(58), int64(62)}, {int64(127), int64(132)}},
+	})
+	repository, err := NewTeleportRepository(openCatalogRepositoryTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, err := repository.DungeonLinks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[uint32]uint32{58: 62, 127: 132}; !reflect.DeepEqual(links, want) {
+		t.Fatalf("links = %#v, want %#v", links, want)
+	}
+	catalogRepositoryTestState.Lock()
+	queries := append([]catalogRepositoryTestQuery(nil), catalogRepositoryTestState.queries...)
+	catalogRepositoryTestState.Unlock()
+	if len(queries) != 1 || queries[0].query != SelectDungeonTeleportLinks || len(queries[0].args) != 0 {
+		t.Fatalf("queries = %#v", queries)
+	}
+}
+
+func TestDungeonTeleportPointRepositoryLoadsCoordinates(t *testing.T) {
+	resetCatalogRepositoryTestState()
+	setCatalogRepositoryTestResponse(SelectDungeonTeleportPoints, catalogRepositoryTestResponse{
+		columns: []string{"ID", "CODE_NAME", "REGION_ID", "POS_X", "POS_Y", "POS_Z", "RADIUS", "WORLD_ID"},
+		rows: [][]driver.Value{
+			{int64(58), "GATE_JINSI_02x01_03", int64(-32762), float64(-10468), float64(0), float64(5596), float64(70), int64(1)},
+			{int64(127), "GATE_JINSI_03x02", int64(-32763), float64(19140), float64(549), float64(15784), float64(70), int64(1)},
+		},
+	})
+	repository, err := NewTeleportRepository(openCatalogRepositoryTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	points, err := repository.DungeonPoints(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[uint32]DungeonTeleportPoint{
+		58:  {ID: 58, CodeName: "GATE_JINSI_02x01_03", Region: -32762, X: -10468, Z: 5596, Radius: 70, WorldID: 1},
+		127: {ID: 127, CodeName: "GATE_JINSI_03x02", Region: -32763, X: 19140, Y: 549, Z: 15784, Radius: 70, WorldID: 1},
+	}
+	if !reflect.DeepEqual(points, want) {
+		t.Fatalf("points = %#v, want %#v", points, want)
+	}
+	catalogRepositoryTestState.Lock()
+	queries := append([]catalogRepositoryTestQuery(nil), catalogRepositoryTestState.queries...)
+	catalogRepositoryTestState.Unlock()
+	if len(queries) != 1 || queries[0].query != SelectDungeonTeleportPoints || len(queries[0].args) != 0 {
+		t.Fatalf("queries = %#v", queries)
+	}
+}
+
+func TestDimensionHoleCatalogRepositoryLoadsDatabaseDefinitions(t *testing.T) {
+	previous := DimensionHoleCatalog()
+	t.Cleanup(func() {
+		if err := InstallDimensionHoleCatalog(previous); err != nil {
+			t.Fatal(err)
+		}
+	})
+	resetCatalogRepositoryTestState()
+	setCatalogRepositoryTestResponse(SelectDimensionHoleCatalog, catalogRepositoryTestResponse{
+		columns: []string{
+			"ITEM_REF_ID", "ITEM_CODE_NAME", "WORLD_ID", "WORLD_CODE_NAME", "MAX_USER_COUNT",
+			"CAN_USE", "TYPE_ID_1", "TYPE_ID_2", "TYPE_ID_3", "TYPE_ID_4",
+			"PARAM_1", "PARAM_2", "PARAM_3", "PARAM_4", "PARAM_5",
+			"PARAM_6", "PARAM_7", "PARAM_8", "PARAM_9", "PARAM_10",
+		},
+		rows: [][]driver.Value{
+			{int64(35883), "ITEM_HOLE_A", int64(63), "WORLD_A", int64(4), int64(1), int64(3), int64(3), int64(12), int64(7), int64(1), int64(0), int64(35), int64(50), int64(4), int64(6), int64(1), int64(-1), int64(-1), int64(18_000_000)},
+			{int64(35884), "ITEM_HOLE_B", int64(64), "WORLD_B", int64(8), int64(1), int64(3), int64(3), int64(12), int64(7), int64(2), int64(0), int64(51), int64(60), int64(8), int64(6), int64(1), int64(-1), int64(-1), int64(18_000_000)},
+		},
+	})
+	repository, err := NewDimensionHoleCatalogRepository(openCatalogRepositoryTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repository.LoadDimensionHoleCatalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DimensionHoleDefinition{
+		{ItemRefID: 35883, ItemCodeName: "ITEM_HOLE_A", WorldID: 63, WorldCodeName: "WORLD_A", MinLevel: 35, MaxLevel: 50, Capacity: 4, Difficulty: 1, Cooldown: 5 * time.Hour},
+		{ItemRefID: 35884, ItemCodeName: "ITEM_HOLE_B", WorldID: 64, WorldCodeName: "WORLD_B", MinLevel: 51, MaxLevel: 60, Capacity: 8, Difficulty: 2, Cooldown: 5 * time.Hour},
+	}
+	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(DimensionHoleCatalog(), want) {
+		t.Fatalf("definitions = %#v, installed = %#v, want %#v", got, DimensionHoleCatalog(), want)
+	}
 }
 
 func TestCatalogRepositoriesReturnTypedQueryScanAndRowsFailures(t *testing.T) {

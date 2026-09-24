@@ -18,6 +18,51 @@ func TestCatalogIsUniqueAndUnavailableCapabilitiesDefaultOff(t *testing.T) {
 	}
 }
 
+func TestDefinitionBuildersPreserveMetadata(t *testing.T) {
+	evidence := Evidence{Source: "binary", Locator: "address"}
+	const key Key = "test-feature"
+	tests := []struct {
+		name       string
+		definition Definition
+		available  bool
+		reason     string
+		directives []string
+	}{
+		{
+			name:       "available",
+			definition: availableServerFlag(key, "available.directive", true, evidence),
+			available:  true,
+			directives: []string{"available.directive"},
+		},
+		{
+			name:       "unavailable",
+			definition: unavailableDefinition(key, true, []string{"first.directive", "second.directive"}, evidence),
+			reason:     "implementation and evidence certification are incomplete",
+			directives: []string{"first.directive", "second.directive"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition := test.definition
+			if definition.Key != key || definition.ConfigKey != "agent.features.test-feature.enabled" || definition.Environment != "AGENT_FEATURE_TEST_FEATURE_ENABLED" || definition.DefaultEnabled || !definition.LegacyEnabled || definition.Available != test.available || definition.UnavailableReason != test.reason {
+				t.Fatalf("definition metadata = %#v", definition)
+			}
+			if len(definition.Evidence) != 1 || definition.Evidence[0] != evidence {
+				t.Fatalf("definition evidence = %#v, want %#v", definition.Evidence, evidence)
+			}
+			if len(definition.LegacyDirectives) != len(test.directives) {
+				t.Fatalf("definition directives = %#v, want %#v", definition.LegacyDirectives, test.directives)
+			}
+			for index, directive := range test.directives {
+				if definition.LegacyDirectives[index] != directive {
+					t.Fatalf("directive %d = %q, want %q", index, definition.LegacyDirectives[index], directive)
+				}
+			}
+		})
+	}
+}
+
 func TestDirectiveMappingsCoverExactRecoveredInventory(t *testing.T) {
 	mappings := DirectiveMappings()
 	if got, want := len(mappings), 30; got != want {

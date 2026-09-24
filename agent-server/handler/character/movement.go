@@ -152,6 +152,10 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 		logrus.Warnf("movement request for unknown player %d: %v", data.UserContext.UniqueID, err)
 		return
 	}
+	if player.TimedActionLocked() {
+		movementService.Stop(player, "timed-action-lock")
+		return
+	}
 	if player.IsBarrierRooted() {
 		movementService.Stop(player, "wall-skill-root")
 		return
@@ -191,7 +195,7 @@ func (mh *MovementHandler) handleMovement(data server.PacketChannelData) {
 	}
 	mh.cancelPlayerCombat(data.Session, player.GetUniqueID())
 	mh.resumePlayerFromSit(player)
-	if mh.eventZone != nil && navmeshv2.IsDungeonRegion(targetPosition.Region.ID) {
+	if mh.eventZone != nil {
 		handled, eventErr := mh.eventZone(player, targetPosition)
 		if eventErr != nil {
 			logrus.WithError(eventErr).Warn("dungeon event-zone activation failed")
@@ -287,6 +291,10 @@ func (mh *MovementHandler) handleForward(data server.PacketChannelData) {
 		logrus.Warnf("forward request for unknown player %d: %v", data.UserContext.UniqueID, err)
 		return
 	}
+	if player.TimedActionLocked() {
+		movementService.Stop(player, "timed-action-lock")
+		return
+	}
 	action, heading, err := parseForwardPacket(&data.Packet, uint16(player.GetNavmeshPosition().Heading))
 	if err != nil {
 		mh.rejectMalformed(player, "forward action", err)
@@ -338,6 +346,10 @@ func (mh *MovementHandler) handleTurn(data server.PacketChannelData) {
 	player, err := world.GetPlayerByUniqueId(data.UserContext.UniqueID)
 	if err != nil {
 		logrus.Warnf("turn request for unknown player %d: %v", data.UserContext.UniqueID, err)
+		return
+	}
+	if player.TimedActionLocked() {
+		movementService.Stop(player, "timed-action-lock")
 		return
 	}
 	heading, err := parseTurnPacket(&data.Packet)

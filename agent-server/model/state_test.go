@@ -83,9 +83,10 @@ func TestBattleStateDoesNotConflatePvPState(t *testing.T) {
 	}
 }
 
-func TestBerserkerMovementAndLegacySpawnSerializationUseAuthoritativeValue(t *testing.T) {
+func TestBerserkerMovementAndCanonicalSpawnSerializationUseAuthoritativeValue(t *testing.T) {
 	player := &Player{
 		SRObject: SRObject{
+			TypeInfo: TypeInfo{TypeID1: 1, TypeID2: 1},
 			RtNavmeshPosition: navmeshv2.RtNavmeshPosition{
 				Region: navmeshv2.NewRegionFromInt16(25000),
 				Offset: math32.NewVector3(100, 0, 200),

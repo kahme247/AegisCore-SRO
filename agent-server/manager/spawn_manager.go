@@ -96,12 +96,12 @@ func groupSpawnObjects(player model.IPlayer, objects map[uint32]model.ISRObject,
 			return
 		}
 	}
-	p1, p2, p3, err := buildGroupSpawnPackets(objects, spawning)
+	packets, err := buildGroupSpawnPackets(objects, spawning)
 	if err != nil {
 		logrus.Errorf("build grouped %s packet: %v", spawnActionName(spawning), err)
 		return
 	}
-	if err := player.GetSession().SendBatch([]network.Packet{p1, p2, p3}); err != nil {
+	if err := player.GetSession().SendBatch(packets); err != nil {
 		logrus.Errorf("send grouped %s packet: %v", spawnActionName(spawning), err)
 		return
 	}
@@ -194,56 +194,71 @@ func supportedSpawnObjects(objects map[uint32]model.ISRObject) map[uint32]model.
 	return supported
 }
 
+const groupSpawnDataChunkSize = int(network.BufferSize) - 0x20
+
 // buildGroupSpawnPackets creates the stock begin/data/end batch before any
-// bytes are sent. Its stable UID order makes wire output reproducible for
-// captures, diagnostics, and client compatibility tests.
-func buildGroupSpawnPackets(objects map[uint32]model.ISRObject, spawning bool) (network.Packet, network.Packet, network.Packet, error) {
+// bytes are sent. SR_GameServer 0x00430A20 splits the serialized record stream
+// into 0x3019 chunks that reserve 0x20 bytes of each 0x1000-byte message block.
+func buildGroupSpawnPackets(objects map[uint32]model.ISRObject, spawning bool) ([]network.Packet, error) {
 	if len(objects) > int(^uint16(0)) {
-		return network.Packet{}, network.Packet{}, network.Packet{}, fmt.Errorf("too many objects: %d", len(objects))
+		return nil, fmt.Errorf("too many objects: %d", len(objects))
 	}
 	ids := make([]uint32, 0, len(objects))
 	for id, object := range objects {
 		if object == nil {
-			return network.Packet{}, network.Packet{}, network.Packet{}, fmt.Errorf("object %d is nil", id)
+			return nil, fmt.Errorf("object %d is nil", id)
 		}
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 
-	p1 := network.EmptyPacket()
-	p1.MessageID = opcode.EntityGroupSpawnBegin
+	begin := network.EmptyPacket()
+	begin.MessageID = opcode.EntityGroupSpawnBegin
 	if spawning {
-		if err := p1.WriteByte(1); err != nil {
-			return network.Packet{}, network.Packet{}, network.Packet{}, err
+		if err := begin.WriteByte(1); err != nil {
+			return nil, err
 		}
 	} else {
-		if err := p1.WriteByte(2); err != nil {
-			return network.Packet{}, network.Packet{}, network.Packet{}, err
+		if err := begin.WriteByte(2); err != nil {
+			return nil, err
 		}
 	}
-	if err := p1.WriteUInt16(uint16(len(ids))); err != nil {
-		return network.Packet{}, network.Packet{}, network.Packet{}, err
+	if err := begin.WriteUInt16(uint16(len(ids))); err != nil {
+		return nil, err
 	}
-	p2 := network.EmptyPacket()
-	p2.MessageID = opcode.EntityGroupSpawnData
 
+	data := network.EmptyPacket()
 	for _, id := range ids {
-		object := objects[id]
 		if spawning {
-			model.WriteEntitySpawnData(&p2, object)
-		} else {
-			if err := p2.WriteUInt32(object.GetUniqueID()); err != nil {
-				return network.Packet{}, network.Packet{}, network.Packet{}, err
-			}
+			model.WriteEntitySpawnData(&data, objects[id])
+		} else if err := data.WriteUInt32(objects[id].GetUniqueID()); err != nil {
+			return nil, err
 		}
 	}
-	if err := p2.WriteError(); err != nil {
-		return network.Packet{}, network.Packet{}, network.Packet{}, err
+	if err := data.WriteError(); err != nil {
+		return nil, err
 	}
 
-	p3 := network.EmptyPacket()
-	p3.MessageID = opcode.EntityGroupSpawnEnd
-	return p1, p2, p3, nil
+	payload := data.Payload()
+	chunkCount := max(1, (len(payload)+groupSpawnDataChunkSize-1)/groupSpawnDataChunkSize)
+	packets := make([]network.Packet, 0, chunkCount+2)
+	packets = append(packets, begin)
+	for offset := 0; offset < len(payload) || offset == 0; offset += groupSpawnDataChunkSize {
+		endOffset := min(offset+groupSpawnDataChunkSize, len(payload))
+		chunk := network.EmptyPacket()
+		chunk.MessageID = opcode.EntityGroupSpawnData
+		if err := chunk.WriteBytes(payload[offset:endOffset]); err != nil {
+			return nil, err
+		}
+		packets = append(packets, chunk)
+		if endOffset == len(payload) {
+			break
+		}
+	}
+	end := network.EmptyPacket()
+	end.MessageID = opcode.EntityGroupSpawnEnd
+	packets = append(packets, end)
+	return packets, nil
 }
 
 func spawnActionName(spawning bool) string {

@@ -270,8 +270,9 @@ func handleScheduledCompetitiveEvent(ctx context.Context, run scheduler.Run, run
 }
 
 type scheduledGlobalEventPayload struct {
-	Name  string `json:"name"`
-	Value uint32 `json:"value"`
+	Name   string `json:"name"`
+	Value  uint32 `json:"value"`
+	Notice string `json:"notice,omitempty"`
 }
 
 func handleScheduledGlobalEvent(ctx context.Context, run scheduler.Run, broadcaster seasonalEventBroadcaster) error {
@@ -289,8 +290,34 @@ func handleScheduledGlobalEvent(ctx context.Context, run scheduler.Run, broadcas
 	if payload.Name == "" || len([]rune(payload.Name)) > 128 {
 		return permanentSchedulerHandlerError{err: errors.New("event.global requires a 1-128 character name")}
 	}
-	_, err := broadcaster.BroadcastGlobalEvent(payload.Name, payload.Value)
-	return err
+	if _, err := broadcaster.BroadcastGlobalEvent(payload.Name, payload.Value); err != nil {
+		return err
+	}
+	return broadcastScheduledEventNotice(broadcaster, run.Phase, payload.Name, payload.Notice)
+}
+
+func broadcastScheduledEventNotice(broadcaster seasonalEventBroadcaster, phase scheduler.Phase, eventName, explicit string) error {
+	notices, ok := broadcaster.(noticeBroadcaster)
+	if !ok {
+		return nil
+	}
+	message := strings.TrimSpace(explicit)
+	if message == "" {
+		switch phase {
+		case scheduler.Warning:
+			message = fmt.Sprintf("%s event will start soon.", eventName)
+		case scheduler.Start:
+			message = fmt.Sprintf("%s event has started.", eventName)
+		case scheduler.Finish:
+			message = fmt.Sprintf("%s event has ended.", eventName)
+		default:
+			return nil
+		}
+	}
+	if _, err := notices.BroadcastNotice(message); err != nil {
+		return fmt.Errorf("broadcast scheduled event notice: %w", err)
+	}
+	return nil
 }
 
 type scheduledVietnamMRPayload struct {
@@ -345,6 +372,7 @@ type scheduledServerEventPayload struct {
 	CharacterID   int    `json:"characterId"`
 	Delta         uint64 `json:"delta"`
 	Target        uint64 `json:"target"`
+	Notice        string `json:"notice,omitempty"`
 }
 
 func handleScheduledServerEventAdvance(ctx context.Context, run scheduler.Run, controller scheduledServerEventController, broadcaster seasonalEventBroadcaster) error {
@@ -381,7 +409,7 @@ func handleScheduledServerEventAdvance(ctx context.Context, run scheduler.Run, c
 	if err != nil {
 		return fmt.Errorf("broadcast server event progress: %w", err)
 	}
-	return nil
+	return broadcastScheduledEventNotice(broadcaster, run.Phase, payload.InstanceKey, payload.Notice)
 }
 
 type scheduledMobRatesPayload struct {
