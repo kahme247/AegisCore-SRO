@@ -183,9 +183,13 @@ func BuildCOSRefObjectUpdate(uniqueID, refObjectID uint32) network.Packet {
 }
 
 func BuildCOSPickupInventoryUpdate(uniqueID uint32, slot byte, item Item) network.Packet {
-	// The stock B034 operation-0x17 completion consumes only the COS/context
-	// value and slot. The item argument remains in this compatibility wrapper
-	// for callers that already have the hydrated item, but its variable body is
-	// not part of this wire branch.
-	return vsro188.BuildItemOperationObjectSlotSuccess(vsro188.ItemOperationCOSTransfer, uniqueID, slot)
+	// Client 0x0087BC1F handles operation 0x11 as ground-to-COS pickup.
+	// Its destination path calls the common item hydrator at 0x008BE4F0 before
+	// formatting the local activity entry, so the fixed object/slot prefix must
+	// be followed by the same RentInfo + item body used by character pickup.
+	packet := vsro188.BuildItemOperationObjectSlotSuccess(vsro188.ItemOperationCOSPickup, uniqueID, slot)
+	WriteRentInfo(&packet, item)
+	packet.WriteUInt32(item.GetRefObjectID())
+	WriteInventoryItem(&packet, item)
+	return packet
 }

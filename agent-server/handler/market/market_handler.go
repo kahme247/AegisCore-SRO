@@ -16,7 +16,6 @@ import (
 const (
 	maxRegistrationItems = 8
 	marketPageSize       = 10
-	marketLifetime       = 72 * time.Hour
 )
 
 type worldLookup interface {
@@ -95,24 +94,12 @@ func commandKey(session *server.Session, packet network.Packet, action string, i
 	return fmt.Sprintf("market:%s:%02x:%04x:%s:%d", session.ID, packet.Sequence, packet.MessageID, action, index)
 }
 
-func feeTier(price uint64) int {
-	switch {
-	case price < 1_000_000:
-		return 0
-	case price < 10_000_000:
-		return 1
-	case price < 100_000_000:
-		return 2
-	default:
-		return 3
-	}
-}
-
 func marketFees(price uint64) (deposit, sellFee uint64) {
 	// SR_GameServer 0x0047A410/0x0047A4A0/0x0047A4F0 uses four price
 	// tiers and computes price/100*rate. Constructor 0x00478E30 installs
-	// default SET_FEE_RATE [0,1,1,1] and SELL_FEE_RATE [0,3,3,3].
-	if feeTier(price) == 0 {
+	// default SET_FEE_RATE [0,1,1,1] and SELL_FEE_RATE [0,3,3,3], so
+	// only the zero-rate cutoff affects the current calculation.
+	if price < 1_000_000 {
 		return 0, 0
 	}
 	base := price / 100

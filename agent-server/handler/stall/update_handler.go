@@ -21,6 +21,18 @@ func RegisterStallUpdateHandler(target *server.Server) {
 	target.RegisterHandler(opcode.StallUpdateRequest, handler.handlePacket)
 }
 
+func newStallUpdateResponse(updateType byte) (network.Packet, error) {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.StallUpdateResponse
+	if err := p.WriteByte(1); err != nil {
+		return network.Packet{}, err
+	}
+	if err := p.WriteByte(updateType); err != nil {
+		return network.Packet{}, err
+	}
+	return p, nil
+}
+
 func (s *StallUpdateHandler) handlePacket(_ context.Context, session *server.Session, packet network.Packet) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

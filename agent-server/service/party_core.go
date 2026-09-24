@@ -9,6 +9,8 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 )
 
 var (
@@ -76,6 +78,19 @@ func NewPartyService(players PartyPlayerLookup) *PartyService {
 		players:            players,
 		now:                time.Now,
 	}
+}
+
+func (p *PartyService) MemberCountForPlayer(playerUniqueID uint32) int {
+	if p == nil || playerUniqueID == 0 {
+		return 1
+	}
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	party := p.Parties[playerUniqueID]
+	if party == nil || len(party.Members) == 0 {
+		return 1
+	}
+	return len(party.Members)
 }
 
 // SelectItemRecipient applies the deterministic party-distribution rule. In
@@ -159,6 +174,82 @@ func (p *PartyService) ConnectedMembers(partyNumber uint32) []*model.Player {
 		}
 	}
 	return members
+}
+
+// PublishMemberStatus propagates the client-confirmed 0x3864/action-6 delta
+// to every connected member after a party player's position or vitals change.
+// The parser uses a field mask; 0x24 supplies only vitals and position.
+func (p *PartyService) PublishMemberStatus(player *model.Player) {
+	if p == nil || player == nil {
+		return
+	}
+	party := player.GetParty()
+	if party == nil {
+		return
+	}
+	p.mutex.Lock()
+	if p.Parties[party.Number] != party {
+		p.mutex.Unlock()
+		return
+	}
+	recipients := p.playersForMembersLocked(party.Members)
+	p.mutex.Unlock()
+
+	packet := buildPartyMemberStatus(player)
+	for _, recipient := range recipients {
+		if recipient == nil || recipient.GetSession() == nil {
+			continue
+		}
+		_ = recipient.GetSession().Send(packet)
+	}
+}
+
+func buildPartyMemberStatus(player *model.Player) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.PartyUpdateResponse
+	if player == nil {
+		return packet
+	}
+	hp, mp := player.CurrentVitals()
+	maxHP, maxMP := player.MaxVitals()
+	position := player.GetNavmeshPosition()
+	packet.WriteByte(6)
+	packet.WriteUInt32(player.GetUniqueID())
+	packet.WriteByte(0x24)
+	packet.WriteByte(packPartyVitalPercent(hp, maxHP) | packPartyVitalPercent(mp, maxMP)<<4)
+	writePartyMemberPosition(&packet, position, model.GameWorldScope(player.GetGameWorldID()))
+	return packet
+}
+
+func packPartyVitalPercent(current, maximum int) byte {
+	if current <= 0 || maximum <= 0 {
+		return 0
+	}
+	value := current * 10 / maximum
+	if value > 10 {
+		return 10
+	}
+	return byte(value)
+}
+
+func writePartyMemberPosition(packet *network.Packet, position navmeshv2.RtNavmeshPosition, scope model.GameWorldScope) {
+	region := uint16(position.Region.ID)
+	var x, y, z float32
+	if position.Offset != nil {
+		x, y, z = position.Offset.X, position.Offset.Y, position.Offset.Z
+	}
+	packet.WriteUInt16(region)
+	if region&navmeshv2.DungeonMask != 0 {
+		packet.WriteUInt32(uint32(int32(x)))
+		packet.WriteUInt32(uint32(int32(z)))
+		packet.WriteUInt32(uint32(int32(y)))
+	} else {
+		packet.WriteUInt16(uint16(int16(x)))
+		packet.WriteUInt16(uint16(int16(z)))
+		packet.WriteUInt16(uint16(int16(y)))
+	}
+	packet.WriteUInt16(scope.WorldID())
+	packet.WriteUInt16(scope.LayerID())
 }
 
 // AutoMatch selects a formed listing by purpose and level. Ordering by party
@@ -271,6 +362,17 @@ func (p *PartyService) player(uid uint32) (*model.Player, error) {
 	}
 	player, err := p.players.GetPlayerByUniqueId(uid)
 	if err != nil || player == nil || player.GetSession() == nil {
+		return nil, ErrPartyTargetUnavailable
+	}
+	return player, nil
+}
+
+func (p *PartyService) playerAny(uid uint32) (*model.Player, error) {
+	if p == nil || p.players == nil || uid == 0 {
+		return nil, ErrPartyTargetUnavailable
+	}
+	player, err := p.players.GetPlayerByUniqueId(uid)
+	if err != nil || player == nil {
 		return nil, ErrPartyTargetUnavailable
 	}
 	return player, nil
@@ -485,6 +587,71 @@ func (p *PartyService) LeaveParty(playerUID uint32, reason byte) (PartyTransitio
 	return p.removeMember(playerUID, playerUID, reason, false)
 }
 
+// DisconnectPartyMember removes a player even after its transport/session has
+// become unavailable. Normal leave and kick paths intentionally require live
+// sessions; teardown must not leave a one-member or empty party behind.
+func (p *PartyService) DisconnectPartyMember(playerUID uint32) (PartyTransition, error) {
+	if p == nil || playerUID == 0 {
+		return PartyTransition{}, ErrPartyInvalidRequest
+	}
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	target, _ := p.playerAny(playerUID)
+	var party *model.Party
+	if target != nil {
+		party = target.GetParty()
+	}
+	if party == nil || p.Parties[party.Number] != party {
+		party = nil
+		for _, candidate := range p.Parties {
+			if containsPartyMember(candidate.Members, playerUID) {
+				party = candidate
+				break
+			}
+		}
+	}
+	if party == nil || !containsPartyMember(party.Members, playerUID) {
+		return PartyTransition{}, ErrPartyPermissionDenied
+	}
+
+	transition := PartyTransition{
+		Party:         p.snapshotLocked(party),
+		AllBefore:     p.playersForMembersLocked(party.Members),
+		Target:        target,
+		RemovedUID:    playerUID,
+		RemovalReason: 1,
+	}
+	party.Members = removePartyMember(party.Members, playerUID)
+	if target != nil {
+		target.RemoveFromPartyIf(party)
+	}
+	party.MemberCount = byte(len(party.Members))
+	delete(p.pendingInvites, playerUID)
+
+	if len(party.Members) < 2 {
+		transition.Dismissed = true
+		for _, memberUID := range party.Members {
+			if member, err := p.playerAny(memberUID); err == nil {
+				member.RemoveFromPartyIf(party)
+			}
+		}
+		delete(p.Parties, party.Number)
+		delete(p.FormedParties, party.Number)
+		return transition, nil
+	}
+	if party.MasterUniqueID == playerUID {
+		party.MasterUniqueID = party.Members[0]
+		if master, err := p.playerAny(party.MasterUniqueID); err == nil {
+			party.MasterJID = uint32(master.ID)
+			party.MasterName = master.GetName()
+		}
+		transition.LeaderChanged = true
+	}
+	transition.Party = p.snapshotLocked(party)
+	return transition, nil
+}
+
 func (p *PartyService) KickPartyMember(requesterUID, targetUID uint32) (PartyTransition, error) {
 	return p.removeMember(requesterUID, targetUID, 4, true)
 }
@@ -551,9 +718,25 @@ func (p *PartyService) snapshotLocked(party *model.Party) PartySnapshot {
 	if party == nil {
 		return PartySnapshot{}
 	}
-	return PartySnapshot{Number: party.Number, MasterUniqueID: party.MasterUniqueID, Settings: party.PartySettingsFlag, Members: p.playersForMembersLocked(party.Members)}
+	// A snapshot establishes the client-side member table. It must retain an
+	// already-disconnecting member until the subsequent leave notification can
+	// remove that UID; omitting it makes the stock 0x3864/action-3 handler
+	// dereference a missing member record.
+	return PartySnapshot{Number: party.Number, MasterUniqueID: party.MasterUniqueID, Settings: party.PartySettingsFlag, Members: p.snapshotMembersLocked(party.Members)}
 }
 
+func (p *PartyService) snapshotMembersLocked(members []uint32) []*model.Player {
+	players := make([]*model.Player, 0, len(members))
+	for _, uid := range members {
+		if player, err := p.playerAny(uid); err == nil {
+			players = append(players, player)
+		}
+	}
+	return players
+}
+
+// playersForMembersLocked is for outbound notifications only and excludes
+// detached sessions that cannot receive a packet.
 func (p *PartyService) playersForMembersLocked(members []uint32) []*model.Player {
 	players := make([]*model.Player, 0, len(members))
 	for _, uid := range members {

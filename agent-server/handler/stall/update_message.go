@@ -2,8 +2,6 @@ package stall
 
 import (
 	"errors"
-	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
@@ -23,12 +21,8 @@ func updateMessage(data server.PacketChannelData) error {
 		return err
 	}
 
-	p := network.EmptyPacket()
-	p.MessageID = opcode.StallUpdateResponse
-	if err := p.WriteByte(1); err != nil {
-		return err
-	}
-	if err := p.WriteByte(StallMessage); err != nil {
+	p, err := newStallUpdateResponse(StallMessage)
+	if err != nil {
 		return err
 	}
 	if err := p.WriteString(message); err != nil {

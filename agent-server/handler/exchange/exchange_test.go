@@ -48,7 +48,15 @@ func TestExchangeControlPacketsMatchProtocol(t *testing.T) {
 			p := exchangeFailure(opcode.ExchangeApproveResponse)
 			return p.MessageID, p.Payload()
 		}, wantID: opcode.ExchangeApproveResponse, payload: []byte{2, 0, 0}},
-		{name: "cancelled", packet: func() (uint16, []byte) { p := exchangeCancelled(); return p.MessageID, p.Payload() }, wantID: opcode.ExchangeCancelledResponse, payload: nil},
+		{name: "inventory operation success", packet: func() (uint16, []byte) {
+			p := inventoryOperationSuccess(4)
+			return p.MessageID, p.Payload()
+		}, wantID: opcode.ItemOperationResponse, payload: []byte{1, 4}},
+		{name: "inventory operation failure", packet: func() (uint16, []byte) {
+			p := inventoryOperationFailure()
+			return p.MessageID, p.Payload()
+		}, wantID: opcode.ItemOperationResponse, payload: []byte{2, 0}},
+		{name: "cancelled", packet: func() (uint16, []byte) { p := exchangeCancelled(); return p.MessageID, p.Payload() }, wantID: opcode.ExchangeCancelledResponse, payload: []byte{0, 0}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -65,10 +73,13 @@ func TestExchangeControlPacketsMatchProtocol(t *testing.T) {
 		t.Fatalf("start packet = (0x%04X, % X), want (0x%04X, % X)", start.MessageID, start.Payload(), opcode.ExchangeStartResponse, want)
 	}
 
-	invitation := exchangeInvitation(0x12345678)
-	want = []byte{1, 0x78, 0x56, 0x34, 0x12}
-	if invitation.MessageID != opcode.ExchangeInvitationResponse || !bytes.Equal(invitation.Payload(), want) {
-		t.Fatalf("invitation packet = (0x%04X, % X), want (0x%04X, % X)", invitation.MessageID, invitation.Payload(), opcode.ExchangeInvitationResponse, want)
+}
+
+func TestExchangeGoldUpdateMatchesClientHandlerLayout(t *testing.T) {
+	packet := buildExchangeGoldUpdate(0x1122334455667788)
+	want := []byte{2, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11}
+	if packet.MessageID != opcode.ExchangeUpdateResponse || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("gold update = (0x%04X, % X), want (0x%04X, % X)", packet.MessageID, packet.Payload(), opcode.ExchangeUpdateResponse, want)
 	}
 }
 
@@ -87,17 +98,64 @@ func TestBuildItemSnapshotCountsOnlyExistingOfferedItems(t *testing.T) {
 	}
 }
 
-func TestInvitationAcceptanceStartsExchangeForBothPlayers(t *testing.T) {
+func TestPeerSnapshotProjectsTemporaryEnhancementAndExpiration(t *testing.T) {
+	now := time.Now().UTC()
+	item := model.Item{
+		ID: 9001, OptLevel: 3, Data: 100,
+		SRObject: model.SRObject{
+			RefObjectID: 7001,
+			TypeInfo:    model.TypeInfo{TypeID1: 3, TypeID2: 1, TypeID3: 6, TypeID4: 2},
+		},
+	}
+	player := &model.Player{
+		SRObject:  model.SRObject{UniqueID: 77},
+		Inventory: model.NewInventory(map[byte]model.Item{30: item}),
+	}
+	player.ApplyItemService(model.ItemServiceEffect{
+		Kind:                    model.ItemServiceReinforceWeapon,
+		TargetSlot:              30,
+		TargetSlotSet:           true,
+		TargetBaseOptLevel:      3,
+		TargetProjectedOptLevel: 5,
+		ActivatedAt:             now.Add(-time.Minute),
+		ExpiresAt:               now.Add(2 * time.Hour),
+	})
+	owner := &participant{player: player, items: map[byte]model.ExchangeOfferedItem{
+		0: {SourceSlot: 30, ExchangeSlot: 0, ItemID: item.ID},
+	}}
+
+	packet := buildItemSnapshot(owner, false)
+	payload := packet.Payload()
+	if len(payload) < 25 || payload[4] != 1 || payload[5] != 0 {
+		t.Fatalf("peer snapshot header = % X", payload)
+	}
+	if rentType := binary.LittleEndian.Uint32(payload[6:10]); rentType != 1 {
+		t.Fatalf("rent type = %d, want temporary period type 1", rentType)
+	}
+	if expires := binary.LittleEndian.Uint32(payload[16:20]); expires != uint32(now.Add(2*time.Hour).Unix()) {
+		t.Fatalf("expiration = %d, want %d", expires, now.Add(2*time.Hour).Unix())
+	}
+	if refID := binary.LittleEndian.Uint32(payload[20:24]); refID != item.GetRefObjectID() {
+		t.Fatalf("reference = %d, want %d", refID, item.GetRefObjectID())
+	}
+	if level := payload[24]; level != 5 {
+		t.Fatalf("projected option level = %d, want 5", level)
+	}
+	if original := player.Inventory.Snapshot().Items[30]; original.OptLevel != 3 || original.RentInfo.Type != 0 {
+		t.Fatalf("persistent item mutated by snapshot: %+v", original)
+	}
+}
+
+func TestStartCreatesExchangeForBothPlayers(t *testing.T) {
 	requesterSession := &server.Session{UserContext: server.UserContext{UserID: 10, CharacterID: 1, UniqueID: 101}}
 	responderSession := &server.Session{UserContext: server.UserContext{UserID: 20, CharacterID: 2, UniqueID: 202}}
 	requester := &model.Player{ID: 1, Session: requesterSession, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 101}}
 	responder := &model.Player{ID: 2, Session: responderSession, Inventory: model.NewInventory(nil), SRObject: model.SRObject{UniqueID: 202}}
+	requester.KnownObjectList = model.NewKnownObjectList(requester)
+	requester.KnownObjectList.AddObject(responder)
+	requester.SetLifeState(model.Alive)
+	responder.SetLifeState(model.Alive)
 	manager := NewManager(exchangeTestPlayers{101: requester, 202: responder}, &countingExchangeRepository{})
-	state := &exchangeSession{
-		a: &participant{player: requester, items: make(map[byte]model.ExchangeOfferedItem)},
-		b: &participant{player: responder, items: make(map[byte]model.ExchangeOfferedItem)},
-	}
-	manager.byChar[requester.ID], manager.byChar[responder.ID] = state, state
 
 	type sentPacket struct {
 		session *server.Session
@@ -108,13 +166,13 @@ func TestInvitationAcceptanceStartsExchangeForBothPlayers(t *testing.T) {
 		sent = append(sent, sentPacket{session: session, packet: packet})
 		return nil
 	}
-	accept := network.EmptyPacket()
-	accept.WriteByte(1)
-	if err := manager.handleInvitation(context.Background(), responderSession, accept); err != nil {
-		t.Fatalf("handleInvitation() error = %v", err)
+	request := network.EmptyPacket()
+	request.WriteUInt32(responder.GetUniqueID())
+	if err := manager.handleStart(context.Background(), requesterSession, request); err != nil {
+		t.Fatalf("handleStart() error = %v", err)
 	}
-	if !state.started || len(sent) != 2 {
-		t.Fatalf("started = %v, packets = %d; want true, 2", state.started, len(sent))
+	if manager.Busy(requester.ID) == false || manager.Busy(responder.ID) == false || len(sent) != 2 {
+		t.Fatalf("exchange active = (%v, %v), packets = %d; want true, true, 2", manager.Busy(requester.ID), manager.Busy(responder.ID), len(sent))
 	}
 	if sent[0].session != requesterSession || sent[0].packet.MessageID != opcode.ExchangeStartResponse || !bytes.Equal(sent[0].packet.Payload(), []byte{1, 202, 0, 0, 0}) {
 		t.Fatalf("requester packet = (0x%04X, % X)", sent[0].packet.MessageID, sent[0].packet.Payload())

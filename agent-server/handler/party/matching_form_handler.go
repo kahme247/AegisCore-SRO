@@ -67,18 +67,20 @@ func (h *PartyHandler) handleMatchingForm(_ context.Context, session *server.Ses
 
 	// FormParty updates an existing listing only for its authenticated master;
 	// otherwise it creates a new listing and live party atomically.
-	p := network.EmptyPacket()
-	p.MessageID = opcode.PartyMatchingFormResponse
 	if partyNumber == 0 {
 		return h.sendPacket(session, buildMatchingOperationFailure(opcode.PartyMatchingFormResponse))
 	}
-	p.WriteByte(1)
-	p.WriteUInt32(partyNumber)
-	p.WriteUInt32(0)
-	p.WriteByte(partySetting)
-	p.WriteByte(purposeType)
-	p.WriteByte(levelMin)
-	p.WriteByte(levelMax)
-	p.WriteString(title)
-	return h.sendPacket(session, p)
+	response := buildMatchingUpsertResult(opcode.PartyMatchingFormResponse, partyNumber, partySetting, purposeType, levelMin, levelMax, title)
+	if err = h.sendPacket(session, response); err != nil {
+		return err
+	}
+	snapshot, err := h.core().SnapshotParty(partyNumber)
+	if err != nil {
+		return err
+	}
+	// Forming a matching listing creates a live one-member party. Initialize
+	// the master's 0x3065 state before a later 0x3864/action-2 join update;
+	// otherwise IFQuickPartyWnd asserts that member data exists without
+	// PartyMode enabled.
+	return h.sendPacket(session, buildPartySnapshot(snapshot, true))
 }

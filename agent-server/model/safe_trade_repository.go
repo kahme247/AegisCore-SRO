@@ -294,14 +294,6 @@ func safeTradeScaleData(ctx context.Context, tx *sql.Tx, characterID int, cosID 
 	return score, thresholds, rows.Err()
 }
 
-func (r *SQLSafeTradeRepository) loadCOSInventory(ctx context.Context, characterID int, cosID uint64) (Inventory, error) {
-	repository, err := NewCOSRepository(r.shard)
-	if err != nil {
-		return Inventory{}, err
-	}
-	return repository.LoadInventory(ctx, characterID, cosID)
-}
-
 func normalizeSafeTradeContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()

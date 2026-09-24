@@ -1,15 +1,29 @@
 package stall
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"testing"
 
 	"github.com/Harvi8/AegisCore/framework/network"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
+
+func TestNewStallUpdateResponseWritesSuccessHeader(t *testing.T) {
+	for _, updateType := range []byte{StallAddItem, StallRemoveItem, StallUpdateItem, StallMessage, StallState} {
+		packet, err := newStallUpdateResponse(updateType)
+		if err != nil {
+			t.Fatalf("newStallUpdateResponse(%d) error = %v", updateType, err)
+		}
+		if packet.MessageID != opcode.StallUpdateResponse || !bytes.Equal(packet.Payload(), []byte{1, updateType}) {
+			t.Fatalf("newStallUpdateResponse(%d) = (0x%04X, % X)", updateType, packet.MessageID, packet.Payload())
+		}
+	}
+}
 
 func TestStallUpdateRejectsTruncatedItemPayloadWithoutPanic(t *testing.T) {
 	serverConn, clientConn := net.Pipe()

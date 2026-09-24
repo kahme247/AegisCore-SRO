@@ -105,6 +105,15 @@ func TestBuildCOSInventoryUpdateMatchesClient30C9Type2Layout(t *testing.T) {
 	}
 }
 
+func TestBuildCOSPickupInventoryUpdateMatchesClientActivityBranch(t *testing.T) {
+	item := Item{SRObject: SRObject{RefObjectID: 500, TypeInfo: TypeInfo{TypeID1: 3, TypeID2: 3, TypeID3: 0}}, StackSize: 3}
+	packet := BuildCOSPickupInventoryUpdate(0x11223344, 2, item)
+	want := []byte{1, 0x11, 0x44, 0x33, 0x22, 0x11, 2, 0, 0, 0, 0, 0xF4, 1, 0, 0, 3, 0}
+	if packet.MessageID != opcode.ItemOperationResponse || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("COS pickup update = opcode 0x%04X payload % X, want 0x%04X/% X", packet.MessageID, packet.Payload(), opcode.ItemOperationResponse, want)
+	}
+}
+
 func TestBuildCOSItemStateUpdateMatchesInventoryStateLayout(t *testing.T) {
 	p := BuildCOSItemStateUpdate(17, COSItemActive)
 	want := []byte{17, 64, byte(COSItemActive)}
@@ -200,8 +209,8 @@ func TestCOSApplyDamageTransitionsToDead(t *testing.T) {
 
 func TestWriteCOSSpawnTailGrowthMatchesVSRO188Reader(t *testing.T) {
 	p := network.EmptyPacket()
-	WriteCOSSpawnTail(&p, COSSnapshot{Kind: COSGrowthPet, Name: "Wolf", OwnerName: "Alice", OwnerUniqueID: 0x11223344})
-	want := []byte{4, 0, 'W', 'o', 'l', 'f', 5, 0, 'A', 'l', 'i', 'c', 'e', 0, 0, 0x44, 0x33, 0x22, 0x11}
+	WriteCOSSpawnTail(&p, COSSnapshot{Kind: COSGrowthPet, Name: "Wolf", OwnerName: "Alice", OwnerJobType: PlayerJobThief, OwnerPKState: 3, OwnerUniqueID: 0x11223344})
+	want := []byte{4, 0, 'W', 'o', 'l', 'f', 5, 0, 'A', 'l', 'i', 'c', 'e', PlayerJobThief, 3, 0x44, 0x33, 0x22, 0x11}
 	if !reflect.DeepEqual(p.Payload(), want) {
 		t.Fatalf("COS spawn tail = %x, want %x", p.Payload(), want)
 	}
@@ -210,10 +219,10 @@ func TestWriteCOSSpawnTailGrowthMatchesVSRO188Reader(t *testing.T) {
 	}
 }
 
-func TestWriteCOSSpawnTailRideHasNoTrailingFields(t *testing.T) {
+func TestWriteCOSSpawnTailRideHasNoSubtypeFields(t *testing.T) {
 	p := network.EmptyPacket()
 	WriteCOSSpawnTail(&p, COSSnapshot{Kind: COSRideTransport, OwnerUniqueID: 99})
 	if len(p.Payload()) != 0 {
-		t.Fatalf("ride COS tail = %x, want empty", p.Payload())
+		t.Fatalf("ride COS subtype tail = %x, want empty", p.Payload())
 	}
 }

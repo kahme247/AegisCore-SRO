@@ -1,6 +1,7 @@
 package party
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -21,6 +22,41 @@ func (p matchingHandlerPlayers) GetPlayerByUniqueId(uid uint32) (*model.Player, 
 		return nil, service.ErrPartyTargetUnavailable
 	}
 	return player, nil
+}
+
+func TestMatchingFormInitializesMasterPartyModeBeforeJoinUpdates(t *testing.T) {
+	session := &server.Session{UserContext: server.UserContext{UniqueID: 10, CharName: "master"}}
+	position := navmeshv2.RtNavmeshPosition{Region: navmeshv2.Region{ID: 25000}, Offset: math32.NewVector3(0, 0, 0)}
+	master := &model.Player{ID: 100, CharName: "master", Level: 10, Session: session, SRObject: model.SRObject{UniqueID: 10, RtNavmeshPosition: position}}
+	handler := &PartyHandler{service: service.NewPartyService(matchingHandlerPlayers{players: map[uint32]*model.Player{10: master}})}
+	var sent []network.Packet
+	handler.send = func(_ *server.Session, packet network.Packet) error {
+		sent = append(sent, packet)
+		return nil
+	}
+	request := network.EmptyClientPacket()
+	request.WriteUInt32(0)
+	request.WriteUInt32(0)
+	request.WriteByte(byte(model.ExpShareItemShare))
+	request.WriteByte(byte(model.QuestingParty))
+	request.WriteByte(1)
+	request.WriteByte(30)
+	request.WriteString("matching")
+	if err := handler.handleMatchingForm(context.Background(), session, request); err != nil {
+		t.Fatalf("matching form: %v", err)
+	}
+	if len(sent) != 2 || sent[0].MessageID != opcode.PartyMatchingFormResponse || sent[1].MessageID != opcode.PartyCreatedFromMatchingResponse {
+		t.Fatalf("form packets = %#v, want B069 then 3065", sent)
+	}
+	r := newPartyPacketReader(t, sent[1].Payload())
+	flags, number, masterUID, settings, count := r.byte(), r.uint32(), r.uint32(), r.byte(), r.byte()
+	if flags != 0xFF || number == 0 || masterUID != master.GetUniqueID() || settings != byte(model.ExpShareItemShare) || count != 1 {
+		t.Fatalf("master snapshot = flags %02X number %d master %d settings %d count %d", flags, number, masterUID, settings, count)
+	}
+	if member := decodePartyMember(t, r); member.uid != master.GetUniqueID() {
+		t.Fatalf("snapshot member UID = %d, want %d", member.uid, master.GetUniqueID())
+	}
+	r.done()
 }
 
 func TestMatchingApprovalUsesPendingApplicantAndDirectionalPromptOpcode(t *testing.T) {
@@ -77,8 +113,58 @@ func TestMatchingApprovalUsesPendingApplicantAndDirectionalPromptOpcode(t *testi
 	if applicant.GetParty() == nil || applicant.GetParty().Number != partyNumber {
 		t.Fatalf("applicant party = %+v, want party %d", applicant.GetParty(), partyNumber)
 	}
-	if len(sent) < 3 || sent[1].MessageID != opcode.PartyMatchingJoinResponse {
+	if len(sent) != 5 || recipients[1] != applicantSession || sent[1].MessageID != opcode.PartyMatchingJoinResponse {
 		t.Fatalf("approval responses = %v, want applicant B06D response", sent)
+	}
+	if recipients[2] != applicantSession || sent[2].MessageID != opcode.PartyMemberCountResponse ||
+		!bytes.Equal(sent[2].Payload(), []byte{1, 20, 0, 0, 0}) {
+		t.Fatalf("join acknowledgement = recipient %p/opcode 0x%04X/payload % X", recipients[2], sent[2].MessageID, sent[2].Payload())
+	}
+	if recipients[3] != masterSession || sent[3].MessageID != opcode.PartyUpdateResponse {
+		t.Fatalf("master join update = recipient %p/opcode 0x%04X", recipients[3], sent[3].MessageID)
+	}
+	if recipients[4] != applicantSession || sent[4].MessageID != opcode.PartyCreatedFromMatchingResponse {
+		t.Fatalf("applicant snapshot = recipient %p/opcode 0x%04X", recipients[4], sent[4].MessageID)
+	}
+}
+
+func TestInvitationAcceptanceAcknowledgesJoinBeforePartySnapshot(t *testing.T) {
+	inviterSession := &server.Session{UserContext: server.UserContext{UniqueID: 10}}
+	targetSession := &server.Session{UserContext: server.UserContext{UniqueID: 20}}
+	inviter := &model.Player{ID: 100, CharName: "inviter", Session: inviterSession, SRObject: model.SRObject{UniqueID: 10}}
+	target := &model.Player{ID: 200, CharName: "target", Session: targetSession, SRObject: model.SRObject{UniqueID: 20}}
+	core := service.NewPartyService(matchingHandlerPlayers{players: map[uint32]*model.Player{10: inviter, 20: target}})
+	if _, _, err := core.Invite(10, 20, model.ExpShareItemShare, false); err != nil {
+		t.Fatalf("create invitation: %v", err)
+	}
+	handler := &PartyHandler{service: core}
+	var sent []network.Packet
+	var recipients []*server.Session
+	handler.send = func(session *server.Session, packet network.Packet) error {
+		recipients = append(recipients, session)
+		sent = append(sent, packet)
+		return nil
+	}
+	answer := network.EmptyClientPacket()
+	answer.WriteByte(1)
+	answer.WriteByte(1)
+	if err := handler.handleInvitationAnswer(context.Background(), targetSession, answer); err != nil {
+		t.Fatalf("answer invitation: %v", err)
+	}
+	if len(sent) != 4 {
+		t.Fatalf("sent %d packets, want inviter acknowledgement, target join acknowledgement, and two snapshots", len(sent))
+	}
+	if recipients[0] != inviterSession || sent[0].MessageID != opcode.PartyCreateResponse {
+		t.Fatalf("first response = recipient %p/opcode 0x%04X, want inviter/0x%04X", recipients[0], sent[0].MessageID, opcode.PartyCreateResponse)
+	}
+	if recipients[1] != targetSession || sent[1].MessageID != opcode.PartyMemberCountResponse ||
+		!bytes.Equal(sent[1].Payload(), []byte{1, 20, 0, 0, 0}) {
+		t.Fatalf("join acknowledgement = recipient %p/opcode 0x%04X/payload % X", recipients[1], sent[1].MessageID, sent[1].Payload())
+	}
+	for _, index := range []int{2, 3} {
+		if sent[index].MessageID != opcode.PartyCreate {
+			t.Fatalf("snapshot %d opcode = 0x%04X, want 0x%04X", index, sent[index].MessageID, opcode.PartyCreate)
+		}
 	}
 }
 
@@ -104,5 +190,26 @@ func TestMatchingDeleteSuccessIncludesMatchingID(t *testing.T) {
 	packet := buildMatchingDeleteResult(true, 77)
 	if got := packet.Payload(); len(got) != 5 || got[0] != 1 || got[1] != 77 || got[2] != 0 || got[3] != 0 || got[4] != 0 {
 		t.Fatalf("delete result = % X, want 01 4D 00 00 00", got)
+	}
+}
+
+func TestBuildMatchingUpsertResultUsesFormAndUpdateWireLayouts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		opcode uint16
+	}{
+		{name: "form", opcode: opcode.PartyMatchingFormResponse},
+		{name: "update", opcode: opcode.PartyMatchingUpdateResponse},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			packet := buildMatchingUpsertResult(test.opcode, 0x11223344, 1, 2, 3, 4, "open")
+			if packet.MessageID != test.opcode {
+				t.Fatalf("opcode = 0x%04X, want 0x%04X", packet.MessageID, test.opcode)
+			}
+			want := []byte{1, 0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0, 1, 2, 3, 4, 4, 0, 'o', 'p', 'e', 'n'}
+			if got := packet.Payload(); !bytes.Equal(got, want) {
+				t.Fatalf("payload = % X, want % X", got, want)
+			}
+		})
 	}
 }

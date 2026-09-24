@@ -43,6 +43,9 @@ func (h *PartyHandler) handleMatchingPlayerJoin(_ context.Context, session *serv
 	if !transition.Accepted {
 		return nil
 	}
+	if err = h.sendPacket(transition.Target.GetSession(), buildPartyJoinAcknowledgement(transition.Target.GetUniqueID())); err != nil {
+		return err
+	}
 	if err = sendPartyPacket(h, transition.Existing, buildPartyJoin(transition.Target)); err != nil {
 		return err
 	}

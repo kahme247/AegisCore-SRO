@@ -7,8 +7,6 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/service"
-	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 )
 
@@ -64,12 +62,8 @@ func addRemoveItem(data server.PacketChannelData, updateType byte) error {
 		return fmt.Errorf("find player for stall update: %w", err)
 	}
 	playerInventoryItems := player.GetInventory().Items
-	p := network.EmptyPacket()
-	p.MessageID = opcode.StallUpdateResponse
-	if err := p.WriteByte(1); err != nil {
-		return err
-	}
-	if err := p.WriteByte(updateType); err != nil {
+	p, err := newStallUpdateResponse(updateType)
+	if err != nil {
 		return err
 	}
 	if err := p.WriteUInt16(0); err != nil { // TODO: Handle errors correctly

@@ -69,15 +69,5 @@ func (h *PartyHandler) handleMatchingUpdate(_ context.Context, session *server.S
 		return h.sendPacket(session, buildMatchingOperationFailure(opcode.PartyMatchingUpdateResponse))
 	}
 
-	p := network.EmptyPacket()
-	p.MessageID = opcode.PartyMatchingUpdateResponse
-	p.WriteByte(1)
-	p.WriteUInt32(matchingID)
-	p.WriteUInt32(0)
-	p.WriteByte(partySetting)
-	p.WriteByte(purposeType)
-	p.WriteByte(levelMin)
-	p.WriteByte(levelMax)
-	p.WriteString(title)
-	return h.sendPacket(session, p)
+	return h.sendPacket(session, buildMatchingUpsertResult(opcode.PartyMatchingUpdateResponse, matchingID, partySetting, purposeType, levelMin, levelMax, title))
 }

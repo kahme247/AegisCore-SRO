@@ -30,7 +30,10 @@ func (p PartySetting) ToByte() byte {
 }
 
 func (p PartySetting) MaxMembers() int {
-	if p == ExpDistItemDistNoInvite || p == ExpDistItemDist {
+	// SR_GameServer checks the low settings bit: EXP distribution parties
+	// allow four members; EXP-sharing parties allow eight. Item-sharing and
+	// invitation bits do not affect capacity.
+	if p&1 == 0 {
 		return 4
 	}
 	return 8

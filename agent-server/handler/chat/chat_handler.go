@@ -50,6 +50,38 @@ func RegisterChatHandler(target *server.Server, social model.SocialRepository, f
 	target.RegisterHandler(opcode.ChatRequest, handler.handlePacket)
 }
 
+func sendChatResult(session *server.Session, request MessageRequest, result byte) error {
+	packet, err := buildChatResult(request, result)
+	if err != nil {
+		return err
+	}
+	return session.Send(packet)
+}
+
+func buildChatResult(request MessageRequest, result byte) (network.Packet, error) {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ChatResponse
+	packet.WriteByte(result)
+	packet.WriteByte(request.ChatType)
+	packet.WriteByte(request.ChatIndex)
+	if err := packet.WriteError(); err != nil {
+		return network.Packet{}, err
+	}
+	return packet, nil
+}
+
+func buildNamedChatUpdate(request MessageRequest, senderName string) (network.Packet, error) {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.ChatUpdate
+	packet.WriteByte(request.ChatType)
+	packet.WriteString(senderName)
+	packet.WriteString(request.Message)
+	if err := packet.WriteError(); err != nil {
+		return network.Packet{}, err
+	}
+	return packet, nil
+}
+
 func (h *ChatHandler) handlePacket(ctx context.Context, session *server.Session, packet network.Packet) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -142,12 +174,8 @@ func (h *ChatHandler) handleSocialMessage(ctx context.Context, request MessageRe
 	if err = session.Send(ack); err != nil {
 		return err
 	}
-	update := network.EmptyPacket()
-	update.MessageID = opcode.ChatUpdate
-	update.WriteByte(request.ChatType)
-	update.WriteString(session.UserContext.CharName)
-	update.WriteString(request.Message)
-	if err = update.WriteError(); err != nil {
+	update, err := buildNamedChatUpdate(request, session.UserContext.CharName)
+	if err != nil {
 		return err
 	}
 	world := service.GetWorldServiceInstance()

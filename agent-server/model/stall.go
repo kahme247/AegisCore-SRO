@@ -21,6 +21,15 @@ type Stall struct {
 
 var Stalls map[uint32]*Stall = make(map[uint32]*Stall)
 
+func (p *Player) GetStallAvatarRefID() uint32 {
+	if p == nil {
+		return 0
+	}
+	p.Mutex.Lock()
+	defer p.Mutex.Unlock()
+	return p.StallAvatarRefID
+}
+
 func (s *StallEntry) AddItem(playerId uint32) *Stall {
 	s.Mutex.Lock()
 	defer s.Mutex.Unlock()

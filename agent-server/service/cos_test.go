@@ -301,6 +301,53 @@ func TestCOSServiceResolvesOwnedRuntimeTargetAndAppliesCommittedResources(t *tes
 	}
 }
 
+func TestCOSPersistedMutationsPreserveInactiveAndOwnershipOutcomes(t *testing.T) {
+	expiresAt := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	owner := &model.Player{ID: 6, SRObject: model.SRObject{UniqueID: 10}}
+	mutations := []struct {
+		name  string
+		apply func(*COSService) (*model.COS, error)
+	}{
+		{name: "timed-service", apply: func(runtime *COSService) (*model.COS, error) {
+			return runtime.ApplyPersistedTimedService(owner, 78, model.COSTimedService{JobID: 9, ExpiresAt: expiresAt})
+		}},
+		{name: "rent-end", apply: func(runtime *COSService) (*model.COS, error) {
+			return runtime.ApplyPersistedRentEnd(owner, 78, expiresAt)
+		}},
+		{name: "resources", apply: func(runtime *COSService) (*model.COS, error) {
+			return runtime.ApplyPersistedResources(owner, 78, 90, 30)
+		}},
+		{name: "revive", apply: func(runtime *COSService) (*model.COS, error) {
+			return runtime.RevivePersisted(owner, 78, 90)
+		}},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name+"/inactive", func(t *testing.T) {
+			got, err := mutation.apply(NewCOSService(nil, nil))
+			if got != nil || err != nil {
+				t.Fatalf("inactive mutation = (%+v, %v), want (nil, nil)", got, err)
+			}
+		})
+		t.Run(mutation.name+"/owner-mismatch", func(t *testing.T) {
+			runtime := NewCOSService(nil, nil)
+			runtime.byOwnerKind[owner.ID] = map[model.COSKind]*model.COS{
+				model.COSAbilityPet: {
+					PersistentID:  78,
+					OwnerCharID:   owner.ID,
+					OwnerUniqueID: owner.GetUniqueID() + 1,
+					Kind:          model.COSAbilityPet,
+					Health:        50,
+					MaxHealth:     100,
+				},
+			}
+			got, err := mutation.apply(runtime)
+			if got != nil || !errors.Is(err, model.ErrCOSNotOwned) {
+				t.Fatalf("owner mismatch mutation = (%+v, %v), want (nil, ErrCOSNotOwned)", got, err)
+			}
+		})
+	}
+}
+
 func TestCOSManualMoveHoldsUntilFollowCommand(t *testing.T) {
 	old := model.RefChars
 	defer func() { model.RefChars = old }()
@@ -401,6 +448,16 @@ func TestCOSAbilityPetPursuesAndStoresGroundItem(t *testing.T) {
 	}
 	if state := runtime.actions[pet.GetUniqueID()]; state.action != cosActionFollow {
 		t.Fatalf("pickup action = %d, want follow after completion", state.action)
+	}
+	packets, packetCount := buildAbilityPetPickupClientPackets(pet, 0, stored.Items[0])
+	if packetCount != 3 {
+		t.Fatalf("pet pickup packet count = %d, want animation, B034, and COS inventory", packetCount)
+	}
+	if got, want := [3]uint16{packets[0].MessageID, packets[1].MessageID, packets[2].MessageID}, [3]uint16{0x3036, 0xB034, 0x30C9}; got != want {
+		t.Fatalf("pet pickup packet order = %04X, want %04X", got, want)
+	}
+	if got := packets[1].Payload(); len(got) != 17 || got[0] != 1 || got[1] != 0x11 {
+		t.Fatalf("pet pickup completion payload = % X, want hydrated B034/0x11 body", got)
 	}
 }
 

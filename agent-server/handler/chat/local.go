@@ -27,13 +27,5 @@ func handleAllMessage(request MessageRequest, session *server.Session) error {
 	}
 	player.SendToSelfAndKnown(&p)
 
-	p1 := network.EmptyPacket()
-	p1.MessageID = opcode.ChatResponse
-	p1.WriteByte(1)
-	p1.WriteByte(request.ChatType)
-	p1.WriteByte(request.ChatIndex)
-	if err := p1.WriteError(); err != nil {
-		return err
-	}
-	return session.Send(p1)
+	return sendChatResult(session, request, 1)
 }

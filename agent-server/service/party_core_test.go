@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Harvi8/AegisCore/agent-server/model"
 	"github.com/Harvi8/AegisCore/agent-server/navmeshv2"
+	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/g3n/engine/math32"
 )
@@ -18,6 +20,22 @@ type fakePartyPlayerLookup struct {
 }
 
 func (f *fakePartyPlayerLookup) GetPlayerByUniqueId(uid uint32) (*model.Player, error) {
+	player := f.players[uid]
+	if player == nil {
+		return nil, fmt.Errorf("player %d not found", uid)
+	}
+	return player, nil
+}
+
+type partyLookupHook struct {
+	players  map[uint32]*model.Player
+	onLookup func(uint32)
+}
+
+func (f *partyLookupHook) GetPlayerByUniqueId(uid uint32) (*model.Player, error) {
+	if f.onLookup != nil {
+		f.onLookup(uid)
+	}
 	player := f.players[uid]
 	if player == nil {
 		return nil, fmt.Errorf("player %d not found", uid)
@@ -40,6 +58,18 @@ func newPartyCoreFixture(uids ...uint32) (*PartyService, map[uint32]*model.Playe
 func acceptNewParty(t *testing.T, service *PartyService, inviterUID, targetUID uint32, settings model.PartySetting) PartyTransition {
 	t.Helper()
 	if _, _, err := service.Invite(inviterUID, targetUID, settings, false); err != nil {
+		t.Fatalf("Invite() error = %v", err)
+	}
+	transition, err := service.AnswerInvitation(targetUID, true)
+	if err != nil {
+		t.Fatalf("AnswerInvitation() error = %v", err)
+	}
+	return transition
+}
+
+func acceptExistingPartyInvitation(t *testing.T, service *PartyService, inviterUID, targetUID uint32, settings model.PartySetting) PartyTransition {
+	t.Helper()
+	if _, _, err := service.Invite(inviterUID, targetUID, settings, true); err != nil {
 		t.Fatalf("Invite() error = %v", err)
 	}
 	transition, err := service.AnswerInvitation(targetUID, true)
@@ -408,5 +438,173 @@ func TestPartyMatchingUpdateAndDeleteRequireListingMaster(t *testing.T) {
 	changed.MasterUniqueID = 1
 	if err := service.UpdateMatchingEntry(changed); !errors.Is(err, ErrPartyMatchingNotFound) {
 		t.Fatalf("update after delete error = %v, want missing listing", err)
+	}
+}
+
+func TestBuildPartyMemberStatusUsesActionSixVitalsAndPosition(t *testing.T) {
+	player := &model.Player{
+		Level: 1,
+		BaseStats: model.BaseStats{
+			HP: 70, MP: 60, Str: 10, Int: 20,
+		},
+		SRObject: model.SRObject{
+			UniqueID: 0x11223344,
+			RtNavmeshPosition: navmeshv2.RtNavmeshPosition{
+				Region: navmeshv2.NewRegionFromInt16(0x1234),
+				Offset: math32.NewVector3(101, 202, -303),
+			},
+		},
+	}
+	packet := buildPartyMemberStatus(player)
+	want := []byte{
+		6, 0x44, 0x33, 0x22, 0x11, 0x24, 0x37,
+		0x34, 0x12, 0x65, 0, 0xD1, 0xFE, 0xCA, 0, 1, 0, 1, 0,
+	}
+	if packet.MessageID != opcode.PartyUpdateResponse || !bytes.Equal(packet.Payload(), want) {
+		t.Fatalf("party status = opcode 0x%04X payload % X, want opcode 0x%04X payload % X", packet.MessageID, packet.Payload(), opcode.PartyUpdateResponse, want)
+	}
+}
+
+func TestDisconnectPartyMemberDismissesFinalOfflineParty(t *testing.T) {
+	service, players := newPartyCoreFixture(1, 2)
+	created := acceptNewParty(t, service, 1, 2, model.ExpShareItemShare)
+	partyNumber := created.Party.Number
+	players[1].Session = nil
+	players[2].Session = nil
+
+	transition, err := service.DisconnectPartyMember(2)
+	if err != nil {
+		t.Fatalf("DisconnectPartyMember: %v", err)
+	}
+	if !transition.Dismissed || transition.RemovedUID != 2 || transition.RemovalReason != 1 {
+		t.Fatalf("disconnect transition = %+v, want dismissed logout removal for player 2", transition)
+	}
+	if players[1].GetParty() != nil || players[2].GetParty() != nil {
+		t.Fatalf("offline players retained party: first=%#v second=%#v", players[1].GetParty(), players[2].GetParty())
+	}
+	if _, err := service.SnapshotParty(partyNumber); !errors.Is(err, ErrPartyInvalidRequest) {
+		t.Fatalf("dismissed party snapshot error = %v, want invalid request", err)
+	}
+}
+
+func TestDisconnectPartyMasterPromotesNextMemberInJoinOrder(t *testing.T) {
+	service, players := newPartyCoreFixture(1, 2, 3, 4)
+	created := acceptNewParty(t, service, 1, 2, model.ExpShareItemShare)
+	acceptExistingPartyInvitation(t, service, 1, 3, model.ExpShareItemShare)
+	acceptExistingPartyInvitation(t, service, 1, 4, model.ExpShareItemShare)
+	players[1].Session = nil
+
+	transition, err := service.DisconnectPartyMember(1)
+	if err != nil {
+		t.Fatalf("DisconnectPartyMember: %v", err)
+	}
+	if transition.Dismissed || !transition.LeaderChanged {
+		t.Fatalf("disconnect transition = %+v, want retained party with a new leader", transition)
+	}
+	if transition.Party.MasterUniqueID != 2 {
+		t.Fatalf("new master UID = %d, want first joined member 2", transition.Party.MasterUniqueID)
+	}
+	if got, want := transition.Party.Number, created.Party.Number; got != want {
+		t.Fatalf("party number = %d, want %d", got, want)
+	}
+	if got, want := transition.Party.Members, []uint32{2, 3, 4}; !partyMemberUIDsEqual(got, want) {
+		t.Fatalf("remaining members = %v, want %v", partyMemberUIDs(got), want)
+	}
+	if players[1].GetParty() != nil {
+		t.Fatal("disconnected master retained party membership")
+	}
+	for _, uid := range []uint32{2, 3, 4} {
+		if players[uid].GetParty() == nil {
+			t.Fatalf("member %d lost retained party membership", uid)
+		}
+	}
+}
+
+func TestDisconnectPartyMasterDismissesTwoMemberParty(t *testing.T) {
+	service, players := newPartyCoreFixture(1, 2)
+	created := acceptNewParty(t, service, 1, 2, model.ExpShareItemShare)
+	players[1].Session = nil
+
+	transition, err := service.DisconnectPartyMember(1)
+	if err != nil {
+		t.Fatalf("DisconnectPartyMember: %v", err)
+	}
+	if !transition.Dismissed || transition.LeaderChanged {
+		t.Fatalf("disconnect transition = %+v, want dismissed two-member party", transition)
+	}
+	if players[1].GetParty() != nil || players[2].GetParty() != nil {
+		t.Fatalf("dismissed party retained memberships: master=%#v member=%#v", players[1].GetParty(), players[2].GetParty())
+	}
+	if _, err := service.SnapshotParty(created.Party.Number); !errors.Is(err, ErrPartyInvalidRequest) {
+		t.Fatalf("dismissed party snapshot error = %v, want invalid request", err)
+	}
+}
+
+func partyMemberUIDs(members []*model.Player) []uint32 {
+	uids := make([]uint32, len(members))
+	for index, member := range members {
+		uids[index] = member.GetUniqueID()
+	}
+	return uids
+}
+
+func partyMemberUIDsEqual(members []*model.Player, want []uint32) bool {
+	got := partyMemberUIDs(members)
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSnapshotPartyRetainsDisconnectingMemberUntilLeaveNotice(t *testing.T) {
+	service, players := newPartyCoreFixture(1, 2)
+	created := acceptNewParty(t, service, 1, 2, model.ExpShareItemShare)
+	players[1].Session = nil
+
+	snapshot, err := service.SnapshotParty(created.Party.Number)
+	if err != nil {
+		t.Fatalf("SnapshotParty: %v", err)
+	}
+	if len(snapshot.Members) != 2 || snapshot.Members[0].GetUniqueID() != 1 || snapshot.Members[1].GetUniqueID() != 2 {
+		t.Fatalf("snapshot members = %#v, want disconnecting master and joiner", snapshot.Members)
+	}
+}
+
+func TestMatchingJoinSnapshotRetainsMasterDisconnectingDuringAcceptance(t *testing.T) {
+	master := &model.Player{ID: 1, Level: 20, CharName: "master", Session: &server.Session{}, SRObject: model.SRObject{UniqueID: 1}}
+	applicant := &model.Player{ID: 2, Level: 20, CharName: "applicant", Session: &server.Session{}, SRObject: model.SRObject{UniqueID: 2}}
+	lookup := &partyLookupHook{players: map[uint32]*model.Player{1: master, 2: applicant}}
+	service := NewPartyService(lookup)
+	partyNumber := service.FormParty(model.PartyFormRequest{
+		MasterUniqueID: 1, MasterJID: 1, MasterName: "master",
+		PartySettingsFlag: model.ExpShareItemShare, PurposeType: model.QuestingParty,
+		LevelMin: 1, LevelMax: 30, Title: "matching",
+	})
+	if partyNumber == 0 {
+		t.Fatal("FormParty returned zero")
+	}
+	request, _, _, err := service.CreateMatchingJoinRequest(partyNumber, 2)
+	if err != nil {
+		t.Fatalf("CreateMatchingJoinRequest: %v", err)
+	}
+	lookup.onLookup = func(uid uint32) {
+		if uid == applicant.GetUniqueID() {
+			master.Session = nil
+		}
+	}
+
+	transition, err := service.AnswerMatchingJoin(request.RequestID, 2, 1, true)
+	if err != nil {
+		t.Fatalf("AnswerMatchingJoin: %v", err)
+	}
+	if len(transition.Party.Members) != 2 ||
+		transition.Party.Members[0].GetUniqueID() != master.GetUniqueID() ||
+		transition.Party.Members[1].GetUniqueID() != applicant.GetUniqueID() {
+		t.Fatalf("matching snapshot members = %#v, want master and applicant", transition.Party.Members)
 	}
 }

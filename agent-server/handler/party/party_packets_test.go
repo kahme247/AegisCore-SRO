@@ -177,6 +177,20 @@ func TestBuildPartyCreateSuccessVSROLayout(t *testing.T) {
 	}
 }
 
+func TestPartyOperationFailureAndJoinAcknowledgementVSROLayouts(t *testing.T) {
+	for _, messageID := range []uint16{opcode.PartyCreateResponse, opcode.PartyInviteResponse} {
+		packet := buildPartyOperationResponse(messageID, false)
+		if got, want := packet.Payload(), []byte{2, 0, 0}; !bytes.Equal(got, want) {
+			t.Fatalf("0x%04X failure payload = % X, want % X", messageID, got, want)
+		}
+	}
+	acknowledgement := buildPartyJoinAcknowledgement(0x11223344)
+	if acknowledgement.MessageID != opcode.PartyMemberCountResponse ||
+		!bytes.Equal(acknowledgement.Payload(), []byte{1, 0x44, 0x33, 0x22, 0x11}) {
+		t.Fatalf("party join acknowledgement = opcode 0x%04X payload % X", acknowledgement.MessageID, acknowledgement.Payload())
+	}
+}
+
 func TestBuildPartySnapshotVSROLayoutWithTwoMembers(t *testing.T) {
 	first := testPartyPlayer(0x01020304, 1907, "Leader", 1, 70, 60, 10, 20, 0x1234, 101, -303, 202, map[uint32]byte{257: 40, 258: 60, 259: 60})
 	second := testPartyPlayer(0xA1A2A3A4, 1920, "Member", 1, 0, 500, 10, 20, 0x2345, 404, 606, 505, map[uint32]byte{300: 20})
@@ -223,7 +237,7 @@ func TestPartyUpdateControlPacketVSROLayouts(t *testing.T) {
 		want   []byte
 	}{
 		{name: "leave", opcode: leave.MessageID, got: leave.Payload(), want: []byte{3, 0x44, 0x33, 0x22, 0x11, 4}},
-		{name: "dismiss", opcode: dismiss.MessageID, got: dismiss.Payload(), want: []byte{1}},
+		{name: "dismiss", opcode: dismiss.MessageID, got: dismiss.Payload(), want: []byte{1, 0, 0}},
 		{name: "leader", opcode: leader.MessageID, got: leader.Payload(), want: []byte{9, 0xD4, 0xC3, 0xB2, 0xA1}},
 	}
 	for _, test := range tests {

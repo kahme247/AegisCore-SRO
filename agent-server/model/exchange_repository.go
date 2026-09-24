@@ -31,10 +31,12 @@ type ExchangeOffer struct {
 }
 
 type ExchangeCommitResult struct {
-	FirstGold       uint64
-	SecondGold      uint64
-	FirstInventory  Inventory
-	SecondInventory Inventory
+	FirstGold           uint64
+	SecondGold          uint64
+	FirstInventory      Inventory
+	SecondInventory     Inventory
+	FirstReceivedSlots  []byte
+	SecondReceivedSlots []byte
 }
 
 type ExchangeRepository interface {
@@ -133,6 +135,9 @@ func (r *SQLExchangeRepository) CommitExchange(ctx context.Context, first, secon
 		} else {
 			owner = second.CharacterID
 		}
+		if _, deleteErr := tx.ExecContext(ctx, "DELETE FROM `CHAR_ITEM_SERVICE` WHERE `CHAR_ID`=? AND `TARGET_SLOT`=? AND `SERVICE_KIND` IN (?,?,?)", owner, transfer.SourceSlot, ItemServiceReinforceWeapon, ItemServiceReinforceArmor, ItemServiceReinforceAccessory); deleteErr != nil {
+			return ExchangeCommitResult{}, deleteErr
+		}
 		result, deleteErr := tx.ExecContext(ctx, "DELETE FROM `INVENTORY` WHERE `FK_CHAR`=? AND `SLOT`=? AND `FK_ITEM`=?", owner, transfer.SourceSlot, transfer.ItemID)
 		if deleteErr != nil {
 			return ExchangeCommitResult{}, deleteErr
@@ -169,7 +174,11 @@ func (r *SQLExchangeRepository) CommitExchange(ctx context.Context, first, secon
 		return ExchangeCommitResult{}, errors.Join(ErrExchangeOutcomeUnknown, err)
 	}
 	committed = true
-	return ExchangeCommitResult{FirstGold: firstGold, SecondGold: secondGold, FirstInventory: firstInventory, SecondInventory: secondInventory}, nil
+	return ExchangeCommitResult{
+		FirstGold: firstGold, SecondGold: secondGold,
+		FirstInventory: firstInventory, SecondInventory: secondInventory,
+		FirstReceivedSlots: firstSlots, SecondReceivedSlots: secondSlots,
+	}, nil
 }
 
 func lockExchangeCharacter(ctx context.Context, tx *sql.Tx, id int64) (*lockedExchangeCharacter, error) {

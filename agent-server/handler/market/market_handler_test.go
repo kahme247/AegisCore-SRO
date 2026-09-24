@@ -91,6 +91,26 @@ func captureHandler(repo model.OpenMarketRepository) (*Handler, *network.Packet)
 	return h, captured
 }
 
+func TestMarketFeesUseCurrentUnifiedNonzeroRate(t *testing.T) {
+	tests := []struct {
+		price       uint64
+		wantDeposit uint64
+		wantSellFee uint64
+	}{
+		{price: 999_999},
+		{price: 1_000_000, wantDeposit: 10_000, wantSellFee: 30_000},
+		{price: 10_000_000, wantDeposit: 100_000, wantSellFee: 300_000},
+		{price: 100_000_000, wantDeposit: 1_000_000, wantSellFee: 3_000_000},
+	}
+
+	for _, test := range tests {
+		deposit, sellFee := marketFees(test.price)
+		if deposit != test.wantDeposit || sellFee != test.wantSellFee {
+			t.Errorf("marketFees(%d) = (%d,%d), want (%d,%d)", test.price, deposit, sellFee, test.wantDeposit, test.wantSellFee)
+		}
+	}
+}
+
 func TestRegisterUsesRecoveredFeeLifetimeAndResponseShape(t *testing.T) {
 	var got model.MarketRegisterCommand
 	repo := repositoryStub{

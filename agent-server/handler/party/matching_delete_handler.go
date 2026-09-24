@@ -22,8 +22,7 @@ func (h *PartyHandler) handleMatchingDelete(_ context.Context, session *server.S
 	if packet.Remaining() != 0 {
 		return fmt.Errorf("invalid party matching delete request")
 	}
-	err = h.core().DeleteMatchingEntry(partyNumber, session.UserContext.UniqueID)
-	if err != nil {
+	if err = h.core().DeleteMatchingEntry(partyNumber, session.UserContext.UniqueID); err != nil {
 		return h.sendPacket(session, buildMatchingDeleteResult(false, 0))
 	}
 	return h.sendPacket(session, buildMatchingDeleteResult(true, partyNumber))

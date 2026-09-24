@@ -6,6 +6,7 @@ import (
 
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
+	"github.com/Harvi8/AegisCore/agent-server/service"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"github.com/Harvi8/AegisCore/protocol/vsro188"
 	log "github.com/sirupsen/logrus"
@@ -48,7 +49,10 @@ func handleStallCreate(_ context.Context, session *server.Session, packet networ
 	p1.WriteUInt32(session.UserContext.UniqueID)
 	p1.WriteString(stallName)
 
-	// TODO: Check which stall avatar is activated
-	p1.WriteUInt32(StallAvatarDefault)
+	stallAvatar := uint32(StallAvatarDefault)
+	if player, lookupErr := service.GetWorldServiceInstance().GetPlayerByUniqueId(session.UserContext.UniqueID); lookupErr == nil {
+		stallAvatar = player.GetStallAvatarRefID()
+	}
+	p1.WriteUInt32(stallAvatar)
 	return session.Send(p1)
 }

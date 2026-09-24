@@ -39,15 +39,30 @@ func buildPartyOperationResponse(messageID uint16, success bool) network.Packet 
 	packet.MessageID = messageID
 	if success {
 		packet.WriteByte(1)
-	} else {
-		packet.WriteByte(2)
+		return packet
 	}
+	// The 1.188 client consumes a uint16 error code for result 2 on both
+	// 0xB060 and 0xB062. Omitting it advances the packet reader beyond the
+	// payload and can terminate the client.
+	packet.WriteByte(2)
+	packet.WriteUInt16(0)
 	return packet
 }
 
 func buildPartyCreateSuccess(playerUID uint32) network.Packet {
 	packet := buildPartyOperationResponse(opcode.PartyCreateResponse, true)
 	packet.WriteUInt32(playerUID)
+	return packet
+}
+
+// buildPartyJoinAcknowledgement is 0xB067. The client records this successful
+// joiner's runtime UID, then compares it with the 0x3065 master UID to decide
+// whether kick/ban controls are enabled.
+func buildPartyJoinAcknowledgement(joinerUID uint32) network.Packet {
+	packet := network.EmptyPacket()
+	packet.MessageID = opcode.PartyMemberCountResponse
+	packet.WriteByte(1)
+	packet.WriteUInt32(joinerUID)
 	return packet
 }
 
@@ -135,6 +150,8 @@ func buildPartyDismiss() network.Packet {
 	packet := network.EmptyPacket()
 	packet.MessageID = opcode.PartyUpdateResponse
 	packet.WriteByte(1)
+	// The pinned client always consumes a uint16 after dismiss action 1.
+	packet.WriteUInt16(0)
 	return packet
 }
 
@@ -168,7 +185,7 @@ func writePartyMember(packet *network.Packet, player *model.Player) {
 	packet.WriteByte(byte(level))
 	packet.WriteByte(packPartyVitals(hp, mp, utils.BaseHPOrMP(level, strength), utils.BaseHPOrMP(level, intelligence)))
 	writePartyPosition(packet, position, model.GameWorldScope(player.GetGameWorldID()))
-	packet.WriteString("") // guild name
+	packet.WriteString(player.GetGuildAffiliation().Name)
 	packet.WriteByte(0x04)
 	first, second := highestMasteries(masteries)
 	packet.WriteUInt32(first)
@@ -224,15 +241,19 @@ func playerHighestMasteries(player *model.Player) (uint32, uint32) {
 
 func writePartyPosition(packet *network.Packet, position navmeshv2.RtNavmeshPosition, scope model.GameWorldScope) {
 	region := uint16(position.Region.ID)
+	var x, y, z float32
+	if position.Offset != nil {
+		x, y, z = position.Offset.X, position.Offset.Y, position.Offset.Z
+	}
 	packet.WriteUInt16(region)
 	if region&navmeshv2.DungeonMask != 0 {
-		packet.WriteUInt32(uint32(int32(position.Offset.X)))
-		packet.WriteUInt32(uint32(int32(position.Offset.Z)))
-		packet.WriteUInt32(uint32(int32(position.Offset.Y)))
+		packet.WriteUInt32(uint32(int32(x)))
+		packet.WriteUInt32(uint32(int32(z)))
+		packet.WriteUInt32(uint32(int32(y)))
 	} else {
-		packet.WriteUInt16(uint16(int16(position.Offset.X)))
-		packet.WriteUInt16(uint16(int16(position.Offset.Z)))
-		packet.WriteUInt16(uint16(int16(position.Offset.Y)))
+		packet.WriteUInt16(uint16(int16(x)))
+		packet.WriteUInt16(uint16(int16(z)))
+		packet.WriteUInt16(uint16(int16(y)))
 	}
 	packet.WriteUInt16(scope.WorldID())
 	packet.WriteUInt16(scope.LayerID())

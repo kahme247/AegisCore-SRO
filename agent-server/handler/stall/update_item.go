@@ -3,8 +3,6 @@ package stall
 import (
 	"errors"
 	"github.com/Harvi8/AegisCore/agent-server/model"
-	"github.com/Harvi8/AegisCore/framework/network"
-	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
 	"sync"
 )
@@ -43,12 +41,8 @@ func updateItem(data server.PacketChannelData) error {
 
 	stallEntry = stallEntry.UpdateItem(data.UserContext.UniqueID)
 
-	p := network.EmptyPacket()
-	p.MessageID = opcode.StallUpdateResponse
-	if err := p.WriteByte(1); err != nil {
-		return err
-	}
-	if err := p.WriteByte(StallUpdateItem); err != nil {
+	p, err := newStallUpdateResponse(StallUpdateItem)
+	if err != nil {
 		return err
 	}
 	if err := p.WriteByte(stallEntry.StallSlot); err != nil {

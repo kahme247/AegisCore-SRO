@@ -46,6 +46,9 @@ type COS struct {
 	OwnerUniqueID     uint32
 	OwnerName         string
 	GuildName         string
+	OwnerJobType      byte
+	OwnerPKState      byte
+	OwnerGuildID      uint32
 	Kind              COSKind
 	Level             byte
 	Health            int32
@@ -98,7 +101,9 @@ func NewCOS(ref RefChar, owner *Player) (*COS, error) {
 			BodyState:   Normal,
 		},
 		OwnerCharID: owner.ID, OwnerUniqueID: owner.GetUniqueID(),
-		OwnerName: owner.GetName(), Kind: kind, Level: byte(max(1, ref.Level)),
+		OwnerName: owner.GetName(), OwnerJobType: owner.GetJob().Type,
+		OwnerPKState: byte(owner.GetPKState()), OwnerGuildID: owner.GetGuildAffiliation().ID,
+		Kind: kind, Level: byte(max(1, ref.Level)),
 		Health: int32(ref.MaxHP), MaxHealth: int32(ref.MaxHP),
 		Inventory: NewInventory(nil), TimedServices: make(map[int]COSTimedService),
 	}
@@ -301,6 +306,9 @@ type COSSnapshot struct {
 	OwnerName     string
 	Name          string
 	GuildName     string
+	OwnerJobType  byte
+	OwnerPKState  byte
+	OwnerGuildID  uint32
 	Kind          COSKind
 	Level         byte
 	Health        int32
@@ -324,6 +332,7 @@ func (c *COS) Snapshot() COSSnapshot {
 	return COSSnapshot{
 		PersistentID: c.PersistentID, UniqueID: c.GetUniqueID(), RefObjectID: c.GetRefObjectID(),
 		OwnerCharID: c.OwnerCharID, OwnerUniqueID: c.OwnerUniqueID, OwnerName: c.OwnerName,
+		OwnerJobType: c.OwnerJobType, OwnerPKState: c.OwnerPKState, OwnerGuildID: c.OwnerGuildID,
 		Name: c.GetName(), GuildName: c.GuildName, Kind: c.Kind, Level: c.Level,
 		Health: c.Health, MaxHealth: c.MaxHealth, Experience: c.Experience, HGP: c.HGP,
 		Satiety: c.Satiety, Settings: c.Settings, InventorySlot: c.InventorySlot, InventorySize: c.InventorySize, Inventory: c.Inventory.Snapshot(), RentEndsAt: c.RentEndsAt,

@@ -12,6 +12,7 @@ import (
 	"github.com/Harvi8/AegisCore/framework/network"
 	"github.com/Harvi8/AegisCore/framework/network/opcode"
 	"github.com/Harvi8/AegisCore/framework/server"
+	"github.com/Harvi8/AegisCore/protocol/vsro188"
 )
 
 const (
@@ -78,7 +79,6 @@ func RegisterHandlers(target *server.Server, manager *Manager) error {
 		return ErrExchangeUnavailable
 	}
 	target.RegisterHandler(opcode.ExchangeStartRequest, manager.handleStart)
-	target.RegisterHandler(opcode.ExchangeInvitationRequest, manager.handleInvitation)
 	target.RegisterHandler(opcode.ExchangeConfirmRequest, manager.handleConfirm)
 	target.RegisterHandler(opcode.ExchangeApproveRequest, manager.handleApprove)
 	target.RegisterHandler(opcode.ExchangeCancelRequest, manager.handleCancel)
@@ -161,56 +161,20 @@ func (m *Manager) handleStart(_ context.Context, session *server.Session, packet
 	}
 	delete(m.cooldowns, pair)
 	state := &exchangeSession{
-		a: &participant{player: requester, items: make(map[byte]model.ExchangeOfferedItem)},
-		b: &participant{player: target, items: make(map[byte]model.ExchangeOfferedItem)},
+		a:       &participant{player: requester, items: make(map[byte]model.ExchangeOfferedItem)},
+		b:       &participant{player: target, items: make(map[byte]model.ExchangeOfferedItem)},
+		started: true,
 	}
 	m.byChar[requester.ID], m.byChar[target.ID] = state, state
 	m.mu.Unlock()
-	if err = m.sendPacket(target.Session, exchangeInvitation(requester.GetUniqueID())); err != nil {
-		m.cancelState(state)
-		return err
-	}
-	return nil
-}
-
-func (m *Manager) handleInvitation(_ context.Context, session *server.Session, packet network.Packet) error {
-	if packet.Remaining() != 1 {
-		return ErrExchangeInvalid
-	}
-	accepted, err := packet.ReadByte()
-	if err != nil || packet.Remaining() != 0 {
-		return ErrExchangeInvalid
-	}
-	responder, err := m.resolve(session)
-	if err != nil {
-		return ErrExchangeInvalid
-	}
-
-	m.mu.Lock()
-	state := m.byChar[responder.ID]
-	if state == nil || state.a == nil || state.b == nil || state.b.player != responder || state.started || state.terminal || state.committing {
-		m.mu.Unlock()
-		return ErrExchangeState
-	}
-	requester := state.a.player
-	if accepted != 1 {
-		state.terminal = true
-		delete(m.byChar, state.a.player.ID)
-		delete(m.byChar, state.b.player.ID)
-		m.mu.Unlock()
-		return m.sendPacket(requester.Session, exchangeFailure(opcode.ExchangeStartResponse))
-	}
-	state.started = true
-	m.mu.Unlock()
-
-	if err = m.sendPacket(requester.Session, exchangeStartSuccess(responder.GetUniqueID())); err != nil {
+	if err = m.sendPacket(session, exchangeStartSuccess(target.GetUniqueID())); err != nil {
 		m.cancelState(state)
 		return err
 	}
 	started := network.EmptyPacket()
 	started.MessageID = opcode.ExchangeStartedResponse
 	started.WriteUInt32(requester.GetUniqueID())
-	if err = m.sendPacket(responder.Session, started); err != nil {
+	if err = m.sendPacket(target.Session, started); err != nil {
 		m.cancelState(state)
 		return err
 	}
@@ -302,11 +266,7 @@ func (m *Manager) HandleInventoryOperation(_ context.Context, session *server.Se
 	if changedItems {
 		return m.sendSnapshots(ownerCopy, peerCopy)
 	}
-	update := network.EmptyPacket()
-	update.MessageID = opcode.ExchangeUpdateResponse
-	update.WriteByte(2)
-	update.WriteUInt64(gold)
-	return m.sendPacket(peerCopy.player.Session, update)
+	return m.sendPacket(peerCopy.player.Session, buildExchangeGoldUpdate(gold))
 }
 
 func (m *Manager) handleConfirm(_ context.Context, session *server.Session, packet network.Packet) error {
@@ -380,6 +340,14 @@ func (m *Manager) handleApprove(_ context.Context, session *server.Session, pack
 	}
 	a.player.CommitEconomy(result.FirstGold, result.FirstInventory)
 	b.player.CommitEconomy(result.SecondGold, result.SecondInventory)
+	aCleared := a.player.ClearItemServicesForTargetSlots(offeredSlotSet(a.items), time.Now().UTC())
+	bCleared := b.player.ClearItemServicesForTargetSlots(offeredSlotSet(b.items), time.Now().UTC())
+	if len(aCleared) != 0 {
+		a.player.SendStatsUpdate()
+	}
+	if len(bCleared) != 0 {
+		b.player.SendStatsUpdate()
+	}
 	m.finishCompletedState(state)
 	if err = m.sendPacket(session, exchangeSuccess(opcode.ExchangeApproveResponse)); err != nil {
 		return err
@@ -389,7 +357,13 @@ func (m *Manager) handleApprove(_ context.Context, session *server.Session, pack
 	if err = m.sendPacket(a.player.Session, complete); err != nil {
 		return err
 	}
-	return m.sendPacket(b.player.Session, complete)
+	if err = m.sendPacket(b.player.Session, complete); err != nil {
+		return err
+	}
+	if err = m.sendPermanentReceivedItemUpdates(a.player, result.FirstReceivedSlots); err != nil {
+		return err
+	}
+	return m.sendPermanentReceivedItemUpdates(b.player, result.SecondReceivedSlots)
 }
 
 func (m *Manager) handleCancel(_ context.Context, session *server.Session, packet network.Packet) error {
@@ -465,11 +439,69 @@ func buildItemSnapshot(owner *participant, ownView bool) network.Packet {
 			p.WriteByte(offered.SourceSlot)
 		}
 		p.WriteByte(offered.ExchangeSlot)
+		item = projectTemporaryEnhancement(owner.player, offered.SourceSlot, item, time.Now().UTC())
 		model.WriteRentInfo(&p, item)
 		p.WriteUInt32(item.GetRefObjectID())
 		model.WriteInventoryItem(&p, item)
 	}
 	return p
+}
+
+func projectTemporaryEnhancement(player *model.Player, slot byte, item model.Item, now time.Time) model.Item {
+	if player == nil {
+		return item
+	}
+	for _, state := range player.ItemServiceStates(now) {
+		effect := state.Effect
+		if !model.ItemServiceAffectsStats(effect) || !effect.TargetSlotSet || effect.TargetSlot != slot || item.OptLevel != effect.TargetBaseOptLevel {
+			continue
+		}
+		item.OptLevel = effect.TargetProjectedOptLevel
+		item.RentInfo = model.RentInfo{
+			Type:            1,
+			CanDelete:       0,
+			PeriodBeginTime: uint32(effect.ActivatedAt.Unix()),
+			PeriodEndTime:   uint32(effect.ExpiresAt.Unix()),
+		}
+		return item
+	}
+	return item
+}
+
+func offeredSlotSet(items map[byte]model.ExchangeOfferedItem) map[byte]struct{} {
+	slots := make(map[byte]struct{}, len(items))
+	for _, item := range items {
+		slots[item.SourceSlot] = struct{}{}
+	}
+	return slots
+}
+
+func (m *Manager) sendPermanentReceivedItemUpdates(player *model.Player, slots []byte) error {
+	if player == nil || player.Session == nil || len(slots) == 0 {
+		return nil
+	}
+	inventory := player.Inventory.Snapshot()
+	expiration := uint32(0)
+	for _, slot := range slots {
+		item, exists := inventory.Items[slot]
+		if !exists || !item.IsEquipment() {
+			continue
+		}
+		level := item.OptLevel
+		packet, err := vsro188.BuildInventoryItemUpdate(vsro188.InventoryItemUpdate{
+			ItemKind:  slot,
+			Flags:     0x82,
+			Flag02U8:  &level,
+			Flag80U32: &expiration,
+		})
+		if err != nil {
+			return err
+		}
+		if err = m.sendPacket(player.Session, packet); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) sendPacket(session *server.Session, packet network.Packet) error {
@@ -560,14 +592,6 @@ func orderedPair(a, b int) exchangePair {
 	return exchangePair{first: b, second: a}
 }
 
-func exchangeInvitation(requester uint32) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ExchangeInvitationResponse
-	p.WriteByte(1)
-	p.WriteUInt32(requester)
-	return p
-}
-
 func exchangeStartSuccess(target uint32) network.Packet {
 	p := exchangeSuccess(opcode.ExchangeStartResponse)
 	p.WriteUInt32(target)
@@ -592,22 +616,33 @@ func exchangeFailure(messageID uint16) network.Packet {
 func exchangeCancelled() network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.ExchangeCancelledResponse
+	// The client handler for 0x3088 unconditionally reads this cancellation
+	// reason as a uint16. Zero expresses a generic peer cancellation.
+	p.WriteUInt16(0)
+	return p
+}
+
+func buildExchangeGoldUpdate(gold uint64) network.Packet {
+	p := network.EmptyPacket()
+	p.MessageID = opcode.ExchangeUpdateResponse
+	p.WriteByte(2)
+	p.WriteUInt64(gold)
 	return p
 }
 
 func inventoryOperationSuccess(operation byte) network.Packet {
-	p := network.EmptyPacket()
-	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(1)
-	p.WriteByte(operation)
-	return p
+	return inventoryOperationResult(1, operation)
 }
 
 func inventoryOperationFailure() network.Packet {
+	return inventoryOperationResult(2, 0)
+}
+
+func inventoryOperationResult(result, operation byte) network.Packet {
 	p := network.EmptyPacket()
 	p.MessageID = opcode.ItemOperationResponse
-	p.WriteByte(2)
-	p.WriteByte(0)
+	p.WriteByte(result)
+	p.WriteByte(operation)
 	return p
 }
 

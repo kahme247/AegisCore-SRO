@@ -96,6 +96,9 @@ func (h *PartyHandler) handleInvitationAnswer(ctx context.Context, session *serv
 	if err = h.sendPacket(transition.Inviter.GetSession(), response); err != nil {
 		return err
 	}
+	if err = h.sendPacket(transition.Target.GetSession(), buildPartyJoinAcknowledgement(transition.Target.GetUniqueID())); err != nil {
+		return err
+	}
 	full := buildPartySnapshot(transition.Party, false)
 	if transition.Invitation.PartyNumber == 0 {
 		return sendPartyPacket(h, []*model.Player{transition.Inviter, transition.Target}, full)
@@ -157,11 +160,10 @@ func sendPartyPacket(h *PartyHandler, players []*model.Player, packet network.Pa
 	return result
 }
 
-// HandleDisconnect removes a closing player from party state before the world
-// service drops its UID lookup, then publishes the same leave/dismiss updates
-// as an explicit client leave.
+// HandleDisconnect clears party membership even when the player session has
+// already been detached by transport teardown.
 func HandleDisconnect(playerUID uint32) {
-	transition, err := service.GetPartyServiceInstance().LeaveParty(playerUID, 1)
+	transition, err := service.GetPartyServiceInstance().DisconnectPartyMember(playerUID)
 	if err != nil {
 		return
 	}
