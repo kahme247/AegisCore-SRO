@@ -25,6 +25,7 @@ func TestLoadAllowsExplicitLocalWeakPassword(t *testing.T) {
 	t.Setenv("SMC_ADMIN_USERNAME", "1")
 	t.Setenv("SMC_ADMIN_PASSWORD", "1")
 	t.Setenv("SMC_ALLOW_WEAK_PASSWORD", "1")
+	t.Setenv("SMC_AGENT_MANAGEMENT_ENABLED", "0")
 	Initialize()
 	settings, err := Load()
 	if err != nil {

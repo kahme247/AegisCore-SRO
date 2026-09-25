@@ -56,14 +56,26 @@
 
       <section id="summary-grid" class="summary-grid" aria-label="Catalog totals"></section>
 
-      <section class="panel">
+      <section class="quick-actions" aria-label="Common actions">
+        <button type="button" data-open-module="players"><strong>Find a player</strong><span>Search characters and locations</span></button>
+        <button type="button" data-open-module="game-control"><strong>Game control</strong><span>Broadcast and live operations</span></button>
+        <button type="button" data-open-module="server-config"><strong>Server config</strong><span>Gameplay and runtime settings</span></button>
+        <button type="button" data-open-module="servers"><strong>Export Media</strong><span>Create database-backed Media files</span></button>
+        <button type="button" data-open-module="administration"><strong>Audit activity</strong><span>Review operator actions</span></button>
+      </section>
+
+      <section id="runtime-config-panel" class="panel">
         <div class="panel-heading"><div><p class="eyebrow">LIVE CONFIGURATION</p><h2>Effective gameplay rates</h2></div><span class="muted">Includes active scheduled overrides</span></div>
         <div id="gameplay-rate-grid" class="summary-grid"></div>
+        <details class="settings-disclosure">
+          <summary>Advanced runtime settings</summary>
         <form id="runtime-gameplay-form" class="schedule-field-grid">
+          <fieldset><legend>Core gameplay</legend>
           <div><label>Party EXP range</label><input name="partyExpRange" type="number" min="1" required></div>
           <div><label>Ground pickup range</label><input name="groundPickupRange" type="number" min="1" required></div>
           <div><label>Job-suit delay (ms)</label><input name="jobSuitEquipDelayMs" type="number" min="1000" max="255000" required></div>
           <div><label>Party invite TTL (ms)</label><input name="partyInvitationTtlMs" type="number" min="1" required></div>
+          </fieldset>
           <fieldset><legend>Advanced Monster AI</legend>
             <div><label>Attack cooldown (ms)</label><input name="mobAttackCooldownMs" type="number" min="1" required></div>
             <div><label>Wander delay (ms)</label><input name="mobWanderDelayMs" type="number" min="1" required></div>
@@ -114,8 +126,12 @@
             <div><label>CH mastery points per level</label><input name="chMasteryPointsPerLevel" type="number" min="1" required></div>
             <div><label>Maximum speed-effect stack (minutes)</label><input name="maxSpeedEffectMinutes" type="number" min="1" required></div>
           </fieldset>
-          <button type="submit">Save runtime controls</button><p id="runtime-gameplay-status" class="muted"></p>
+          <div class="runtime-form-actions">
+            <p id="runtime-gameplay-status" class="muted">Changes are applied by Agent within five seconds.</p>
+            <button type="submit">Save runtime controls</button>
+          </div>
         </form>
+        </details>
       </section>
 
       <section class="content-grid">
@@ -129,12 +145,19 @@
         </article>
       </section>
 
-      <section class="panel module-panel">
-        <div class="panel-heading"><div><p class="eyebrow">ROADMAP</p><h2>Management modules</h2></div><span class="muted">Capability-gated</span></div>
-        <div id="module-grid" class="module-grid"></div>
-      </section>
       <p id="dashboard-error" class="dashboard-error" role="alert"></p>
       </div>
+
+      <section id="server-config-view" class="directory-view" hidden>
+        <article class="directory-hero">
+          <div>
+            <p class="eyebrow">RUNTIME SETTINGS</p>
+            <h2>Server configuration</h2>
+            <p>Review effective gameplay rates and update Agent runtime controls.</p>
+          </div>
+          <span class="data-badge live-command-badge">LIVE CONFIGURATION</span>
+        </article>
+      </section>
 
       <section id="directory-view" class="directory-view" hidden>
         <article class="directory-hero">
@@ -258,6 +281,33 @@
         </article>
       </section>
 
+      <section id="servers-view" class="directory-view" hidden>
+        <article class="directory-hero">
+          <div>
+            <p class="eyebrow">DATABASE → MEDIA</p>
+            <h2>Media exports</h2>
+            <p>Create a fresh extracted Media tree from the shard database. Existing directories are never overwritten.</p>
+          </div>
+          <span class="data-badge">FAIL-CLOSED SYNC</span>
+        </article>
+        <article class="panel broadcast-panel">
+          <div class="panel-heading"><div><p class="eyebrow">EXPORT DESTINATION</p><h2>Create Media files</h2></div></div>
+          <form id="media-export-form" class="settings-form">
+            <label>Configured export root<input id="media-export-root" readonly></label>
+            <label>New directory name<input id="media-export-directory" required maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" placeholder="media-export-2026-07-27"></label>
+            <label>Database table (optional)<input id="media-export-table" maxlength="128" placeholder="REF_LEVEL_DATA"></label>
+            <p class="muted">Leave the table empty to export every currently supported catalog. A table selection is rejected if its Media mapping is incomplete.</p>
+            <button id="media-export-submit" type="submit">Create Media export</button>
+          </form>
+          <p id="media-export-status" class="dashboard-error" role="status"></p>
+          <div id="media-export-result" class="export-result" hidden>
+            <label>Full export address<input id="media-export-address" readonly></label>
+            <button id="media-export-copy" type="button">Copy address</button>
+          </div>
+          <pre id="media-export-output" class="audit-results" hidden></pre>
+        </article>
+      </section>
+
       <section id="administration-view" class="directory-view" hidden>
         <article class="directory-hero administration-hero">
           <div>
@@ -279,6 +329,7 @@
               <option value="world.broadcast">World broadcast</option>
               <option value="schedule.create">Schedule creation</option>
               <option value="schedule.enable">Schedule enable/disable</option>
+              <option value="media.export">Media export</option>
             </select>
             <label for="audit-limit">Records</label>
             <select id="audit-limit"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>

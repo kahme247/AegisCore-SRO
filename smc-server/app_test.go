@@ -193,13 +193,32 @@ func TestDirectoryEndpointsRequireValidatedBoundedSearch(t *testing.T) {
 	}
 	var accountResult struct {
 		Items []AccountRecord `json:"items"`
+		Query string          `json:"query"`
 		Limit int             `json:"limit"`
 	}
 	if err := json.Unmarshal(accountResponse.Body.Bytes(), &accountResult); err != nil {
 		t.Fatal(err)
 	}
-	if len(accountResult.Items) != 1 || accountResult.Items[0].Username != "account" || accountResult.Limit != 2 {
+	if len(accountResult.Items) != 1 || accountResult.Items[0].Username != "account" || accountResult.Query != "acc" || accountResult.Limit != 2 {
 		t.Fatalf("account result = %#v", accountResult)
+	}
+
+	characterRequest := authenticatedRequest(t, app, http.MethodGet, "/api/v1/characters?q=char&limit=2")
+	characterResponse := httptest.NewRecorder()
+	app.ServeHTTP(characterResponse, characterRequest)
+	if characterResponse.Code != http.StatusOK {
+		t.Fatalf("character search status = %d, want %d; body=%s", characterResponse.Code, http.StatusOK, characterResponse.Body.String())
+	}
+	var characterResult struct {
+		Items []CharacterRecord `json:"items"`
+		Query string            `json:"query"`
+		Limit int               `json:"limit"`
+	}
+	if err := json.Unmarshal(characterResponse.Body.Bytes(), &characterResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(characterResult.Items) != 1 || characterResult.Items[0].Name != "Character" || characterResult.Query != "char" || characterResult.Limit != 2 {
+		t.Fatalf("character result = %#v", characterResult)
 	}
 
 	invalidRequest := authenticatedRequest(t, app, http.MethodGet, "/api/v1/characters?limit=500")

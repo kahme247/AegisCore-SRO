@@ -17,7 +17,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Harvi8/AegisCore/framework/scheduler"
 	smcconfig "github.com/Harvi8/AegisCore/smc-server/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -39,10 +38,11 @@ var moduleCapabilities = []ModuleCapability{
 	{ID: "accounts", Name: "Accounts", Description: "Account lookup, status, balances and GM roles", Status: "available"},
 	{ID: "moderation", Name: "Moderation", Description: "Punishments, disconnects and IP restrictions", Status: "planned"},
 	{ID: "game-control", Name: "Game Control", Description: "Audited broadcasts and safe live-world commands", Status: "available"},
+	{ID: "server-config", Name: "Server Config", Description: "Gameplay rates and Agent runtime settings", Status: "available"},
 	{ID: "economy", Name: "Economy", Description: "Gold, Silk and item investigations", Status: "planned"},
 	{ID: "notices", Name: "Notices & Events", Description: "Durable scheduled announcements and execution timing", Status: "available"},
 	{ID: "logs", Name: "Logs & Analytics", Description: "Gameplay activity and concurrency reporting", Status: "foundation"},
-	{ID: "servers", Name: "Servers & Patching", Description: "Service state, shard settings and releases", Status: "foundation"},
+	{ID: "servers", Name: "Servers & Media", Description: "Database-backed Media exports and release preparation", Status: "available"},
 	{ID: "administration", Name: "Administration", Description: "Operator sessions and durable command audit records", Status: "available"},
 }
 
@@ -54,19 +54,20 @@ type loginAttempt struct {
 }
 
 type App struct {
-	settings     smcconfig.Settings
-	dashboard    DashboardSource
-	directory    DirectorySource
-	livePlayers  LivePlayerSource
-	disconnects  PlayerDisconnectSource
-	broadcasts   BroadcastSource
-	schedules    ScheduleSource
-	audit        AuditRecorder
-	sessions     *sessionStore
-	passwordHash []byte
-	loginMu      sync.Mutex
-	loginByIP    map[string]loginAttempt
-	handler      http.Handler
+	settings      smcconfig.Settings
+	dashboard     DashboardSource
+	directory     DirectorySource
+	livePlayers   LivePlayerSource
+	disconnects   PlayerDisconnectSource
+	broadcasts    BroadcastSource
+	schedules     ScheduleSource
+	audit         AuditRecorder
+	sessions      *sessionStore
+	passwordHash  []byte
+	loginMu       sync.Mutex
+	loginByIP     map[string]loginAttempt
+	mediaExportMu sync.Mutex
+	handler       http.Handler
 }
 
 func NewApp(settings smcconfig.Settings, dashboard DashboardSource, directory DirectorySource, livePlayers LivePlayerSource, disconnects PlayerDisconnectSource, broadcasts BroadcastSource, audit AuditRecorder) (*App, error) {
@@ -129,6 +130,8 @@ func (a *App) routes() (http.Handler, error) {
 	mux.Handle("PATCH /api/v1/schedules/{id}", a.authenticated(http.HandlerFunc(a.handleUpdateSchedule)))
 	mux.Handle("GET /api/v1/schedules/{id}/runs", a.authenticated(http.HandlerFunc(a.handleScheduleRuns)))
 	mux.Handle("GET /api/v1/audit-events", a.authenticated(http.HandlerFunc(a.handleAuditEvents)))
+	mux.Handle("GET /api/v1/media-exports/config", a.authenticated(http.HandlerFunc(a.handleMediaExportConfig)))
+	mux.Handle("POST /api/v1/media-exports", a.authenticated(http.HandlerFunc(a.handleMediaExport)))
 	mux.Handle("GET /api/v1/modules", a.authenticated(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{"modules": moduleCapabilities})
 	})))
@@ -257,32 +260,24 @@ func (a *App) handleGameplaySettings(response http.ResponseWriter, request *http
 }
 
 func (a *App) handleAccountSearch(response http.ResponseWriter, request *http.Request) {
-	query, limit, ok := directorySearchParameters(response, request)
-	if !ok {
-		return
-	}
-	ctx, cancel := contextWithTimeout(request, 3*time.Second)
-	defer cancel()
-	items, err := a.directory.SearchAccounts(ctx, query, limit)
-	if err != nil {
-		log.WithError(err).Error("search SMC accounts")
-		writeAPIError(response, http.StatusServiceUnavailable, "account directory is temporarily unavailable")
-		return
-	}
-	writeJSON(response, http.StatusOK, map[string]any{"items": items, "query": query, "limit": limit})
+	handleDirectorySearch(response, request, a.directory.SearchAccounts, "search SMC accounts", "account directory is temporarily unavailable")
 }
 
 func (a *App) handleCharacterSearch(response http.ResponseWriter, request *http.Request) {
+	handleDirectorySearch(response, request, a.directory.SearchCharacters, "search SMC characters", "character directory is temporarily unavailable")
+}
+
+func handleDirectorySearch[T any](response http.ResponseWriter, request *http.Request, search func(context.Context, string, int) ([]T, error), logMessage, unavailableMessage string) {
 	query, limit, ok := directorySearchParameters(response, request)
 	if !ok {
 		return
 	}
 	ctx, cancel := contextWithTimeout(request, 3*time.Second)
 	defer cancel()
-	items, err := a.directory.SearchCharacters(ctx, query, limit)
+	items, err := search(ctx, query, limit)
 	if err != nil {
-		log.WithError(err).Error("search SMC characters")
-		writeAPIError(response, http.StatusServiceUnavailable, "character directory is temporarily unavailable")
+		log.WithError(err).Error(logMessage)
+		writeAPIError(response, http.StatusServiceUnavailable, unavailableMessage)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"items": items, "query": query, "limit": limit})
@@ -432,167 +427,6 @@ func (a *App) handleBroadcast(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeJSON(response, http.StatusOK, result)
-}
-
-func (a *App) handleSchedules(response http.ResponseWriter, request *http.Request) {
-	if a.schedules == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "live Agent management channel is disabled")
-		return
-	}
-	ctx, cancel := contextWithTimeout(request, 4*time.Second)
-	defer cancel()
-	definitions, err := a.schedules.ListSchedules(ctx)
-	if err != nil {
-		log.WithError(err).Warn("read Agent schedules")
-		writeAPIError(response, http.StatusServiceUnavailable, "Agent schedules are unavailable")
-		return
-	}
-	writeJSON(response, http.StatusOK, map[string]any{"schedules": definitions})
-}
-
-func (a *App) handleSchedule(response http.ResponseWriter, request *http.Request) {
-	if a.schedules == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "live Agent management channel is disabled")
-		return
-	}
-	id := strings.TrimSpace(request.PathValue("id"))
-	if id == "" || len(id) > 128 {
-		writeAPIError(response, http.StatusBadRequest, "invalid schedule ID")
-		return
-	}
-	ctx, cancel := contextWithTimeout(request, 4*time.Second)
-	defer cancel()
-	definition, err := a.schedules.GetSchedule(ctx, id)
-	if err != nil {
-		log.WithError(err).Warn("read Agent schedule")
-		writeAPIError(response, http.StatusServiceUnavailable, "Agent schedule is unavailable")
-		return
-	}
-	writeJSON(response, http.StatusOK, definition)
-}
-
-func (a *App) handleCreateSchedule(response http.ResponseWriter, request *http.Request) {
-	if !sameOrigin(request) {
-		writeAPIError(response, http.StatusForbidden, "cross-origin commands are not allowed")
-		return
-	}
-	if a.schedules == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "live Agent management channel is disabled")
-		return
-	}
-	request.Body = http.MaxBytesReader(response, request.Body, 16<<10)
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	var definition scheduler.Definition
-	if err := decoder.Decode(&definition); err != nil || definition.Version != 0 || !definition.NextRunAt.IsZero() || definition.Validate() != nil {
-		writeAPIError(response, http.StatusBadRequest, "invalid schedule definition")
-		return
-	}
-	session := request.Context().Value(sessionContextKey{}).(operatorSession)
-	event := AuditEvent{
-		Action: "schedule.create", Outcome: "attempt", Operator: session.Username,
-		RemoteAddr: clientIP(request.RemoteAddr), Target: "schedule:" + definition.ID,
-		Details: map[string]any{"handler": definition.Handler, "recurrence": definition.Recurrence},
-	}
-	if err := a.audit.Record(event); err != nil {
-		log.WithError(err).Error("record SMC schedule-create attempt")
-		writeAPIError(response, http.StatusServiceUnavailable, "audit service unavailable; command was not sent")
-		return
-	}
-	ctx, cancel := contextWithTimeout(request, 4*time.Second)
-	defer cancel()
-	created, err := a.schedules.CreateSchedule(ctx, definition)
-	if err != nil {
-		event.Outcome = "failed"
-		event.Details = map[string]any{"handler": definition.Handler, "failure": "agent_rejected"}
-		a.recordBestEffort(event)
-		log.WithError(err).Warn("create Agent schedule")
-		writeAPIError(response, http.StatusBadRequest, "Agent rejected schedule definition")
-		return
-	}
-	event.Outcome = "success"
-	event.Details = map[string]any{"handler": created.Handler, "version": created.Version, "nextRunAt": created.NextRunAt}
-	if err := a.audit.Record(event); err != nil {
-		log.WithError(err).Error("record SMC schedule-create success")
-		writeAPIError(response, http.StatusServiceUnavailable, "schedule was created but success audit could not be persisted")
-		return
-	}
-	writeJSON(response, http.StatusCreated, created)
-}
-
-func (a *App) handleUpdateSchedule(response http.ResponseWriter, request *http.Request) {
-	if !sameOrigin(request) {
-		writeAPIError(response, http.StatusForbidden, "cross-origin commands are not allowed")
-		return
-	}
-	if a.schedules == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "live Agent management channel is disabled")
-		return
-	}
-	request.Body = http.MaxBytesReader(response, request.Body, 4<<10)
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	var command struct {
-		ExpectedVersion uint64 `json:"expectedVersion"`
-		Enabled         *bool  `json:"enabled"`
-	}
-	id := strings.TrimSpace(request.PathValue("id"))
-	if err := decoder.Decode(&command); err != nil || id == "" || len(id) > 128 || command.ExpectedVersion == 0 || command.Enabled == nil {
-		writeAPIError(response, http.StatusBadRequest, "invalid schedule update")
-		return
-	}
-	session := request.Context().Value(sessionContextKey{}).(operatorSession)
-	event := AuditEvent{
-		Action: "schedule.enable", Outcome: "attempt", Operator: session.Username,
-		RemoteAddr: clientIP(request.RemoteAddr), Target: "schedule:" + id,
-		Details: map[string]any{"expectedVersion": command.ExpectedVersion, "enabled": *command.Enabled},
-	}
-	if err := a.audit.Record(event); err != nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "audit service unavailable; command was not sent")
-		return
-	}
-	ctx, cancel := contextWithTimeout(request, 4*time.Second)
-	defer cancel()
-	updated, err := a.schedules.SetScheduleEnabled(ctx, id, command.ExpectedVersion, *command.Enabled)
-	if err != nil {
-		event.Outcome = "failed"
-		event.Details = map[string]any{"failure": "agent_rejected", "enabled": *command.Enabled}
-		a.recordBestEffort(event)
-		writeAPIError(response, http.StatusConflict, "Agent rejected schedule update")
-		return
-	}
-	event.Outcome = "success"
-	event.Details = map[string]any{"enabled": updated.Enabled, "version": updated.Version}
-	if err := a.audit.Record(event); err != nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "schedule was updated but success audit could not be persisted")
-		return
-	}
-	writeJSON(response, http.StatusOK, updated)
-}
-
-func (a *App) handleScheduleRuns(response http.ResponseWriter, request *http.Request) {
-	if a.schedules == nil {
-		writeAPIError(response, http.StatusServiceUnavailable, "live Agent management channel is disabled")
-		return
-	}
-	limit := 100
-	if raw := request.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > 500 {
-			writeAPIError(response, http.StatusBadRequest, "limit must be between 1 and 500")
-			return
-		}
-		limit = parsed
-	}
-	ctx, cancel := contextWithTimeout(request, 4*time.Second)
-	defer cancel()
-	runs, err := a.schedules.ScheduleRuns(ctx, request.PathValue("id"), limit)
-	if err != nil {
-		log.WithError(err).Warn("read Agent schedule history")
-		writeAPIError(response, http.StatusServiceUnavailable, "Agent schedule history is unavailable")
-		return
-	}
-	writeJSON(response, http.StatusOK, map[string]any{"runs": runs})
 }
 
 func (a *App) handleAuditEvents(response http.ResponseWriter, request *http.Request) {

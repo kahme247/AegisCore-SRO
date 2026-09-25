@@ -6,6 +6,7 @@ const dashboardError = document.querySelector('#dashboard-error');
 const directoryError = document.querySelector('#directory-error');
 let directoryMode = 'players';
 let disconnectTarget = null;
+document.querySelector('#server-config-view').append(document.querySelector('#runtime-config-panel'));
 
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options });
@@ -48,21 +49,26 @@ document.querySelector('#runtime-gameplay-form').addEventListener('submit', asyn
 });
 
 function renderModules(modules) {
-  const nav = document.querySelector('#module-nav'); const grid = document.querySelector('#module-grid');
-  nav.replaceChildren(); grid.replaceChildren();
+  const nav = document.querySelector('#module-nav');
+  nav.replaceChildren();
   modules.forEach((module, index) => {
-    const item = document.createElement('button'); item.className = `nav-item ${index === 0 ? 'active' : ''}`;
-    item.disabled = module.status !== 'available'; item.dataset.module = module.id; item.append(document.createTextNode(module.name));
-    if (module.status !== 'available') { const badge = document.createElement('small'); badge.textContent = module.status; item.append(badge); }
+    const item = document.createElement('button');
+    item.className = `nav-item ${index === 0 ? 'active' : ''}`;
+    item.disabled = module.status !== 'available';
+    item.dataset.module = module.id;
+    item.append(document.createTextNode(module.name));
+    if (module.status !== 'available') {
+      const badge = document.createElement('small');
+      badge.textContent = module.status;
+      item.append(badge);
+    }
     if (module.status === 'available') item.addEventListener('click', () => openModule(module.id));
     nav.append(item);
-    const card = document.createElement('article'); card.className = 'module-card';
-    const name = document.createElement('strong'); name.textContent = module.name;
-    const copy = document.createElement('p'); copy.textContent = module.description;
-    const status = document.createElement('span'); status.className = `module-status ${module.status}`; status.textContent = module.status;
-    card.append(name, copy, status); grid.append(card);
   });
 }
+document.querySelectorAll('[data-open-module]').forEach(button => {
+  button.addEventListener('click', () => openModule(button.dataset.openModule));
+});
 
 function openModule(module) {
   document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.module === module));
@@ -73,15 +79,25 @@ function openModule(module) {
   document.querySelector('#game-control-view').hidden = module !== 'game-control';
   document.querySelector('#notices-view').hidden = module !== 'notices';
   document.querySelector('#administration-view').hidden = module !== 'administration';
+  document.querySelector('#servers-view').hidden = module !== 'servers';
+  document.querySelector('#server-config-view').hidden = module !== 'server-config';
   if (overview) { document.querySelector('#page-title').textContent = 'Server overview'; return; }
   if (directory) { openDirectory(module); return; }
   if (module === 'game-control') {
     document.querySelector('#page-title').textContent = 'Game control';
     document.querySelector('#broadcast-message').focus();
   }
+  if (module === 'server-config') {
+    document.querySelector('#page-title').textContent = 'Server configuration';
+    document.querySelector('.settings-disclosure').open = true;
+  }
   if (module === 'notices') {
     document.querySelector('#page-title').textContent = 'Notices & events';
     loadSchedules();
+  }
+  if (module === 'servers') {
+    document.querySelector('#page-title').textContent = 'Servers & Media';
+    loadMediaExportConfig();
   }
   if (module === 'administration') {
     document.querySelector('#page-title').textContent = 'Administration';
@@ -330,6 +346,63 @@ async function loadScheduleRuns(schedule) {
     });
   } catch (failure) { const error = document.createElement('p'); error.className = 'empty-state'; error.textContent = failure.message; history.append(error); }
 }
+
+async function loadMediaExportConfig() {
+  const status = document.querySelector('#media-export-status');
+  try {
+    const config = await api('/api/v1/media-exports/config');
+    document.querySelector('#media-export-root').value = config.root;
+    if (!document.querySelector('#media-export-directory').value) {
+      document.querySelector('#media-export-directory').value = `media-export-${new Date().toISOString().slice(0, 10)}`;
+    }
+    status.textContent = '';
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+document.querySelector('#media-export-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const submit = document.querySelector('#media-export-submit');
+  const status = document.querySelector('#media-export-status');
+  const output = document.querySelector('#media-export-output');
+  const resultPanel = document.querySelector('#media-export-result');
+  submit.disabled = true;
+  status.textContent = 'Creating Media files. Keep this page open…';
+  output.hidden = true;
+  resultPanel.hidden = true;
+  try {
+    const result = await api('/api/v1/media-exports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directory: document.querySelector('#media-export-directory').value.trim(),
+        table: document.querySelector('#media-export-table').value.trim()
+      })
+    });
+    status.textContent = `Export complete: ${result.directory}`;
+    document.querySelector('#media-export-address').value = result.directory;
+    resultPanel.hidden = false;
+    output.textContent = result.output;
+    output.hidden = false;
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+document.querySelector('#media-export-copy').addEventListener('click', async () => {
+  const address = document.querySelector('#media-export-address');
+  try {
+    await navigator.clipboard.writeText(address.value);
+    document.querySelector('#media-export-status').textContent = 'Full export address copied.';
+  } catch {
+    address.select();
+    document.execCommand('copy');
+    document.querySelector('#media-export-status').textContent = 'Full export address copied.';
+  }
+});
 
 document.querySelector('#audit-filter-form').addEventListener('submit', event => {
   event.preventDefault(); loadAuditEvents();

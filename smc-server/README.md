@@ -16,9 +16,9 @@ docker compose ps smc-server
 docker compose logs --tail=200 smc-server
 ```
 
-The current implementation keeps database views read-only and exposes one
-explicitly audited live control: disconnecting a player through Agent's private
-mTLS management API. It provides:
+The current implementation keeps general database views read-only and exposes
+explicitly audited operations for live controls and database-backed Media
+exports. It provides:
 
 - authenticated, expiring operator sessions;
 - login rate limiting and same-origin request enforcement;
@@ -26,10 +26,13 @@ mTLS management API. It provides:
 - account, character, guild, item, notice, shard, and capacity totals;
 - bounded account and persisted-character directory searches;
 - Gateway and Agent TCP reachability probes;
-- capability-gated navigation for the planned SMC modules;
+- capability-gated navigation for the SMC modules;
+- an audited Servers & Media interface that selects a new export directory and
+  optionally limits synchronization to one mapped database table;
 - `/healthz`, `/api/v1/session`, `/api/v1/dashboard`, `/api/v1/modules`,
-  `/api/v1/accounts`, `/api/v1/characters`, `/api/v1/online-players`, and the
-  audited `POST /api/v1/player-disconnects` command.
+  `/api/v1/accounts`, `/api/v1/characters`, `/api/v1/online-players`,
+  `GET /api/v1/media-exports/config`, and the audited
+  `POST /api/v1/media-exports` and `POST /api/v1/player-disconnects` commands.
 
 TCP reachability means that a listener accepted a connection. It is not full
 Gateway or Agent readiness. Future live controls must use separate private mTLS
@@ -56,6 +59,9 @@ rejects a stale UID so an old page cannot disconnect a later reconnection.
 | `SMC_SESSION_TTL` | `8h` | Session duration, between 5 minutes and 24 hours |
 | `SMC_COOKIE_SECURE` | `false` | Require HTTPS when sending the session cookie |
 | `SMC_AUDIT_PATH` | `smc-audit.jsonl` | Append-only audit path |
+| `SMC_MEDIA_EXPORT_ROOT` | `media-exports` | Server-side root that contains generated Media directories |
+| `SMC_MEDIA_EXPORT_DISPLAY_ROOT` | `media-exports` | Host-visible root returned to the browser after export |
+| `SMC_MEDIA_EXPORT_BINARY` | `sro-data` | Path to the bundled `sro-data` maintenance executable |
 | `SMC_GATEWAY_ADDRESS` | `127.0.0.1:15779` | Private Gateway probe target |
 | `SMC_AGENT_ADDRESS` | `127.0.0.1:15882` | Private Agent probe target |
 | `SMC_AGENT_MANAGEMENT_ENABLED` | `false` | Enable authoritative Agent player snapshots |
@@ -88,6 +94,21 @@ docker compose logs --tail=100 smc-server
 
 Open `http://127.0.0.1:15900`. The supplied Compose binding is loopback-only;
 `SMC_PUBLIC_PORT` changes the host port without changing the container port.
+
+Compose mounts `${SRO_MEDIA_EXPORT_DIR:-./.local/media-exports}` at `/exports`.
+It supplies `SMC_MEDIA_EXPORT_DISPLAY_ROOT` from the same value, so completion
+and the copy button show the host-visible address instead of `/exports`. Set an
+absolute `SRO_MEDIA_EXPORT_DIR` in the ignored `.env`, then recreate SMC:
+
+```powershell
+$env:SRO_MEDIA_EXPORT_DIR = "C:\Silkroad\MediaExports"
+docker compose --profile smc up --build -d smc-server
+```
+
+Open **Servers & Media**, enter a new directory name, and optionally enter a
+database table such as `REF_LEVEL_DATA`. An empty table exports every currently
+supported snapshot catalog. SMC never overwrites an existing directory and
+records attempt, success, and failure outcomes as `media.export` audit events.
 For remote administration, place SMC Server behind an authenticated HTTPS/VPN
 boundary and set `SMC_COOKIE_SECURE=1`; do not publish it directly to the
 Internet.

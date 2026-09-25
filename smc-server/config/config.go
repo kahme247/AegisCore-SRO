@@ -21,6 +21,9 @@ const (
 	SessionTTL                   = "smc.session.ttl"
 	CookieSecure                 = "smc.cookie.secure"
 	AuditPath                    = "smc.audit.path"
+	MediaExportRoot              = "smc.media_export.root"
+	MediaExportBinary            = "smc.media_export.binary"
+	MediaExportDisplayRoot       = "smc.media_export.display_root"
 	GatewayAddress               = "smc.gateway.address"
 	AgentAddress                 = "smc.agent.address"
 	AgentManagementEnabled       = "smc.agent_management.enabled"
@@ -43,6 +46,9 @@ type Settings struct {
 	SessionTTL                   time.Duration
 	CookieSecure                 bool
 	AuditPath                    string
+	MediaExportRoot              string
+	MediaExportBinary            string
+	MediaExportDisplayRoot       string
 	GatewayAddress               string
 	AgentAddress                 string
 	AgentManagementEnabled       bool
@@ -63,6 +69,9 @@ func Initialize() {
 	viper.SetDefault(SessionTTL, "8h")
 	viper.SetDefault(CookieSecure, false)
 	viper.SetDefault(AuditPath, "smc-audit.jsonl")
+	viper.SetDefault(MediaExportRoot, "media-exports")
+	viper.SetDefault(MediaExportBinary, "sro-data")
+	viper.SetDefault(MediaExportDisplayRoot, "media-exports")
 	viper.SetDefault(GatewayAddress, "127.0.0.1:15779")
 	viper.SetDefault(AgentAddress, "127.0.0.1:15882")
 	viper.SetDefault(AgentManagementEnabled, false)
@@ -77,6 +86,9 @@ func Initialize() {
 	_ = viper.BindEnv(SessionTTL, "SMC_SESSION_TTL")
 	_ = viper.BindEnv(CookieSecure, "SMC_COOKIE_SECURE")
 	_ = viper.BindEnv(AuditPath, "SMC_AUDIT_PATH")
+	_ = viper.BindEnv(MediaExportRoot, "SMC_MEDIA_EXPORT_ROOT")
+	_ = viper.BindEnv(MediaExportBinary, "SMC_MEDIA_EXPORT_BINARY")
+	_ = viper.BindEnv(MediaExportDisplayRoot, "SMC_MEDIA_EXPORT_DISPLAY_ROOT")
 	_ = viper.BindEnv(GatewayAddress, "SMC_GATEWAY_ADDRESS")
 	_ = viper.BindEnv(AgentAddress, "SMC_AGENT_ADDRESS")
 	_ = viper.BindEnv(AgentManagementEnabled, "SMC_AGENT_MANAGEMENT_ENABLED")
@@ -102,7 +114,10 @@ func Load() (Settings, error) {
 		SessionTTL:                   ttl,
 		CookieSecure:                 viper.GetBool(CookieSecure),
 		AuditPath:                    strings.TrimSpace(viper.GetString(AuditPath)),
+		MediaExportRoot:              strings.TrimSpace(viper.GetString(MediaExportRoot)),
+		MediaExportBinary:            strings.TrimSpace(viper.GetString(MediaExportBinary)),
 		GatewayAddress:               strings.TrimSpace(viper.GetString(GatewayAddress)),
+		MediaExportDisplayRoot:       strings.TrimSpace(viper.GetString(MediaExportDisplayRoot)),
 		AgentAddress:                 strings.TrimSpace(viper.GetString(AgentAddress)),
 		AgentManagementEnabled:       viper.GetBool(AgentManagementEnabled),
 		AgentManagementEndpoint:      strings.TrimSpace(viper.GetString(AgentManagementEndpoint)),
@@ -125,6 +140,9 @@ func Load() (Settings, error) {
 	}
 	if settings.AuditPath == "" {
 		return Settings{}, fmt.Errorf("%w: SMC_AUDIT_PATH is required", ErrInvalidConfiguration)
+	}
+	if settings.MediaExportRoot == "" || settings.MediaExportDisplayRoot == "" || settings.MediaExportBinary == "" {
+		return Settings{}, fmt.Errorf("%w: SMC Media export root, display root, and binary are required", ErrInvalidConfiguration)
 	}
 	for name, address := range map[string]string{"SMC_GATEWAY_ADDRESS": settings.GatewayAddress, "SMC_AGENT_ADDRESS": settings.AgentAddress} {
 		if _, _, err := net.SplitHostPort(address); err != nil {
