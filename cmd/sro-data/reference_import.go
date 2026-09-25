@@ -126,7 +126,6 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 	if err != nil {
 		return err
 	}
-	startPositions := dimensionHoleStockStartPositions()
 	eventRewards, eventRewardItems, err := loadEventRewardReferenceData(textDataDirectory)
 	if err != nil {
 		return err
@@ -138,6 +137,14 @@ func importReferenceData(ctx context.Context, arguments []string, output io.Writ
 		return fmt.Errorf("open shard database: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, pool.Close()) }()
+	dimensionHoleRepository, err := model.NewDimensionHoleCatalogRepository(pool)
+	if err != nil {
+		return fmt.Errorf("configure Dimension Hole catalog repository: %w", err)
+	}
+	if _, err = dimensionHoleRepository.LoadDimensionHoleCatalog(ctx); err != nil {
+		return fmt.Errorf("load Dimension Hole catalog: %w", err)
+	}
+	startPositions := dimensionHoleStockStartPositions()
 	if err := importReferenceRows(ctx, pool, levels, skills, magicOptions, dropMagicAssignments, gameWorlds, gameWorldRegions, startPositions); err != nil {
 		return err
 	}

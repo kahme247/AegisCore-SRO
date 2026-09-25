@@ -11,6 +11,7 @@ maintenance.
 | Need | Start here |
 | --- | --- |
 | Check `Data.pk2` without changing the database | [Verify Data.pk2](#verify-datapk2) |
+| Find the database table for a Media file, or the reverse | [Map Media files to tables](#map-media-files-to-tables) |
 | Audit usable items, linked skills, and loot sources | [Audit item and drop coverage](#audit-item-and-drop-coverage) |
 | Prove Dimension Hole startup data is complete | [Verify Dimension Hole readiness](#verify-dimension-hole-readiness) |
 | Export database-backed Media files | [Export Media files](#export-database-backed-media-files) |
@@ -23,6 +24,46 @@ proportionally distributes the accumulated Thief/Hunter global pools by weekly
 contribution, caps pending rewards, clears both pools, and resets weekly
 contribution atomically. The reference backup does not preserve the legacy
 execution schedule; invoke it from an operator-owned weekly scheduler.
+
+## Map Media files to tables
+
+Use `media-map` before editing a file or table:
+
+```powershell
+go run ./cmd/sro-data media-map --file teleportdata.txt
+go run ./cmd/sro-data media-map --table REF_LEVEL_DATA
+go run ./cmd/sro-data media-map --file gacha
+```
+
+The tab-separated output identifies the related table, current authority,
+database update command, and Media synchronization support. `MEDIA_SYNC` is
+`export-media` only when the current exporter regenerates that file from the
+database; `not-supported` means the DB and PK2 file must not be assumed aligned.
+The authority column also marks superseded, client/file-only, candidate, and
+unmapped catalogs. Filename patterns such as `itemdata_*.txt` and
+`skilldata_*.txt` cover their chunk families.
+
+Migration `000136` stores this mapping in
+`SRO_SHARD.MEDIA_CATALOG_MAPPING`; `media-map` reads that registry rather
+than a compiled list. `MEDIA_*` views provide filename-aligned discovery over
+the normalized tables. `RECONCILE=snapshot` means a fresh export represents
+inserts, updates, and deletions from the mapped database catalog.
+
+Use the fail-closed synchronization wrapper when rebuilding an extracted Media
+tree after database edits:
+
+```powershell
+go run ./cmd/sro-data media-sync --table REF_LEVEL_DATA `
+  --output ./.local/media-sync-levels
+go run ./cmd/sro-data media-sync --supported-only `
+  --output ./.local/media-sync-supported
+```
+
+The first form refuses a mapped table if any selected file is not a complete
+snapshot export. With no table filter, `media-sync` validates the full registry
+and lists every unsupported database-backed file instead of producing a
+partially aligned tree. `--supported-only` explicitly exports only the catalogs
+whose registry rows are both `export-media` and `snapshot`.
 
 ## Verify Data.pk2
 
@@ -120,10 +161,10 @@ Dimension Hole worlds: entry/entrance/leave type `0`, duration `7200000 ms`,
 and empty-remain time `600000 ms`. Other worlds retain zero until an
 authoritative server-side source is imported.
 
-Shard migrations `000130` and `000131` add the normalized allowed-region and
-instance-start tables. `import-reference` replaces only worlds `63–84` in those
-catalogs and imports the exact vSRO 1.188 start positions recovered from
-`_RefInstance_World_Start_Pos`.
+Shard migrations `000130`, `000131`, and `000135` add the normalized
+allowed-region, instance-start, and item-to-world definition catalogs.
+`REF_DIMENSION_HOLE` is the authority that selects enabled Dimension Hole
+items and worlds; `import-reference` refreshes their Media-derived metadata.
 
 ## Verify Dimension Hole readiness
 
@@ -133,11 +174,12 @@ After the shard migrations and reference import, run the read-only gate:
 go run ./cmd/sro-data verify-dimension-hole
 ```
 
-Success requires all 22 pinned worlds, all 2,088 world-region mappings, and at
-least one validated stock start position for every world. Missing tables, rows,
-altered lifecycle metadata, invalid regions, duplicate starts, or unsupported
-nonzero `Param` values return a non-zero status. Agent performs the same
-preflight before enabling Dimension Hole item use.
+Success requires every enabled `REF_DIMENSION_HOLE` mapping to resolve a valid
+item and world, with at least one allowed region and validated start position
+for every world. Missing tables or rows, altered lifecycle metadata, invalid
+regions, duplicate starts, or unsupported nonzero `Param` values return a
+non-zero status. Agent performs the same preflight before enabling Dimension
+Hole item use.
 
 ## Audit item and drop coverage
 

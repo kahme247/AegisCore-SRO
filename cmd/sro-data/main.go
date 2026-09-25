@@ -19,7 +19,7 @@ import (
 	"github.com/Harvi8/AegisCore/protocol/profiles"
 )
 
-var errUsage = errors.New("usage: sro-data <verify|audit-item-coverage|verify-drop-catalog|verify-dimension-hole|export-media|import-media-catalogs|import-reference|import-drop-catalog|import-event-rewards|import-server-event-rewards|import-item-mall|import-specialty-quotations|distribute-weekly-job-rewards|import-optional-teleports|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
+var errUsage = errors.New("usage: sro-data <verify|media-map|media-sync|audit-item-coverage|verify-drop-catalog|verify-dimension-hole|export-media|import-media-catalogs|import-reference|import-drop-catalog|import-event-rewards|import-server-event-rewards|import-item-mall|import-specialty-quotations|distribute-weekly-job-rewards|import-optional-teleports|import-vsro-skills|import-vsro-items|import-vsro-quests|inspect-vsro-quest-script|import-vsro-quest-script> [options]")
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -42,6 +42,12 @@ func run(ctx context.Context, arguments []string, output io.Writer) error {
 func runWithCanonicalProfile(ctx context.Context, arguments []string, output io.Writer, canonical profiles.Profile) error {
 	if len(arguments) == 0 {
 		return errUsage
+	}
+	if arguments[0] == "media-map" {
+		return mediaMap(ctx, arguments[1:], output)
+	}
+	if arguments[0] == "media-sync" {
+		return mediaSync(ctx, arguments[1:], output)
 	}
 	if arguments[0] == "audit-item-coverage" {
 		return auditItemCoverage(ctx, arguments[1:], output)

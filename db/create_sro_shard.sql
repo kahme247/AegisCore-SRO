@@ -3003,6 +3003,9 @@ CREATE TABLE `CHAR_ITEM_SERVICE` (
   `CHAR_ID` int NOT NULL,
   `SERVICE_KIND` tinyint unsigned NOT NULL COMMENT '1=Gold/Premium, 2=Skill Gold, 3=EXP scroll, 4=Skill EXP scroll',
   `SOURCE_REF_ITEM_ID` int NOT NULL,
+  `TARGET_SLOT` tinyint unsigned DEFAULT NULL,
+  `TARGET_BASE_OPT_LEVEL` tinyint unsigned DEFAULT NULL,
+  `TARGET_PROJECTED_OPT_LEVEL` tinyint unsigned DEFAULT NULL,
   `EXPERIENCE_BONUS_PERCENT` int unsigned NOT NULL DEFAULT '0',
   `SKILL_EXPERIENCE_BONUS_PERCENT` int unsigned NOT NULL DEFAULT '0',
   `DAILY_BUDGET_MS` int unsigned NOT NULL DEFAULT '10800000',
@@ -3687,7 +3690,7 @@ CREATE TABLE `aegiscore_schema_migrations` (
 -- Dumping data for table `aegiscore_schema_migrations`
 --
 
-INSERT INTO `aegiscore_schema_migrations` VALUES (30,'item_mall','14f15bacc51d773cffd0e72b3f85cf24b8568f78b8f49132cfdfd3548597ed08','applied','2026-07-17 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` VALUES (30,'item_mall','14f15bacc51d773cffd0e72b3f85cf24b8568f78b8f49132cfdfd3548597ed08','applied','2026-07-17 00:00:00.000000'),(144,'alchemy_material_stacks','853c629e94df4347db9386fa8be78141b04ecb324a6472a2e15f49bce6248a1b','applied','2026-07-28 15:00:00.000000'),(145,'alchemy_material_stack_5000','6a0adbc74a5b839c8b14f51ff4ef73e7d2a0f9b8a7d0d43b0a68def57d59a26d','applied','2026-07-28 15:46:28.000000');
 INSERT INTO `aegiscore_schema_migrations` VALUES (31,'character_item_services','e2c8135d97d85e1242320e1e60262ff5874a8b9056fa2b09a294a40b8185b81d','applied','2026-07-17 00:00:00.000000');
 INSERT INTO `aegiscore_schema_migrations` VALUES (32,'character_creation_policy','554da0e8b968f3297d14934051d0d40ac372f53f2a148cb7aef53c673986c3cb','applied','2026-07-17 00:00:00.000000');
 INSERT INTO `aegiscore_schema_migrations` VALUES (33,'european_character_creation','9b395171ea005e33211a141618faed00f2352a553eeaefff6d9cddab7cf2fe77','applied','2026-07-17 00:00:00.000000');
@@ -3753,6 +3756,79 @@ UNLOCK TABLES;
 -- Dumping routines for database 'SRO_SHARD'
 --
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+-- Applied migration 000134_dungeon_teleport_points
+CREATE TABLE `DUNGEON_TELEPORT_POINT` (
+    `ID` INT UNSIGNED NOT NULL,
+    `CODE_NAME` VARCHAR(128) NOT NULL,
+    `REGION_ID` SMALLINT NOT NULL,
+    `POS_X` FLOAT NOT NULL,
+    `POS_Y` FLOAT NOT NULL,
+    `POS_Z` FLOAT NOT NULL,
+    `RADIUS` SMALLINT UNSIGNED NOT NULL,
+    `WORLD_ID` SMALLINT NOT NULL DEFAULT 1,
+    `SERVICE` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    PRIMARY KEY (`ID`),
+    UNIQUE KEY `UX_DUNGEON_TELEPORT_POINT_CODE` (`CODE_NAME`),
+    KEY `IX_DUNGEON_TELEPORT_POINT_SERVICE` (`SERVICE`,`REGION_ID`)
+);
+
+-- Active dungeon points imported from the vSRO 1.188 teleport-data catalog.
+INSERT INTO `DUNGEON_TELEPORT_POINT` (`ID`,`CODE_NAME`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`RADIUS`,`WORLD_ID`) VALUES
+(10,'GATE_DUNGEON_DH_OUT',-32767,1011,0,-862,90,1),(11,'GATE_DUNGEON_DH_IN',27027,1814,452,1834,150,1),
+(56,'GATE_JINSI_IN',-32761,-1,-11,-3200,70,1),(57,'GATE_JINSI_01x01_12',-32761,2,223,6495,70,1),
+(58,'GATE_JINSI_02x01_03',-32762,-10468,0,5596,70,1),(59,'GATE_JINSI_02x01_09',-32762,-13674,0,5596,70,1),
+(60,'GATE_JINSI_02x02_03',-32762,-3858,0,5592,70,1),(62,'GATE_JINSI_02x02_09',-32762,-8259,0,5592,70,1),
+(69,'GATE_JINSI_02x03_09',-32762,-1628,0,5596,70,1),(70,'GATE_JINSI_02x03_12',-32762,-3,0,7197,70,1),
+(71,'GATE_JINSI_02x04_03',-32762,7827,0,5596,70,1),(72,'GATE_JINSI_02x04_06',-32762,6208,0,4035,70,1),
+(73,'GATE_JINSI_02x04_09',-32762,4610,0,5596,70,1),(75,'GATE_JINSI_02x05_03',-32762,13727,0,5596,70,1),
+(76,'GATE_JINSI_02x05_06',-32762,12124,0,4030,70,1),(77,'GATE_JINSI_02x05_09',-32762,10497,0,5596,70,1),
+(78,'GATE_JINSI_02x05_12',-32762,12124,0,7228,70,1),(79,'GATE_JINSI_02x06_03',-32762,13730,0,-21,70,1),
+(80,'GATE_JINSI_02x06_06',-32762,12124,0,-1587,70,1),(81,'GATE_JINSI_02x06_09',-32762,10496,0,-21,70,1),
+(82,'GATE_JINSI_02x06_12',-32762,12124,0,1633,70,1),(83,'GATE_JINSI_02x07_03',-32762,7809,0,-21,70,1),
+(84,'GATE_JINSI_02x07_09',-32762,4580,0,-21,70,1),(86,'GATE_JINSI_02x08_03',-32762,2197,0,-27,70,1),
+(87,'GATE_JINSI_02x08_06',-32762,-5,0,-2223,70,1),(88,'GATE_JINSI_02x08_09',-32762,-2203,0,-27,70,1),
+(89,'GATE_JINSI_02x08_12',-32762,-5,0,2173,70,1),(90,'GATE_JINSI_02x09_03',-32762,-4458,0,-21,70,1),
+(91,'GATE_JINSI_02x09_06',-32762,-6068,0,-1593,70,1),(92,'GATE_JINSI_02x09_09',-32762,-7704,0,-21,70,1),
+(93,'GATE_JINSI_02x09_12',-32762,-6068,0,1640,70,1),(94,'GATE_JINSI_02x10_03',-32762,-10470,0,-21,70,1),
+(95,'GATE_JINSI_02x10_06',-32762,-12072,0,-1587,70,1),(96,'GATE_JINSI_02x10_09',-32762,-13804,0,-27,70,1),
+(97,'GATE_JINSI_02x11_03',-32762,-9871,0,-5818,70,1),(98,'GATE_JINSI_02x11_06',-32762,-12073,0,-8021,70,1),
+(99,'GATE_JINSI_02x11_09',-32762,-14275,0,-5824,70,1),(100,'GATE_JINSI_02x11_12',-32762,-12072,0,-3616,70,1),
+(101,'GATE_JINSI_02x12_03',-32762,-4458,0,-5813,70,1),(102,'GATE_JINSI_02x12_09',-32762,-7684,0,-5813,70,1),
+(106,'GATE_JINSI_02x13_03-2',-32762,1569,0,-5818,70,1),(109,'GATE_JINSI_02x13_09-1',-32762,-1593,0,-5819,70,1),
+(110,'GATE_JINSI_02x13_09-2',-32762,-1567,0,-5817,70,1),(113,'GATE_JINSI_02x14_03',-32762,7809,0,-5814,70,1),
+(114,'GATE_JINSI_02x14_09',-32762,4581,0,-5814,70,1),(115,'GATE_JINSI_02x15_03',-32762,14325,0,-5818,70,1),
+(116,'GATE_JINSI_02x15_09',-32762,9924,0,-5821,70,1),(117,'GATE_JINSI_02x16_03',-32762,19707,0,-5814,70,1),
+(118,'GATE_JINSI_02x16_09',-32762,16479,0,-5815,70,1),(119,'GATE_JINSI_02x20_09',-32762,16480,0,5596,70,1),
+(121,'GATE_JINSI_02x30_12',-32762,-18152,0,1633,70,1),(122,'GATE_JINSI_02x40_06',-32762,18103,0,-1593,70,1),
+(125,'GATE_JINSI_02x50_12',-32762,-18150,0,-4157,70,1),(126,'GATE_JINSI_03x01',-32763,352,72,78,70,1),
+(127,'GATE_JINSI_03x02',-32763,19140,549,15784,70,1),(128,'GATE_JINSI_03x03',-32763,15855,549,-18952,70,1),
+(129,'GATE_JINSI_03x04',-32763,-19110,584,-16170,70,1),(130,'GATE_JINSI_03x05',-32763,-15711,549,19794,70,1),
+(132,'GATE_JINSI_04x02',-32764,18267,-98,14340,70,1),(133,'GATE_JINSI_04x03',-32764,15463,-126,-19780,70,1),
+(134,'GATE_JINSI_04x04',-32764,-17850,-126,-14329,70,1),(135,'GATE_JINSI_04x05',-32764,-15043,-98,19789,70,1),
+(136,'GATE_JINSI_05x01',-32765,-1335,-42,642,70,1),(141,'GATE_JINSI_04x01',-32764,-731,-62,-159,70,1);
+
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (134,'dungeon_teleport_points','212df1765cb99c0726d2f73d941c8111b52f528a13185d425b4efb77ac120e67','applied','2026-07-27 00:00:00.000000');
+
+-- Applied migration 000135_dimension_hole_catalog
+CREATE TABLE `SRO_SHARD`.`REF_DIMENSION_HOLE` (
+    `ITEM_REF_ID` INT UNSIGNED NOT NULL,
+    `WORLD_ID` SMALLINT UNSIGNED NOT NULL,
+    `SERVICE` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    PRIMARY KEY (`ITEM_REF_ID`),
+    UNIQUE KEY `UX_REF_DIMENSION_HOLE_WORLD` (`WORLD_ID`),
+    CONSTRAINT `FK_REF_DIMENSION_HOLE_WORLD`
+        FOREIGN KEY (`WORLD_ID`) REFERENCES `SRO_SHARD`.`REF_GAME_WORLD` (`WORLD_ID`)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `SRO_SHARD`.`REF_DIMENSION_HOLE` (`ITEM_REF_ID`,`WORLD_ID`) VALUES
+(35883,63),(35884,64),(35885,65),(35886,66),(35887,67),(35888,68),
+(35889,69),(35890,70),(35891,71),(35892,72),(35893,73),(35894,74),
+(35895,75),(35896,76),(35897,77),(35898,78),(35899,79),(35900,80),
+(35901,81),(35902,82),(35903,83),(35904,84);
+
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (135,'dimension_hole_catalog','b547a23615271b125c5d9b08a2106458957c0d3a4659091ddca430fe3dc054fb','applied','2026-07-27 00:00:00.000000');
 
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
 /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
@@ -3909,3 +3985,80 @@ INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
 -- Dump completed on 2026-07-16 20:52:30
+
+-- Qin-shi Tomb database-backed directed event-zone graph.
+CREATE TABLE `DUNGEON_TELEPORT_LINK` (
+  `SOURCE_TELEPORT_ID` int unsigned NOT NULL,
+  `TARGET_TELEPORT_ID` int unsigned NOT NULL,
+  `SERVICE` tinyint unsigned NOT NULL DEFAULT '1',
+  PRIMARY KEY (`SOURCE_TELEPORT_ID`),
+  KEY `IX_DUNGEON_TELEPORT_LINK_TARGET` (`TARGET_TELEPORT_ID`,`SERVICE`)
+);
+INSERT INTO `DUNGEON_TELEPORT_LINK` VALUES (55,56,1),(56,55,1),(57,59,1),(58,62,1),(59,57,1),(60,69,1),(61,93,1),(62,58,1),(63,121,1),(64,78,1),(65,73,1),(66,84,1),(67,72,1),(68,89,1),(69,60,1),(71,77,1),(74,70,1),(75,119,1),(76,82,1),(77,71,1),(81,83,1),(82,76,1),(83,81,1),(84,86,1),(85,72,1),(86,84,1),(88,90,1),(90,88,1),(92,94,1),(94,92,1),(95,100,1),(97,102,1),(100,95,1),(101,109,1),(102,97,1),(103,125,1),(104,87,1),(105,73,1),(106,114,1),(107,122,1),(108,98,1),(109,101,1),(110,60,1),(111,91,1),(112,80,1),(113,116,1),(114,106,1),(115,118,1),(116,113,1),(117,126,1),(118,115,1),(119,75,1),(120,96,1),(123,79,1),(124,99,1),(126,117,1),(127,132,1),(128,133,1),(129,134,1),(130,135,1),(132,127,1),(133,128,1),(134,129,1),(135,130,1),(137,59,1),(138,135,1),(139,126,1),(140,56,1);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (132,'qin_tomb_teleport_links','d13286555592f5d598910cc7f7932332bcd7038f61350851b7580eb8b1abb216','applied','2026-07-27 00:00:00.000000');
+
+INSERT INTO `DUNGEON_TELEPORT_LINK` VALUES (10,11,1),(11,10,1);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (133,'donwhang_stone_cave_teleport_links','7ca22760256984052ebc2076ddbde4b7397feb0e1f99dbc9235d1ac5e6cff7ee','applied','2026-07-27 00:00:00.000000');
+
+-- Database-backed dungeon teleport points (migration 134).
+CREATE TABLE `DUNGEON_TELEPORT_POINT` (`ID` INT UNSIGNED NOT NULL,`CODE_NAME` VARCHAR(128) NOT NULL,`REGION_ID` SMALLINT NOT NULL,`POS_X` FLOAT NOT NULL,`POS_Y` FLOAT NOT NULL,`POS_Z` FLOAT NOT NULL,`RADIUS` SMALLINT UNSIGNED NOT NULL,`WORLD_ID` SMALLINT NOT NULL DEFAULT 1,`SERVICE` TINYINT UNSIGNED NOT NULL DEFAULT 1,PRIMARY KEY (`ID`),UNIQUE KEY `UX_DUNGEON_TELEPORT_POINT_CODE` (`CODE_NAME`),KEY `IX_DUNGEON_TELEPORT_POINT_SERVICE` (`SERVICE`,`REGION_ID`));
+INSERT INTO `DUNGEON_TELEPORT_POINT` (`ID`,`CODE_NAME`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`RADIUS`,`WORLD_ID`) VALUES (10,'GATE_DUNGEON_DH_OUT',-32767,1011,0,-862,90,1),(11,'GATE_DUNGEON_DH_IN',27027,1814,452,1834,150,1),(56,'GATE_JINSI_IN',-32761,-1,-11,-3200,70,1),(57,'GATE_JINSI_01x01_12',-32761,2,223,6495,70,1),(58,'GATE_JINSI_02x01_03',-32762,-10468,0,5596,70,1),(59,'GATE_JINSI_02x01_09',-32762,-13674,0,5596,70,1),(60,'GATE_JINSI_02x02_03',-32762,-3858,0,5592,70,1),(62,'GATE_JINSI_02x02_09',-32762,-8259,0,5592,70,1),(69,'GATE_JINSI_02x03_09',-32762,-1628,0,5596,70,1),(70,'GATE_JINSI_02x03_12',-32762,-3,0,7197,70,1),(71,'GATE_JINSI_02x04_03',-32762,7827,0,5596,70,1),(72,'GATE_JINSI_02x04_06',-32762,6208,0,4035,70,1),(73,'GATE_JINSI_02x04_09',-32762,4610,0,5596,70,1),(75,'GATE_JINSI_02x05_03',-32762,13727,0,5596,70,1),(76,'GATE_JINSI_02x05_06',-32762,12124,0,4030,70,1),(77,'GATE_JINSI_02x05_09',-32762,10497,0,5596,70,1),(78,'GATE_JINSI_02x05_12',-32762,12124,0,7228,70,1),(79,'GATE_JINSI_02x06_03',-32762,13730,0,-21,70,1),(80,'GATE_JINSI_02x06_06',-32762,12124,0,-1587,70,1),(81,'GATE_JINSI_02x06_09',-32762,10496,0,-21,70,1),(82,'GATE_JINSI_02x06_12',-32762,12124,0,1633,70,1),(83,'GATE_JINSI_02x07_03',-32762,7809,0,-21,70,1),(84,'GATE_JINSI_02x07_09',-32762,4580,0,-21,70,1),(86,'GATE_JINSI_02x08_03',-32762,2197,0,-27,70,1),(87,'GATE_JINSI_02x08_06',-32762,-5,0,-2223,70,1),(88,'GATE_JINSI_02x08_09',-32762,-2203,0,-27,70,1),(89,'GATE_JINSI_02x08_12',-32762,-5,0,2173,70,1),(90,'GATE_JINSI_02x09_03',-32762,-4458,0,-21,70,1),(91,'GATE_JINSI_02x09_06',-32762,-6068,0,-1593,70,1),(92,'GATE_JINSI_02x09_09',-32762,-7704,0,-21,70,1),(93,'GATE_JINSI_02x09_12',-32762,-6068,0,1640,70,1),(94,'GATE_JINSI_02x10_03',-32762,-10470,0,-21,70,1),(95,'GATE_JINSI_02x10_06',-32762,-12072,0,-1587,70,1),(96,'GATE_JINSI_02x10_09',-32762,-13804,0,-27,70,1),(97,'GATE_JINSI_02x11_03',-32762,-9871,0,-5818,70,1),(98,'GATE_JINSI_02x11_06',-32762,-12073,0,-8021,70,1),(99,'GATE_JINSI_02x11_09',-32762,-14275,0,-5824,70,1),(100,'GATE_JINSI_02x11_12',-32762,-12072,0,-3616,70,1),(101,'GATE_JINSI_02x12_03',-32762,-4458,0,-5813,70,1),(102,'GATE_JINSI_02x12_09',-32762,-7684,0,-5813,70,1),(106,'GATE_JINSI_02x13_03-2',-32762,1569,0,-5818,70,1),(109,'GATE_JINSI_02x13_09-1',-32762,-1593,0,-5819,70,1),(110,'GATE_JINSI_02x13_09-2',-32762,-1567,0,-5817,70,1),(113,'GATE_JINSI_02x14_03',-32762,7809,0,-5814,70,1),(114,'GATE_JINSI_02x14_09',-32762,4581,0,-5814,70,1),(115,'GATE_JINSI_02x15_03',-32762,14325,0,-5818,70,1),(116,'GATE_JINSI_02x15_09',-32762,9924,0,-5821,70,1),(117,'GATE_JINSI_02x16_03',-32762,19707,0,-5814,70,1),(118,'GATE_JINSI_02x16_09',-32762,16479,0,-5815,70,1),(119,'GATE_JINSI_02x20_09',-32762,16480,0,5596,70,1),(121,'GATE_JINSI_02x30_12',-32762,-18152,0,1633,70,1),(122,'GATE_JINSI_02x40_06',-32762,18103,0,-1593,70,1),(125,'GATE_JINSI_02x50_12',-32762,-18150,0,-4157,70,1),(126,'GATE_JINSI_03x01',-32763,352,72,78,70,1),(127,'GATE_JINSI_03x02',-32763,19140,549,15784,70,1),(128,'GATE_JINSI_03x03',-32763,15855,549,-18952,70,1),(129,'GATE_JINSI_03x04',-32763,-19110,584,-16170,70,1),(130,'GATE_JINSI_03x05',-32763,-15711,549,19794,70,1),(132,'GATE_JINSI_04x02',-32764,18267,-98,14340,70,1),(133,'GATE_JINSI_04x03',-32764,15463,-126,-19780,70,1),(134,'GATE_JINSI_04x04',-32764,-17850,-126,-14329,70,1),(135,'GATE_JINSI_04x05',-32764,-15043,-98,19789,70,1),(136,'GATE_JINSI_05x01',-32765,-1335,-42,642,70,1),(141,'GATE_JINSI_04x01',-32764,-731,-62,-159,70,1);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (134,'dungeon_teleport_points','212df1765cb99c0726d2f73d941c8111b52f528a13185d425b4efb77ac120e67','applied','2026-07-27 00:00:00.000000');
+
+CREATE TABLE `REF_DIMENSION_HOLE` (`ITEM_REF_ID` INT UNSIGNED NOT NULL,`WORLD_ID` SMALLINT UNSIGNED NOT NULL,`SERVICE` TINYINT UNSIGNED NOT NULL DEFAULT 1,PRIMARY KEY (`ITEM_REF_ID`),UNIQUE KEY `UX_REF_DIMENSION_HOLE_WORLD` (`WORLD_ID`),CONSTRAINT `FK_REF_DIMENSION_HOLE_WORLD` FOREIGN KEY (`WORLD_ID`) REFERENCES `REF_GAME_WORLD` (`WORLD_ID`) ON DELETE CASCADE) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+INSERT INTO `REF_DIMENSION_HOLE` (`ITEM_REF_ID`,`WORLD_ID`) VALUES (35883,63),(35884,64),(35885,65),(35886,66),(35887,67),(35888,68),(35889,69),(35890,70),(35891,71),(35892,72),(35893,73),(35894,74),(35895,75),(35896,76),(35897,77),(35898,78),(35899,79),(35900,80),(35901,81),(35902,82),(35903,83),(35904,84);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (135,'dimension_hole_catalog','b547a23615271b125c5d9b08a2106458957c0d3a4659091ddca430fe3dc054fb','applied','2026-07-27 00:00:00.000000');
+
+-- Database-authoritative Media registry and Media-aligned discovery views.
+CREATE TABLE `MEDIA_CATALOG_MAPPING` (`MEDIA_PATTERN` VARCHAR(128) NOT NULL,`DATABASE_TABLES` VARCHAR(512) NOT NULL,`AUTHORITY` VARCHAR(32) NOT NULL,`DATABASE_UPDATE` VARCHAR(64) NOT NULL,`MEDIA_SYNC` VARCHAR(32) NOT NULL,`RECONCILE_MODE` VARCHAR(16) NOT NULL,`NOTES` VARCHAR(512) NOT NULL DEFAULT '',`SERVICE` TINYINT UNSIGNED NOT NULL DEFAULT 1,PRIMARY KEY (`MEDIA_PATTERN`),KEY `IX_MEDIA_CATALOG_MAPPING_AUTHORITY` (`AUTHORITY`,`SERVICE`),CONSTRAINT `CK_MEDIA_CATALOG_MAPPING_SYNC` CHECK (`MEDIA_SYNC` IN ('export-media','not-supported')),CONSTRAINT `CK_MEDIA_CATALOG_MAPPING_RECONCILE` CHECK (`RECONCILE_MODE` IN ('snapshot','overlay','none'))) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+INSERT INTO `MEDIA_CATALOG_MAPPING` (`MEDIA_PATTERN`,`DATABASE_TABLES`,`AUTHORITY`,`DATABASE_UPDATE`,`MEDIA_SYNC`,`RECONCILE_MODE`,`NOTES`) VALUES ('leveldata.txt','REF_LEVEL_DATA','database','import-reference','export-media','snapshot','Level, experience, skill points, and job experience'),('levelgold.txt','REF_LEVEL_DATA','database','import-reference','export-media','snapshot','DROP_GOLD_MIN and DROP_GOLD_MAX overlay'),('skilldata.txt','REF_SKILL_DATA','database','import-reference','export-media','snapshot','Manifest listing skill-data chunks'),('skilldata_*.txt','REF_SKILL_DATA','database','import-reference','export-media','snapshot','Enabled skill rows; encrypted chunks are generated output'),('magicoption.txt','REF_MAGIC_OPTION; REF_MAGIC_OPTION_APPLICABILITY','database','import-reference','not-supported','overlay','Magic-option definitions and applicability'),('magicoptionassign.txt','REF_DROP_MAGIC_OPTION_ASSIGN','database','import-reference','not-supported','snapshot','Item-family magic-option assignment slots'),('gameworlddata.txt','REF_GAME_WORLD','database','import-reference','not-supported','snapshot','World metadata and server lifecycle columns'),('refregion.txt','REF_GAME_WORLD_REGION','database','import-reference','not-supported','snapshot','Dimension Hole allowed regions'),('refeventreward.txt','REF_EVENT_REWARD','database','import-event-rewards','export-media','snapshot','Event reward headers'),('refeventrewarditems.txt','REF_EVENT_REWARD_ITEM','database','import-event-rewards','export-media','snapshot','Event reward items'),('refservereventreward*.txt','REF_SERVER_EVENT_REWARD*','database','import-server-event-rewards','export-media','snapshot','Server-event reward families'),('refoptionalteleport.txt','REF_OPTIONAL_TELEPORT','database','import-optional-teleports','not-supported','snapshot','Reverse-return destinations'),('refshopgroup.txt','REF_SHOP_GROUP_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Shop-group source and Item Mall placement input'),('refmappingshopgroup.txt','REF_MAPPING_SHOP_GROUP_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Shop-group mapping'),('refmappingshopwithtab.txt','REF_MAPPING_SHOP_WITH_TAB_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Shop-to-tab mapping'),('refshoptab.txt','REF_SHOP_TAB_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Shop tabs'),('refshopgoods.txt','REF_SHOP_GOODS_PACKAGE_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Package placement'),('refpackageitem.txt','REF_PACKAGE_ITEM_VSRO; ITEM_MALL_GOODS','database','import-item-mall','export-media','snapshot','Package definitions'),('refscrapofpackageitem.txt','REF_SCRAP_OF_PACKAGE_ITEM_VSRO; ITEM_MALL_GOODS','database','import-item-mall','not-supported','snapshot','Package members'),('refpricepolicyofitem.txt','REF_PRICE_POLICY_ITEM_VSRO; ITEM_MALL_GOODS','database','import-item-mall','export-media','snapshot','Package prices'),('refabilitybyitemoptleveldata.txt','REF_ABILITY_ITEM_OPT_LEVEL_VSRO','database','import-media-catalogs','export-media','snapshot','Typed option-level catalog'),('refmagicoptbyitemoptleveldata.txt','REF_MAGIC_OPT_ITEM_OPT_LEVEL_VSRO','database','import-media-catalogs','export-media','snapshot','Typed magic-option-level catalog'),('refsetitemgroup.txt','REF_SET_ITEM_GROUP_VSRO','database','import-media-catalogs','export-media','snapshot','Set-item groups'),('questdata.txt','REF_QUEST','database','import-vsro-quests','export-media','snapshot','Runtime quest headers'),('refqusetreward.txt','REF_QUEST_REWARD','database','import-vsro-quests','export-media','snapshot','Stock filename preserves the misspelling'),('refquestrewarditems.txt','REF_QUEST_REWARD_ITEM','database','import-vsro-quests','export-media','snapshot','Quest reward items'),('itemdata_*.txt','ITEMDATA','database','import-vsro-items','export-media','snapshot','Runtime item catalog'),('characterdata_*.txt','CHAR_REF_DATA','database','import-media-catalogs','not-supported','snapshot','Runtime character and monster reference catalog'),('teleportdata.txt','DUNGEON_TELEPORT_POINT; TELEPORT_POINT','superseded','migrations 000006 and 000134','not-supported','none','Agent points are database-backed; client synchronization is not implemented'),('teleportlink.txt','DUNGEON_TELEPORT_LINK; TELEPORT_LINK','superseded','migrations 000006 and 000132-000133','not-supported','none','Agent routes are database-backed; client synchronization is not implemented'),('teleportbuilding.txt','TELEPORT_BUILDING_SPAWN','database','import-media-catalogs','not-supported','overlay','Raw interaction bytes are preserved'),('gachaitemset.txt','GACHA_REWARD_POOL','candidate','not-normalized','not-supported','none','Useful source for replacing seeded reward rows'),('gachanpcmap.txt','GACHA operator mapping','candidate','not-normalized','not-supported','none','Useful source for replacing hardcoded Gacha NPC code names'),('npcpos.txt','SPAWN_REF_NESTS; SPAWN_REF_TACTICS','candidate','reference-database import','not-supported','none','Compare with authoritative spawn imports before normalization'),('hwanleveldata.txt','Hwan progression catalog','candidate','not-normalized','not-supported','none','Balance and progression data suitable for a typed table'),('questcontentsdata.txt','typed quest objective tables','candidate','import-vsro-quest-script','not-supported','none','Useful discovery source; strict script import remains authoritative'),('eventzonedata.txt','none','file-only','none','not-supported','none','Client and world geometry metadata'),('dungeoninfo.txt','none','file-only','none','not-supported','none','Client dungeon presentation metadata'),('text*.txt','none','client-only','none','not-supported','none','Localization and UI strings');
+CREATE OR REPLACE VIEW `MEDIA_LEVELDATA` AS SELECT * FROM `REF_LEVEL_DATA`;
+CREATE OR REPLACE VIEW `MEDIA_LEVELGOLD` AS SELECT `LEVEL`,`DROP_GOLD_MIN`,`DROP_GOLD_MAX` FROM `REF_LEVEL_DATA`;
+CREATE OR REPLACE VIEW `MEDIA_SKILLDATA` AS SELECT * FROM `REF_SKILL_DATA`;
+CREATE OR REPLACE VIEW `MEDIA_MAGICOPTION` AS SELECT * FROM `REF_MAGIC_OPTION`;
+CREATE OR REPLACE VIEW `MEDIA_MAGICOPTIONASSIGN` AS SELECT * FROM `REF_DROP_MAGIC_OPTION_ASSIGN`;
+CREATE OR REPLACE VIEW `MEDIA_GAMEWORLDDATA` AS SELECT * FROM `REF_GAME_WORLD`;
+CREATE OR REPLACE VIEW `MEDIA_REFREGION` AS SELECT * FROM `REF_GAME_WORLD_REGION`;
+CREATE OR REPLACE VIEW `MEDIA_QUESTDATA` AS SELECT * FROM `REF_QUEST`;
+CREATE OR REPLACE VIEW `MEDIA_REFQUSETREWARD` AS SELECT * FROM `REF_QUEST_REWARD`;
+CREATE OR REPLACE VIEW `MEDIA_REFQUESTREWARDITEMS` AS SELECT * FROM `REF_QUEST_REWARD_ITEM`;
+CREATE OR REPLACE VIEW `MEDIA_TELEPORTDATA_NORMAL` AS SELECT * FROM `TELEPORT_POINT`;
+CREATE OR REPLACE VIEW `MEDIA_TELEPORTDATA_DUNGEON` AS SELECT * FROM `DUNGEON_TELEPORT_POINT`;
+CREATE OR REPLACE VIEW `MEDIA_TELEPORTLINK_NORMAL` AS SELECT * FROM `TELEPORT_LINK`;
+CREATE OR REPLACE VIEW `MEDIA_TELEPORTLINK_DUNGEON` AS SELECT * FROM `DUNGEON_TELEPORT_LINK`;
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (136,'media_catalog_registry','500d29ac77ec4c44a2ad9fd2d74af39eb59613e8cab4e1cb413708aa9b21104b','applied','2026-07-27 00:00:00.000000');
+
+-- Shard migrations 137-140.
+INSERT INTO `SRO_SHARD`.`SPAWN_REF_TACTICS` (`TacticsID`,`ObjID`,`AIQoS`,`MaxStamina`,`MaxStaminaVariance`,`SightRange`,`AggressType`)
+SELECT 9000001,3861,0,0,0,0,0 FROM `SRO_SHARD`.`CHAR_REF_DATA` WHERE `RefObjID`=3861;
+INSERT INTO `SRO_SHARD`.`SPAWN_REF_NESTS` (`dwNestID`,`dwHiveID`,`dwTacticsID`,`nRegionDBID`,`fLocalPosX`,`fLocalPosY`,`fLocalPosZ`,`wInitialDir`,`nRadius`,`nGenerateRadius`,`nChampionGenPercentage`,`dwDelayTimeMin`,`dwDelayTimeMax`,`dwMaxTotalCount`,`btFlag`,`btRespawn`,`btType`)
+SELECT 9000001,NULL,9000001,26959,843.85,83.74,1138,24757,0,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=26959)
+UNION ALL SELECT 9000002,NULL,9000001,25000,1101.68,-32.28,854.3,16383,0,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=25000)
+UNION ALL SELECT 9000003,NULL,9000001,23687,1130.4,245.02,370.64,0,0,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=23687)
+UNION ALL SELECT 9000004,NULL,9000001,26265,932.34,-106.76,1569.58,16201,90,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=26265)
+UNION ALL SELECT 9000005,NULL,9000001,27244,52.14,180,1681.32,0,0,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=27244)
+UNION ALL SELECT 9000006,NULL,9000001,23088,449.84,862,1269.51,-24577,0,0,0,0,0,1,0,1,0 WHERE NOT EXISTS (SELECT 1 FROM `SRO_SHARD`.`SPAWN_REF_NESTS` n JOIN `SRO_SHARD`.`SPAWN_REF_TACTICS` t ON t.`TacticsID`=n.`dwTacticsID` WHERE t.`ObjID`=3861 AND n.`nRegionDBID`=23088);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (137,'so_ok_event_npc_spawn','a7d1d054edbb3bce8804b8b51deca4de7e133c7aaecdd31df53d346954714fad','applied','2026-07-27 00:00:00.000000');
+
+ALTER TABLE `SRO_SHARD`.`CHAR_ITEM_SERVICE` DROP CHECK `CK_CHAR_ITEM_SERVICE_KIND`, ADD COLUMN `EFFECT_VALUE` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `SKILL_EXPERIENCE_BONUS_PERCENT`, ADD CONSTRAINT `CK_CHAR_ITEM_SERVICE_KIND` CHECK (`SERVICE_KIND` IN (1,2,3,4,5,6,7,8));
+CREATE TABLE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` (`ITEM_REF_ID` INT UNSIGNED NOT NULL,`EFFECT_KIND` ENUM('skill_points','opt_level','hwan_duration','reinforce_weapon','reinforce_armor','reinforce_accessory') NOT NULL,`VALUE` INT UNSIGNED NOT NULL,`MAX_VALUE` INT UNSIGNED NOT NULL DEFAULT 0,`DURATION_SECONDS` INT UNSIGNED NOT NULL DEFAULT 0,`REQUIRES_TARGET_SLOT` TINYINT(1) NOT NULL DEFAULT 0,PRIMARY KEY (`ITEM_REF_ID`),CONSTRAINT `CK_EXPENDABLE_EFFECT_CONFIG_VALUE` CHECK (`VALUE` > 0)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT INTO `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` (`ITEM_REF_ID`,`EFFECT_KIND`,`VALUE`,`MAX_VALUE`,`DURATION_SECONDS`,`REQUIRES_TARGET_SLOT`) VALUES (36771,'skill_points',1,0,0,0),(39364,'opt_level',1,15,0,1),(39365,'opt_level',2,15,0,1),(39366,'opt_level',3,15,0,1),(23938,'hwan_duration',5,60,3600,0),(23939,'hwan_duration',8,60,3600,0),(23940,'hwan_duration',11,60,3600,0),(23941,'hwan_duration',14,60,3600,0),(3789,'reinforce_weapon',1,15,1800,0),(3790,'reinforce_weapon',2,15,1800,0),(3791,'reinforce_armor',1,15,1800,0),(3792,'reinforce_armor',2,15,1800,0),(3793,'reinforce_accessory',1,15,1800,0),(3794,'reinforce_accessory',2,15,1800,0);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (138,'expendable_effect_config','52cda6baeda67b401d1ac110d623f2606b20b699eae0a2d590bb440fe5a93ff9','applied','2026-07-27 00:00:00.000000');
+
+CREATE TABLE `SRO_SHARD`.`REF_ITEM_SUMMON_MONSTER` (`ITEM_REF_ID` INT UNSIGNED NOT NULL,`MONSTER_REF_ID` INT UNSIGNED NOT NULL,`RUNTIME_RARITY` TINYINT UNSIGNED NOT NULL DEFAULT 0,`MIN_PLAYER_LEVEL` SMALLINT UNSIGNED NOT NULL,`MAX_PLAYER_LEVEL` SMALLINT UNSIGNED NOT NULL,`WEIGHT` SMALLINT UNSIGNED NOT NULL DEFAULT 1,`SPAWN_RADIUS` SMALLINT UNSIGNED NOT NULL DEFAULT 100,`LIFETIME_SECONDS` SMALLINT UNSIGNED NOT NULL DEFAULT 300,PRIMARY KEY (`ITEM_REF_ID`,`MONSTER_REF_ID`),KEY `IX_REF_ITEM_SUMMON_MONSTER_LEVEL` (`ITEM_REF_ID`,`MIN_PLAYER_LEVEL`,`MAX_PLAYER_LEVEL`),CONSTRAINT `CK_REF_ITEM_SUMMON_MONSTER_LEVEL` CHECK (`MIN_PLAYER_LEVEL` > 0 AND `MAX_PLAYER_LEVEL` >= `MIN_PLAYER_LEVEL`),CONSTRAINT `CK_REF_ITEM_SUMMON_MONSTER_WEIGHT` CHECK (`WEIGHT` > 0),CONSTRAINT `CK_REF_ITEM_SUMMON_MONSTER_RADIUS` CHECK (`SPAWN_RADIUS` > 0),CONSTRAINT `CK_REF_ITEM_SUMMON_MONSTER_LIFETIME` CHECK (`LIFETIME_SECONDS` > 0),CONSTRAINT `CK_REF_ITEM_SUMMON_MONSTER_RARITY` CHECK (`RUNTIME_RARITY` IN (0,1,4,16,17,20))) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+INSERT INTO `SRO_SHARD`.`REF_ITEM_SUMMON_MONSTER` (`ITEM_REF_ID`,`MONSTER_REF_ID`,`RUNTIME_RARITY`,`MIN_PLAYER_LEVEL`,`MAX_PLAYER_LEVEL`,`WEIGHT`,`SPAWN_RADIUS`,`LIFETIME_SECONDS`) VALUES
+(9318,3921,0,10,24,1,100,300),(9318,1960,4,10,24,1,100,300),(9318,14926,16,10,24,1,100,300),(9318,3949,0,25,39,1,100,300),(9318,36081,4,25,39,1,100,300),(9318,36087,17,25,39,1,100,300),(9318,3927,0,40,59,1,100,300),(9318,2125,4,40,59,1,100,300),(9318,1996,20,40,59,1,100,300),(9318,3952,0,60,79,1,100,300),(9318,3799,4,60,79,1,100,300),(9318,3803,20,60,79,1,100,300),(9318,6104,0,80,89,1,100,300),(9318,3869,4,80,89,1,100,300),(9318,3874,16,80,89,1,100,300),(9318,9383,0,90,99,1,100,300),(9318,14972,4,90,99,1,100,300),(9318,14977,17,90,99,1,100,300),(9318,38183,1,100,120,1,100,300),(9318,38246,4,100,120,1,100,300),(9318,38191,20,100,120,1,100,300),
+(9319,3921,0,10,24,1,100,300),(9319,1960,4,10,24,1,100,300),(9319,14926,16,10,24,1,100,300),(9319,3949,0,25,39,1,100,300),(9319,36081,4,25,39,1,100,300),(9319,36087,17,25,39,1,100,300),(9319,3927,0,40,59,1,100,300),(9319,2125,4,40,59,1,100,300),(9319,1996,20,40,59,1,100,300),(9319,3952,0,60,79,1,100,300),(9319,3799,4,60,79,1,100,300),(9319,3803,20,60,79,1,100,300),(9319,6104,0,80,89,1,100,300),(9319,3869,4,80,89,1,100,300),(9319,3874,16,80,89,1,100,300),(9319,9383,0,90,99,1,100,300),(9319,14972,4,90,99,1,100,300),(9319,14977,17,90,99,1,100,300),(9319,38183,1,100,120,1,100,300),(9319,38246,4,100,120,1,100,300),(9319,38191,20,100,120,1,100,300);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (139,'item_summon_monster_catalog','a7857f6f15190a591cbbedbdec90762276c70fce4e812dc8dfecde4943db6e99','applied','2026-07-27 00:00:00.000000');
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (140,'non_unique_item_summons','4dbdbda2acfc7370f7b441baa6cf6c3d2a59c1031dd00c4d2d280b29887c470a','applied','2026-07-27 00:00:00.000000');
+
+-- Shard migration 141.
+INSERT INTO `SRO_SHARD`.`TELEPORT_POINT` (`ID`,`CODE_NAME`,`NPC_REF_OBJ_ID`,`REGION_ID`,`POS_X`,`POS_Y`,`POS_Z`,`WORLD_ID`,`SERVICE`) VALUES (2197,'STORE_TD_GATE',2197,24758,641,-3,728,1,1);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (141,'special_return_teleport_point','e0749511cbc506bcffb361df3a218187884a89dce789fc84816a8c3bc61e1d08','applied','2026-07-27 00:00:00.000000');
+
+-- Shard migration 142.
+ALTER TABLE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` ADD COLUMN `COOLDOWN_SECONDS` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `DURATION_SECONDS`;
+UPDATE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` SET `REQUIRES_TARGET_SLOT`=1 WHERE `EFFECT_KIND` IN ('reinforce_weapon','reinforce_armor','reinforce_accessory');
+UPDATE `SRO_SHARD`.`EXPENDABLE_EFFECT_CONFIG` SET `COOLDOWN_SECONDS`=1200 WHERE `EFFECT_KIND`='hwan_duration';
+UPDATE `SRO_SHARD`.`ITEMDATA` SET `TypeID_3`=13,`TypeID_4`=11 WHERE `ItemID` IN (39364,39365,39366);
+INSERT INTO `aegiscore_schema_migrations` (`version`,`name`,`checksum`,`state`,`applied_at`) VALUES (142,'expendable_target_and_cooldown','53829d45e69c03686ac979f00350d46ebd717126ce886b3ec2df0e8118a9706f','applied','2026-07-28 00:00:00.000000'),(143,'item_service_target_projection','c5d8565bd6c86bbc6b9a13bfddeb75a05b6dc425e5220320a88536e010a545b2','applied','2026-07-28 00:00:00.000000');

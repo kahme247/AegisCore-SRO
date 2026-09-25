@@ -13,6 +13,9 @@ func TestVSROItemCatalogUsesAuthoritativeCommonLink(t *testing.T) {
 	if !strings.Contains(selectItemMediaCatalog, "item.ID=common.LINK") || strings.Contains(selectItemMediaCatalog, "item.ID=common.ID") {
 		t.Fatalf("item Media join is not Link-based: %s", selectItemMediaCatalog)
 	}
+	if !strings.Contains(selectItemMediaCatalog, "itemdata.ItemID=common.ID") || !strings.Contains(selectItemMediaCatalog, "itemdata.Stack_Size") {
+		t.Fatalf("item Media export does not overlay authoritative ITEMDATA stack limits: %s", selectItemMediaCatalog)
+	}
 
 	data := validVSROItemLinkFixture()
 	if err := validateVSROItemLinks(data); err != nil {

@@ -233,76 +233,10 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_SCRIPT_REWARD_ITEM`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_SCRIPT_REWARD`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DELIVER_ITEM_ENTRY`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DELIVER_ITEM`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DIALOG_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_KILL_PLAYER_JOB_STATE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_KILL_PLAYER_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_COLLECTION_ITEM_SOURCE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_COLLECTION_ITEM_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_EXTENDED_KILL_TARGET`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_EXTENDED_KILL_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_TALISMAN_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DEPENDENCY_ENTRY`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DEPENDENCY_GROUP`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_NPC`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_METHOD`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_START_CONDITION`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_SCRIPT_POINT_REWARD`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_RACE_START_CONDITION`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_JOB_START_CONDITION`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_COMPLETION_POLICY`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_DELIVER_ITEM_EX`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_KILL_OBJECTIVE`"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM `REF_QUEST_SCRIPT_DECLARATION`"); err != nil {
+	if err = clearVSROQuestScriptTables(ctx, func(ctx context.Context, statement string) error {
+		_, execErr := tx.ExecContext(ctx, statement)
+		return execErr
+	}); err != nil {
 		return err
 	}
 	statement, err := tx.PrepareContext(ctx, `INSERT INTO REF_QUEST_SCRIPT_DECLARATION
@@ -321,8 +255,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import quest %s: %w", definition.CodeName, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("quest %s does not resolve exactly once in REF_QUEST", definition.CodeName)
 		}
 	}
@@ -343,8 +276,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import start condition %s/%d: %w", condition.QuestCodeName, condition.Variant, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("start condition %s/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant)
 		}
 	}
@@ -372,8 +304,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import start method %s/%d: %w", method.QuestCodeName, method.Variant, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("start method %s/%d does not resolve exactly once", method.QuestCodeName, method.Variant)
 		}
 		for index, npc := range method.NPCs {
@@ -381,8 +312,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import start NPC %s/%d/%d: %w", method.QuestCodeName, method.Variant, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("start NPC %s/%d/%d does not resolve exactly once", method.QuestCodeName, method.Variant, index)
 			}
 		}
@@ -413,8 +343,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import dependency group %s/%d/%d: %w", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("dependency group %s/%d/%d does not resolve exactly once", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex)
 		}
 		for index, dependencyCode := range dependency.QuestCodes {
@@ -423,8 +352,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import dependency %s/%d/%d/%d: %w", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("dependency %s/%d/%d/%d does not resolve exactly once", dependency.QuestCodeName, dependency.Variant, dependency.GroupIndex, index)
 			}
 		}
@@ -449,8 +377,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import completion policy %s/%d: %w", policy.QuestCodeName, policy.Variant, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("completion policy %s/%d does not resolve exactly once", policy.QuestCodeName, policy.Variant)
 		}
 	}
@@ -472,8 +399,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import job condition %s/%d/%d: %w", condition.QuestCodeName, condition.Variant, condition.ConditionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("job condition %s/%d/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant, condition.ConditionIndex)
 		}
 	}
@@ -495,8 +421,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import race condition %s/%d: %w", condition.QuestCodeName, condition.Variant, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("race condition %s/%d does not resolve exactly once", condition.QuestCodeName, condition.Variant)
 		}
 	}
@@ -518,8 +443,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import point reward %s/%d/%d: %w", reward.QuestCodeName, reward.Variant, reward.RewardIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("point reward %s/%d/%d does not resolve exactly once", reward.QuestCodeName, reward.Variant, reward.RewardIndex)
 		}
 	}
@@ -541,8 +465,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import kill objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("kill objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 	}
@@ -569,8 +492,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import deliver objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("deliver objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 	}
@@ -603,8 +525,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import deliver objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("deliver objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 		for index, item := range objective.Items {
@@ -613,8 +534,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import deliver item %s/%d/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("deliver item %s/%d/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index)
 			}
 		}
@@ -640,8 +560,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import dialog objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("dialog objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 	}
@@ -675,8 +594,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import kill-player objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("kill-player objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 		for index, jobState := range objective.JobStates {
@@ -684,8 +602,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import kill-player job state %s/%d/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("kill-player job state %s/%d/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index)
 			}
 		}
@@ -722,8 +639,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import collection-item objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("collection-item objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 		for index, source := range objective.Sources {
@@ -732,8 +648,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import collection-item source %s/%d/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("collection-item source %s/%d/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index)
 			}
 		}
@@ -765,8 +680,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import extended kill objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("extended kill objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 		for index, target := range objective.Targets {
@@ -774,8 +688,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import extended kill target %s/%d/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("extended kill target %s/%d/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex, index)
 			}
 		}
@@ -803,8 +716,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import talisman objective %s/%d/%d: %w", objective.QuestCodeName, objective.Variant, objective.MissionIndex, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("talisman objective %s/%d/%d does not resolve exactly once", objective.QuestCodeName, objective.Variant, objective.MissionIndex)
 		}
 	}
@@ -835,8 +747,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import reward %s/%d: %w", reward.QuestCodeName, reward.Variant, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("reward %s/%d does not resolve exactly once", reward.QuestCodeName, reward.Variant)
 		}
 		for index, item := range reward.Items {
@@ -844,8 +755,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 			if execErr != nil {
 				return fmt.Errorf("import reward item %s/%d/%d: %w", reward.QuestCodeName, reward.Variant, index, execErr)
 			}
-			affected, rowsErr = result.RowsAffected()
-			if rowsErr != nil || affected != 1 {
+			if !questScriptRowsAffectedExactlyOnce(result) {
 				return fmt.Errorf("reward item %s/%d/%d does not resolve exactly once", reward.QuestCodeName, reward.Variant, index)
 			}
 		}
@@ -887,8 +797,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 		if execErr != nil {
 			return fmt.Errorf("import reference fortress reward %s: %w", key.quest, execErr)
 		}
-		affected, rowsErr := result.RowsAffected()
-		if rowsErr != nil || affected != 1 {
+		if !questScriptRowsAffectedExactlyOnce(result) {
 			return fmt.Errorf("reference fortress reward %s does not resolve exactly once", key.quest)
 		}
 		if _, execErr = fortressRewardItemStatement.ExecContext(ctx, key.quest); execErr != nil {
@@ -912,7 +821,7 @@ func importVSROQuestScript(ctx context.Context, arguments []string, output io.Wr
 	if err != nil {
 		return fmt.Errorf("import ferry conversation reward: %w", err)
 	}
-	if affected, rowsErr := ferryRewardResult.RowsAffected(); rowsErr != nil || affected != 1 {
+	if !questScriptRowsAffectedExactlyOnce(ferryRewardResult) {
 		return fmt.Errorf("ferry conversation reward does not resolve exactly once")
 	}
 	if _, err = fortressRewardItemStatement.ExecContext(ctx, "QNO_WC_FERRY4_1"); err != nil {

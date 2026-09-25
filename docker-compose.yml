@@ -109,7 +109,6 @@ services:
       DB_SHARD_PW: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD to the sro database password}"
       AGENT_HOST: agent-server
       AGENT_DATA_PATH: ${AGENT_DATA_PATH:-/etc/aegiscore/Data/Data.pk2}
-      AGENT_DUNGEON_TELEPORT_DATA_PATH: /etc/aegiscore/media-textdata/teleportdata.txt
       AGENT_PRELINKED_NAVDATA_FILE: ${AGENT_PRELINKED_NAVDATA_FILE:-/etc/aegiscore/Data/prelinked_navdata.gob}
       AGENT_POSITION_CHECKPOINT_SECONDS: ${AGENT_POSITION_CHECKPOINT_SECONDS:-30}
       AGENT_TIMED_BUFF_DURATION: ${AGENT_TIMED_BUFF_DURATION:-0}
@@ -143,7 +142,6 @@ services:
       AGENT_MANAGEMENT_TLS_CLIENT_CA_FILE: /run/secrets/aegiscore-management/smc-ca.pem
     volumes:
     - ./Data:/etc/aegiscore/Data:ro
-    - ./Media/Media/server_dep/silkroad/textdata/teleportdata.txt:/etc/aegiscore/media-textdata/teleportdata.txt:ro
     - ./.local/session-traces/agent:/var/log/aegis/session-traces
     - "${SRO_AGENT_TLS_DIR:?Set SRO_AGENT_TLS_DIR to the Agent certificate directory}:/run/secrets/aegiscore:ro"
     - "${SRO_AGENT_MANAGEMENT_TLS_DIR:-./.local/smc-agent-tls}:/run/secrets/aegiscore-management:ro"
@@ -231,6 +229,9 @@ services:
       SMC_SESSION_TTL: "${SMC_SESSION_TTL:-8h}"
       SMC_COOKIE_SECURE: "${SMC_COOKIE_SECURE:-0}"
       SMC_AUDIT_PATH: "/var/lib/aegiscore-smc/audit.jsonl"
+      SMC_MEDIA_EXPORT_ROOT: "/exports"
+      SMC_MEDIA_EXPORT_DISPLAY_ROOT: "${SRO_MEDIA_EXPORT_DIR:-${PWD}/.local/media-exports}"
+      SMC_MEDIA_EXPORT_BINARY: "./sro-data"
       SMC_GATEWAY_ADDRESS: "gateway-server:15779"
       SMC_AGENT_ADDRESS: "agent-server:15882"
       SMC_AGENT_MANAGEMENT_ENABLED: "${SMC_AGENT_MANAGEMENT_ENABLED:-0}"
@@ -242,6 +243,7 @@ services:
     volumes:
       - smc-data:/var/lib/aegiscore-smc
       - "${SRO_SMC_TLS_DIR:-./.local/smc-tls}:/run/secrets/aegiscore-smc:ro"
+      - "${SRO_MEDIA_EXPORT_DIR:-./.local/media-exports}:/exports"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:15900/healthz >/dev/null"]
       interval: 10s

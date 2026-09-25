@@ -115,10 +115,10 @@ func loadMediaExportCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCata
 }
 
 func loadPassthroughMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalog, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT catalog.FILE_NAME,rows.RAW_FIELDS
+	rows, err := tx.QueryContext(ctx, `SELECT catalog.FILE_NAME,catalog_row.RAW_FIELDS
         FROM SRO_SHARD.REF_MEDIA_TEXT_CATALOG catalog
-        LEFT JOIN SRO_SHARD.REF_MEDIA_TEXT_CATALOG_ROW rows ON rows.FILE_NAME=catalog.FILE_NAME
-        ORDER BY catalog.FILE_NAME,rows.ROW_ORDINAL`)
+        LEFT JOIN SRO_SHARD.REF_MEDIA_TEXT_CATALOG_ROW catalog_row ON catalog_row.FILE_NAME=catalog.FILE_NAME
+        ORDER BY catalog.FILE_NAME,catalog_row.ROW_ORDINAL`)
 	if err != nil {
 		return nil, fmt.Errorf("query passthrough Media catalogs: %w", err)
 	}
@@ -182,8 +182,11 @@ func loadEventMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatal
 }
 
 const selectItemMediaCatalog = `SELECT common.ID,common.SERVICE,common.CODE_NAME,common.TYPE_ID_1,
-        common.TYPE_ID_2,common.TYPE_ID_3,common.TYPE_ID_4,common.RAW_DATA,item.SET_ID,item.ITEM_CLASS,item.RAW_DATA
-		FROM SRO_SHARD.REF_OBJ_COMMON_VSRO common JOIN SRO_SHARD.REF_OBJ_ITEM_VSRO item ON item.ID=common.LINK
+        common.TYPE_ID_2,common.TYPE_ID_3,common.TYPE_ID_4,common.RAW_DATA,item.SET_ID,item.ITEM_CLASS,item.RAW_DATA,
+        COALESCE(NULLIF(itemdata.Stack_Size,0),1)
+		FROM SRO_SHARD.REF_OBJ_COMMON_VSRO common
+		JOIN SRO_SHARD.REF_OBJ_ITEM_VSRO item ON item.ID=common.LINK
+		JOIN SRO_SHARD.ITEMDATA itemdata ON itemdata.ItemID=common.ID
 		WHERE common.SERVICE=1 AND common.TYPE_ID_1=3 ORDER BY common.ID`
 
 func loadItemMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalog, error) {
@@ -194,9 +197,9 @@ func loadItemMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalo
 	defer rows.Close()
 	chunks := make(map[uint64][][]string)
 	for rows.Next() {
-		var id, service, type1, type2, type3, type4, setID, itemClass uint64
+		var id, service, type1, type2, type3, type4, setID, itemClass, stackSize uint64
 		var codeName, commonRaw, itemRaw string
-		if err := rows.Scan(&id, &service, &codeName, &type1, &type2, &type3, &type4, &commonRaw, &setID, &itemClass, &itemRaw); err != nil {
+		if err := rows.Scan(&id, &service, &codeName, &type1, &type2, &type3, &type4, &commonRaw, &setID, &itemClass, &itemRaw, &stackSize); err != nil {
 			return nil, fmt.Errorf("scan item Media data: %w", err)
 		}
 		common, err := decodeRawObject(commonRaw)
@@ -209,7 +212,7 @@ func loadItemMediaCatalogs(ctx context.Context, tx *sql.Tx) ([]mediaExportCatalo
 		}
 		common["ID"], common["Service"], common["CodeName128"] = id, service, codeName
 		common["TypeID1"], common["TypeID2"], common["TypeID3"], common["TypeID4"] = type1, type2, type3, type4
-		item["SetID"], item["ItemClass"] = setID, itemClass
+		item["MaxStack"], item["SetID"], item["ItemClass"] = stackSize, setID, itemClass
 		fields, err := rawObjectFields(common, itemMediaColumns[:57])
 		if err != nil {
 			return nil, fmt.Errorf("item %d common fields: %w", id, err)
