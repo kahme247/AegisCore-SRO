@@ -10,14 +10,29 @@ add_library(Aegis SHARED
     src/auth/launch_context.cpp
     src/compat/navigation_policy.cpp
     src/core/runtime.cpp
+    src/compat/temporary_enhancement_tooltip.cpp
     src/network/gateway_login.cpp
+    src/network/character_auto_select.cpp
 )
 
 target_compile_features(Aegis PRIVATE cxx_std_17)
 target_compile_definitions(Aegis PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(Aegis PRIVATE src)
 target_link_libraries(Aegis PRIVATE bcrypt)
+
+add_custom_target(DeployAegis
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:Aegis>" "${CMAKE_SOURCE_DIR}/../../VSRO_Client/AegisLauncher.dll"
+    DEPENDS Aegis
+)
 set_target_properties(Aegis PROPERTIES OUTPUT_NAME "Aegis")
+if(MSVC)
+    target_compile_options(Aegis PRIVATE
+        $<$<CONFIG:Release>:/O2 /Os /GL /Gy /Gw /GF>
+    )
+    target_link_options(Aegis PRIVATE
+        $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
+    )
+endif()
 
 option(AEGIS_ENABLE_DEVKIT_INTEGRATION "Build the guarded reconstructed DevKit integration" OFF)
 set(AEGIS_DEVKIT_SOURCE_DIR "" CACHE PATH "Path to DevKit_DLL_reconstructed")

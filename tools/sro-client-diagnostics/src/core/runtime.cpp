@@ -2,6 +2,7 @@
 
 #include "auth/launch_context.h"
 #include "compat/navigation_policy.h"
+#include "compat/temporary_enhancement_tooltip.h"
 #ifdef AEGIS_WITH_DEVKIT
 #include "compat/devkit_runtime.h"
 #endif
@@ -18,6 +19,7 @@ bool Initialize(HINSTANCE module) {
     DisableThreadLibraryCalls(module);
     auth::InitializeFromLauncher();
     compat::InstallNavigationPolicy();
+    compat::InstallTemporaryEnhancementTooltip();
     diagnostics::InstallCrashIntegration();
     network::InstallGatewayAutoLogin();
 #ifdef AEGIS_WITH_DEVKIT

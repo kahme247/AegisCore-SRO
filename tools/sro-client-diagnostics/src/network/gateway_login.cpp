@@ -1,5 +1,6 @@
 #include "network/gateway_login.h"
 
+#include "network/character_auto_select.h"
 #include "auth/launch_context.h"
 
 #include <windows.h>
@@ -63,6 +64,7 @@ void CALLBACK LoginTimer(HWND window, UINT, UINT_PTR timerId, DWORD) {
     if (!auth::Take(context)) {
         return;
     }
+    character_auto_select::Schedule(context.characterName);
     char tokenPassword[auth::kTokenBytes + 5]{};
     const int written = _snprintf_s(tokenPassword, sizeof(tokenPassword), _TRUNCATE, "@A1:%s", context.token);
     if (written > 4) {

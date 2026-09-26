@@ -14,12 +14,103 @@ The runtime is organized by responsibility beneath `src/`:
 - `network/` owns pinned-client packet boundaries, including the signature-
   checked automatic Gateway login on the client UI thread;
 - `client_trace.*` owns the bounded, credential-redacting trace ring;
-- future `compat/` modules are registered only through
-  the core composition root.
+- `compat/` owns signature-checked client compatibility hooks, including
+  navigation policy and temporary-enhancement tooltip rendering; modules are
+  registered only through the core composition root.
+
+## Source map
+
+The maintained source root is:
+
+```text
+tools/sro-client-diagnostics/
+```
+
+The temporary weapon, armor, and accessory enhancement tooltip is implemented
+in:
+
+```text
+src/compat/temporary_enhancement_tooltip.cpp
+src/compat/temporary_enhancement_tooltip.h
+```
+
+`src/core/runtime.cpp` calls `InstallTemporaryEnhancementTooltip()` during
+Aegis initialization. `CMakeLists.txt` registers the implementation in the
+`Aegis` shared-library target.
+
+The module installs two verified runtime changes against the pinned 32-bit
+vSRO 1.188 client:
+
+1. An equipment-compatible `0x3040` kind-gate patch. This permits the
+   server-provided `flags = 0x82` update to project the temporary option level
+   and store the expiration on weapon, armor, and accessory `CSOItem` objects.
+2. A hook at `sro_client.exe:0x00776D20`, the helper-bubble line builder used
+   by item tooltips.
+
+The tooltip hook resolves:
+
+```text
+CIFHelperBubbleWindow +0x7DC -> owner CIFSlotWithHelp
+CIFSlotWithHelp       +0x390 -> CSOItem
+```
+
+It uses the native client accessors:
+
+```text
+0x008BA580 -> timed-state flag
+0x008BA5B0 -> absolute expiration at CSOItem +0x60/+0x64
+```
+
+For an active timed item, it subtracts the current Unix time in milliseconds
+from the absolute expiration and appends one gold line:
+
+```text
+Temporary enhancement: 10h 15m remaining
+Temporary enhancement: 1d 02h 14m remaining
+```
+
+The first live implementation incorrectly formatted the absolute expiration as
+a duration and displayed an epoch-sized value such as `20662d`. Do not remove
+the Unix-millisecond subtraction.
+
+The hook affects item helper bubbles whose `CSOItem` contains the timed fields.
+The owner's ordinary equipment tooltip is verified. A counterparty trade
+tooltip is not guaranteed until the exchange item record is verified to carry
+the projected option level and expiration.
+
+### Pinned-client compatibility
+
+All addresses, structure offsets, and expected instruction bytes above are
+specific to the pinned vSRO 1.188 `sro_client.exe`:
+
+```text
+SHA-256: 281345245694AECF1B73F845FD410F3F0A041E29CFEE6457323C4E67AD6B9D48
+Image base: 0x00400000
+```
+
+`temporary_enhancement_tooltip.cpp` stores image-relative RVAs and verifies the
+original bytes with `memcmp` before writing. A mismatch fails closed; never
+remove the byte guards to support another client build.
+
+For a different executable, re-derive every value in IDA:
+
+1. Locate `CIFSlotWithHelp::SetSlotData` and follow the item timed-state and
+   expiration calls to recover the equivalents of `0x008BA580` and
+   `0x008BA5B0`.
+2. Confirm the expiration getter's field offsets and time basis at runtime.
+3. Locate the helper-bubble line append method reached by equipment tooltips;
+   do not reuse `0x007A3BD0`, which is not the equipment-hover path.
+4. Recover `CIFHelperBubbleWindow::m_ownerWindow` and
+   `CIFSlotWithHelp::m_pItem` from actual memory accesses.
+5. Re-trace the `0x3040` decoder's item-kind gate and its branch targets.
+6. Replace the RVAs and expected byte arrays together, then verify a weapon,
+   armor, and accessory tooltip in a disposable client.
 
 ## Build and test
 
-The current milestone provides the bounded trace ring and `.actrace` sidecar writer. It has no live hook installed yet, so it cannot affect normal game traffic. The next milestone will connect the ring only to client-verified plaintext packet boundaries.
+The maintained runtime contains live, signature-checked compatibility,
+authentication, diagnostics, and tooltip hooks. Every new hook must verify the
+pinned bytes before mutation and fail closed when the client does not match.
 
 Build from `go-sro` in an x86 Visual Studio developer shell:
 
@@ -61,8 +152,14 @@ The current automatic test build uses the proven lifecycle trio. Macro
 bootstrap at `0x00DB95CC` is disabled after a controlled launch reached
 character selection and crashed in host runtime-type handling at `0x00B94B4C`.
 
-Do not copy the candidate over `VSRO_Client/Aegis.dll` until a disposable
-client test has reviewed `AegisDevKit.log` and the normal crash sidecars.
+Do not copy an untested candidate over `VSRO_Client/Aegis.dll`. The deployed
+client uses the full DevKit-enabled output:
+
+```text
+.local/sro-client-diagnostics-devkit-build/Release/Aegis.dll
+```
+
+The smaller plain-build DLL omits the reconstructed DevKit integration.
 
 The launcher injects only `Aegis.dll`. For manual diagnostic arming, launch the
 client normally and run:

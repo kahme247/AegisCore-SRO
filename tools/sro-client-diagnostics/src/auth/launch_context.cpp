@@ -57,6 +57,7 @@ bool InitializeFromLauncher() {
     g_context.contentId = local.contentId;
     std::memcpy(g_context.username, local.username, sizeof(g_context.username));
     std::memcpy(g_context.token, local.token, sizeof(g_context.token));
+    std::memcpy(g_context.characterName, local.characterName, sizeof(g_context.characterName));
     g_hasContext = true;
     ReleaseSRWLockExclusive(&g_contextLock);
     SecureZeroMemory(&local, sizeof(local));

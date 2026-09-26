@@ -6,10 +6,10 @@
 namespace aegis::auth {
 
 constexpr std::uint32_t kLaunchContextMagic = 0x314C4341; // "ACL1"
-constexpr std::uint16_t kLaunchContextVersion = 1;
+constexpr std::uint16_t kLaunchContextVersion = 2;
 constexpr std::size_t kUsernameBytes = 64;
 constexpr std::size_t kTokenBytes = 64;
-
+constexpr std::size_t kCharacterNameBytes = 64;
 #pragma pack(push, 1)
 struct SharedLaunchContext {
     std::uint32_t magic;
@@ -20,16 +20,18 @@ struct SharedLaunchContext {
     std::uint8_t reserved;
     char username[kUsernameBytes];
     char token[kTokenBytes];
+    char characterName[kCharacterNameBytes];
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedLaunchContext) == 140, "launcher contract layout changed");
+static_assert(sizeof(SharedLaunchContext) == 204, "launcher contract layout changed");
 
 struct LaunchContext {
     std::uint16_t shardId{};
     std::uint8_t contentId{};
     char username[kUsernameBytes]{};
     char token[kTokenBytes]{};
+    char characterName[kCharacterNameBytes]{};
 };
 
 // Reads and erases the current process's launcher mapping. A missing mapping is

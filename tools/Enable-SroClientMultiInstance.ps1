@@ -19,8 +19,12 @@ $resolvedPath = (Resolve-Path -LiteralPath $ClientPath).Path
 $hash = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash
 $bytes = [System.IO.File]::ReadAllBytes($resolvedPath)
 
-if ($hash -eq $patchedHash -and $bytes[$patchOffset] -eq $patchedByte) {
-    Write-Host "Multi-instance patch is already applied: $resolvedPath"
+if ($bytes[$patchOffset] -eq $patchedByte) {
+    if ($hash -eq $patchedHash) {
+        Write-Host "Multi-instance patch is already applied: $resolvedPath"
+    } else {
+        Write-Host "Multi-instance branch is already enabled in a modified client: $resolvedPath"
+    }
     exit 0
 }
 

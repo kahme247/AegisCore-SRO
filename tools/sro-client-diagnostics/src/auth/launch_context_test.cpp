@@ -26,6 +26,7 @@ int main() {
     shared->contentId = 22;
     std::memcpy(shared->username, "alice", sizeof("alice"));
     std::memcpy(shared->token, "test-launch-token", sizeof("test-launch-token"));
+    std::memcpy(shared->characterName, "CherEU", sizeof("CherEU"));
 
     const bool initialized = aegis::auth::InitializeFromLauncher();
     const bool erased = shared->magic == 0 && shared->token[0] == '\0';
@@ -34,7 +35,8 @@ int main() {
     const bool taken = aegis::auth::Take(context);
     const bool valid = context.shardId == 1 && context.contentId == 22 &&
                        std::strcmp(context.username, "alice") == 0 &&
-                       std::strcmp(context.token, "test-launch-token") == 0;
+                       std::strcmp(context.token, "test-launch-token") == 0 &&
+                       std::strcmp(context.characterName, "CherEU") == 0;
     SecureZeroMemory(&context, sizeof(context));
     const bool singleUse = !aegis::auth::Take(context);
 
