@@ -1002,4 +1002,7 @@ Do not yet claim as exact:
   other exceptional result subclasses;
 - one-to-one meanings for all `0x30xx` result values;
 - synchronous SQL persistence for ordinary casts;
+- `rgmd` effect semantics or wire representation: its four-word descriptor is
+  parsed by `0x00587630` and registered through the `RefSkill +0x418` branch
+  in `0x00594AC0`, but its runtime consumer remains unrecovered.
 - applicability of these addresses and layouts to the separate 1.274 binary.

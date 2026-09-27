@@ -865,17 +865,15 @@ if result != 1:
 
 if result == 1:
     u8  encodedSlot       // the handler derives encodedSlot - 0x0D for the inventory UI
+    u16 remainingAmount   // zero removes the item; nonzero updates its stack
     u16 packedTypeID      // the handler uses its TypeID bit fields for action/UI branches
-    u16 actionOrState      // only the observed zero/nonzero split is established
     inventory/item state transitions
 ```
 
 The listing proves three reads after the success byte: one byte, then two
-16-bit values. The first is used as an encoded inventory slot, the second is
-consumed as a packed TypeID, and the final value controls the observed
-zero/nonzero action/UI split. These are wire roles, not proof that the final
-field is universally an amount, item ID, or action code. The entry point also
-dispatches UI/inventory updates based on TypeID bit fields.
+16-bit values. The first is used as an encoded inventory slot. The second
+drives the final zero/remove versus nonzero/stack-update branch. The final
+value is consumed as the packed TypeID for action and UI dispatch.
 
 Raw evidence: [`0087A7B0_CNetProcessIn__OnB04C.c`](../../analysis/decompiled/client-quest-30d5/0087A7B0_CNetProcessIn__OnB04C.c)
 and [`0087A7B0_listing.txt`](../../analysis/decompiled/item-use-client-exact/0087A7B0_listing.txt).

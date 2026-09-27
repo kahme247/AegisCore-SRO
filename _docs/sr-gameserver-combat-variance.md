@@ -134,12 +134,14 @@ passive-skill recalculation all update this separate accumulator.
 ### `gdmp` and `pdmp`
 
 The parser stores `gdmp` at offset `0x340` and `pdmp` at `0x344`. In
-`0x00594AC0`, only records whose fourth operand equals `2` participate. Their
-two magnitude operands are negated and installed as type-`2`/type-`1`
-modifiers; the resulting physical/magical outgoing values are read through
-slots `0xB2` and `0xB3`. `0x00596A40` removes the same values with the
-opposite update. Target-side `0xB4`/`0xB5` use the separate abnormal-status
-path documented below.
+`0x00594AC0`, only records whose fourth operand equals `2` participate. Both
+payload magnitudes are negated and passed to the native modifier installer:
+`gdmp` uses installer type `2`; `pdmp` uses type `1`. `0x00596A40` reverses
+those installations. This proves installation and teardown, but not a
+one-to-one mapping from the two payload words to the emulator's physical and
+magical defense or outgoing-damage fields. They remain unsupported rather than
+being assigned by descriptor-name inference. Target-side `0xB4`/`0xB5` use
+the separate abnormal-status path documented below.
 
 ### Final-factor storage
 
@@ -224,6 +226,82 @@ are packed effect sequences. For example, the TestIn rows for
 magnitude. The `tisc` sequence contains no literal `0xB4`/`0xB5` slot
 selector in SQL because the fixed mapping is implemented by callback
 `0x004A50B0`.
+
+### Darkness (`0x646E`) stat lifecycle
+
+The server skill parser at `0x00587813` recognizes parameter token `0x646E`
+(`25710`), retains exactly four operands at skill offset `+0x44C`, and advances
+past duration, admission chance, abnormal level, and magnitude. The abnormal
+builder at `0x00590680` consumes those fields, creates record type `13`, stores
+the authored magnitude at record offset `+0x48`, and publishes abnormal mask
+bit `0x00002000`.
+
+The type-13 callback registered by `0x004A40C0` is `0x004A4E20`. On
+application it negates the unsigned magnitude at record `+0x48`, commits it to
+the character stat container through `0x004B3510`, and invokes the owning
+player's virtual recalculation method at vtable offset `+0x538`. On removal it
+deletes the same owner/key contribution through `0x004B3570` and invokes the
+same recalculation method. Darkness is therefore an absolute Hit Rate
+reduction, not a percentage, but it is also a client-visible derived-stat
+change rather than a server-only variance modifier.
+
+The pinned client independently parses `0x646E` at `0x009BBE23`, retains its
+four operands at skill offset `+0x264`, and registers opcode `0x303D` to
+`0x00880F80` at `0x0087021A`. That handler overwrites the local character's
+four attack values, two defenses, Hit Rate at payload offset `20`, Parry Rate,
+maximum HP/MP, Strength, and Intellect. A server implementation must therefore
+send `0x303D` when Darkness is applied, removed, cured, or expires; publishing
+only the `0x3057` abnormal mask leaves the character window stale.
+
+### Remaining stat-changing abnormal callbacks
+
+The adjacent abnormal callbacks distinguish client-visible derived statistics
+from server-only combat factors:
+
+- Shock's callback `0x004A4850` reads its magnitude from record `+0x28`,
+  clamps `100 - magnitude` to `[0,100]`, commits that remaining-Parry factor to
+  stat slot `9`, and invokes the player recalculation method at vtable
+  `+0x538`. The `0x6573`/`25971` operand order is duration, admission chance,
+  and magnitude; treating the duration as Shock power or hard-coding a
+  one-half factor is incorrect.
+- Physical Defense Down callback `0x004A5160` and Magical Defense Down callback
+  `0x004A5240` read magnitude from record `+0x34`. Both cap the reduction to
+  `base - 30% of base`, preserving a minimum 30% of the pre-debuff defense,
+  mutate stat slots `5` and `6` respectively, and invoke vtable `+0x538` on
+  application and removal.
+- Short Sight callback `0x004A4C60` mutates server range factor slot `183`
+  without invoking the player recalculation method. Disease callback
+  `0x004A4F20` similarly mutates abnormal-admission slot `169` only.
+- Attack Down callback `0x004A5000` mutates physical/magical attack factor
+  slots `178/179` but does not invoke vtable `+0x538`; it remains a combat
+  factor rather than a `0x303D` character-window rewrite.
+
+Accordingly, Shock, Hit/Parry Down, physical/magical Defense Down, and Darkness
+must refresh the applicable `0x303D` fields on application and teardown.
+Short Sight, Disease, and Attack Down must not be fabricated into unrelated
+displayed fields.
+
+### Periodic and timing abnormal callbacks
+
+The pinned `sro_client.exe` abnormal actor table exposes two additional runtime
+contracts:
+
+- Dull callback `0x004A4A90` installs `75%` in movement stat slots `23/24` and
+  `125%` in action-time slot `140`; removal restores all three to `100%`.
+  Dull therefore reduces walk/run speed by one quarter and stretches attack
+  and skill timing by one quarter. It is not the same one-half speed/two-times
+  timing effect as Frostbite callback `0x004A45D0`.
+- Poison callback `0x004A4940` evaluates after `2000 ms`, takes the authored
+  damage from record `+0x38`, and caps the result so the afflicted actor keeps
+  at least one HP. Bleed callback `0x004A4CC0` uses the record interval at
+  `+0x10` (the builder default is `2000 ms`), damage at `+0x38`, and an
+  absolute physical-and-magical defense reduction at `+0x40`. Bleed invokes
+  the same derived-stat recalculation boundary on application and removal.
+
+The Bleed builder stores operand two as the abnormal level, operand three as
+periodic damage, operand four as the dual-defense reduction, and operand five
+as admission chance. Collapsing damage and defense reduction into one field,
+or running all periodic states on a five-second cadence, loses stock behavior.
 
 ## Runtime policy
 

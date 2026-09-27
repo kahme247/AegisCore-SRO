@@ -54,3 +54,16 @@
 logs.txt
 
 config.json
+agent-server/handler/character/.local/session-traces/
+agent-server/handler/lobby/.local/session-traces/
+framework/server/.local/session-traces/session-traces/
+%SystemDrive%
+agent-server/handler/logout/.local/session-traces/
+agent-server/manager/.local/session-traces/
+agent-server/management/.local/session-traces/
+framework/server/.local/session-traces/
+gateway-server/handler/.local/session-traces/
+agent-server/service/.local/session-traces/
+.vscode/settings.json
+Error & Issues.xlsx
+/Error & Issues.csv/

@@ -1,4 +1,4 @@
-No,Issue,States
+﻿No,Issue,States
 1,"when moving item to storage from the inv it feels lagy
 items like active pet should not move out of inv !! ",done
 2,"active item should not move out of storage
@@ -28,80 +28,88 @@ use ide on the client and sr_gameserver for the correct handling",
 19,trace option does not work,
 20,when the cher attacked an mob while in a party it crashed the game,done
 21,EXP/GOLD/loot distrupution is not correct ,
-22,,
-23,,
-24,,
-25,,
-26,,
-27,,
-28,,
-29,,
-30,,
-31,,
-32,,
-33,,
-34,,
-35,,
-36,,
-37,,
-38,,
-39,,
-40,,
-41,,
-42,,
-43,,
-44,,
-45,,
-46,,
-47,,
-48,,
-49,,
-50,,
-51,,
-52,,
-53,,
-54,,
-55,,
-56,,
-57,,
-58,,
-59,,
-60,,
-61,,
-62,,
-63,,
-64,,
-65,,
-66,,
-67,,
-68,,
-69,,
-70,,
-71,,
-72,,
-73,,
-74,,
-75,,
-76,,
-77,,
-78,,
-79,,
-80,,
-81,,
-82,,
-83,,
-84,,
-85,,
-86,,
-87,,
-88,,
-89,,
-90,,
-91,,
-92,,
-93,,
-94,,
-95,,
-96,,
-97,,
-98,,
+22,"Tooling: lean-ctx could not read skill files outside the project root, and the first raw/executor fallbacks were blocked or incompatible; direct ctx_shell raw reads succeeded.",done
+23,"Tooling: the evidence-first project snapshot helper was missing at the workspace-relative path, then the bundled helper exceeded the executor timeout and was blocked by the shell allowlist; clean go-sro status was checked directly.",need to check
+24,"Tooling: CSV parser verification through Import-Csv was blocked by the lean-ctx shell allowlist, and the executor fallback stripped PowerShell variables; the exact Git diff remained available for verification.",done
+25,"An unrelated untracked Go file, codex_refactor_audit.go, appeared after the clean worktree baseline during documentation verification and disappeared before final status; it was left untouched.",done
+26,"Targeted refactor debt: combat, item-use, and Agent composition contain oversized high-branch functions; focused tests still pass.",need to check
+27,Tooling: lean-ctx blocked the workspace-local Go version command because .tools/go/bin/go.exe is not allowlisted; the required version remains documented as Go 1.26.5.,need to check
+28,Tooling: repository-composition discovery initially targeted missing agent-server/database/repositories.go; the maintained file is agent-server/database/gameplay_repositories.go.,done
+29,"Tooling: focused Go test execution was blocked by the executor's shell quoting, working-directory, and module-cache environment handling; no test result was produced.",need to check
+30,Tooling: lean-ctx ctx_read rejected installed skill files outside the active project root; the documented lean-ctx raw fallback was used.,done
+31,Tooling: lean-ctx blocked inline Python -c while reading installed skill instructions; the exact raw Get-Content path succeeded.,done
+32,"Tooling: ctx_execute used cmd.exe semantics, so PowerShell Get-Content was unavailable and direct type path attempts failed; lean-ctx raw completed the reads.",done
+33,Tooling: ctx_shell blocked the conditional PowerShell junction command; the sanctioned ctx_execute fallback created the node_modules junction.,done
+34,Tooling: lean-ctx blocked the graphify executable because it was not allowlisted; uv tool run provided the allowed fallback.,done
+35,Tooling: ctx_execute could not resolve graphify from its isolated PATH; execution moved to uv tool run.,done
+36,Tooling: ctx_execute could not access the absolute graphify.exe path from its sandbox; uv tool run remained available.,done
+37,Tooling: lean-ctx blocked Test-Path during uninstall verification; a validated Python script performed the exact check.,done
+38,Tooling: ctx_compose exceeded its 120-second watchdog while inspecting Graphify uninstall routing; focused ctx_search and ctx_read calls succeeded.,done
+39,Graphify's documented uninstall command did not remove the global Codex skill directory; the exact validated skill directory was removed manually.,done
+40,Tooling: ctx_execute does not support PowerShell as a language; a script-file fallback was used.,done
+41,Tooling: the cmd executor stripped PowerShell variables from the deletion command; the validated Python script completed the removal.,done
+42,uv tool uninstall reported graphifyy was not installed; uv tool list and PATH verification confirmed the CLI was already absent.,done
+43,Tooling: a workspace-wide lookup for project_snapshot.ps1 encountered AccessDenied entries under analysis/tooling/pyghidra-python; it did not affect the IDA evidence collection.,done
+44,Tooling: lean-ctx blocked the required project snapshot script because it is outside the shell allowlist; baseline will use a direct status fallback.,need to check
+45,Tooling: ctx_execute confirmed scripts/project_snapshot.ps1 is absent from the outer workspace root; baseline is using maintained-worktree Git evidence.,done
+46,"Tooling: lean-ctx's outer-workspace index cannot index nested go-sro; ctx_compose returned no code candidates, so focused direct-path queries are in use.",done
+47,Tooling: lean-ctx blocked Measure-Object during read-only audit; no project data was modified.,done
+48,Tooling: lean-ctx blocked staticcheck -version during the read-only audit; no project data was modified.,done
+49,"Tooling: ctx_execute language=shell uses cmd.exe, so a PowerShell audit script with variables failed; the audit switched to explicit commands.",done
+50,Tooling: staticcheck is not installed in the available audit environment; source-level reference checks are in use.,done
+51,Tooling: the source-level dead-code scanner exceeded the 30-second executor cap; audit switched to a one-pass token count.,done
+52,Tooling: lean-ctx blocked gofmt because it is outside the shell allowlist; sanctioned executor fallback formatted the package.,done
+53,Tooling: ctx_execute formatted Windows absolute paths incorrectly; the package-relative Go formatting fallback succeeded.,done
+54,Tooling: ctx_compose exceeded its 120-second watchdog while mapping the nested inventory handler; direct source audit continues.,done
+55,Tooling: collaboration spawn rejected the listed Claude model; the audit used gpt-5.6-terra instead.,done
+56,Tooling: ctx_execute schema discovery returned 'language is required'; no workspace change was made.,done
+57,Tooling: parallel ctx_search calls returned an unexpected MCP-server error and a serial symbol lookup stalled; direct file reads are used instead.,done
+58,Refactor: COS lifecycle-controls split initially removed navmeshv2 import still required by lifecycleService.MoveTo; restored before test rerun.,fixed
+59,Tooling: a malformed task-runner request caused a JavaScript syntax error; no workspace command ran.,done
+60,Refactor: combat-transfer move patch was rejected before writing because its deletion context mismatched; source was unchanged and the move was reapplied successfully.,fixed
+61,Refactor: social academy-matching move patch was rejected before writing because its deletion context mismatched; an anchor-verified edit reapplied the move successfully.,fixed
+62,Refactor: patch-wire helper removal initially used an incomplete closing anchor; corrected before test rerun.,fixed
+63,Tooling: the collaboration agent limit prevented a third independent audit; two audits continued.,done
+64,Tooling: lean-ctx blocked Get-ChildItem -Recurse during a read-only dead-code audit; no project data changed.,done
+65,Tooling: lean-ctx rejected the ignored-path snapshot lookup without the required policy; the tracked-worktree status fallback remains available.,done
+66,Verification: scripts/verify.ps1 stopped at gofmt because pre-existing ignored .codex-tmp/cap_media_stack.go and .codex-tmp/pk2-gacha-inspect.go are unformatted; maintained refactor files were not implicated.,need to check
+67,Tooling: ctx_compose exceeded its 120-second watchdog while auditing protocol/vsro188; the focused Gateway audit supplied a bounded candidate instead.,done
+68,Refactor: the first shared Gateway wire-text validator patch was rejected before writing because its multi-hunk context did not match; an anchor-verified patch follows.,fixed
+69,Refactor audit: a static zero-caller result for randomRespawnOffset missed its live function-value callback from spawnNpc; direct source verification prevented deletion.,fixed
+70,Tooling: the collaboration agent limit prevented a third parallel audit; the two active evidence audits continued.,done
+71,Tooling: the collaboration agent limit prevented an additional framework-network audit while two clean-package audits and one structural audit were active.,done
+72,Audit: the initial large repository-file target used the missing agent-server/database path; it was corrected to agent-server/model/quest_runtime_repository.go before any source change.,done
+73,Tooling: ctx_execute Python reads of installed skill files exceeded its 30-second timeout; the documented ctx_shell raw fallback completed the reads.,done
+74,"Tooling: ctx_execute Go tests started without GOPATH or GOMODCACHE, so the baseline package test could not resolve its module cache; the temporary batch runner supplied the known local GOPATH.",done
+75,"Tooling: cmd.exe retained the whitespace before && in the temporary GOPATH assignment, producing an invalid module-cache path; the batch runner corrected the assignment syntax.",done
+76,Tooling: the isolated Go test runner omitted LocalAppData and GOCACHE; the batch runner used a temporary build cache under C:/tmp.,done
+77,Tooling: ctx_read reported its documented diff mode as unsupported and fell back to a full file read; direct Git diff remains the review source.,done
+78,Refactor tooling: apply_patch normalized the error ledger to LF and inflated its Git diff; the original CRLF format was restored.,fixed
+79,Tooling: ctx_execute did not apply the supplied working directory while formatting COS files; absolute source paths are required.,done
+80,Verification tooling: ctx_execute passed the combined Go -run regex as zero matching tests; the COS tests were rerun individually.,done
+81,"Tooling: ctx_shell uses Windows PowerShell, where && is unsupported; repository checks were rerun as separate commands.",done
+82,Tooling: lean-ctx blocked PowerShell -join during a read-only bytewise comparison; source review and tests remained available.,done
+83,Tooling: nested PowerShell quoting in the dead-code audit caused an UnexpectedToken parse error; no project files were read or changed.,done
+84,Tooling: ctx_execute rejects a leading cmd call operator; invoking the Go executable through the batch runner succeeds.,done
+85,Tooling: collaboration rejected gpt-5.6-luna despite the available-model list; the audit continued with a supported model.,done
+86,Tooling: retrying a rejected audit spawn reused a reserved task path; a new task name is required.,done
+87,Tooling: a focused collection test ran after its temporary Go wrapper was removed during prior cleanup; the wrapper was recreated before rerun.,done
+88,Tooling: an isolated audit runner timed out twice on git diff --check; parent verification uses the normal lean-ctx shell.,done
+89,Tooling: the COS service audit subagent hit its usage limit before analysis completed; no source files were changed.,done
+90,Tooling: lean-ctx blocked the mechanical CRLF restoration command for Error & Issues.csv; the sanctioned executor fallback was used.,done
+91,Tooling: the isolated COS audit runner could not create its Go build-cache directory after cache variables were supplied; parent verification uses the known local wrapper.,done
+92,Refactor: COS companion-AI extraction initially removed the math32 import still required by cosFollowerWorld; restored before rerunning tests.,fixed
+93,Tooling: a second read-only COS audit subagent hit its usage limit before analysis completed; no source files were changed.,done
+94,"Tooling: the fresh COS audit helper could not resolve its Go executable or formatter working directory, so parent verification uses the known local wrapper.",done
+95,Tooling: the market/stall audit subagent hit its usage limit after returning a read-only candidate; no source files were changed.,done
+96,Tooling: the Quest-runtime structural audit subagent hit its usage limit before analysis completed; no source files were changed.,done
+97,Refactor: the Combat rewards ownership move initially removed strings import still used by combat.go; restored before rerunning tests.,fixed
+98,"Codex tooling: switching back to Codex-LB initially failed because the Docker container was paused and Windows Codex still targeted OpenCodex; unpaused Codex-LB, restored its provider endpoint, and retagged 280 visible chats.",fixed
+99,Codex tooling: Oh My Pi Codex-LB provider validation could not execute because lean-ctx blocked the unallowlisted omp command; models.yml was configured but runtime validation remains manual.,blocked
+100,Codex tooling: lean-ctx blocked Get-Item while verifying its executable for Oh My Pi; used the active MCP executable path and validated the generated OMP mcp.json instead.,fixed
+101,"Codex tooling: the initial Oh My Pi IDA MCP merge stopped because OMP had rewritten mcp.json and disabled lean-ctx; reread the live file, merged IDA safely, and re-enabled lean-ctx.",fixed
+102,"Codex tooling: global lean-ctx npm installation exceeded the command timeout but completed successfully; package registration, version, and all doctor checks were verified afterward.",fixed
+103,Codex tooling: lean-ctx trusted execution timed out while validating OpenCode configuration; native JSON validation succeeded and confirmed the repaired config.,fixed
+104,Codex tooling: the local OpenCode documentation index stalled during advisor delegation research; targeted source searches located the native task/subagent mechanism and advisor configuration was validated.,fixed
+105,"Codex tooling: AWS/Amazon MCP and skill registrations were removed, but the system policy blocked deletion of the 15 verified AWS skill folders outside the active workspace.",blocked
+106,"Codex tooling: the OpenCode Lean-ctx SKILL.md was removed, but system policy blocked deletion of its now-empty external folder.",blocked
