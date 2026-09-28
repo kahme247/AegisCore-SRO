@@ -60,13 +60,13 @@ func (h *CharacterSelectionHandler) handleAction(ctx context.Context, session *s
 		return sendCharacterActionResult(session, 0, ResultFalse, 0)
 	}
 	if session.LifecyclePhase() == server.SessionCharacterLoading {
-		// The stock client requests a fresh character list immediately after
-		// selecting a character. It is read-only, so serve it without moving
-		// the staged session back to the lobby. All state-changing lobby
-		// actions remain unavailable until loading finishes or aborts.
-		if action != CharActionList {
+		// The client may send this read-only request while it transitions into
+		// the world. It must be consumed, but replying with the lobby-only
+		// 0xB007 character list reaches CPSMission after its handler changed.
+		if action != CharActionList || packet.Remaining() != 0 {
 			return fmt.Errorf("character action %d is invalid while session is %s", action, session.LifecyclePhase())
 		}
+		return nil
 	} else if !session.EnterLobby() {
 		return fmt.Errorf("character action is invalid while session is %s", session.LifecyclePhase())
 	}

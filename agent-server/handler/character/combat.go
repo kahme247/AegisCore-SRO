@@ -37,7 +37,7 @@ const (
 	attackPursuitPollInterval  = 25 * time.Millisecond
 	attackPursuitRetargetRate  = 200 * time.Millisecond
 	attackPursuitRetargetDelta = float32(2)
-	traceFollowDistance        = float32(20)
+	traceFollowDistance        = float32(30)
 
 	skillCastErrorInvalidSkill     = byte(0x03)
 	skillCastErrorInvalidMP        = byte(0x04)

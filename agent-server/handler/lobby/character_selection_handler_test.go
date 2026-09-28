@@ -405,7 +405,7 @@ func TestCharacterSelectionListUsesAuthenticatedOwner(t *testing.T) {
 	}
 }
 
-func TestCharacterSelectionListIsAllowedWhileCharacterLoading(t *testing.T) {
+func TestCharacterSelectionListDuringLoadingIsConsumedWithoutResponse(t *testing.T) {
 	store := &fakeCharacterStore{list: []model.Char{}}
 	handler := NewCharacterSelectionHandler(store)
 	session, clientConn := newCharacterSelectionTestSession(t)
@@ -420,18 +420,15 @@ func TestCharacterSelectionListIsAllowedWhileCharacterLoading(t *testing.T) {
 	request := buildCharacterSelectionRequest(t, func(packet *network.Packet) error {
 		return packet.WriteByte(CharActionList)
 	})
-	response, err := dispatchCharacterSelectionHandler(t, clientConn, func() error {
-		return handler.handleAction(context.Background(), session, request)
-	})
+	err := handler.handleAction(context.Background(), session, request)
 	if err != nil {
 		t.Fatalf("handleAction(list during loading) error = %v", err)
 	}
-	expectedAction := byte(CharActionList)
-	assertCharacterSelectionResult(t, &response, OpcodeCharSelectionActionResponse, &expectedAction, ResultTrue)
+	assertNoAdditionalCharacterSelectionResponse(t, clientConn)
 	if got, want := session.LifecyclePhase(), server.SessionCharacterLoading; got != want {
 		t.Fatalf("list action lifecycle = %s, want %s", got, want)
 	}
-	if got, want := store.listCalls, 1; got != want {
+	if got, want := store.listCalls, 0; got != want {
 		t.Fatalf("CharactersForOwner calls = %d, want %d", got, want)
 	}
 }

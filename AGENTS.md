@@ -73,3 +73,5 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Support conclusions with address-backed evidence: identify the binary, image base, effective address, relevant field offsets, and corroborating callers, xrefs, disassembly, bytes, or pseudocode. Treat IDA/Lumina names as hypotheses until verified.
 - Before any IDA database mutation, state the intended change and its evidence. Do not patch binary bytes unless the user explicitly requests it and the IDA configuration explicitly permits patching.
 - If IDA cannot establish the behavior, fall back to the sanitized protocol evidence and references in `REFERENCES.md`, `protocol/`, and the applicable capture documentation. Do not invent opcodes, packet layouts, or request/response behavior.
+- Game folder (C:\Users\Khaled\Documents\GO-SRO\go-sro\VSRO_Client) if game crashed there will be a dumb inside the dumb folder
+- If game disconced then look into the Docker server logs first then move to the next appropiate step
