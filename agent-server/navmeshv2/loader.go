@@ -320,7 +320,7 @@ func (l *Loader) loadTerrainMeshContent(fileContent []byte, filepath string, reg
 	}
 	objectInstances := make([]RtNavmeshInstObj, objectInstanceCount)
 	for i := 0; i < int(objectInstanceCount); i++ {
-		objectInstance, loadErr := l.loadTerrainObjectInstance(fileContent, &readIndex)
+		objectInstance, loadErr := l.loadTerrainObjectInstance(fileContent, &readIndex, terrain.Region)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -644,7 +644,14 @@ func (l *Loader) loadTerrainNavigationCell(content []byte, readIndex *int, index
 	return cell, nil
 }
 
-func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int) (RtNavmeshInstObj, error) {
+// loadTerrainObjectInstance reads one object instance record of a terrain
+// .nvm file. Records for objects owned by a neighbouring region (the region ID
+// field differs from the file's region) store their position relative to the
+// file's region, not the owner's. The position is rebased into the owner
+// region so every copy of an instance shares one transform; otherwise the copy
+// seen from the neighbour is shifted by one region and its walkable surface
+// (for example a bridge deck crossing a region seam) is ignored there.
+func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int, fileRegion Region) (RtNavmeshInstObj, error) {
 	if readIndex == nil {
 		return RtNavmeshInstObj{}, &NavmeshLoadError{Operation: "read terrain object instance", Err: fmt.Errorf("%w: read index is nil", ErrInvalidNavmeshData)}
 	}
@@ -685,6 +692,7 @@ func (l *Loader) loadTerrainObjectInstance(fileContent []byte, readIndex *int) (
 		},
 		Region: NewRegionFromUint16(binary.LittleEndian.Uint16(fileContent[regionIdOffset:globalEdgeLinkCountOffset])),
 	}
+	rebaseObjectInstancePosition(objectInstance.Position, fileRegion, objectInstance.Region)
 	objectInstance.WorldID = int(uint32(objectInstance.Region.ID)<<16 | uint32(uint16(objectInstance.ID)))
 	objectInstance.LocalToWorld = math32.NewMatrix4().Compose(objectInstance.GetPosition(), objectInstance.GetRotation(), objectInstance.GetScale())
 	objectInstance.WorldToLocal = objectInstance.GetLocalToWorld().Clone()
@@ -1081,4 +1089,15 @@ func (l *Loader) publishObject(index uint32, object RtNavmeshObj) {
 		l.ObjectData = make(map[uint32]RtNavmeshObj)
 	}
 	l.ObjectData[index] = object
+}
+
+// rebaseObjectInstancePosition converts a position stored relative to
+// fileRegion into a position relative to ownerRegion. Dungeon regions use
+// their own local space and are left unchanged.
+func rebaseObjectInstancePosition(position *math32.Vector3, fileRegion, ownerRegion Region) {
+	if position == nil || fileRegion.ID == ownerRegion.ID || IsDungeonRegion(fileRegion.ID) || IsDungeonRegion(ownerRegion.ID) {
+		return
+	}
+	position.X -= (float32(ownerRegion.X) - float32(fileRegion.X)) * RegionWidth
+	position.Z -= (float32(ownerRegion.Y) - float32(fileRegion.Y)) * RegionHeight
 }
